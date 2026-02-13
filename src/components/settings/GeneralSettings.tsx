@@ -82,7 +82,7 @@ export function GeneralSettings() {
         <input
           type="text"
           className="w-full bg-[var(--color-bg-secondary)] text-[var(--color-text)] text-sm font-mono rounded-lg px-3 py-2 outline-none border border-[var(--color-border)] focus:border-[var(--color-accent)]"
-          value="Alt+Space"
+          value="Command + 2"
           readOnly
           aria-label="全局唤醒快捷键"
         />
@@ -158,7 +158,7 @@ export function GeneralSettings() {
           <div className="flex justify-between">
             <span>唤醒/隐藏窗口</span>
             <kbd className="px-1.5 py-0.5 bg-[var(--color-bg-secondary)] rounded font-mono">
-              Alt + Space
+              Command + 2
             </kbd>
           </div>
           <div className="flex justify-between">
@@ -178,7 +178,7 @@ export function GeneralSettings() {
 
       {/* 版本信息 */}
       <div className="pt-3 border-t border-[var(--color-border)] text-center">
-        <div className="text-xs text-[var(--color-text)]">51ToolBox</div>
+        <div className="text-xs text-[var(--color-text)]">mTools</div>
         <div className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
           v0.1.0 · Tauri v2 + React 19
         </div>

@@ -102,6 +102,13 @@ export function Dashboard({ onNavigate }: DashboardProps) {
       color: "text-green-500 bg-green-500/10",
     },
     {
+      id: "bing",
+      icon: <Globe className="w-6 h-6" />,
+      title: "必应",
+      action: () => setSearchValue("bing "),
+      color: "text-teal-500 bg-teal-500/10",
+    },
+    {
       id: "shell",
       icon: <Terminal className="w-6 h-6" />,
       title: "终端",

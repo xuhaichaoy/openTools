@@ -223,7 +223,7 @@ fn get_tools() -> Vec<serde_json::Value> {
 }
 
 fn get_system_prompt() -> String {
-    "你是 51ToolBox 的 AI 助手，一个强大的桌面效率工具。你可以：\n\
+    "你是 mTools 的 AI 助手，一个强大的桌面效率工具。你可以：\n\
      1. 搜索和执行数据导入导出脚本（数据工坊）\n\
      2. 执行 shell 命令\n\
      3. 读写剪贴板\n\

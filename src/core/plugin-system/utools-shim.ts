@@ -1,7 +1,7 @@
 /**
  * utools API Shim — 注入到插件 WebviewWindow 的兼容层
  *
- * 实现 uTools 插件最常用的 API，使现有 uTools 插件可以在 51ToolBox 中运行。
+ * 实现 uTools 插件最常用的 API，使现有 uTools 插件可以在 mTools 中运行。
  * 通过 Tauri WebviewWindow.eval() 注入到插件的执行环境中。
  *
  * 参考: https://www.u.tools/docs/developer/api.html
@@ -114,12 +114,12 @@ export function generateUtoolsShimScript(pluginId: string): string {
 
     // ─ 屏幕取色 / 截图（暂不支持）─
     screenCapture(callback) {
-      console.warn('[51ToolBox] screenCapture 暂未实现');
+      console.warn('[mTools] screenCapture 暂未实现');
       callback && callback(null);
     },
 
     screenColorPick(callback) {
-      console.warn('[51ToolBox] screenColorPick 暂未实现');
+      console.warn('[mTools] screenColorPick 暂未实现');
       callback && callback(null);
     },
 
@@ -162,7 +162,7 @@ export function generateUtoolsShimScript(pluginId: string): string {
       window.__utoolsOnOutCallback = callback;
     },
 
-    // ── 51ToolBox 扩展 AI API ──
+    // ── mTools 扩展 AI API ──
     ai: {
       chat(message, options) {
         return __invoke('ai.chat', { message, ...options });
@@ -189,7 +189,7 @@ export function generateUtoolsShimScript(pluginId: string): string {
   // ── 兼容 Rubick 的 rubick API ──
   window.rubick = utools;
 
-  console.log('[51ToolBox] utools API shim 已注入, pluginId:', __pluginId);
+  console.log('[mTools] utools API shim 已注入, pluginId:', __pluginId);
 })();
 `
 }

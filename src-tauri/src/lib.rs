@@ -84,7 +84,7 @@ pub fn run() {
             let suppress_for_tray = suppress_hide.clone();
             TrayIconBuilder::new()
                 .menu(&menu)
-                .tooltip("51ToolBox")
+                .tooltip("mTools")
                 .icon(app.default_window_icon().unwrap().clone())
                 .on_menu_event(move |app, event| match event.id.as_ref() {
                     "show" => {
@@ -112,20 +112,21 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // 注册全局快捷键
-            use tauri_plugin_global_shortcut::ShortcutState;
+            // 注册全局快捷键（用结构化 API，避免字符串格式问题）
+            use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState, GlobalShortcutExt};
+
+            // Command+2 (macOS) 切换主窗口
+            let toggle_shortcut = Shortcut::new(Some(Modifiers::META), Code::Digit2);
+            // Ctrl+Shift+A 上下文操作
+            let context_shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyA);
+
             let suppress_for_shortcut = suppress_hide.clone();
             app.handle().plugin(
                 tauri_plugin_global_shortcut::Builder::new()
                     .with_handler(move |app, shortcut, event| {
                         if event.state == ShortcutState::Pressed {
-                            let shortcut_str = shortcut.to_string();
-
-                            // Alt+Space → 切换主窗口
-                            if shortcut_str.contains("Alt") && shortcut_str.contains("Space")
-                                && !shortcut_str.contains("Shift")
-                                && !shortcut_str.contains("Control")
-                            {
+                            // Command+2 → 切换主窗口
+                            if shortcut == &toggle_shortcut {
                                 if let Some(window) = app.get_webview_window("main") {
                                     if window.is_visible().unwrap_or(false) {
                                         let _ = window.hide();
@@ -136,9 +137,7 @@ pub fn run() {
                             }
 
                             // Ctrl+Shift+A → 上下文操作（读取剪贴板并发送给前端）
-                            if shortcut_str.contains("Control") && shortcut_str.contains("Shift")
-                                && shortcut_str.contains("KeyA")
-                            {
+                            if shortcut == &context_shortcut {
                                 use tauri_plugin_clipboard_manager::ClipboardExt;
                                 let text = app.clipboard().read_text().unwrap_or_default();
                                 if !text.is_empty() {
@@ -155,9 +154,8 @@ pub fn run() {
             )?;
 
             // 注册快捷键
-            use tauri_plugin_global_shortcut::GlobalShortcutExt;
-            app.global_shortcut().register("Alt+Space")?;
-            app.global_shortcut().register("Control+Shift+A")?;
+            app.global_shortcut().register(toggle_shortcut)?;
+            app.global_shortcut().register(context_shortcut)?;
 
             // 主窗口失焦隐藏（读取用户设置决定是否启用）
             let main_window = app.get_webview_window("main").unwrap();

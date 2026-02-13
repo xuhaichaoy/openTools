@@ -1,6 +1,6 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "51ToolBox",
+  "productName": "mTools",
   "version": "0.1.0",
   "identifier": "com.51cto.toolbox",
   "build": {
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "51ToolBox",
+        "title": "mTools",
         "width": 800,
         "height": 60,
         "minWidth": 800,

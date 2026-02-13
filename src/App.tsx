@@ -237,6 +237,25 @@ function App() {
       ];
     }
 
+    if (searchValue.startsWith("bing ")) {
+      const query = searchValue.slice(5);
+      return [
+        {
+          id: "bing-search",
+          title: `必应：${query}`,
+          description: "https://www.bing.com",
+          icon: <Globe className="w-6 h-6" />,
+          color: "text-teal-500 bg-teal-500/10",
+          category: "搜索",
+          action: () => {
+            invoke("open_url", {
+              url: `https://www.bing.com/search?q=${encodeURIComponent(query)}`,
+            });
+          },
+        },
+      ];
+    }
+
     if (searchValue.startsWith("/ ")) {
       const cmd = searchValue.slice(2);
       return [
