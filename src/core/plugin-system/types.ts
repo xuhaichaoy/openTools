@@ -1,0 +1,65 @@
+// 插件系统 — 核心类型定义
+// 同时兼容 uTools (plugin.json) 和 Rubick (package.json) 格式
+
+/** 插件指令匹配模式 */
+export type MatchType = 'text' | 'regex' | 'over' | 'img' | 'files' | 'window'
+
+/** 插件指令 (uTools 的 features[].cmds) */
+export interface PluginCommand {
+  type: MatchType
+  label: string
+  match?: string  // regex pattern
+  minLength?: number
+  maxLength?: number
+}
+
+/** 插件功能入口 (uTools 的 features) */
+export interface PluginFeature {
+  code: string           // 唯一标识
+  explain: string        // 功能说明
+  cmds: (string | PluginCommand)[]  // 匹配指令（字符串或对象）
+  icon?: string          // 功能图标
+  platform?: string[]    // 平台限制 ['win', 'darwin', 'linux']
+}
+
+/** 插件清单 — 统一格式 (兼容 uTools plugin.json + Rubick package.json) */
+export interface PluginManifest {
+  // 基础信息
+  pluginName: string     // 插件名
+  description: string    // 描述
+  version: string
+  author?: string
+  homepage?: string
+  logo?: string          // 图标路径（相对于插件目录）
+
+  // 入口
+  main?: string          // 主入口 HTML
+  preload?: string       // preload 脚本路径
+
+  // 功能
+  features: PluginFeature[]
+
+  // 运行时
+  pluginType?: 'ui' | 'system'  // ui=有界面, system=无界面
+  development?: {
+    main?: string        // 开发模式入口 URL
+  }
+}
+
+/** 已加载的插件实例 */
+export interface PluginInstance {
+  id: string
+  manifest: PluginManifest
+  dirPath: string        // 插件目录绝对路径
+  enabled: boolean
+  isBuiltin: boolean     // 是否为内置插件
+  installedAt: number
+}
+
+/** 插件匹配结果 */
+export interface PluginMatchResult {
+  plugin: PluginInstance
+  feature: PluginFeature
+  matchedCmd: string | PluginCommand
+  score: number          // 匹配分数 (用于排序)
+}

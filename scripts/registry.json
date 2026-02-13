@@ -1,0 +1,290 @@
+[
+  {
+    "id": "ningbo-bank-training-export",
+    "name": "宁波银行训练营学习时长导出",
+    "description": "每周导出宁波银行训练营的学习时长数据，包含课程总时长、已完成时长、完成进度",
+    "category": "宁波银行",
+    "tags": [
+      "学习时长",
+      "训练营",
+      "周报"
+    ],
+    "script": "宁波银行/导出训练营学习时长.py",
+    "params": [
+      {
+        "name": "assess_id",
+        "label": "测评ID",
+        "type": "string",
+        "required": true,
+        "description": "训练营关联的测评ID"
+      },
+      {
+        "name": "date_range",
+        "label": "日期范围",
+        "type": "daterange",
+        "required": false,
+        "default": "last_week"
+      }
+    ],
+    "output": {
+      "type": "excel",
+      "filename_pattern": "宁波银行训练营学习时长_{date}.xlsx"
+    },
+    "dependencies": [
+      "requests",
+      "openpyxl"
+    ],
+    "estimated_time": "30s-2min",
+    "requires_auth": [
+      "ARCHERY_COOKIE",
+      "SAAS_TOKEN"
+    ]
+  },
+  {
+    "id": "ningbo-bank-assess-export",
+    "name": "宁波银行测评用户数据导出",
+    "description": "导出测评记录和答题情况",
+    "category": "宁波银行",
+    "tags": [
+      "测评",
+      "用户数据",
+      "答题"
+    ],
+    "script": "宁波银行/导出测评用户数据.py",
+    "params": [
+      {
+        "name": "assess_id",
+        "label": "测评ID",
+        "type": "string",
+        "required": true,
+        "description": "测评的唯一标识"
+      }
+    ],
+    "output": {
+      "type": "excel",
+      "filename_pattern": "宁波银行测评数据_{date}.xlsx"
+    },
+    "estimated_time": "1-3min",
+    "requires_auth": [
+      "SAAS_TOKEN"
+    ]
+  },
+  {
+    "id": "dongfeng-exam-export",
+    "name": "东风汽车考试成绩导出",
+    "description": "导出东风汽车考试成绩数据，包含姓名、部门、分数、排名",
+    "category": "东风汽车",
+    "tags": [
+      "考试",
+      "成绩",
+      "导出"
+    ],
+    "script": "东风汽车/导出考试成绩.py",
+    "params": [
+      {
+        "name": "exam_id",
+        "label": "考试ID",
+        "type": "string",
+        "required": true,
+        "description": "考试的唯一标识"
+      },
+      {
+        "name": "month",
+        "label": "月份",
+        "type": "date",
+        "required": false,
+        "description": "导出的目标月份",
+        "placeholder": "2026-01"
+      }
+    ],
+    "output": {
+      "type": "excel",
+      "filename_pattern": "东风汽车考试成绩_{date}.xlsx"
+    },
+    "estimated_time": "1-2min",
+    "requires_auth": [
+      "SAAS_TOKEN"
+    ]
+  },
+  {
+    "id": "dongfeng-study-progress",
+    "name": "东风汽车学习进度统计",
+    "description": "统计东风汽车员工学习进度和完成率",
+    "category": "东风汽车",
+    "tags": [
+      "学习进度",
+      "统计"
+    ],
+    "script": "东风汽车/学习进度统计.py",
+    "params": [
+      {
+        "name": "project_id",
+        "label": "项目ID",
+        "type": "string",
+        "required": true,
+        "description": "学习项目ID"
+      },
+      {
+        "name": "include_inactive",
+        "label": "包含未激活用户",
+        "type": "boolean",
+        "required": false,
+        "default": false
+      }
+    ],
+    "output": {
+      "type": "excel",
+      "filename_pattern": "东风汽车学习进度_{date}.xlsx"
+    },
+    "estimated_time": "2-5min"
+  },
+  {
+    "id": "internal-trial-export",
+    "name": "试题库导出",
+    "description": "批量导出试题库数据，支持按科目筛选",
+    "category": "内部需求",
+    "tags": [
+      "试题",
+      "导出",
+      "题库"
+    ],
+    "script": "内部需求/试题库导出.py",
+    "params": [
+      {
+        "name": "subject",
+        "label": "科目",
+        "type": "select",
+        "required": false,
+        "options": [
+          {
+            "label": "全部",
+            "value": "all"
+          },
+          {
+            "label": "金融",
+            "value": "finance"
+          },
+          {
+            "label": "合规",
+            "value": "compliance"
+          },
+          {
+            "label": "信息技术",
+            "value": "it"
+          }
+        ],
+        "default": "all"
+      },
+      {
+        "name": "limit",
+        "label": "导出数量",
+        "type": "number",
+        "required": false,
+        "default": 1000,
+        "description": "最大导出数量，留空表示全部"
+      }
+    ],
+    "output": {
+      "type": "excel",
+      "filename_pattern": "试题库导出_{date}.xlsx"
+    },
+    "estimated_time": "1-3min",
+    "requires_auth": [
+      "ARCHERY_COOKIE"
+    ]
+  },
+  {
+    "id": "saas-export-exam-questions",
+    "name": "从考试中提取试题导出",
+    "description": "从 SaaS 平台指定考试中提取所有试题，导出为 CSV 文件，包含题型、题目、分类、难度、选项、正确答案等",
+    "category": "数据导出",
+    "tags": [
+      "考试",
+      "试题",
+      "导出",
+      "CSV",
+      "SaaS"
+    ],
+    "script": "saas-export-exam-questions/export_exam_questions.py",
+    "params": [
+      {
+        "name": "exam_id",
+        "label": "考试ID",
+        "type": "string",
+        "required": true,
+        "description": "SaaS 平台上的考试ID"
+      },
+      {
+        "name": "output_dir",
+        "label": "输出目录",
+        "type": "string",
+        "required": false,
+        "description": "文件保存目录，默认桌面",
+        "placeholder": "~/Desktop"
+      }
+    ],
+    "output": {
+      "type": "csv",
+      "filename_pattern": "考试试题_{exam_name}_{date}.csv"
+    },
+    "dependencies": [
+      "requests"
+    ],
+    "estimated_time": "5-30s",
+    "requires_auth": [
+      "SAAS_TOKEN"
+    ]
+  },
+  {
+    "id": "athena-data-test",
+    "name": "数据工坊接入测试",
+    "description": "测试 athena-data 脚本接入数据工坊的完整流程，验证参数传递、凭证注入、输出采集",
+    "category": "测试",
+    "tags": [
+      "测试",
+      "接入验证",
+      "athena-data"
+    ],
+    "script": "athena-data-test/test_script.py",
+    "params": [
+      {
+        "name": "query",
+        "label": "查询关键词",
+        "type": "string",
+        "required": false,
+        "default": "考试成绩",
+        "description": "模拟查询的关键词"
+      },
+      {
+        "name": "limit",
+        "label": "返回条数",
+        "type": "number",
+        "required": false,
+        "default": 5,
+        "description": "模拟返回的数据条数"
+      },
+      {
+        "name": "format",
+        "label": "输出格式",
+        "type": "select",
+        "required": false,
+        "options": [
+          {
+            "label": "JSON",
+            "value": "json"
+          },
+          {
+            "label": "文本",
+            "value": "text"
+          }
+        ],
+        "default": "json"
+      }
+    ],
+    "output": {
+      "type": "json",
+      "filename_pattern": "测试输出_{date}.json"
+    },
+    "estimated_time": "1-3s"
+  }
+]
