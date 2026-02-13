@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Save, Eye, EyeOff, Bot } from 'lucide-react'
+import { Save, Eye, EyeOff, Bot, ShieldAlert, MessageSquare } from 'lucide-react'
 import { useAIStore } from '@/store/ai-store'
 
 export function AISettings() {
@@ -95,6 +95,50 @@ export function AISettings() {
               placeholder="不限制"
             />
           </div>
+        </div>
+
+        {/* 高级工具 */}
+        <div className="pt-3 border-t border-[var(--color-border)]">
+          <div className="flex items-center gap-2 mb-2">
+            <ShieldAlert className="w-3.5 h-3.5 text-amber-500" />
+            <span className="text-xs font-medium text-[var(--color-text)]">高级工具</span>
+          </div>
+          <label className="flex items-center justify-between cursor-pointer">
+            <div className="flex-1 pr-3">
+              <span className="text-xs text-[var(--color-text)]">启用高级工具</span>
+              <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
+                开启后 AI 可执行 shell 命令、读写本地文件、获取系统信息等。危险操作会弹窗确认。
+              </p>
+            </div>
+            <input
+              type="checkbox"
+              className="w-4 h-4 rounded accent-amber-500"
+              checked={form.enable_advanced_tools}
+              onChange={(e) => setForm({ ...form, enable_advanced_tools: e.target.checked })}
+            />
+          </label>
+          {form.enable_advanced_tools && (
+            <div className="mt-2 text-[10px] text-amber-600 bg-amber-500/5 rounded-lg px-3 py-2 border border-amber-500/10">
+              已启用高级工具：执行命令、读写文件、列出目录、获取系统信息、打开网址、打开文件/目录、获取进程列表。其中执行命令、写入文件、打开路径为危险操作，执行前需要你确认。
+            </div>
+          )}
+        </div>
+
+        {/* 自定义 System Prompt */}
+        <div className="pt-3 border-t border-[var(--color-border)]">
+          <div className="flex items-center gap-2 mb-2">
+            <MessageSquare className="w-3.5 h-3.5 text-indigo-400" />
+            <span className="text-xs font-medium text-[var(--color-text)]">自定义系统提示词</span>
+          </div>
+          <textarea
+            className="w-full bg-[var(--color-bg-secondary)] text-[var(--color-text)] text-xs rounded-lg px-3 py-2 outline-none border border-[var(--color-border)] focus:border-[var(--color-accent)] resize-none min-h-[80px] max-h-[160px] leading-relaxed"
+            value={form.system_prompt}
+            onChange={(e) => setForm({ ...form, system_prompt: e.target.value })}
+            placeholder="可选。在默认系统提示词之后追加你自己的指令，例如「回答风格偏口语化」「回答末尾附上英文翻译」等..."
+          />
+          <p className="text-[10px] text-[var(--color-text-secondary)] mt-1">
+            留空则使用默认提示词；填写后会追加到默认提示词之后
+          </p>
         </div>
 
         <button

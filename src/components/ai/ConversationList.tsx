@@ -24,6 +24,7 @@ export function ConversationList({ onClose }: { onClose: () => void }) {
   const [search, setSearch] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState("");
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const editInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -78,7 +79,33 @@ export function ConversationList({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full relative">
+      {/* 删除确认弹窗（应用内弹窗，避免原生 confirm 导致窗口失焦隐藏） */}
+      {deleteConfirmId && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 rounded-r-xl">
+          <div className="w-[260px] bg-[var(--color-bg)] border border-[var(--color-border)] rounded-xl shadow-xl p-4 mx-3">
+            <p className="text-sm text-[var(--color-text)] mb-4">确定删除这个对话？</p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setDeleteConfirmId(null)}
+                className="px-3 py-1.5 text-xs rounded-lg border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => {
+                  deleteConversation(deleteConfirmId);
+                  setDeleteConfirmId(null);
+                }}
+                className="px-3 py-1.5 text-xs rounded-lg bg-red-500 text-white hover:bg-red-600 transition-colors"
+              >
+                删除
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 顶部操作 */}
       <div className="px-3 pt-3 pb-2 space-y-2">
         <div className="flex items-center justify-between">
@@ -193,11 +220,7 @@ export function ConversationList({ onClose }: { onClose: () => void }) {
                         <Pencil className="w-3 h-3" />
                       </button>
                       <button
-                        onClick={() => {
-                          if (confirm("确定删除这个对话？")) {
-                            deleteConversation(conv.id);
-                          }
-                        }}
+                        onClick={() => setDeleteConfirmId(conv.id)}
                         className="p-1 rounded-md text-[var(--color-text-secondary)] hover:text-red-400 hover:bg-red-500/10 transition-colors"
                         title="删除"
                       >

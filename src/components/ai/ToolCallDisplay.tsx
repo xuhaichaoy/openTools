@@ -8,6 +8,14 @@ const TOOL_LABELS: Record<string, string> = {
   run_shell_command: '执行命令',
   read_clipboard: '读取剪贴板',
   write_clipboard: '写入剪贴板',
+  search_knowledge_base: '搜索知识库',
+  read_file: '读取文件',
+  write_file: '写入文件',
+  list_directory: '列出目录',
+  get_system_info: '获取系统信息',
+  open_url: '打开网址',
+  open_path: '打开文件/目录',
+  get_running_processes: '获取进程列表',
 }
 
 export function ToolCallDisplay({ toolCalls }: { toolCalls: ToolCallInfo[] }) {

@@ -1,5 +1,5 @@
 import { memo, useCallback, useRef } from "react";
-import { User, Bot, Copy, Check, RefreshCw } from "lucide-react";
+import { User, Bot, Copy, Check, RefreshCw, Pencil } from "lucide-react";
 import { useState } from "react";
 import type { ChatMessage } from "@/store/ai-store";
 import { useAIStore } from "@/store/ai-store";
@@ -79,8 +79,20 @@ function CodeBlock({ className, children, ...props }: any) {
   );
 }
 
+/** 格式化时间戳 */
+function formatMsgTime(ts: number): string {
+  const d = new Date(ts);
+  const now = new Date();
+  const hm = `${d.getHours().toString().padStart(2, "0")}:${d.getMinutes().toString().padStart(2, "0")}`;
+  if (d.toDateString() === now.toDateString()) return hm;
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (d.toDateString() === yesterday.toDateString()) return `昨天 ${hm}`;
+  return `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
+}
+
 /** 消息操作栏 */
-function MessageActions({ msg, isUser, isLast }: { msg: ChatMessage; isUser: boolean; isLast: boolean }) {
+function MessageActions({ msg, isUser, isLast, onEdit }: { msg: ChatMessage; isUser: boolean; isLast: boolean; onEdit?: () => void }) {
   const [copied, setCopied] = useState(false);
   const { regenerateLastMessage, isStreaming } = useAIStore();
 
@@ -93,7 +105,12 @@ function MessageActions({ msg, isUser, isLast }: { msg: ChatMessage; isUser: boo
   if (msg.streaming) return null;
 
   return (
-    <div className={`flex items-center gap-1 mt-1 ${isUser ? "justify-end" : "justify-start ml-12"}`}>
+    <div className={`flex items-center gap-1 mt-1 ${isUser ? "justify-end mr-10" : "justify-start ml-10"}`}>
+      {/* 时间戳 */}
+      <span className="text-[10px] text-[var(--color-text-secondary)] opacity-0 group-hover:opacity-50 transition-opacity select-none">
+        {formatMsgTime(msg.timestamp)}
+      </span>
+
       {/* 复制按钮 */}
       <button
         onClick={handleCopy}
@@ -107,6 +124,19 @@ function MessageActions({ msg, isUser, isLast }: { msg: ChatMessage; isUser: boo
         )}
         <span>{copied ? "已复制" : "复制"}</span>
       </button>
+
+      {/* 编辑按钮 - 仅用户消息 */}
+      {isUser && onEdit && (
+        <button
+          onClick={onEdit}
+          disabled={isStreaming}
+          className="flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] text-[var(--color-text-secondary)] hover:text-[var(--color-text)] hover:bg-[var(--color-bg-hover)] transition-colors disabled:opacity-30 opacity-0 group-hover:opacity-100"
+          title="编辑并重发"
+        >
+          <Pencil className="w-3 h-3" />
+          <span>编辑</span>
+        </button>
+      )}
 
       {/* 重新生成按钮 - 仅最后一条 assistant 消息 */}
       {!isUser && isLast && (
@@ -124,18 +154,51 @@ function MessageActions({ msg, isUser, isLast }: { msg: ChatMessage; isUser: boo
   );
 }
 
+/** 高亮搜索关键词 */
+function HighlightText({ text, query }: { text: string; query?: string }) {
+  if (!query) return <>{text}</>;
+  const lowerText = text.toLowerCase();
+  const lowerQ = query.toLowerCase();
+  const parts: React.ReactNode[] = [];
+  let lastIdx = 0;
+  let idx = lowerText.indexOf(lowerQ);
+  while (idx !== -1) {
+    if (idx > lastIdx) parts.push(text.slice(lastIdx, idx));
+    parts.push(
+      <mark key={idx} className="bg-yellow-300/60 text-inherit rounded-sm px-0.5">{text.slice(idx, idx + query.length)}</mark>
+    );
+    lastIdx = idx + query.length;
+    idx = lowerText.indexOf(lowerQ, lastIdx);
+  }
+  if (lastIdx < text.length) parts.push(text.slice(lastIdx));
+  return <>{parts}</>;
+}
+
 /** 单条消息气泡 */
 export const MessageBubble = memo(function MessageBubble({
   msg,
   isLastAssistant = false,
+  searchQuery,
 }: {
   msg: ChatMessage;
   isLastAssistant?: boolean;
+  searchQuery?: string;
 }) {
   const isUser = msg.role === "user";
+  const [editing, setEditing] = useState(false);
+  const [editText, setEditText] = useState(msg.content);
+  const { editAndResend, isStreaming } = useAIStore();
+  const editRef = useRef<HTMLTextAreaElement>(null);
+
+  const handleEditSubmit = () => {
+    const trimmed = editText.trim();
+    if (!trimmed || isStreaming) return;
+    setEditing(false);
+    editAndResend(msg.id, trimmed);
+  };
 
   return (
-    <div className={`group ${isUser ? "" : ""}`}>
+    <div className={`group mb-0.5 ${isUser ? "" : ""}`}>
       <div className={`flex gap-1.5 mb-0.5 ${isUser ? "flex-row-reverse" : ""}`}>
         {/* 头像 */}
         <div
@@ -154,7 +217,7 @@ export const MessageBubble = memo(function MessageBubble({
         <div
           className={`max-w-[85%] rounded-[20px] px-2.5 py-1.5 text-[13px] shadow-sm leading-relaxed ${
             isUser
-              ? "bg-indigo-600 text-white rounded-tr-md"
+              ? (editing ? "bg-indigo-700 text-white rounded-tr-md" : "bg-indigo-600 text-white rounded-tr-md")
               : "bg-[var(--color-bg-secondary)] text-[var(--color-text)] border border-[var(--color-border)] rounded-tl-md"
           }`}
         >
@@ -163,7 +226,7 @@ export const MessageBubble = memo(function MessageBubble({
               {msg.toolCalls && msg.toolCalls.length > 0 && (
                 <ToolCallDisplay toolCalls={msg.toolCalls} />
               )}
-              <div className="prose prose-invert prose-base max-w-none [&_p]:leading-7 [&_p]:my-2 [&_li]:my-1 first:[&_p]:mt-0 last:[&_p]:mb-0">
+              <div className={`prose prose-invert prose-base max-w-none [&_p]:leading-7 [&_p]:my-2 [&_li]:my-1 first:[&_p]:mt-0 last:[&_p]:mb-0 ${msg.streaming ? "min-h-[1.5rem]" : ""}`}>
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
                   rehypePlugins={[rehypeHighlight]}
@@ -195,14 +258,56 @@ export const MessageBubble = memo(function MessageBubble({
                 )}
               </div>
             </div>
+          ) : editing ? (
+            <div className="space-y-2">
+              <textarea
+                ref={editRef}
+                autoFocus
+                className="w-full bg-white/10 text-white text-[13px] rounded-lg px-2 py-1.5 outline-none resize-none min-h-[40px] max-h-[160px] placeholder:text-white/50 leading-relaxed"
+                value={editText}
+                onChange={(e) => {
+                  setEditText(e.target.value);
+                  e.target.style.height = "auto";
+                  e.target.style.height = e.target.scrollHeight + "px";
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleEditSubmit(); }
+                  if (e.key === "Escape") { setEditing(false); setEditText(msg.content); }
+                }}
+              />
+              <div className="flex justify-end gap-1.5">
+                <button
+                  onClick={() => { setEditing(false); setEditText(msg.content); }}
+                  className="px-2.5 py-1 text-[11px] rounded-md text-white/70 hover:text-white hover:bg-white/10 transition-colors"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={handleEditSubmit}
+                  disabled={!editText.trim() || isStreaming}
+                  className="px-2.5 py-1 text-[11px] rounded-md bg-white/20 text-white hover:bg-white/30 disabled:opacity-40 transition-colors"
+                >
+                  发送
+                </button>
+              </div>
+            </div>
           ) : (
-            <div className="leading-7 whitespace-pre-wrap">{msg.content}</div>
+            <div className="leading-7 whitespace-pre-wrap">
+              <HighlightText text={msg.content} query={searchQuery} />
+            </div>
           )}
         </div>
       </div>
 
       {/* 操作栏 */}
-      {msg.content && <MessageActions msg={msg} isUser={isUser} isLast={isLastAssistant} />}
+      {msg.content && !editing && (
+        <MessageActions
+          msg={msg}
+          isUser={isUser}
+          isLast={isLastAssistant}
+          onEdit={isUser ? () => { setEditing(true); setEditText(msg.content); } : undefined}
+        />
+      )}
     </div>
   );
 });

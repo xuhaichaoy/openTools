@@ -33,11 +33,17 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_store::Builder::default().build())
+        .manage(commands::ai::ToolConfirmationState {
+            pending: std::sync::Mutex::new(None),
+        })
+        .manage(commands::ai::StreamCancellation::new())
         .invoke_handler(tauri::generate_handler![
             commands::ai::ai_chat,
             commands::ai::ai_chat_stream,
             commands::ai::ai_get_config,
             commands::ai::ai_set_config,
+            commands::ai::ai_confirm_tool,
+            commands::ai::ai_stop_stream,
             commands::window::toggle_main_window,
             commands::window::resize_window,
             commands::window::hide_window,

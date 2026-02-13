@@ -31,6 +31,13 @@ export interface AIConfig {
   model: string
   temperature: number
   max_tokens: number | null
+  enable_advanced_tools: boolean
+  system_prompt: string
+}
+
+export interface PendingToolConfirm {
+  name: string
+  arguments: string
 }
 
 interface AIState {
@@ -39,6 +46,7 @@ interface AIState {
   currentConversationId: string | null
   isStreaming: boolean
   historyLoaded: boolean
+  pendingToolConfirm: PendingToolConfirm | null
 
   setConfig: (config: AIConfig) => void
   loadConfig: () => Promise<void>
@@ -52,7 +60,9 @@ interface AIState {
   renameConversation: (id: string, title: string) => void
   clearConversation: (id: string) => void
   regenerateLastMessage: () => Promise<void>
+  editAndResend: (messageId: string, newContent: string) => Promise<void>
   stopStreaming: () => void
+  confirmTool: (approved: boolean) => Promise<void>
   loadHistory: () => Promise<void>
   persistHistory: () => Promise<void>
 }
@@ -66,11 +76,14 @@ export const useAIStore = create<AIState>((set, get) => ({
     model: 'gpt-4o',
     temperature: 0.7,
     max_tokens: null,
+    enable_advanced_tools: false,
+    system_prompt: '',
   },
   conversations: [],
   currentConversationId: null,
   isStreaming: false,
   historyLoaded: false,
+  pendingToolConfirm: null,
 
   setConfig: (config) => set({ config }),
 
@@ -183,9 +196,20 @@ export const useAIStore = create<AIState>((set, get) => ({
     setTimeout(() => get().persistHistory(), 100)
   },
 
+  confirmTool: async (approved: boolean) => {
+    try {
+      await invoke('ai_confirm_tool', { approved })
+    } catch (e) {
+      console.error('确认工具失败:', e)
+    }
+    set({ pendingToolConfirm: null })
+  },
+
   stopStreaming: () => {
     const { conversations, currentConversationId } = get()
     if (!currentConversationId) return
+    // 通知后端中断流
+    invoke('ai_stop_stream').catch(() => {})
     set((state) => ({
       isStreaming: false,
       conversations: state.conversations.map((c) =>
@@ -230,6 +254,31 @@ export const useAIStore = create<AIState>((set, get) => ({
 
     // 重新发送
     await get().sendMessage(lastUserMsg.content)
+  },
+
+  editAndResend: async (messageId: string, newContent: string) => {
+    const state = get()
+    const { currentConversationId, isStreaming } = state
+    if (!currentConversationId || isStreaming) return
+
+    const conversation = state.conversations.find((c) => c.id === currentConversationId)
+    if (!conversation) return
+
+    // 找到被编辑消息的索引，截断到该消息之前的所有消息
+    const msgIndex = conversation.messages.findIndex((m) => m.id === messageId)
+    if (msgIndex === -1) return
+
+    const keptMessages = conversation.messages.slice(0, msgIndex)
+
+    // 更新对话
+    set((s) => ({
+      conversations: s.conversations.map((c) =>
+        c.id === currentConversationId ? { ...c, messages: keptMessages } : c
+      ),
+    }))
+
+    // 用新内容重新发送
+    await get().sendMessage(newContent)
   },
 
   sendMessage: async (content: string) => {
@@ -289,19 +338,20 @@ export const useAIStore = create<AIState>((set, get) => ({
       }
     )
 
-    // 监听工具调用
+    // 监听工具调用（多轮时追加，不覆盖）
     const unlistenToolCalls = await listen<{ conversation_id: string; tool_calls: ToolCallInfo[] }>(
       'ai-stream-tool-calls',
       (event) => {
         if (event.payload.conversation_id === conversationId) {
+          const newCalls = event.payload.tool_calls.map((tc: any) => ({
+            id: tc.id,
+            name: tc.function.name,
+            arguments: tc.function.arguments,
+          }))
           updateAssistant((m) => ({
             ...m,
             content: m.content || '正在调用工具...',
-            toolCalls: event.payload.tool_calls.map((tc: any) => ({
-              id: tc.id,
-              name: tc.function.name,
-              arguments: tc.function.arguments,
-            })),
+            toolCalls: [...(m.toolCalls || []), ...newCalls],
           }))
         }
       }
@@ -324,10 +374,19 @@ export const useAIStore = create<AIState>((set, get) => ({
       }
     )
 
+    // 监听工具确认请求（危险工具执行前弹窗确认）
+    const unlistenToolConfirm = await listen<{ name: string; arguments: string }>(
+      'ai-tool-confirm-request',
+      (event) => {
+        set({ pendingToolConfirm: event.payload })
+      }
+    )
+
     const cleanup = () => {
       unlisten()
       unlistenToolCalls()
       unlistenToolResult()
+      unlistenToolConfirm()
       unlistenDone()
       unlistenError()
     }
