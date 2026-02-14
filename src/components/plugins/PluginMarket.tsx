@@ -1,15 +1,14 @@
 import { useState, useEffect } from 'react'
-import { ArrowLeft, Puzzle, Play, Square, FolderOpen, Code, RefreshCw, ExternalLink, Loader2 } from 'lucide-react'
+import { ArrowLeft, Puzzle, Play, FolderOpen, Code, RefreshCw, ExternalLink, Loader2, ToggleLeft, ToggleRight, X, Plus } from 'lucide-react'
 import { usePluginStore } from '@/store/plugin-store'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { useDragWindow } from '@/hooks/useDragWindow'
 
 export function PluginMarket({ onBack }: { onBack: () => void }) {
-  const { plugins, loadPlugins, openPlugin } = usePluginStore()
+  const { plugins, loadPlugins, openPlugin, addDevDir, removeDevDir, setPluginEnabled, devDirs } = usePluginStore()
   const [activeTab, setActiveTab] = useState<'installed' | 'dev'>('installed')
   const [loading, setLoading] = useState(false)
-  const [devPath, setDevPath] = useState('')
   const [devLogs, setDevLogs] = useState<string[]>([])
   const { onMouseDown } = useDragWindow()
 
@@ -30,24 +29,21 @@ export function PluginMarket({ onBack }: { onBack: () => void }) {
         title: '选择插件目录',
       })
       if (selected) {
-        setDevPath(selected as string)
-        addDevLog(`已选择目录: ${selected}`)
+        addDevLog(`正在加载目录: ${selected}`)
+        await addDevDir(selected as string)
+        const count = usePluginStore.getState().plugins.length
+        addDevLog(`✓ 插件列表已刷新，共 ${count} 个插件`)
       }
     } catch (e) {
+      addDevLog(`✗ 加载失败: ${e}`)
       console.error('选择目录失败:', e)
     }
   }
 
-  const handleDevLoad = async () => {
-    if (!devPath) return
-    addDevLog('正在加载插件...')
-    try {
-      // 刷新插件列表后查找新插件
-      await handleRefresh()
-      addDevLog(`✓ 插件列表已刷新，共 ${plugins.length} 个插件`)
-    } catch (e) {
-      addDevLog(`✗ 加载失败: ${e}`)
-    }
+  const handleRemoveDevDir = async (dirPath: string) => {
+    addDevLog(`移除开发目录: ${dirPath}`)
+    await removeDevDir(dirPath)
+    addDevLog(`✓ 已移除，剩余 ${usePluginStore.getState().plugins.length} 个插件`)
   }
 
   const addDevLog = (msg: string) => {
@@ -117,14 +113,16 @@ export function PluginMarket({ onBack }: { onBack: () => void }) {
               <div className="text-center py-8 text-[var(--color-text-secondary)]">
                 <Puzzle className="w-10 h-10 mx-auto mb-3 opacity-30" />
                 <p className="text-xs">暂无安装的插件</p>
-                <p className="text-[10px] mt-1">将插件目录放入 <code className="bg-[var(--color-bg-secondary)] px-1 rounded">plugins/</code> 即可</p>
+                <p className="text-[10px] mt-1">将插件目录放入 <code className="bg-[var(--color-bg-secondary)] px-1 rounded">plugins/</code> 或在开发者 Tab 中添加目录</p>
               </div>
             )}
 
             {plugins.map((plugin) => (
               <div
                 key={plugin.id}
-                className="flex items-center justify-between p-3 rounded-lg bg-[var(--color-bg-secondary)] border border-[var(--color-border)] hover:border-orange-400/50 transition-colors"
+                className={`flex items-center justify-between p-3 rounded-lg bg-[var(--color-bg-secondary)] border border-[var(--color-border)] hover:border-orange-400/50 transition-colors ${
+                  !plugin.enabled ? 'opacity-50' : ''
+                }`}
               >
                 <div className="flex items-center gap-3 flex-1 min-w-0">
                   <div className="w-9 h-9 rounded-lg bg-orange-400/10 flex items-center justify-center shrink-0">
@@ -149,7 +147,24 @@ export function PluginMarket({ onBack }: { onBack: () => void }) {
                 </div>
 
                 <div className="flex items-center gap-1 ml-2">
-                  {plugin.manifest.features.map((feature) => (
+                  {/* 启用/禁用开关 */}
+                  <button
+                    onClick={() => setPluginEnabled(plugin.id, !plugin.enabled)}
+                    className={`p-1.5 rounded transition-colors ${
+                      plugin.enabled
+                        ? 'text-green-400 hover:bg-green-400/10'
+                        : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'
+                    }`}
+                    title={plugin.enabled ? '点击禁用' : '点击启用'}
+                  >
+                    {plugin.enabled ? (
+                      <ToggleRight className="w-4 h-4" />
+                    ) : (
+                      <ToggleLeft className="w-4 h-4" />
+                    )}
+                  </button>
+                  {/* Feature 打开按钮 */}
+                  {plugin.enabled && plugin.manifest.features.map((feature) => (
                     <button
                       key={feature.code}
                       onClick={() => openPlugin(plugin.id, feature.code)}
@@ -172,33 +187,43 @@ export function PluginMarket({ onBack }: { onBack: () => void }) {
               <h3 className="text-xs font-medium text-orange-400 mb-1">开发者模式</h3>
               <p className="text-[10px] text-[var(--color-text-secondary)] leading-relaxed">
                 支持 uTools <code className="bg-[var(--color-bg-secondary)] px-1 rounded">plugin.json</code> 和 Rubick <code className="bg-[var(--color-bg-secondary)] px-1 rounded">package.json</code> 格式。
-                选择插件目录后会自动加载并显示在已安装列表中。
+                选择插件目录后会自动扫描并加载到已安装列表中。
               </p>
             </div>
 
-            {/* 选择目录 */}
+            {/* 添加开发目录 */}
             <div>
-              <label className="text-xs text-[var(--color-text-secondary)] mb-1 block">插件目录</label>
-              <div className="flex gap-2">
-                <div className="flex-1 bg-[var(--color-bg-secondary)] text-xs text-[var(--color-text)] rounded-lg px-3 py-2 border border-[var(--color-border)] font-mono truncate">
-                  {devPath || '未选择...'}
-                </div>
-                <button
-                  onClick={handleOpenPluginDir}
-                  className="px-3 py-2 text-xs rounded-lg bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text)] transition-colors flex items-center gap-1 border border-[var(--color-border)]"
-                >
-                  <FolderOpen className="w-3 h-3" />
-                  选择
-                </button>
-                <button
-                  onClick={handleDevLoad}
-                  disabled={!devPath}
-                  className="px-3 py-2 text-xs rounded-lg bg-orange-500 text-white hover:bg-orange-600 disabled:opacity-40 transition-colors"
-                >
-                  加载
-                </button>
-              </div>
+              <label className="text-xs text-[var(--color-text-secondary)] mb-1 block">添加插件目录</label>
+              <button
+                onClick={handleOpenPluginDir}
+                className="w-full flex items-center justify-center gap-2 px-3 py-2.5 text-xs rounded-lg border border-dashed border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-orange-400 hover:text-orange-400 transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                选择目录
+              </button>
             </div>
+
+            {/* 已添加的开发目录 */}
+            {devDirs.length > 0 && (
+              <div>
+                <label className="text-xs text-[var(--color-text-secondary)] mb-1 block">已添加目录</label>
+                <div className="space-y-1">
+                  {devDirs.map((dir) => (
+                    <div key={dir} className="flex items-center gap-2 bg-[var(--color-bg-secondary)] rounded-lg px-3 py-2 border border-[var(--color-border)]">
+                      <FolderOpen className="w-3 h-3 text-orange-400 shrink-0" />
+                      <span className="text-[10px] text-[var(--color-text)] font-mono truncate flex-1">{dir}</span>
+                      <button
+                        onClick={() => handleRemoveDevDir(dir)}
+                        className="p-0.5 rounded hover:bg-red-400/10 text-[var(--color-text-secondary)] hover:text-red-400 transition-colors shrink-0"
+                        title="移除"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* 开发日志 */}
             <div>

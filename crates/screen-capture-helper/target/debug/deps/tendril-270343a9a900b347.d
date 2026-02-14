@@ -1,0 +1,11 @@
+/Users/haichao/Desktop/work/51ToolBox/crates/screen-capture-helper/target/debug/deps/tendril-270343a9a900b347.d: /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tendril-0.4.3/src/lib.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tendril-0.4.3/src/fmt.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tendril-0.4.3/src/stream.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tendril-0.4.3/src/buf32.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tendril-0.4.3/src/tendril.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tendril-0.4.3/src/utf8_decode.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tendril-0.4.3/src/util.rs
+
+/Users/haichao/Desktop/work/51ToolBox/crates/screen-capture-helper/target/debug/deps/libtendril-270343a9a900b347.rmeta: /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tendril-0.4.3/src/lib.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tendril-0.4.3/src/fmt.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tendril-0.4.3/src/stream.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tendril-0.4.3/src/buf32.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tendril-0.4.3/src/tendril.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tendril-0.4.3/src/utf8_decode.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tendril-0.4.3/src/util.rs
+
+/Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tendril-0.4.3/src/lib.rs:
+/Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tendril-0.4.3/src/fmt.rs:
+/Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tendril-0.4.3/src/stream.rs:
+/Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tendril-0.4.3/src/buf32.rs:
+/Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tendril-0.4.3/src/tendril.rs:
+/Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tendril-0.4.3/src/utf8_decode.rs:
+/Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tendril-0.4.3/src/util.rs:

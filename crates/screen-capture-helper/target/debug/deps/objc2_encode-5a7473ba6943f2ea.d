@@ -1,0 +1,10 @@
+/Users/haichao/Desktop/work/51ToolBox/crates/screen-capture-helper/target/debug/deps/objc2_encode-5a7473ba6943f2ea.d: /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-encode-4.1.0/src/lib.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-encode-4.1.0/src/encoding.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-encode-4.1.0/src/encoding_box.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-encode-4.1.0/src/helper.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-encode-4.1.0/src/parse.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-encode-4.1.0/src/static_str.rs
+
+/Users/haichao/Desktop/work/51ToolBox/crates/screen-capture-helper/target/debug/deps/libobjc2_encode-5a7473ba6943f2ea.rmeta: /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-encode-4.1.0/src/lib.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-encode-4.1.0/src/encoding.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-encode-4.1.0/src/encoding_box.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-encode-4.1.0/src/helper.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-encode-4.1.0/src/parse.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-encode-4.1.0/src/static_str.rs
+
+/Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-encode-4.1.0/src/lib.rs:
+/Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-encode-4.1.0/src/encoding.rs:
+/Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-encode-4.1.0/src/encoding_box.rs:
+/Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-encode-4.1.0/src/helper.rs:
+/Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-encode-4.1.0/src/parse.rs:
+/Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-encode-4.1.0/src/static_str.rs:

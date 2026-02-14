@@ -1,0 +1,20 @@
+{
+  "pluginName": "截图录屏",
+  "description": "区域截图、滚动长截图、屏幕录制（GIF/MP4），支持导出 PNG/JPEG/PDF",
+  "version": "1.0.0",
+  "author": "mTools",
+  "main": "index.html",
+  "logo": "",
+  "pluginType": "ui",
+  "features": [
+    {
+      "code": "screen-capture",
+      "explain": "截图录屏 — 区域截图、长截图、屏幕录制",
+      "cmds": [
+        "截图", "截屏", "screenshot", "长截图", "滚动截图",
+        "录屏", "录制", "record", "screen", "capture",
+        "GIF", "MP4", "PDF", "屏幕"
+      ]
+    }
+  ]
+}

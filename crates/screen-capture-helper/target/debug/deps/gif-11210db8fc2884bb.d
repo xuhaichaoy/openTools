@@ -1,0 +1,12 @@
+/Users/haichao/Desktop/work/51ToolBox/crates/screen-capture-helper/target/debug/deps/gif-11210db8fc2884bb.d: /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gif-0.13.3/src/lib.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gif-0.13.3/src/traits.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gif-0.13.3/src/common.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gif-0.13.3/src/reader/mod.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gif-0.13.3/src/reader/decoder.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gif-0.13.3/src/reader/converter.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gif-0.13.3/src/encoder.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gif-0.13.3/src/../README.md
+
+/Users/haichao/Desktop/work/51ToolBox/crates/screen-capture-helper/target/debug/deps/libgif-11210db8fc2884bb.rmeta: /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gif-0.13.3/src/lib.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gif-0.13.3/src/traits.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gif-0.13.3/src/common.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gif-0.13.3/src/reader/mod.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gif-0.13.3/src/reader/decoder.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gif-0.13.3/src/reader/converter.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gif-0.13.3/src/encoder.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gif-0.13.3/src/../README.md
+
+/Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gif-0.13.3/src/lib.rs:
+/Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gif-0.13.3/src/traits.rs:
+/Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gif-0.13.3/src/common.rs:
+/Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gif-0.13.3/src/reader/mod.rs:
+/Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gif-0.13.3/src/reader/decoder.rs:
+/Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gif-0.13.3/src/reader/converter.rs:
+/Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gif-0.13.3/src/encoder.rs:
+/Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gif-0.13.3/src/../README.md:

@@ -10,6 +10,8 @@ import {
   Terminal,
   Globe,
   Grid,
+  Workflow,
+  Pipette,
 } from "lucide-react";
 import { useAppStore } from "@/store/app-store";
 
@@ -57,6 +59,13 @@ export function Dashboard({ onNavigate }: DashboardProps) {
       color: "text-blue-500 bg-blue-500/10",
     },
     {
+      id: "color",
+      icon: <Pipette className="w-6 h-6" />,
+      title: "颜色",
+      action: () => onNavigate("color"),
+      color: "text-pink-500 bg-pink-500/10",
+    },
+    {
       id: "knowledge-base",
       icon: <BookOpen className="w-6 h-6" />,
       title: "知识库",
@@ -64,9 +73,16 @@ export function Dashboard({ onNavigate }: DashboardProps) {
       color: "text-emerald-500 bg-emerald-500/10",
     },
     {
+      id: "workflows",
+      icon: <Workflow className="w-6 h-6" />,
+      title: "工作流",
+      action: () => onNavigate("workflows"),
+      color: "text-teal-500 bg-teal-500/10",
+    },
+    {
       id: "plugins",
       icon: <Puzzle className="w-6 h-6" />,
-      title: "插件市场",
+      title: "插件",
       action: () => onNavigate("plugins"),
       color: "text-orange-500 bg-orange-500/10",
     },

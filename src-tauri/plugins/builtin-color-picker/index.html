@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>取色器</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --bg: #1a1b2e;
+  --bg2: #232440;
+  --bg3: #2a2b4a;
+  --border: #3a3b5a;
+  --text: #e8e8f0;
+  --text2: #8888aa;
+  --accent: #6c5ce7;
+  --radius: 10px;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  padding: 20px;
+  user-select: none;
+}
+
+.container { max-width: 760px; margin: 0 auto; }
+
+/* ── 顶部：取色按钮 + 预览 ── */
+.top-section {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 20px;
+  align-items: stretch;
+}
+
+.pick-btn {
+  width: 120px;
+  border-radius: 16px;
+  border: 2px dashed var(--border);
+  background: linear-gradient(135deg, #6c5ce7 0%, #a29bfe 100%);
+  color: white;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  transition: all 0.2s;
+  flex-shrink: 0;
+  min-height: 110px;
+  position: relative;
+  overflow: hidden;
+}
+.pick-btn::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, rgba(255,255,255,0.1) 0%, transparent 50%);
+}
+.pick-btn:hover {
+  transform: scale(1.03);
+  box-shadow: 0 8px 30px rgba(108,92,231,0.4);
+  border-color: transparent;
+}
+.pick-btn:active { transform: scale(0.98); }
+.pick-btn svg { width: 32px; height: 32px; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.3)); }
+.pick-btn span { position: relative; z-index: 1; text-shadow: 0 1px 2px rgba(0,0,0,0.3); }
+
+.color-preview {
+  width: 110px;
+  min-height: 110px;
+  border-radius: 16px;
+  border: 3px solid var(--border);
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+  flex-shrink: 0;
+  transition: border-color 0.2s;
+}
+.color-preview:hover { border-color: var(--accent); }
+.color-preview::before {
+  content: '';
+  position: absolute; inset: 0;
+  background: repeating-conic-gradient(#fff 0% 25%, #ddd 0% 50%) 0 0/16px 16px;
+  z-index: 0;
+}
+.color-preview .fill {
+  position: absolute; inset: 0;
+  z-index: 1;
+  transition: background-color 0.15s;
+}
+.native-picker {
+  position: absolute; inset: 0;
+  opacity: 0; width: 100%; height: 100%;
+  cursor: pointer; z-index: 2;
+}
+
+.preview-info { flex: 1; display: flex; flex-direction: column; gap: 6px; justify-content: center; }
+.preview-info .hex-display {
+  font-size: 26px;
+  font-weight: 700;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  letter-spacing: 1px;
+}
+.preview-info .color-name {
+  font-size: 12px;
+  color: var(--text2);
+}
+.preview-info .quick-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+.preview-info .quick-actions button {
+  padding: 4px 10px;
+  font-size: 11px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg2);
+  color: var(--text2);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.preview-info .quick-actions button:hover {
+  border-color: var(--accent);
+  color: var(--text);
+  background: var(--bg3);
+}
+
+/* ── 滑块区 ── */
+.sliders-section {
+  background: var(--bg2);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 14px;
+  border: 1px solid var(--border);
+}
+.slider-group { margin-bottom: 10px; }
+.slider-group:last-child { margin-bottom: 0; }
+.slider-label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+  font-size: 11px;
+  color: var(--text2);
+  font-weight: 500;
+}
+.slider-label span:last-child {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  color: var(--text);
+}
+
+input[type="range"] {
+  -webkit-appearance: none;
+  width: 100%;
+  height: 8px;
+  border-radius: 4px;
+  outline: none;
+  cursor: pointer;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: white;
+  border: 2px solid var(--border);
+  box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+  cursor: pointer;
+}
+
+.slider-hue { background: linear-gradient(to right, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00); }
+
+/* ── 色值输出区 ── */
+.values-section {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.value-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+  position: relative;
+}
+.value-card:hover { border-color: var(--accent); background: var(--bg3); }
+.value-card:active { transform: scale(0.98); }
+.value-card .label {
+  font-size: 10px; color: var(--text2);
+  text-transform: uppercase; letter-spacing: 1px;
+  margin-bottom: 3px; font-weight: 600;
+}
+.value-card .value {
+  font-size: 12px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  color: var(--text);
+  word-break: break-all;
+}
+.copied-toast {
+  position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  background: var(--accent); color: white;
+  font-size: 11px; padding: 4px 12px; border-radius: 20px;
+  pointer-events: none; opacity: 0; transition: opacity 0.2s;
+}
+.copied-toast.show { opacity: 1; }
+
+/* ── 调色板 ── */
+.palette-section {
+  background: var(--bg2);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  margin-bottom: 14px;
+}
+.palette-title {
+  font-size: 11px; color: var(--text2);
+  margin-bottom: 8px; font-weight: 500;
+}
+.palette-grid {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 5px;
+}
+.palette-color {
+  aspect-ratio: 1;
+  border-radius: 5px;
+  cursor: pointer;
+  border: 2px solid transparent;
+  transition: all 0.15s;
+}
+.palette-color:hover {
+  transform: scale(1.2); z-index: 1;
+  border-color: white;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+
+/* ── 历史 ── */
+.history-section {
+  background: var(--bg2);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+}
+.history-title {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 8px;
+}
+.history-title span { font-size: 11px; color: var(--text2); font-weight: 500; }
+.history-title button {
+  font-size: 10px; color: var(--text2);
+  background: none; border: none; cursor: pointer;
+  padding: 2px 8px; border-radius: 4px;
+}
+.history-title button:hover { color: var(--text); background: var(--bg3); }
+.history-colors { display: flex; gap: 5px; flex-wrap: wrap; }
+.history-color {
+  width: 26px; height: 26px;
+  border-radius: 5px; cursor: pointer;
+  border: 2px solid transparent;
+  transition: all 0.15s;
+}
+.history-color:hover { transform: scale(1.15); border-color: white; }
+</style>
+</head>
+<body>
+<div class="container">
+  <!-- 顶部：屏幕取色 + 预览 -->
+  <div class="top-section">
+    <button class="pick-btn" id="pickBtn" title="从桌面屏幕上取色">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m2 22 1-1h3l9-9"/>
+        <path d="M3 21v-3l9-9"/>
+        <path d="m15 6 3.4-3.4a2.1 2.1 0 1 1 3 3L18 9l.4.4a2.1 2.1 0 1 1-3 3l-3.8-3.8a2.1 2.1 0 1 1 3-3L15 6"/>
+      </svg>
+      <span>屏幕取色</span>
+    </button>
+
+    <div class="color-preview" id="colorPreview">
+      <div class="fill" id="colorFill"></div>
+      <input type="color" class="native-picker" id="nativePicker" value="#6c5ce7" title="使用系统颜色选择器">
+    </div>
+
+    <div class="preview-info">
+      <div class="hex-display" id="hexDisplay">#6C5CE7</div>
+      <div class="color-name" id="colorName">靛蓝</div>
+      <div class="quick-actions">
+        <button onclick="copyValue('hex')">复制 HEX</button>
+        <button onclick="copyValue('rgb')">复制 RGB</button>
+        <button onclick="copyValue('hsl')">复制 HSL</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 滑块 -->
+  <div class="sliders-section">
+    <div class="slider-group">
+      <div class="slider-label"><span>色相 H</span><span id="hueVal">260°</span></div>
+      <input type="range" class="slider-hue" id="hueSlider" min="0" max="360" value="260">
+    </div>
+    <div class="slider-group">
+      <div class="slider-label"><span>饱和度 S</span><span id="satVal">72%</span></div>
+      <input type="range" id="satSlider" min="0" max="100" value="72">
+    </div>
+    <div class="slider-group">
+      <div class="slider-label"><span>亮度 L</span><span id="lightVal">63%</span></div>
+      <input type="range" id="lightSlider" min="0" max="100" value="63">
+    </div>
+    <div class="slider-group">
+      <div class="slider-label"><span>透明度 A</span><span id="alphaVal">100%</span></div>
+      <input type="range" id="alphaSlider" min="0" max="100" value="100">
+    </div>
+  </div>
+
+  <!-- 色值 -->
+  <div class="values-section">
+    <div class="value-card" onclick="copyValue('hex')">
+      <div class="label">HEX</div>
+      <div class="value" id="valHex">#6C5CE7</div>
+      <div class="copied-toast" id="toast-hex">已复制</div>
+    </div>
+    <div class="value-card" onclick="copyValue('rgb')">
+      <div class="label">RGB</div>
+      <div class="value" id="valRgb">rgb(108, 92, 231)</div>
+      <div class="copied-toast" id="toast-rgb">已复制</div>
+    </div>
+    <div class="value-card" onclick="copyValue('hsl')">
+      <div class="label">HSL</div>
+      <div class="value" id="valHsl">hsl(260, 72%, 63%)</div>
+      <div class="copied-toast" id="toast-hsl">已复制</div>
+    </div>
+    <div class="value-card" onclick="copyValue('rgba')">
+      <div class="label">RGBA</div>
+      <div class="value" id="valRgba">rgba(108, 92, 231, 1)</div>
+      <div class="copied-toast" id="toast-rgba">已复制</div>
+    </div>
+  </div>
+
+  <!-- 调色板 -->
+  <div class="palette-section">
+    <div class="palette-title">常用颜色</div>
+    <div class="palette-grid" id="paletteGrid"></div>
+  </div>
+
+  <!-- 历史 -->
+  <div class="history-section">
+    <div class="history-title">
+      <span>最近使用</span>
+      <button onclick="clearHistory()">清空</button>
+    </div>
+    <div class="history-colors" id="historyColors">
+      <span style="font-size:11px;color:var(--text2);">暂无记录</span>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── 状态 ──
+var H = 260, S = 72, L = 63, A = 100;
+var colorHistory = [];
+var MAX_HISTORY = 24;
+
+// ── DOM ──
+var $ = function(id) { return document.getElementById(id); };
+var colorFill = $('colorFill');
+var hexDisplay = $('hexDisplay');
+var colorName = $('colorName');
+var nativePicker = $('nativePicker');
+var hueSlider = $('hueSlider');
+var satSlider = $('satSlider');
+var lightSlider = $('lightSlider');
+var alphaSlider = $('alphaSlider');
+var pickBtn = $('pickBtn');
+
+// ── 调色板 ──
+var PALETTE = [
+  '#FFEBEE','#EF9A9A','#EF5350','#E53935','#B71C1C','#FF1744',
+  '#FCE4EC','#F48FB1','#EC407A','#D81B60','#880E4F','#FF4081',
+  '#F3E5F5','#CE93D8','#AB47BC','#8E24AA','#4A148C','#E040FB',
+  '#EDE7F6','#B39DDB','#7E57C2','#5E35B1','#311B92','#7C4DFF',
+  '#E8EAF6','#9FA8DA','#5C6BC0','#3949AB','#1A237E','#536DFE',
+  '#E3F2FD','#90CAF9','#42A5F5','#1E88E5','#0D47A1','#448AFF',
+  '#E0F7FA','#80DEEA','#26C6DA','#00ACC1','#006064','#18FFFF',
+  '#E0F2F1','#80CBC4','#26A69A','#00897B','#004D40','#64FFDA',
+  '#E8F5E9','#A5D6A7','#66BB6A','#43A047','#1B5E20','#69F0AE',
+  '#FFFDE7','#FFF59D','#FFEE58','#FDD835','#F57F17','#FFFF00',
+  '#FFF3E0','#FFCC80','#FFA726','#FB8C00','#E65100','#FF9100',
+  '#FAFAFA','#BDBDBD','#757575','#424242','#212121','#000000',
+];
+
+// ── 颜色转换 ──
+function hslToRgb(h, s, l) {
+  s /= 100; l /= 100;
+  var a = s * Math.min(l, 1 - l);
+  var f = function(n) { var k = (n + h / 30) % 12; return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)); };
+  return [Math.round(f(0) * 255), Math.round(f(8) * 255), Math.round(f(4) * 255)];
+}
+
+function rgbToHex(r, g, b) {
+  return '#' + [r, g, b].map(function(v) { return v.toString(16).padStart(2, '0'); }).join('').toUpperCase();
+}
+
+function hexToHsl(hex) {
+  hex = hex.replace('#', '');
+  if (hex.length === 3) hex = hex.split('').map(function(c) { return c + c; }).join('');
+  var r = parseInt(hex.substr(0, 2), 16) / 255;
+  var g = parseInt(hex.substr(2, 2), 16) / 255;
+  var b = parseInt(hex.substr(4, 2), 16) / 255;
+  var max = Math.max(r, g, b), min = Math.min(r, g, b);
+  var h = 0, s = 0, l = (max + min) / 2;
+  if (max !== min) {
+    var d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    if (max === r) h = ((g - b) / d + (g < b ? 6 : 0));
+    else if (max === g) h = ((b - r) / d + 2);
+    else h = ((r - g) / d + 4);
+    h *= 60;
+  }
+  return [Math.round(h), Math.round(s * 100), Math.round(l * 100)];
+}
+
+function getColorName(h, s, l) {
+  if (l <= 5) return '黑色';
+  if (l >= 95 && s <= 10) return '白色';
+  if (s <= 10) return l < 30 ? '深灰' : l < 60 ? '灰色' : '浅灰';
+  var names = [[0,'红色'],[15,'橙红'],[30,'橙色'],[45,'橙黄'],[60,'黄色'],[80,'黄绿'],
+    [120,'绿色'],[160,'青绿'],[180,'青色'],[200,'天蓝'],[240,'蓝色'],[260,'靛蓝'],
+    [280,'紫色'],[300,'紫红'],[330,'玫红'],[360,'红色']];
+  var name = '红色';
+  for (var i = 0; i < names.length; i++) { if (h <= names[i][0]) { name = names[i][1]; break; } }
+  if (l < 35) name = '暗' + name;
+  else if (l > 75) name = '亮' + name;
+  return name;
+}
+
+// ── 设置颜色（从 hex） ──
+function setColorFromHex(hex) {
+  if (!hex || hex.length < 4) return;
+  var hsl = hexToHsl(hex);
+  H = hsl[0]; S = hsl[1]; L = hsl[2]; A = 100;
+  hueSlider.value = H; satSlider.value = S; lightSlider.value = L; alphaSlider.value = A;
+  updateUI();
+  addToHistory(hex);
+}
+
+// ── 更新 UI ──
+function updateUI() {
+  var rgb = hslToRgb(H, S, L);
+  var hex = rgbToHex(rgb[0], rgb[1], rgb[2]);
+  var alpha = A / 100;
+
+  colorFill.style.backgroundColor = 'hsla(' + H + ',' + S + '%,' + L + '%,' + alpha + ')';
+  hexDisplay.textContent = hex;
+  colorName.textContent = getColorName(H, S, L);
+
+  $('hueVal').textContent = H + '°';
+  $('satVal').textContent = S + '%';
+  $('lightVal').textContent = L + '%';
+  $('alphaVal').textContent = A + '%';
+
+  satSlider.style.background = 'linear-gradient(to right, hsl(' + H + ',0%,' + L + '%), hsl(' + H + ',100%,' + L + '%))';
+  lightSlider.style.background = 'linear-gradient(to right, hsl(' + H + ',' + S + '%,0%), hsl(' + H + ',' + S + '%,50%), hsl(' + H + ',' + S + '%,100%))';
+  alphaSlider.style.background = 'linear-gradient(to right, transparent, hsl(' + H + ',' + S + '%,' + L + '%)), repeating-conic-gradient(#fff 0% 25%, #ddd 0% 50%) 0 0/10px 10px';
+
+  $('valHex').textContent = hex;
+  $('valRgb').textContent = 'rgb(' + rgb[0] + ', ' + rgb[1] + ', ' + rgb[2] + ')';
+  $('valHsl').textContent = 'hsl(' + H + ', ' + S + '%, ' + L + '%)';
+  $('valRgba').textContent = 'rgba(' + rgb[0] + ', ' + rgb[1] + ', ' + rgb[2] + ', ' + alpha + ')';
+
+  nativePicker.value = hex.toLowerCase();
+}
+
+// ── 滑块事件 ──
+hueSlider.addEventListener('input', function(e) { H = +e.target.value; updateUI(); });
+satSlider.addEventListener('input', function(e) { S = +e.target.value; updateUI(); });
+lightSlider.addEventListener('input', function(e) { L = +e.target.value; updateUI(); });
+alphaSlider.addEventListener('input', function(e) { A = +e.target.value; updateUI(); });
+
+nativePicker.addEventListener('input', function(e) {
+  setColorFromHex(e.target.value.toUpperCase());
+});
+
+// ── 屏幕取色按钮 ──
+(function setupScreenPickChannel() {
+  var CH = 'mtools-screen-pick';
+  try {
+    var bc = new BroadcastChannel(CH);
+    bc.onmessage = function(e) {
+      // 恢复按钮状态
+      if (pickBtn) { pickBtn.disabled = false; var sp = pickBtn.querySelector('span'); if (sp) sp.textContent = '屏幕取色'; }
+      if (e.data && e.data.type === 'screen-color-picked' && e.data.color) {
+        setColorFromHex(e.data.color);
+      }
+    };
+    window.__mtoolsScreenPickBc = bc;
+  } catch (e) {}
+})();
+
+pickBtn.addEventListener('click', function() {
+  if (pickBtn.disabled) return;
+
+  function startPick() {
+    pickBtn.disabled = true;
+    var sp = pickBtn.querySelector('span');
+    if (sp) sp.textContent = '取色中...';
+  }
+  function endPick() {
+    pickBtn.disabled = false;
+    var sp = pickBtn.querySelector('span');
+    if (sp) sp.textContent = '屏幕取色';
+  }
+
+  // 方式 1：直接 Tauri IPC — 系统取色器，不截屏，直接返回 hex
+  if (window.__TAURI__ && window.__TAURI__.core) {
+    startPick();
+    window.__TAURI__.core.invoke('plugin_start_color_picker').then(function(hex) {
+      endPick();
+      if (hex) setColorFromHex(hex);
+    }).catch(function(err) {
+      endPick();
+      alert('取色失败: ' + (err && err.toString ? err.toString() : JSON.stringify(err)));
+    });
+    return;
+  }
+
+  // 方式 2：EyeDropper API
+  if (window.EyeDropper) {
+    new EyeDropper().open().then(function(r) {
+      setColorFromHex(r.sRGBHex.toUpperCase());
+    }).catch(function() {});
+    return;
+  }
+
+  // 方式 3：utools shim
+  if (window.utools && typeof window.utools.screenColorPick === 'function') {
+    startPick();
+    window.utools.screenColorPick(function(hex) {
+      endPick();
+      if (hex) setColorFromHex(hex);
+    });
+    return;
+  }
+
+  // 方式 4：BroadcastChannel
+  if (window.__mtoolsScreenPickBc) {
+    startPick();
+    window.__mtoolsScreenPickBc.postMessage({ type: 'request-screen-pick' });
+    setTimeout(endPick, 30000);
+    return;
+  }
+
+  alert('无可用取色方式');
+});
+
+// ── 复制 ──
+function copyValue(type) {
+  var key = type.charAt(0).toUpperCase() + type.slice(1);
+  var el = $('val' + key);
+  var text = el.textContent;
+  if (window.utools && window.utools.copyText) {
+    window.utools.copyText(text);
+  } else if (navigator.clipboard) {
+    navigator.clipboard.writeText(text).catch(function() {});
+  }
+  var toast = $('toast-' + type);
+  if (toast) { toast.classList.add('show'); setTimeout(function() { toast.classList.remove('show'); }, 800); }
+  addToHistory($('valHex').textContent);
+}
+
+// ── 调色板 ──
+function renderPalette() {
+  var grid = $('paletteGrid');
+  grid.innerHTML = '';
+  PALETTE.forEach(function(color) {
+    var el = document.createElement('div');
+    el.className = 'palette-color';
+    el.style.backgroundColor = color;
+    el.title = color;
+    el.addEventListener('click', function() { setColorFromHex(color); });
+    grid.appendChild(el);
+  });
+}
+
+// ── 历史 ──
+function addToHistory(hex) {
+  hex = hex.toUpperCase();
+  if (hex.length === 4) hex = '#' + hex[1]+hex[1]+hex[2]+hex[2]+hex[3]+hex[3];
+  colorHistory = [hex].concat(colorHistory.filter(function(c) { return c !== hex; })).slice(0, MAX_HISTORY);
+  renderHistory();
+  try {
+    if (window.utools && window.utools.dbStorage) {
+      window.utools.dbStorage.setItem('color-history', colorHistory);
+    } else {
+      localStorage.setItem('color-history', JSON.stringify(colorHistory));
+    }
+  } catch(e) {}
+}
+
+function loadHistory() {
+  try {
+    if (window.utools && window.utools.dbStorage) {
+      window.utools.dbStorage.getItem('color-history').then(function(v) {
+        if (Array.isArray(v)) { colorHistory = v; renderHistory(); }
+      });
+    } else {
+      var saved = localStorage.getItem('color-history');
+      if (saved) { colorHistory = JSON.parse(saved); renderHistory(); }
+    }
+  } catch(e) {}
+}
+
+function clearHistory() {
+  colorHistory = [];
+  renderHistory();
+  try {
+    if (window.utools && window.utools.dbStorage) {
+      window.utools.dbStorage.removeItem('color-history');
+    } else {
+      localStorage.removeItem('color-history');
+    }
+  } catch(e) {}
+}
+
+function renderHistory() {
+  var container = $('historyColors');
+  if (colorHistory.length === 0) {
+    container.innerHTML = '<span style="font-size:11px;color:var(--text2);">暂无记录</span>';
+    return;
+  }
+  container.innerHTML = '';
+  colorHistory.forEach(function(hex) {
+    var el = document.createElement('div');
+    el.className = 'history-color';
+    el.style.backgroundColor = hex;
+    el.title = hex;
+    el.addEventListener('click', function() { setColorFromHex(hex); });
+    container.appendChild(el);
+  });
+}
+
+// ── utools 生命周期 ──
+if (window.utools) {
+  if (window.utools.onPluginEnter) {
+    window.utools.onPluginEnter(function(info) {
+      if (info.payload && /^#?[0-9a-fA-F]{3,8}$/.test(info.payload.trim())) {
+        var hex = info.payload.trim();
+        if (hex.charAt(0) !== '#') hex = '#' + hex;
+        setColorFromHex(hex);
+      }
+    });
+  }
+}
+
+// ── 初始化 ──
+renderPalette();
+loadHistory();
+updateUI();
+</script>
+</body>
+</html>

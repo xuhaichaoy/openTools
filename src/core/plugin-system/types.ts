@@ -22,7 +22,23 @@ export interface PluginFeature {
   platform?: string[]    // 平台限制 ['win', 'darwin', 'linux']
 }
 
-/** 插件清单 — 统一格式 (兼容 uTools plugin.json + Rubick package.json) */
+/** 插件内嵌工作流定义（简化版 Workflow） */
+export interface PluginWorkflowDef {
+  name: string
+  icon: string
+  description: string
+  category?: string
+  trigger?: { type: 'manual' | 'keyword'; keyword?: string }
+  steps: {
+    id: string
+    name: string
+    type: string
+    config: Record<string, unknown>
+    output_var?: string
+  }[]
+}
+
+/** 插件清单 — 统一格式 (兼容 uTools plugin.json + Rubick package.json + mTools 扩展) */
 export interface PluginManifest {
   // 基础信息
   pluginName: string     // 插件名
@@ -39,6 +55,9 @@ export interface PluginManifest {
   // 功能
   features: PluginFeature[]
 
+  // mTools 扩展 — 工作流
+  workflows?: PluginWorkflowDef[]  // 插件提供的工作流
+
   // 运行时
   pluginType?: 'ui' | 'system'  // ui=有界面, system=无界面
   development?: {
@@ -53,7 +72,6 @@ export interface PluginInstance {
   dirPath: string        // 插件目录绝对路径
   enabled: boolean
   isBuiltin: boolean     // 是否为内置插件
-  installedAt: number
 }
 
 /** 插件匹配结果 */

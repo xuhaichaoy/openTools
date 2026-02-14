@@ -8,6 +8,8 @@ import {
   Puzzle,
   ArrowLeft,
   BookOpen,
+  Pipette,
+  Camera,
 } from "lucide-react";
 import { useDragWindow } from "@/hooks/useDragWindow";
 
@@ -67,6 +69,22 @@ export function Home({ onNavigate, onBack }: HomeProps) {
       description: "编码 / 解码",
       color: "text-blue-400 bg-blue-400/10",
       action: () => onNavigate("base64"),
+    },
+    {
+      id: "color",
+      icon: <Pipette className="w-5 h-5" />,
+      title: "颜色",
+      description: "屏幕取色、调色板、HEX/RGB/HSL",
+      color: "text-pink-400 bg-pink-400/10",
+      action: () => onNavigate("color"),
+    },
+    {
+      id: "screen-capture",
+      icon: <Camera className="w-5 h-5" />,
+      title: "截图录屏",
+      description: "截图、长截图、录屏",
+      color: "text-sky-400 bg-sky-400/10",
+      action: () => onNavigate("screen-capture"),
     },
     {
       id: "knowledge-base",

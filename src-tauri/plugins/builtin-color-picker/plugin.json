@@ -1,0 +1,27 @@
+{
+  "pluginName": "取色器",
+  "description": "屏幕取色、颜色格式转换、调色板",
+  "version": "1.0.0",
+  "author": "mTools",
+  "main": "index.html",
+  "logo": "",
+  "pluginType": "ui",
+  "features": [
+    {
+      "code": "color-picker",
+      "explain": "取色器 — 颜色选择与格式转换",
+      "cmds": [
+        "取色",
+        "颜色",
+        "取色器",
+        "color",
+        "picker",
+        "色值",
+        "调色板",
+        "HEX",
+        "RGB",
+        "HSL"
+      ]
+    }
+  ]
+}

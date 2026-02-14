@@ -1,0 +1,8 @@
+/Users/haichao/Desktop/work/51ToolBox/crates/screen-capture-helper/target/debug/deps/objc2_core_audio-5f8a48dcc52d0b3a.d: /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-core-audio-0.3.2/src/lib.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-core-audio-0.3.2/src/generated/mod.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-core-audio-0.3.2/src/generated/AudioHardware.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-core-audio-0.3.2/src/generated/AudioHardwareDeprecated.rs
+
+/Users/haichao/Desktop/work/51ToolBox/crates/screen-capture-helper/target/debug/deps/libobjc2_core_audio-5f8a48dcc52d0b3a.rmeta: /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-core-audio-0.3.2/src/lib.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-core-audio-0.3.2/src/generated/mod.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-core-audio-0.3.2/src/generated/AudioHardware.rs /Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-core-audio-0.3.2/src/generated/AudioHardwareDeprecated.rs
+
+/Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-core-audio-0.3.2/src/lib.rs:
+/Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-core-audio-0.3.2/src/generated/mod.rs:
+/Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-core-audio-0.3.2/src/generated/AudioHardware.rs:
+/Users/haichao/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-core-audio-0.3.2/src/generated/AudioHardwareDeprecated.rs:

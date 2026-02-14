@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-export type AppMode = 'search' | 'ai' | 'plugin'
+export type AppMode = 'search' | 'ai'
 
 export interface AppState {
   mode: AppMode

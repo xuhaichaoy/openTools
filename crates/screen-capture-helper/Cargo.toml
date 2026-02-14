@@ -1,0 +1,33 @@
+[package]
+name = "screen-capture-helper"
+version = "0.1.0"
+edition = "2021"
+description = "Screen capture & recording helper binary for 51ToolBox"
+
+[[bin]]
+name = "screen-capture-helper"
+path = "src/main.rs"
+
+[dependencies]
+# 截图
+xcap = "0.8"
+# 录屏帧捕获
+# scap = "0.1.0-beta"  # TODO: 等 scap 稳定后启用，目前先用 xcap 帧循环
+# 滚动模拟
+enigo = { version = "0.3", features = [] }
+# 图像处理
+image = "0.25"
+# PDF 导出
+printpdf = "0.8"
+# GIF 编码
+gif = "0.13"
+# 序列化
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# base64 编码 (缩略图传输)
+base64 = "0.22"
+# 临时文件
+tempfile = "3"
+# 日志
+log = "0.4"
+env_logger = "0.11"
