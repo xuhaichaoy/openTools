@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, Suspense } from "react";
+import { useState, useCallback, useEffect, Suspense, useRef } from "react";
 import { SearchBar } from "@/components/search/SearchBar";
 import { ResultList, type ResultItem } from "@/components/search/ResultList";
 import { ScreenshotSelector } from "@/components/tools/ScreenshotSelector";
@@ -15,6 +15,10 @@ import { useAgentStore } from "@/store/agent-store";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Bot, Globe, Puzzle, Terminal, Database, Workflow as WorkflowIcon } from "lucide-react";
+import {
+  emitPluginEvent,
+  PluginEventTypes,
+} from "@/core/plugin-system/event-bus";
 
 // 插件注册中心
 import { registry } from "@/core/plugin-system/registry";
@@ -36,6 +40,81 @@ import {
 
 // 独立窗口模式检测：截图选区窗口
 const specialView = (window as any).__SCREENSHOT_MODE__ ? "screenshot" : null;
+
+function createBridgeToken(): string {
+  const bytes = new Uint8Array(16);
+  if (globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(bytes);
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function isAllowedEmbedOrigin(origin: string): boolean {
+  // srcDoc + sandbox 场景常见 "null"，同源嵌入允许当前 origin
+  return origin === "null" || origin === window.location.origin;
+}
+
+function toPostMessageTargetOrigin(origin: string | null): string {
+  if (origin && origin !== "null") return origin;
+  return "*";
+}
+
+function getAllowedEmbedCommands(pluginId: string): Set<string> {
+  const plugin = usePluginStore
+    .getState()
+    .plugins.find((p) => p.id === pluginId && p.enabled);
+  if (!plugin) return new Set<string>();
+
+  const base = new Set<string>([
+    "plugin_api_call",
+    "open_url",
+    "plugin_start_color_picker",
+  ]);
+  // 预留：未来可按 manifest/capabilities 做更细粒度扩展
+  return base;
+}
+
+function isAllowedPluginApiMethod(method: unknown): method is string {
+  if (typeof method !== "string") return false;
+  const allowed = new Set<string>([
+    "hideMainWindow",
+    "showMainWindow",
+    "setExpendHeight",
+    "copyText",
+    "showNotification",
+    "shellOpenExternal",
+    "shellOpenPath",
+    "shellShowItemInFolder",
+    "getPath",
+    "copyImage",
+    "setSubInput",
+    "removeSubInput",
+    "redirect",
+    "dbStorage.setItem",
+    "dbStorage.getItem",
+    "dbStorage.removeItem",
+    "outPlugin",
+  ]);
+  return allowed.has(method);
+}
+
+function isValidPluginApiCallArgs(
+  args: Record<string, unknown>,
+): args is {
+  pluginId: string;
+  method: string;
+  args: string;
+  callId: number;
+} {
+  return (
+    typeof args.pluginId === "string" &&
+    typeof args.method === "string" &&
+    typeof args.args === "string" &&
+    typeof args.callId === "number" &&
+    Number.isFinite(args.callId)
+  );
+}
 
 function App() {
   // 截图选区窗口使用独立组件，避免加载主应用逻辑
@@ -59,8 +138,24 @@ function MainApp() {
     featureCode: string;
     title?: string;
   } | null>(null);
+  const [embedBridgeToken, setEmbedBridgeToken] = useState<string | null>(null);
+  const embedSecurityRef = useRef<{
+    view: string;
+    pluginId: string | null;
+    token: string | null;
+    source: Window | null;
+    origin: string | null;
+  }>({
+    view: "main",
+    pluginId: null,
+    token: null,
+    source: null,
+    origin: null,
+  });
   const { mode, searchValue, setWindowExpanded, reset } = useAppStore();
   const { config } = useAIStore();
+  const lastCaptureHandledRef = (window as any).__LAST_CAPTURE_HANDLED_REF__ ||
+    ((window as any).__LAST_CAPTURE_HANDLED_REF__ = { key: "", ts: 0 });
 
   const handleDirectColorPicker = useCallback(async () => {
     try {
@@ -89,6 +184,36 @@ function MainApp() {
       .catch((e) => console.error("Failed to load settings:", e));
   }, []);
 
+  useEffect(() => {
+    if (view === "plugin-embed" && embedTarget) {
+      setEmbedBridgeToken(createBridgeToken());
+    } else {
+      setEmbedBridgeToken(null);
+    }
+  }, [view, embedTarget?.pluginId, embedTarget?.featureCode]);
+
+  useEffect(() => {
+    embedSecurityRef.current = {
+      view,
+      pluginId: embedTarget?.pluginId ?? null,
+      token: embedBridgeToken,
+      source: null,
+      origin: null,
+    };
+  }, [view, embedTarget?.pluginId, embedBridgeToken]);
+
+  // 监听 app-store 的嵌入请求（来自 PluginMarket 等）
+  const pendingEmbed = useAppStore((s) => s.pendingEmbed);
+  useEffect(() => {
+    if (pendingEmbed) {
+      const req = useAppStore.getState().consumeEmbed();
+      if (req) {
+        setEmbedTarget(req);
+        setView("plugin-embed");
+      }
+    }
+  }, [pendingEmbed]);
+
   // 监听 Rust 发来的上下文操作事件
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -100,6 +225,103 @@ function MainApp() {
       unlisten = fn;
     });
     return () => unlisten?.();
+  }, []);
+
+  // 全局监听截图完成事件，保证 OCR/贴图在任意页面都生效
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    listen<{
+      path?: string;
+      action?: string;
+      imageBase64?: string;
+      imageWidth?: number;
+      imageHeight?: number;
+    }>(
+      "capture-done",
+      async (e) => {
+        const {
+          path: capPath,
+          action,
+          imageBase64,
+          imageWidth,
+          imageHeight,
+        } = e.payload || {};
+        if (!capPath) return;
+
+        // 去重：StrictMode/重复监听/重复事件时，短时间内同 key 只处理一次
+        const key = `${action || "copy"}|${capPath}`;
+        const now = Date.now();
+        if (
+          lastCaptureHandledRef.key === key &&
+          now - lastCaptureHandledRef.ts < 1200
+        ) {
+          return;
+        }
+        lastCaptureHandledRef.key = key;
+        lastCaptureHandledRef.ts = now;
+
+        if (action === "pin") {
+          try {
+            if (!imageBase64) {
+              console.warn("pin 缺少 imageBase64，跳过");
+              return;
+            }
+            const srcW = Math.max(1, imageWidth || 300);
+            const srcH = Math.max(1, imageHeight || 300);
+            const maxW = 560;
+            const maxH = 420;
+            const scale = Math.min(maxW / srcW, maxH / srcH, 1);
+            const width = Math.round(srcW * scale);
+            const height = Math.round(srcH * scale);
+            await invoke("ding_create", {
+              imageBase64,
+              x: 100.0,
+              y: 100.0,
+              width,
+              height,
+            });
+          } catch (err) {
+            console.error("全局贴图失败:", err);
+          }
+          return;
+        }
+
+        if (action === "ocr") {
+          try {
+            if (!imageBase64) {
+              console.warn("ocr 缺少 imageBase64，跳过");
+              return;
+            }
+            (window as any).__PENDING_OCR_IMAGE__ = imageBase64;
+            setView("ocr");
+            // 先切到 OCR 页，再投喂截图事件；插件端也会从全局变量兜底读取
+            setTimeout(() => {
+              emitPluginEvent(
+                PluginEventTypes.SCREENSHOT_CAPTURED,
+                "screen-capture",
+                {
+                  imageBase64,
+                },
+              );
+            }, 80);
+          } catch (err) {
+            console.error("全局 OCR 处理失败:", err);
+          }
+        }
+      },
+    ).then((fn) => {
+      if (disposed) {
+        fn();
+        return;
+      }
+      unlisten = fn;
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
 
   // 插件窗口通过 BroadcastChannel 请求屏幕取色（不依赖插件窗口的 __TAURI__）
@@ -126,37 +348,90 @@ function MainApp() {
       const d = e.data;
       if (!d || !e.source) return;
       const source = e.source as Window;
+      const type = d.type as string | undefined;
+      const isBridgeMessage =
+        type === "mtools-embed-invoke" ||
+        type === "mtools-ai-chat" ||
+        type === "mtools-ai-stream";
+
+      if (isBridgeMessage) {
+        const origin = typeof e.origin === "string" ? e.origin : "";
+        if (!isAllowedEmbedOrigin(origin)) {
+          console.warn(`[Security] Blocked bridge message from origin: ${origin}`);
+          return;
+        }
+        const sec = embedSecurityRef.current;
+        if (
+          sec.view !== "plugin-embed" ||
+          !sec.pluginId ||
+          !sec.token ||
+          d.pluginId !== sec.pluginId ||
+          d.token !== sec.token
+        ) {
+          console.warn("[Security] Blocked unauthorized embed bridge message");
+          return;
+        }
+        // 绑定 source：首条合法消息建立会话来源，后续必须同一窗口
+        if (!sec.source) {
+          sec.source = source;
+          sec.origin = origin;
+        } else if (sec.source !== source) {
+          console.warn("[Security] Blocked bridge message from unknown source");
+          return;
+        }
+      }
 
       // ── 标准 invoke 桥 ──
       if (d.type === "mtools-embed-invoke") {
         const id = d.id as string;
         const cmd = d.cmd as string;
+        const token = d.token as string;
         const args = (d.args as Record<string, unknown>) ?? {};
 
-        // 安全白名单：只允许外部插件调用特定的 Tauri 命令
-        const SAFE_COMMANDS = ["open_url", "plugin_start_color_picker"];
+        const sec = embedSecurityRef.current;
+        const SAFE_COMMANDS = getAllowedEmbedCommands(sec.pluginId || "");
 
         const send = (result: unknown, error?: string) => {
           try {
+            const targetOrigin = toPostMessageTargetOrigin(
+              embedSecurityRef.current.origin,
+            );
             source.postMessage(
               {
                 type: "mtools-embed-result",
                 id,
+                token,
                 result: error === undefined ? result : undefined,
                 error,
               },
-              "*",
+              targetOrigin,
             );
           } catch (_) {}
         };
 
-        if (!SAFE_COMMANDS.includes(cmd)) {
+        if (!SAFE_COMMANDS.has(cmd)) {
           console.warn(`[Security] Blocked unauthorized invoke: ${cmd}`);
           send(
             undefined,
             `Permission denied: Command '${cmd}' is not allowed.`,
           );
           return;
+        }
+
+        // 进一步约束 plugin_api_call：插件身份与可调用方法都要匹配
+        if (cmd === "plugin_api_call") {
+          if (!isValidPluginApiCallArgs(args)) {
+            send(undefined, "Invalid plugin_api_call args payload.");
+            return;
+          }
+          if (args.pluginId !== sec.pluginId) {
+            send(undefined, "Permission denied: plugin identity mismatch.");
+            return;
+          }
+          if (!isAllowedPluginApiMethod(args.method)) {
+            send(undefined, "Permission denied: plugin API method is not allowed.");
+            return;
+          }
         }
 
         try {
@@ -171,20 +446,27 @@ function MainApp() {
       // ── AI chat（单轮，等完整结果）──
       if (d.type === "mtools-ai-chat") {
         const ai = getMToolsAI();
+        const token = d.token as string;
         try {
+          const targetOrigin = toPostMessageTargetOrigin(
+            embedSecurityRef.current.origin,
+          );
           const result = await ai.chat({
             messages: d.messages,
             model: d.model,
             temperature: d.temperature,
           });
           source.postMessage(
-            { type: "mtools-ai-result", id: d.id, content: result.content },
-            "*",
+            { type: "mtools-ai-result", id: d.id, token, content: result.content },
+            targetOrigin,
           );
         } catch (err) {
+          const targetOrigin = toPostMessageTargetOrigin(
+            embedSecurityRef.current.origin,
+          );
           source.postMessage(
-            { type: "mtools-ai-result", id: d.id, error: String(err) },
-            "*",
+            { type: "mtools-ai-result", id: d.id, token, error: String(err) },
+            targetOrigin,
           );
         }
         return;
@@ -193,26 +475,30 @@ function MainApp() {
       // ── AI stream（流式，逐 chunk 推送）──
       if (d.type === "mtools-ai-stream") {
         const ai = getMToolsAI();
+        const token = d.token as string;
+        const targetOrigin = toPostMessageTargetOrigin(
+          embedSecurityRef.current.origin,
+        );
         try {
           await ai.stream({
             messages: d.messages,
             onChunk: (chunk) => {
               source.postMessage(
-                { type: "mtools-ai-chunk", id: d.id, chunk },
-                "*",
+                { type: "mtools-ai-chunk", id: d.id, token, chunk },
+                targetOrigin,
               );
             },
             onDone: (content) => {
               source.postMessage(
-                { type: "mtools-ai-done", id: d.id, content },
-                "*",
+                { type: "mtools-ai-done", id: d.id, token, content },
+                targetOrigin,
               );
             },
           });
         } catch (err) {
           source.postMessage(
-            { type: "mtools-ai-error", id: d.id, error: String(err) },
-            "*",
+            { type: "mtools-ai-error", id: d.id, token, error: String(err) },
+            targetOrigin,
           );
         }
         return;
@@ -454,15 +740,16 @@ function MainApp() {
         return;
       }
 
-      // / 前缀 → AI Agent Shell 模式
+      // / 前缀 → AI Agent 模式（直接进入 Agent Tab）
       if (value.startsWith("/ ")) {
         const cmd = value.slice(2).trim();
         if (cmd) {
           useAIStore
             .getState()
             .sendMessage(`请执行以下 shell 命令并解释结果：\`${cmd}\``);
-          setView("ai-center");
         }
+        useAppStore.getState().setAiInitialMode("agent");
+        setView("ai-center");
         return;
       }
 
@@ -546,7 +833,7 @@ function MainApp() {
       )}
 
       {/* 外部插件嵌入 */}
-      {view === "plugin-embed" && embedTarget && (
+      {view === "plugin-embed" && embedTarget && embedBridgeToken && (
         <div className="h-full">
           <PluginErrorBoundary
             pluginId={embedTarget.pluginId}
@@ -558,6 +845,7 @@ function MainApp() {
             <PluginEmbed
               pluginId={embedTarget.pluginId}
               featureCode={embedTarget.featureCode}
+              bridgeToken={embedBridgeToken}
               title={embedTarget.title}
               onBack={() => {
                 setView("main");

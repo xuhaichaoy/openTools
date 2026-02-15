@@ -6,11 +6,18 @@ import { invoke } from "@tauri-apps/api/core";
 interface PluginEmbedProps {
   pluginId: string;
   featureCode: string;
+  bridgeToken: string;
   title?: string;
   onBack: () => void;
 }
 
-export function PluginEmbed({ pluginId, featureCode, title, onBack }: PluginEmbedProps) {
+export function PluginEmbed({
+  pluginId,
+  featureCode,
+  bridgeToken,
+  title,
+  onBack,
+}: PluginEmbedProps) {
   const [html, setHtml] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -18,7 +25,11 @@ export function PluginEmbed({ pluginId, featureCode, title, onBack }: PluginEmbe
 
   useEffect(() => {
     let cancelled = false;
-    invoke<string>("plugin_get_embed_html", { pluginId, featureCode })
+    invoke<string>("plugin_get_embed_html", {
+      pluginId,
+      featureCode,
+      bridgeToken,
+    })
       .then((h) => {
         if (!cancelled) {
           setHtml(h);
@@ -34,7 +45,7 @@ export function PluginEmbed({ pluginId, featureCode, title, onBack }: PluginEmbe
     return () => {
       cancelled = true;
     };
-  }, [pluginId, featureCode]);
+  }, [pluginId, featureCode, bridgeToken]);
 
   return (
     <div className="flex flex-col h-full bg-[var(--color-bg)] rounded-xl overflow-hidden">
@@ -63,7 +74,7 @@ export function PluginEmbed({ pluginId, featureCode, title, onBack }: PluginEmbe
             ref={iframeRef}
             title="plugin"
             srcDoc={html}
-            sandbox="allow-scripts allow-same-origin"
+            sandbox="allow-scripts allow-forms allow-popups"
             className="w-full h-full border-0 rounded-b-xl bg-[var(--color-bg)]"
           />
         )}

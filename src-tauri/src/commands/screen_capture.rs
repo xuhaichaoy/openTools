@@ -21,6 +21,8 @@ static HELPER: std::sync::LazyLock<Mutex<Option<HelperProcess>>> =
 
 /// 截图窗口是否已加载就绪
 static SCREENSHOT_WINDOW_READY: AtomicBool = AtomicBool::new(false);
+/// 截图流程进行中（防止并发 start_capture 覆盖全局状态）
+static CAPTURE_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 /// 当前截图源文件路径（每次截图用唯一文件名，解决缓存 + 多次截图问题）
 static CURRENT_SCREENSHOT_PATH: std::sync::LazyLock<Mutex<Option<String>>> =
@@ -29,6 +31,13 @@ static CURRENT_SCREENSHOT_PATH: std::sync::LazyLock<Mutex<Option<String>>> =
 // 缓存最后一次截图数据，供前端 reload 后拉取
 static LAST_SCREENSHOT_DATA: std::sync::LazyLock<Mutex<Option<Value>>> =
     std::sync::LazyLock::new(|| Mutex::new(None));
+
+struct CaptureInProgressResetGuard;
+impl Drop for CaptureInProgressResetGuard {
+    fn drop(&mut self) {
+        CAPTURE_IN_PROGRESS.store(false, Ordering::SeqCst);
+    }
+}
 
 fn get_helpers_dir(app: &AppHandle) -> PathBuf {
     let data_dir = app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -401,6 +410,13 @@ pub async fn show_screenshot_window(app: AppHandle) -> Result<(), String> {
 /// 开始区域截图（参考 eSearch 流程：隐藏主窗口 → 截屏 → 发送数据到预创建窗口 → 窗口就绪后显示）
 #[tauri::command]
 pub async fn start_capture(app: AppHandle, monitor_id: Option<u32>) -> Result<String, String> {
+    if CAPTURE_IN_PROGRESS
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("截图进行中，请先完成或取消当前截图".to_string());
+    }
+
     // 1. 隐藏主窗口
     if let Some(main_win) = app.get_webview_window("main") {
         let _ = main_win.hide();
@@ -410,6 +426,7 @@ pub async fn start_capture(app: AppHandle, monitor_id: Option<u32>) -> Result<St
     match start_capture_inner(&app, monitor_id).await {
         Ok(path) => Ok(path),
         Err(e) => {
+            CAPTURE_IN_PROGRESS.store(false, Ordering::SeqCst);
             // 出错时恢复主窗口，否则用户看不到任何反馈
             if let Some(main_win) = app.get_webview_window("main") {
                 let _ = main_win.show();
@@ -609,6 +626,9 @@ pub async fn finish_capture(
     action: Option<String>,
     annotated_image: Option<String>,
 ) -> Result<String, String> {
+    // 无论成功还是失败，都在结束时释放并发锁
+    let _reset_guard = CaptureInProgressResetGuard;
+
     // 1. 隐藏截图窗口（不关闭，供下次复用）
     if let Some(win) = app.get_webview_window("screenshot") {
         let _ = win.hide();
@@ -625,7 +645,8 @@ pub async fn finish_capture(
          return Err("没有可用的截图源文件".to_string());
     }
 
-    let result_str = tokio::task::spawn_blocking(move || -> Result<String, String> {
+    let source_path_for_crop = source_path_opt.clone();
+    let (result_str, result_base64, result_w, result_h) = tokio::task::spawn_blocking(move || -> Result<(String, String, u32, u32), String> {
         let dynamic_img = if let Some(base64_str) = annotated_image {
              // Case A: 前端传来了已标注的图片 (Base64)
              // 去掉头部的 "data:image/png;base64,"
@@ -638,14 +659,27 @@ pub async fn finish_capture(
                  .map_err(|e| format!("加载标注图片失败: {e}"))?
         } else {
              // Case B: 仅裁剪原图
-             let path = source_path_opt.unwrap();
+             let path = source_path_for_crop
+                 .as_ref()
+                 .ok_or_else(|| "没有可用的截图源文件".to_string())?;
              let img = image::open(&path).map_err(|e| format!("打开截图失败: {e}"))?;
              img.crop_imm(x, y, width, height)
         };
         
+        let out_w = dynamic_img.width();
+        let out_h = dynamic_img.height();
+
         // 保存（统一存为 png）
         let result_path = std::env::temp_dir().join("51toolbox-screenshot-result.png");
         dynamic_img.save(&result_path).map_err(|e| format!("保存截图结果失败: {e}"))?;
+
+        // 同时返回 base64，前端可直接消费，避免再次读临时文件失败
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        dynamic_img
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .map_err(|e| format!("编码截图结果失败: {e}"))?;
+        use base64::{engine::general_purpose, Engine as _};
+        let image_base64 = general_purpose::STANDARD.encode(encoded.get_ref());
 
         if do_copy {
             let rgba = dynamic_img.to_rgba8();
@@ -666,7 +700,7 @@ pub async fn finish_capture(
             }
         }
 
-        Ok(result_path.to_string_lossy().to_string())
+        Ok((result_path.to_string_lossy().to_string(), image_base64, out_w, out_h))
     })
     .await
     .map_err(|e| format!("任务执行失败: {e}"))??;
@@ -676,6 +710,9 @@ pub async fn finish_capture(
     let _ = app.emit("capture-done", serde_json::json!({
         "path": result_str,
         "action": action_str,
+        "imageBase64": result_base64,
+        "imageWidth": result_w,
+        "imageHeight": result_h,
     }));
 
     // 4. 恢复主窗口
@@ -697,6 +734,7 @@ pub async fn cancel_capture(app: AppHandle) -> Result<(), String> {
         let _ = main_win.show();
         let _ = main_win.set_focus();
     }
+    CAPTURE_IN_PROGRESS.store(false, Ordering::SeqCst);
     Ok(())
 }
 

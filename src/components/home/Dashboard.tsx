@@ -1,24 +1,70 @@
 import { useAppStore } from "@/store/app-store";
 import { registry } from "@/core/plugin-system/registry";
-import { Globe, Terminal } from "lucide-react";
+import { Globe, Terminal, ScanText, Languages, MessageCircle } from "lucide-react";
+import { useMemo } from "react";
 
 interface DashboardProps {
   onNavigate: (view: string) => void;
 }
 
 export function Dashboard({ onNavigate }: DashboardProps) {
-  const { setSelectedIndex, setSearchValue } = useAppStore();
+  const { setSelectedIndex, setSearchValue, recentTools, addRecentTool } = useAppStore();
 
   // AI 助手已合并进 registry，直接从 registry 获取所有插件
-  const tools = registry.getAll().map((plugin) => ({
+  const allTools = registry.getAll().map((plugin) => ({
     id: plugin.id,
     icon: plugin.icon,
     title: plugin.name,
-    action: () => onNavigate(plugin.viewId),
+    viewId: plugin.viewId,
+    action: () => {
+      addRecentTool(plugin.viewId);
+      onNavigate(plugin.viewId);
+    },
     color: plugin.color,
   }));
 
+  // 按最近使用排序：最近使用过的排在前面，其余保持原始顺序
+  const tools = useMemo(() => {
+    if (recentTools.length === 0) return allTools;
+    const recentSet = new Set(recentTools);
+    const recent = recentTools
+      .map((viewId) => allTools.find((t) => t.viewId === viewId))
+      .filter(Boolean) as typeof allTools;
+    const rest = allTools.filter((t) => !recentSet.has(t.viewId));
+    return [...recent, ...rest];
+  }, [allTools, recentTools]);
+
   const quickActions = [
+    {
+      id: "screenshot-ocr",
+      icon: <ScanText className="w-6 h-6" />,
+      title: "截图 OCR",
+      action: () => {
+        addRecentTool("ocr");
+        onNavigate("ocr");
+      },
+      color: "text-violet-500 bg-violet-500/10",
+    },
+    {
+      id: "screenshot-translate",
+      icon: <Languages className="w-6 h-6" />,
+      title: "截图翻译",
+      action: () => {
+        addRecentTool("screen-translate");
+        onNavigate("screen-translate");
+      },
+      color: "text-pink-500 bg-pink-500/10",
+    },
+    {
+      id: "ai-chat",
+      icon: <MessageCircle className="w-6 h-6" />,
+      title: "AI 问答",
+      action: () => {
+        addRecentTool("ai-center");
+        onNavigate("ai-center");
+      },
+      color: "text-indigo-500 bg-indigo-500/10",
+    },
     {
       id: "baidu",
       icon: <Globe className="w-6 h-6" />,
@@ -49,12 +95,14 @@ export function Dashboard({ onNavigate }: DashboardProps) {
     },
   ];
 
+  const hasRecent = recentTools.length > 0;
+
   return (
     <div className="px-2 py-1 h-full overflow-y-auto custom-scrollbar">
-      {/* 常用工具 */}
+      {/* 常用工具（按最近使用排序） */}
       <div className="mb-8">
         <h3 className="text-xs font-medium text-[var(--color-text-secondary)] mb-4 px-2">
-          常用工具
+          {hasRecent ? "最近使用" : "常用工具"}
         </h3>
         <div className="grid grid-cols-8 gap-x-2 gap-y-1 mt-5">
           {tools.map((tool) => (

@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, LogicalSize, Manager, Size, WebviewUrl, WebviewWindowBuilder};
+use url::Url;
 
 /// 贴图实例信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,11 +48,18 @@ pub async fn ding_create(
         r#"<!DOCTYPE html>
 <html>
 <head>
+<meta charset="utf-8" />
 <style>
   * {{ margin: 0; padding: 0; }}
-  body {{
+  html, body {{
+    width: 100%;
+    height: 100%;
     overflow: hidden;
-    background: transparent;
+    background: #111;
+  }}
+  body {{
+    width: 100%;
+    height: 100%;
     user-select: none;
     -webkit-user-select: none;
   }}
@@ -59,44 +67,15 @@ pub async fn ding_create(
     width: 100%;
     height: 100%;
     object-fit: contain;
-    pointer-events: auto;
-    cursor: move;
+    display: block;
   }}
-  .controls {{
-    position: fixed;
-    top: 4px;
-    right: 4px;
-    display: flex;
-    gap: 4px;
-    opacity: 0;
-    transition: opacity 0.2s;
-    z-index: 10;
-  }}
-  body:hover .controls {{ opacity: 1; }}
-  .btn {{
-    width: 24px;
-    height: 24px;
-    border-radius: 50%;
-    border: none;
-    cursor: pointer;
-    font-size: 12px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: rgba(0,0,0,0.6);
-    color: white;
-  }}
-  .btn:hover {{ background: rgba(0,0,0,0.8); }}
 </style>
 </head>
 <body>
-  <div class="controls">
-    <button class="btn" onclick="window.__TAURI__?.core.invoke('ding_close', {{dingId: '{}'}})">✕</button>
-  </div>
   <img src="data:image/png;base64,{}" draggable="false" />
 </body>
 </html>"#,
-        id, image_base64
+        image_base64
     );
 
     // 写入临时文件
@@ -106,17 +85,17 @@ pub async fn ding_create(
     std::fs::write(&html_path, html)
         .map_err(|e| format!("Write HTML failed: {}", e))?;
 
-    // 创建透明无边框窗口
-    let url = WebviewUrl::App(
-        format!("../../../{}", html_path.display()).into()
-    );
+    // 创建透明无边框窗口：使用 file:// URL，避免错误回落到主应用首页
+    let file_url = Url::from_file_path(&html_path)
+        .map_err(|_| format!("Invalid temp html path: {}", html_path.display()))?;
+    let url = WebviewUrl::External(file_url);
 
     let _window = WebviewWindowBuilder::new(&app, &id, url)
-        .title("贴图")
+        .title("贴图（可拖动/缩放）")
         .inner_size(w, h)
         .position(x, y)
-        .decorations(false)
-        .transparent(true)
+        .decorations(true)
+        .transparent(false)
         .always_on_top(true)
         .skip_taskbar(true)
         .resizable(true)
@@ -138,6 +117,44 @@ pub async fn ding_create(
     }
 
     Ok(id)
+}
+
+/// 拖拽贴图窗口
+#[tauri::command]
+pub async fn ding_start_drag(ding_id: String, app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(&ding_id) {
+        window
+            .start_dragging()
+            .map_err(|e| format!("Start dragging failed: {}", e))?;
+    }
+    Ok(())
+}
+
+/// 等比缩放贴图窗口（由前端 resize handle 触发）
+#[tauri::command]
+pub async fn ding_resize(
+    ding_id: String,
+    width: f64,
+    height: f64,
+    app: AppHandle,
+) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(&ding_id) {
+        window
+            .set_size(Size::Logical(LogicalSize::new(width, height)))
+            .map_err(|e| format!("Resize failed: {}", e))?;
+    }
+    if let Some(mgr) = app.try_state::<DingManager>() {
+        if let Some(info) = mgr
+            .instances
+            .lock()
+            .map_err(|e| format!("Lock poisoned: {}", e))?
+            .get_mut(&ding_id)
+        {
+            info.width = width;
+            info.height = height;
+        }
+    }
+    Ok(())
 }
 
 /// 关闭贴图窗口

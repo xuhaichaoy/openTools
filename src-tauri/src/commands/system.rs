@@ -1,5 +1,6 @@
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::process::Command;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -269,11 +270,120 @@ pub async fn clean_old_chat_images(app: tauri::AppHandle, days: u64) -> Result<S
     }
 }
 
+// ── Agent 文件系统 & Shell 安全策略 ──
+// 以下命令具有系统级副作用，需配合路径/命令策略使用
+
+/// 获取允许的文件操作根目录列表
+fn get_allowed_path_roots(app: &tauri::AppHandle) -> Vec<PathBuf> {
+    use tauri::Manager;
+    let mut roots: Vec<PathBuf> = Vec::new();
+
+    // 默认允许目录：用户 Home + 临时目录 + App 数据目录
+    if let Ok(home) = app.path().home_dir() {
+        roots.push(home);
+    }
+    roots.push(std::env::temp_dir());
+    if let Ok(app_data) = app.path().app_data_dir() {
+        roots.push(app_data);
+    }
+
+    // 从配置加载用户自定义的允许目录
+    {
+        use tauri_plugin_store::StoreExt;
+        if let Ok(store) = app.store("config.json") {
+            if let Some(val) = store.get("allowed_file_roots") {
+                if let Some(arr) = val.as_array() {
+                    for v in arr {
+                        if let Some(s) = v.as_str() {
+                            roots.push(PathBuf::from(s));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    roots
+}
+
+/// 校验文件路径是否在允许的根目录范围内
+fn validate_path_access(app: &tauri::AppHandle, path: &str) -> Result<(), String> {
+    // 阻止显式的路径遍历攻击
+    if path.contains("..") {
+        return Err("安全限制：路径不允许包含 '..'".to_string());
+    }
+
+    let p = std::path::Path::new(path);
+
+    // 尝试规范化路径（解析符号链接）；不存在时退回绝对路径
+    let resolved = if p.exists() {
+        p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+    } else if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(p)
+    };
+
+    let roots = get_allowed_path_roots(app);
+    let allowed = roots.iter().any(|root| {
+        let canon_root = root.canonicalize().unwrap_or_else(|_| root.clone());
+        resolved.starts_with(&canon_root)
+    });
+
+    if !allowed {
+        let root_list = roots
+            .iter()
+            .map(|r| r.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "安全限制：路径 {} 不在允许的目录范围内。允许的目录: {}",
+            path, root_list
+        ));
+    }
+
+    Ok(())
+}
+
+/// 被禁止的 Shell 命令模式（防止误操作导致系统损坏）
+const BLOCKED_COMMAND_PATTERNS: &[&str] = &[
+    "rm -rf /",
+    "rm -rf /*",
+    "sudo rm -rf",
+    "mkfs",
+    "dd if=",
+    "> /dev/sda",
+    "> /dev/nvme",
+    "chmod -R 777 /",
+    ":(){ :|:& };:",
+    "shutdown",
+    "reboot",
+    "init 0",
+    "halt",
+    "format c:",
+];
+
+/// 校验 Shell 命令是否安全
+fn validate_shell_command(command: &str) -> Result<(), String> {
+    let lower = command.to_lowercase();
+    let trimmed = lower.trim();
+    for pattern in BLOCKED_COMMAND_PATTERNS {
+        if trimmed.contains(pattern) {
+            return Err(format!(
+                "安全限制：命令包含被禁止的模式 '{}'",
+                pattern
+            ));
+        }
+    }
+    Ok(())
+}
+
 // ── Agent 文件系统 & Shell 工具 ──
 
-/// 读取文本文件
+/// 读取文本文件（受路径白名单保护）
 #[tauri::command]
-pub async fn read_text_file(path: String) -> Result<String, String> {
+pub async fn read_text_file(app: tauri::AppHandle, path: String) -> Result<String, String> {
+    validate_path_access(&app, &path)?;
     let p = std::path::Path::new(&path);
     if !p.exists() {
         return Err(format!("文件不存在: {}", path));
@@ -281,9 +391,10 @@ pub async fn read_text_file(path: String) -> Result<String, String> {
     std::fs::read_to_string(p).map_err(|e| format!("读取失败: {}", e))
 }
 
-/// 写入文本文件
+/// 写入文本文件（受路径白名单保护）
 #[tauri::command]
-pub async fn write_text_file(path: String, content: String) -> Result<String, String> {
+pub async fn write_text_file(app: tauri::AppHandle, path: String, content: String) -> Result<String, String> {
+    validate_path_access(&app, &path)?;
     let p = std::path::Path::new(&path);
     // 自动创建父目录
     if let Some(parent) = p.parent() {
@@ -295,9 +406,10 @@ pub async fn write_text_file(path: String, content: String) -> Result<String, St
     Ok(format!("已写入 {} 字节到 {}", content.len(), path))
 }
 
-/// 列出目录内容
+/// 列出目录内容（受路径白名单保护）
 #[tauri::command]
-pub async fn list_directory(path: String) -> Result<String, String> {
+pub async fn list_directory(app: tauri::AppHandle, path: String) -> Result<String, String> {
+    validate_path_access(&app, &path)?;
     let p = std::path::Path::new(&path);
     if !p.exists() {
         return Err(format!("目录不存在: {}", path));
@@ -323,9 +435,10 @@ pub async fn list_directory(path: String) -> Result<String, String> {
     serde_json::to_string_pretty(&entries).map_err(|e| format!("序列化失败: {}", e))
 }
 
-/// 执行 Shell 命令
+/// 执行 Shell 命令（受命令策略保护）
 #[tauri::command]
 pub async fn run_shell_command(command: String) -> Result<String, String> {
+    validate_shell_command(&command)?;
     let output = if cfg!(target_os = "windows") {
         Command::new("cmd").args(["/C", &command]).output()
     } else {

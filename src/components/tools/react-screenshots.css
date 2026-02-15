@@ -49,6 +49,22 @@
 .icon-rectangle:before {
   content: "";
 }
+/* 隐藏库内部渲染的空白 Pin/OCR 按钮（我们通过 React Portal 注入自定义按钮替代） */
+.icon-pin,
+.icon-ocr {
+  display: none !important;
+}
+/* 自定义 Pin/OCR 按钮样式 */
+.custom-toolbar-btn {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  color: #333 !important;
+}
+.custom-toolbar-btn:hover {
+  background-color: #eee;
+  outline: 1px solid #777;
+}
 .screenshots {
   font-family:
     -apple-system,
@@ -518,12 +534,16 @@
   top: 0;
   left: 0;
   overflow: hidden;
+  z-index: 9999;
+  -webkit-user-select: text;
+  user-select: text;
 }
 .screenshots-operations {
   will-change: transform;
   position: absolute;
   top: 0;
   left: 0;
+  z-index: 100 !important;
 }
 .screenshots-operations-buttons {
   background-color: #fff;

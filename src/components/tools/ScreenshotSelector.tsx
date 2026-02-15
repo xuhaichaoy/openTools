@@ -1,4 +1,11 @@
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, {
+  useState,
+  useEffect,
+  useCallback,
+  useMemo,
+  useRef,
+} from "react";
+import { createPortal } from "react-dom";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 // @ts-ignore
@@ -10,6 +17,136 @@ interface ScreenshotData {
   base64?: string;
   width: number;
   height: number;
+}
+
+// Pin 图标组件
+function PinIcon() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      width="18"
+      height="18"
+    >
+      <path
+        fill="currentColor"
+        d="M14 4v5c0 1.12.37 2.16 1 3H9c.65-.86 1-1.9 1-3V4h4m3-2H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1.03 1 1.03-1v-7H19v-2c-1.66 0-3-1.34-3-3V4h1c.55 0 1-.45 1-1s-.45-1-1-1z"
+      />
+    </svg>
+  );
+}
+
+// OCR 图标组件
+function OcrIcon() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      width="18"
+      height="18"
+    >
+      <path
+        fill="currentColor"
+        d="M3 5v4h2V5h4V3H5a2 2 0 00-2 2zm2 10H3v4a2 2 0 002 2h4v-2H5v-4zm14 4h-4v2h4a2 2 0 002-2v-4h-2v4zm0-16h-4v2h4v4h2V5a2 2 0 00-2-2zM12 15h-2V9h-2V7h6v2h-2v6z"
+      />
+    </svg>
+  );
+}
+
+// 工具栏扩展组件：通过 React Portal 将 Pin/OCR 按钮注入到截图工具栏
+function ToolbarExtension({
+  onPinClick,
+  onOcrClick,
+}: {
+  onPinClick: () => void;
+  onOcrClick: () => void;
+}) {
+  const portalContainerRef = useRef<HTMLDivElement | null>(null);
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    let intervalId: ReturnType<typeof setInterval>;
+
+    const tryInject = () => {
+      // 如果已经注入且容器还在 DOM 中，跳过
+      if (
+        portalContainerRef.current &&
+        portalContainerRef.current.parentElement
+      ) {
+        return;
+      }
+
+      // 容器被移出 DOM，需要重新注入
+      if (
+        portalContainerRef.current &&
+        !portalContainerRef.current.parentElement
+      ) {
+        portalContainerRef.current = null;
+        setMounted(false);
+      }
+
+      // 全局搜索工具栏
+      const toolbar = document.querySelector(".screenshots-operations-buttons");
+      if (!toolbar) return;
+
+      // 跳过已经有自定义按钮的工具栏
+      if (toolbar.querySelector("[data-custom-toolbar]")) return;
+
+      // 通过 title 属性找到保存按钮（优先），或通过 icon class 找
+      let insertBefore: Element | null = toolbar.querySelector(
+        '.screenshots-button[title="保存"]',
+      );
+      if (!insertBefore) {
+        const saveIcon = toolbar.querySelector(".icon-save");
+        insertBefore = saveIcon?.closest(".screenshots-button") || null;
+      }
+      if (!insertBefore) return;
+
+      // 创建 portal 容器（display:contents 使其子元素直接参与 flex 布局）
+      const container = document.createElement("div");
+      container.style.display = "contents";
+      container.setAttribute("data-custom-toolbar", "true");
+      toolbar.insertBefore(container, insertBefore);
+      portalContainerRef.current = container;
+      setMounted(true);
+    };
+
+    // 每 150ms 轮询检查
+    intervalId = setInterval(tryInject, 150);
+    // 立即尝试一次
+    tryInject();
+
+    return () => {
+      clearInterval(intervalId);
+      if (portalContainerRef.current) {
+        portalContainerRef.current.remove();
+        portalContainerRef.current = null;
+      }
+    };
+  }, []);
+
+  if (!mounted || !portalContainerRef.current) return null;
+
+  return createPortal(
+    <>
+      <div className="screenshots-operations-divider" />
+      <div
+        className="screenshots-button custom-toolbar-btn"
+        title="贴图"
+        onClick={onPinClick}
+      >
+        <PinIcon />
+      </div>
+      <div
+        className="screenshots-button custom-toolbar-btn"
+        title="OCR"
+        onClick={onOcrClick}
+      >
+        <OcrIcon />
+      </div>
+    </>,
+    portalContainerRef.current,
+  );
 }
 
 export function ScreenshotSelector() {
@@ -54,49 +191,82 @@ export function ScreenshotSelector() {
     };
   }, []);
 
-  const handleFinish = async (action: string, base64: string) => {
-    try {
-      await invoke("finish_capture", {
-        x: 0,
-        y: 0,
-        width: screenshotData?.width || 0,
-        height: screenshotData?.height || 0,
-        action,
-        annotated_image: base64,
-        copyToClipboard: action === "copy",
-      });
-    } catch (err) {
-      console.error("Finish capture failed:", err);
-    }
-  };
+  const handleFinish = useCallback(
+    async (action: string, base64: string) => {
+      try {
+        await invoke("finish_capture", {
+          x: 0,
+          y: 0,
+          width: screenshotData?.width || 0,
+          height: screenshotData?.height || 0,
+          action,
+          annotatedImage: base64,
+          copyToClipboard: action === "copy",
+        });
+      } catch (err) {
+        console.error("Finish capture failed:", err);
+      }
+    },
+    [screenshotData],
+  );
 
-  const onCancel = useCallback(() => {
-    invoke("cancel_capture").catch(console.error);
-  }, []);
-
-  const onOk = useCallback(
-    (cancel: any, blob: Blob) => {
-      // blob 转 base64
+  // 将 blob 转 base64 并调用 handleFinish
+  const blobToFinish = useCallback(
+    (action: string, blob: Blob) => {
       const reader = new FileReader();
       reader.onload = () => {
         const base64 = (reader.result as string).split(",")[1];
-        handleFinish("copy", base64);
+        handleFinish(action, base64);
       };
       reader.readAsDataURL(blob);
     },
     [handleFinish],
   );
 
-  const onSave = useCallback(
-    (cancel: any, blob: Blob) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const base64 = (reader.result as string).split(",")[1];
-        handleFinish("save", base64);
-      };
-      reader.readAsDataURL(blob);
+  const onCancel = useCallback(() => {
+    invoke("cancel_capture").catch(console.error);
+  }, []);
+
+  const onOk = useCallback(
+    (blob: Blob, _bounds?: any) => {
+      blobToFinish("copy", blob);
     },
-    [handleFinish],
+    [blobToFinish],
+  );
+
+  const onSave = useCallback(
+    (blob: Blob, _bounds?: any) => {
+      blobToFinish("save", blob);
+    },
+    [blobToFinish],
+  );
+
+  const onPin = useCallback(
+    (blob: Blob, _bounds?: any) => {
+      blobToFinish("pin", blob);
+    },
+    [blobToFinish],
+  );
+
+  const onOcr = useCallback(
+    (blob: Blob, _bounds?: any) => {
+      blobToFinish("ocr", blob);
+    },
+    [blobToFinish],
+  );
+
+  // Pin/OCR 按钮点击：piggyback on OK 按钮来 compose image
+  const handleCustomButtonClick = useCallback(
+    (action: "pin" | "ocr") => {
+      const okButton = document.querySelector(
+        '.screenshots-button[title="完成"]',
+      ) as HTMLElement;
+      if (okButton) {
+        (window as any).__screenshot_action__ = action;
+        okButton.click();
+      }
+    },
+    [],
   );
 
   // 图片 URL
@@ -105,6 +275,23 @@ export function ScreenshotSelector() {
     if (screenshotData.base64) return screenshotData.base64;
     return convertFileSrc(screenshotData.path);
   }, [screenshotData]);
+
+  // 包装 onOk，支持通过 __screenshot_action__ 触发不同操作
+  const wrappedOnOk = useCallback(
+    (blob: Blob, bounds?: any) => {
+      const action = (window as any).__screenshot_action__;
+      delete (window as any).__screenshot_action__;
+
+      if (action === "pin") {
+        onPin(blob, bounds);
+      } else if (action === "ocr") {
+        onOcr(blob, bounds);
+      } else {
+        onOk(blob, bounds);
+      }
+    },
+    [onOk, onPin, onOcr],
+  );
 
   if (!imageUrl || !screenshotData) {
     return (
@@ -134,8 +321,14 @@ export function ScreenshotSelector() {
           operation_redo_title: "重做",
         }}
         onCancel={onCancel}
-        onOk={onOk}
+        onOk={wrappedOnOk}
         onSave={onSave}
+        onPin={onPin}
+        onOcr={onOcr}
+      />
+      <ToolbarExtension
+        onPinClick={() => handleCustomButtonClick("pin")}
+        onOcrClick={() => handleCustomButtonClick("ocr")}
       />
     </div>
   );

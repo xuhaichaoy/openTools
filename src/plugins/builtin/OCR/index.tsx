@@ -17,6 +17,7 @@ import {
   onPluginEvent,
   PluginEventTypes,
 } from "@/core/plugin-system/event-bus";
+import { useDragWindow } from "@/hooks/useDragWindow";
 
 interface OcrBlock {
   text: string;
@@ -40,6 +41,7 @@ const LANGUAGES = [
 ];
 
 const OCRPlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
+  const { onMouseDown } = useDragWindow();
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [result, setResult] = useState<OcrResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -138,14 +140,28 @@ const OCRPlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     return unsub;
   }, [doOcr]);
 
+  // 兜底：如果先切页后发事件失败，则读取全局待处理图片
+  React.useEffect(() => {
+    const pending = (window as any).__PENDING_OCR_IMAGE__ as string | undefined;
+    if (!pending) return;
+    delete (window as any).__PENDING_OCR_IMAGE__;
+    const dataUrl = `data:image/png;base64,${pending}`;
+    setImagePreview(dataUrl);
+    doOcr(pending);
+  }, [doOcr]);
+
   return (
     <div className="flex flex-col h-full bg-[var(--color-bg)] text-[var(--color-text)]">
       {/* 头部 */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--color-border)]">
+      <div
+        className="flex items-center justify-between px-4 py-3 border-b border-[var(--color-border)] cursor-grab active:cursor-grabbing"
+        onMouseDown={onMouseDown}
+      >
         <div className="flex items-center gap-2">
           {onBack && (
             <button
               onClick={onBack}
+              onMouseDown={(e) => e.stopPropagation()}
               className="p-1 hover:bg-[var(--color-bg-secondary)] rounded-md transition-colors"
             >
               ←
@@ -161,6 +177,7 @@ const OCRPlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
           <select
             value={language}
             onChange={(e) => setLanguage(e.target.value)}
+            onMouseDown={(e) => e.stopPropagation()}
             className="text-sm bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-md px-2 py-1"
           >
             {LANGUAGES.map((lang) => (

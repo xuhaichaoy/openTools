@@ -6,6 +6,7 @@ interface AppSettings {
   hideOnBlur: boolean;
   autoStart: boolean;
   alwaysOnTop: boolean;
+  developerMode: boolean;
   theme: "light" | "dark";
 }
 
@@ -13,6 +14,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   hideOnBlur: true,
   autoStart: false,
   alwaysOnTop: true,
+  developerMode: false,
   theme: "light",
 };
 
@@ -124,6 +126,21 @@ export function GeneralSettings() {
             className="w-4 h-4 rounded accent-[var(--color-accent)]"
             checked={settings.autoStart}
             onChange={(e) => updateSetting("autoStart", e.target.checked)}
+          />
+        </label>
+
+        <label className="flex items-center justify-between cursor-pointer">
+          <div>
+            <span className="text-xs text-[var(--color-text)]">开发者模式</span>
+            <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
+              开启后可在插件页面管理开发目录
+            </p>
+          </div>
+          <input
+            type="checkbox"
+            className="w-4 h-4 rounded accent-[var(--color-accent)]"
+            checked={settings.developerMode}
+            onChange={(e) => updateSetting("developerMode", e.target.checked)}
           />
         </label>
       </div>

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
-import { ArrowLeft, Puzzle, Play, FolderOpen, Code, RefreshCw, ExternalLink, Loader2, ToggleLeft, ToggleRight, X, Plus } from 'lucide-react'
+import { ArrowLeft, Puzzle, Play, AppWindow, FolderOpen, Code, RefreshCw, ExternalLink, Loader2, ToggleLeft, ToggleRight, X, Plus } from 'lucide-react'
 import { usePluginStore } from '@/store/plugin-store'
+import { useAppStore } from '@/store/app-store'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { useDragWindow } from '@/hooks/useDragWindow'
@@ -10,10 +11,20 @@ export function PluginMarket({ onBack }: { onBack: () => void }) {
   const [activeTab, setActiveTab] = useState<'installed' | 'dev'>('installed')
   const [loading, setLoading] = useState(false)
   const [devLogs, setDevLogs] = useState<string[]>([])
+  const [developerMode, setDeveloperMode] = useState(false)
   const { onMouseDown } = useDragWindow()
 
   useEffect(() => {
     handleRefresh()
+    // 加载开发者模式设置
+    invoke<string>("load_general_settings")
+      .then((json) => {
+        try {
+          const s = JSON.parse(json)
+          if (s.developerMode) setDeveloperMode(true)
+        } catch { /* ignore */ }
+      })
+      .catch(() => {})
   }, [])
 
   const handleRefresh = async () => {
@@ -84,7 +95,7 @@ export function PluginMarket({ onBack }: { onBack: () => void }) {
         >
           已安装 ({plugins.length})
         </button>
-        <button
+        {developerMode && <button
           onClick={() => setActiveTab('dev')}
           className={`flex items-center gap-1 text-xs px-3 py-1.5 rounded-t-lg border-b-2 transition-colors ${
             activeTab === 'dev'
@@ -94,7 +105,7 @@ export function PluginMarket({ onBack }: { onBack: () => void }) {
         >
           <Code className="w-3 h-3" />
           开发者
-        </button>
+        </button>}
       </div>
       <div className="h-px bg-[var(--color-border)]" />
 
@@ -165,14 +176,28 @@ export function PluginMarket({ onBack }: { onBack: () => void }) {
                   </button>
                   {/* Feature 打开按钮 */}
                   {plugin.enabled && plugin.manifest.features.map((feature) => (
-                    <button
-                      key={feature.code}
-                      onClick={() => openPlugin(plugin.id, feature.code)}
-                      className="p-1.5 rounded hover:bg-orange-400/10 text-[var(--color-text-secondary)] hover:text-orange-400 transition-colors"
-                      title={`打开: ${feature.explain}`}
-                    >
-                      <Play className="w-3.5 h-3.5" />
-                    </button>
+                    <div key={feature.code} className="flex items-center gap-0.5">
+                      <button
+                        onClick={() => openPlugin(plugin.id, feature.code)}
+                        className="p-1.5 rounded hover:bg-orange-400/10 text-[var(--color-text-secondary)] hover:text-orange-400 transition-colors"
+                        title={`新窗口打开: ${feature.explain}`}
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        onClick={() => {
+                          useAppStore.getState().requestEmbed({
+                            pluginId: plugin.id,
+                            featureCode: feature.code,
+                            title: feature.explain || plugin.manifest.pluginName,
+                          })
+                        }}
+                        className="p-1.5 rounded hover:bg-blue-400/10 text-[var(--color-text-secondary)] hover:text-blue-400 transition-colors"
+                        title={`嵌入打开: ${feature.explain}`}
+                      >
+                        <AppWindow className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   ))}
                 </div>
               </div>
@@ -180,7 +205,7 @@ export function PluginMarket({ onBack }: { onBack: () => void }) {
           </div>
         )}
 
-        {activeTab === 'dev' && (
+        {activeTab === 'dev' && developerMode && (
           <div className="space-y-4">
             {/* 开发者模式说明 */}
             <div className="p-3 rounded-lg bg-orange-400/5 border border-orange-400/20">

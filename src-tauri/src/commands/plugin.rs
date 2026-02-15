@@ -475,7 +475,18 @@ pub async fn plugin_api_call(
     call_id: u64,
 ) -> Result<String, String> {
     let _ = call_id; // 保留以备异步场景使用
-    let args: serde_json::Value = serde_json::from_str(&args).unwrap_or(serde_json::Value::Null);
+    let args: serde_json::Value =
+        serde_json::from_str(&args).map_err(|e| format!("无效参数 JSON: {}", e))?;
+
+    // 后端兜底：插件必须存在且已启用
+    let plugins = get_cached_plugins(&app);
+    let plugin = plugins
+        .iter()
+        .find(|p| p.id == plugin_id)
+        .ok_or_else(|| format!("插件 {} 不存在", plugin_id))?;
+    if !plugin.enabled {
+        return Err(format!("插件 {} 已被禁用", plugin_id));
+    }
 
     match method.as_str() {
         "hideMainWindow" => {
@@ -864,12 +875,7 @@ fn generate_utools_shim(plugin_id: &str) -> String {
     shellShowItemInFolder(path) {{ __invoke('shellShowItemInFolder', {{ path }}); }},
     screenCapture(callback) {{ console.warn('[mTools] screenCapture 暂未实现'); callback && callback(null); }},
     screenColorPick(callback) {{
-      if (!window.__TAURI__ || !window.__TAURI__.core) {{
-        console.error('[mTools] Tauri IPC 不可用，无法取色');
-        callback && callback(null);
-        return;
-      }}
-      window.__TAURI__.core.invoke('plugin_start_color_picker').then(function(hex) {{
+      __invoke('plugin_start_color_picker').then(function(hex) {{
         callback && callback(hex || null);
       }}).catch(function(err) {{
         console.error('[mTools] 取色失败:', err);
@@ -902,6 +908,7 @@ pub async fn plugin_get_embed_html(
     app: AppHandle,
     plugin_id: String,
     feature_code: String,
+    bridge_token: String,
 ) -> Result<String, String> {
     let plugins = get_cached_plugins(&app);
     let plugin = plugins
@@ -935,7 +942,7 @@ pub async fn plugin_get_embed_html(
         plugin.dir_path.replace('\\', "/")
     );
     let html_with_base = inject_base_tag(&html_content, &base_url);
-    let bridge = generate_embed_bridge(&plugin_id);
+    let bridge = generate_embed_bridge(&plugin_id, &bridge_token);
     let html_with_bridge = inject_embed_bridge(&html_with_base, &bridge);
     Ok(html_with_bridge)
 }
@@ -964,18 +971,20 @@ fn escape_js_string(s: &str) -> String {
 }
 
 /// iframe 内使用的 __TAURI__ 桥：通过 postMessage 让父窗口代为 invoke
-fn generate_embed_bridge(plugin_id: &str) -> String {
+fn generate_embed_bridge(plugin_id: &str, bridge_token: &str) -> String {
     let plugin_id_esc = escape_js_string(plugin_id);
+    let bridge_token_esc = escape_js_string(bridge_token);
     format!(r#"
 (function(){{
   var __pluginId = '{plugin_id_esc}';
+  var __bridgeToken = '{bridge_token_esc}';
   var __invokeId = 0;
   function __invoke(cmd, args) {{
     return new Promise(function(resolve, reject) {{
       var id = 'inv-' + (++__invokeId);
       var done = false;
       function onResp(e) {{
-        if (e.data && e.data.type === 'mtools-embed-result' && e.data.id === id) {{
+        if (e.data && e.data.type === 'mtools-embed-result' && e.data.id === id && e.data.token === __bridgeToken) {{
           done = true;
           window.removeEventListener('message', onResp);
           if (e.data.error) reject(new Error(e.data.error)); else resolve(e.data.result);
@@ -983,7 +992,7 @@ fn generate_embed_bridge(plugin_id: &str) -> String {
       }}
       window.addEventListener('message', onResp);
       try {{
-        window.parent.postMessage({{ type: 'mtools-embed-invoke', id: id, cmd: cmd, args: args || {{}} }}, '*');
+        window.parent.postMessage({{ type: 'mtools-embed-invoke', id: id, cmd: cmd, args: args || {{}}, pluginId: __pluginId, token: __bridgeToken }}, '*');
       }} catch (err) {{
         if (!done) {{ window.removeEventListener('message', onResp); reject(err); }}
       }}
@@ -1038,21 +1047,21 @@ fn generate_embed_bridge(plugin_id: &str) -> String {
         return new Promise(function(resolve, reject) {{
           var id = 'ai-' + (++__aiReqId);
           function onResp(e) {{
-            if (e.data && e.data.type === 'mtools-ai-result' && e.data.id === id) {{
+            if (e.data && e.data.type === 'mtools-ai-result' && e.data.id === id && e.data.token === __bridgeToken) {{
               window.removeEventListener('message', onResp);
               if (e.data.error) reject(new Error(e.data.error));
               else resolve({{ content: e.data.content }});
             }}
           }}
           window.addEventListener('message', onResp);
-          window.parent.postMessage({{ type: 'mtools-ai-chat', id: id, messages: opts.messages, model: opts.model, temperature: opts.temperature }}, '*');
+          window.parent.postMessage({{ type: 'mtools-ai-chat', id: id, messages: opts.messages, model: opts.model, temperature: opts.temperature, pluginId: __pluginId, token: __bridgeToken }}, '*');
         }});
       }},
       stream: function(opts) {{
         return new Promise(function(resolve, reject) {{
           var id = 'ai-' + (++__aiReqId);
           function onMsg(e) {{
-            if (!e.data || e.data.id !== id) return;
+            if (!e.data || e.data.id !== id || e.data.token !== __bridgeToken) return;
             if (e.data.type === 'mtools-ai-chunk' && opts.onChunk) opts.onChunk(e.data.chunk);
             if (e.data.type === 'mtools-ai-done') {{
               window.removeEventListener('message', onMsg);
@@ -1065,7 +1074,7 @@ fn generate_embed_bridge(plugin_id: &str) -> String {
             }}
           }}
           window.addEventListener('message', onMsg);
-          window.parent.postMessage({{ type: 'mtools-ai-stream', id: id, messages: opts.messages }}, '*');
+          window.parent.postMessage({{ type: 'mtools-ai-stream', id: id, messages: opts.messages, pluginId: __pluginId, token: __bridgeToken }}, '*');
         }});
       }},
       getModels: function() {{
@@ -1074,7 +1083,7 @@ fn generate_embed_bridge(plugin_id: &str) -> String {
     }}
   }};
 }})();
-"#, plugin_id_esc = plugin_id_esc)
+"#, plugin_id_esc = plugin_id_esc, bridge_token_esc = bridge_token_esc)
 }
 
 fn generate_plugin_enter_script(code: &str, cmd_type: &str, payload: Option<&str>) -> String {

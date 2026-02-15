@@ -14,6 +14,7 @@ import { useDragWindow } from "@/hooks/useDragWindow";
 import { ModelSelector } from "@/components/ai/ModelSelector";
 import { useAIStore } from "@/store/ai-store";
 import { useAgentStore } from "@/store/agent-store";
+import { useAppStore } from "@/store/app-store";
 import type { MToolsAI } from "@/core/plugin-system/plugin-interface";
 import type { ChatViewHandle } from "@/components/ai/ChatView";
 import type { SmartAgentHandle } from "@/plugins/builtin/SmartAgent/index";
@@ -27,6 +28,9 @@ const SmartAgentPlugin = lazy(
 
 type AIMode = "ask" | "agent";
 
+/** 检测用户输入是否适合 Agent 模式（包含执行类关键词） */
+const AGENT_KEYWORDS = /(?:执行|运行|打开|创建|删除|文件|目录|命令|shell|终端|安装|部署|下载|上传|移动|复制|重命名)/i;
+
 export function AICenter({
   onBack,
   ai,
@@ -34,7 +38,10 @@ export function AICenter({
   onBack: () => void;
   ai?: MToolsAI;
 }) {
-  const [mode, setMode] = useState<AIMode>("ask");
+  // 从 app-store 消费一次性的初始模式
+  const [mode, setMode] = useState<AIMode>(() =>
+    useAppStore.getState().consumeAiInitialMode(),
+  );
   const chatRef = useRef<ChatViewHandle>(null);
   const agentRef = useRef<SmartAgentHandle>(null);
   const { onMouseDown } = useDragWindow();

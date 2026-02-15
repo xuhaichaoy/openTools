@@ -2,12 +2,61 @@ mod commands;
 
 use tauri::{
     Manager,
+    PhysicalPosition,
+    Position,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     menu::{Menu, MenuItem},
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::path::PathBuf;
+
+fn is_subpath_of(path: &std::path::Path, root: &std::path::Path) -> bool {
+    path.starts_with(root)
+}
+
+fn allowed_mtplugin_roots(app: &tauri::AppHandle) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+
+    // 1) 打包资源中的 plugins 目录
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        roots.push(resource_dir.join("plugins"));
+    }
+    // 2) 开发目录中的 plugins 目录
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.push(cwd.join("plugins"));
+    }
+    // 3) 开发者插件目录（来自 plugin-settings.json 的 devDirs）
+    {
+        use tauri_plugin_store::StoreExt;
+        if let Ok(store) = app.store("plugin-settings.json") {
+            if let Some(dirs) = store.get("devDirs") {
+                if let Some(arr) = dirs.as_array() {
+                    for v in arr {
+                        if let Some(s) = v.as_str() {
+                            roots.push(PathBuf::from(s));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // 4) 截图预览等临时文件目录
+    roots.push(std::env::temp_dir());
+
+    // 只保留可规范化的目录，避免无效路径干扰判断
+    roots
+        .into_iter()
+        .filter_map(|p| p.canonicalize().ok())
+        .collect()
+}
+
+fn is_allowed_mtplugin_path(app: &tauri::AppHandle, canonical: &std::path::Path) -> bool {
+    let roots = allowed_mtplugin_roots(app);
+    roots
+        .iter()
+        .any(|root| is_subpath_of(canonical, root))
+}
 
 /// 显示窗口的统一帮助函数：显示 → 聚焦，并临时抑制失焦隐藏
 fn show_window(window: &tauri::WebviewWindow, suppress: &Arc<AtomicUsize>) {
@@ -23,6 +72,36 @@ fn show_window(window: &tauri::WebviewWindow, suppress: &Arc<AtomicUsize>) {
         // CAS: 只有当当前值仍等于 gen 时，才将其重置为 0
         let _ = s.compare_exchange(gen, 0, Ordering::SeqCst, Ordering::SeqCst);
     });
+}
+
+/// 启动时将主窗口放到当前屏幕“居中偏上”（仅初始化位置）
+fn place_main_window_top_center(window: &tauri::WebviewWindow) {
+    // 先交给系统做跨平台居中，避免不同平台/多显示器坐标系差异。
+    if window.center().is_err() {
+        return;
+    }
+
+    let monitor = match window.current_monitor() {
+        Ok(Some(m)) => m,
+        _ => return,
+    };
+    let monitor_pos = monitor.position();
+    let monitor_h = monitor.size().height as i32;
+    let centered_pos = match window.outer_position() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+
+    // 以屏幕高度为基准向上偏移（百分比），避免“贴底/贴顶”。
+    let upward_ratio = 0.08_f64;
+    let upward_offset = (monitor_h as f64 * upward_ratio).round() as i32;
+    let min_y = monitor_pos.y + 24; // 留一点安全边距
+    let y = (centered_pos.y - upward_offset).max(min_y);
+
+    let _ = window.set_position(Position::Physical(PhysicalPosition {
+        x: centered_pos.x,
+        y,
+    }));
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -45,7 +124,7 @@ pub fn run() {
         .manage(commands::ding::DingManager::new())
         // 自定义协议：为插件文件提供 Tauri IPC 支持
         // 用 mtplugin://localhost/绝对路径 替代 file:// URL
-        .register_uri_scheme_protocol("mtplugin", |_app, request| {
+        .register_uri_scheme_protocol("mtplugin", |app, request| {
             let raw_path = request.uri().path();
             let decoded = url_decode(raw_path);
             let file_path = PathBuf::from(&decoded);
@@ -75,6 +154,22 @@ pub fn run() {
                     .status(404)
                     .header("Content-Type", "text/plain")
                     .body(b"Not Found".to_vec())
+                    .unwrap();
+            }
+            // 仅允许访问白名单根目录，避免任意文件读取
+            if !is_allowed_mtplugin_path(&app.app_handle(), &canonical) {
+                return tauri::http::Response::builder()
+                    .status(403)
+                    .header("Content-Type", "text/plain")
+                    .body(b"Forbidden: path not allowed".to_vec())
+                    .unwrap();
+            }
+            // 仅允许读取文件，不允许目录
+            if !canonical.is_file() {
+                return tauri::http::Response::builder()
+                    .status(403)
+                    .header("Content-Type", "text/plain")
+                    .body(b"Forbidden: file only".to_vec())
                     .unwrap();
             }
 
@@ -189,6 +284,8 @@ pub fn run() {
             commands::mcp::send_mcp_message,
             commands::ding::ding_create,
             commands::ding::ding_close,
+            commands::ding::ding_start_drag,
+            commands::ding::ding_resize,
             commands::ding::ding_set_opacity,
             commands::ding::ding_list,
             commands::ding::ding_close_all,
@@ -201,7 +298,10 @@ pub fn run() {
             let suppress_hide = Arc::new(AtomicUsize::new(0));
             setup_tray(app, &suppress_hide)?;
             setup_shortcuts(app, &suppress_hide)?;
-            let main_window = app.get_webview_window("main").unwrap();
+            let Some(main_window) = app.get_webview_window("main") else {
+                return Err("main window not found".into());
+            };
+            place_main_window_top_center(&main_window);
             setup_window_events(&main_window, app.handle(), &suppress_hide);
             setup_macos_window(&main_window);
             show_window(&main_window, &suppress_hide);
@@ -223,10 +323,9 @@ fn setup_tray(app: &tauri::App, suppress_hide: &Arc<AtomicUsize>) -> Result<(), 
 
     let suppress_for_menu = suppress_hide.clone();
     let suppress_for_tray = suppress_hide.clone();
-    TrayIconBuilder::new()
+    let mut tray_builder = TrayIconBuilder::new()
         .menu(&menu)
         .tooltip("mTools")
-        .icon(app.default_window_icon().unwrap().clone())
         .on_menu_event(move |app, event| match event.id.as_ref() {
             "show" => {
                 if let Some(window) = app.get_webview_window("main") {
@@ -248,8 +347,13 @@ fn setup_tray(app: &tauri::App, suppress_hide: &Arc<AtomicUsize>) -> Result<(), 
                     show_window(&window, &suppress_for_tray);
                 }
             }
-        })
-        .build(app)?;
+        });
+    if let Some(icon) = app.default_window_icon() {
+        tray_builder = tray_builder.icon(icon.clone());
+    } else {
+        log::warn!("未找到默认窗口图标，托盘将使用系统默认图标");
+    }
+    tray_builder.build(app)?;
     Ok(())
 }
 
@@ -345,11 +449,15 @@ fn setup_macos_window(_main_window: &tauri::WebviewWindow) {
     unsafe {
         use cocoa::appkit::{NSWindow, NSWindowCollectionBehavior};
         use cocoa::base::id;
-        let ns_window = _main_window.ns_window().unwrap() as id;
-        let behavior = ns_window.collectionBehavior();
-        ns_window.setCollectionBehavior_(
-            behavior | NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces,
-        );
+        if let Ok(raw) = _main_window.ns_window() {
+            let ns_window = raw as id;
+            let behavior = ns_window.collectionBehavior();
+            ns_window.setCollectionBehavior_(
+                behavior | NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces,
+            );
+        } else {
+            log::warn!("无法获取 macOS 原生窗口句柄，跳过 all-spaces 设置");
+        }
     }
 }
 

@@ -22,10 +22,6 @@ import {
   Play,
   Circle,
 } from "lucide-react";
-import {
-  emitPluginEvent,
-  PluginEventTypes,
-} from "@/core/plugin-system/event-bus";
 import { useDragWindow } from "@/hooks/useDragWindow";
 import { RecorderFloat } from "./RecorderFloat";
 
@@ -139,59 +135,11 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
 
         switch (capAction) {
           case "ocr": {
-            // 通过事件总线通知 OCR 插件处理
-            try {
-              const { readFile } = await import("@tauri-apps/plugin-fs");
-              const fileData = await readFile(capPath);
-              const blob = new Blob([fileData]);
-              const reader = new FileReader();
-              reader.onload = () => {
-                const base64 = (reader.result as string).split(",")[1];
-                emitPluginEvent(
-                  PluginEventTypes.SCREENSHOT_CAPTURED,
-                  "screen-capture",
-                  {
-                    imageBase64: base64,
-                  },
-                );
-                // 导航到 OCR 结果（emit 给 App 层切换视图）
-                // 注意：OCR 插件监听的是 SCREENSHOT_CAPTURED，会自动处理。
-                // 这里主要是为了让 App 切换到 OCR 界面
-                window.dispatchEvent(
-                  new CustomEvent("navigate-plugin", {
-                    detail: { viewId: "ocr", action: "ocr", path: capPath },
-                  }),
-                );
-              };
-              reader.readAsDataURL(blob);
-            } catch (e) {
-              console.error("OCR 请求失败:", e);
-            }
+            // 由 App.tsx 的全局 capture-done 监听处理，避免离开本页时失效
             break;
           }
           case "pin": {
-            // 调用贴图 ding 命令 (需转 base64)
-            try {
-              const { readFile } = await import("@tauri-apps/plugin-fs");
-              const fileData = await readFile(capPath);
-              // Uint8Array -> Base64
-              // 使用 FileReader 或者 reduce
-              const blob = new Blob([fileData]);
-              const reader = new FileReader();
-              reader.onload = async () => {
-                const base64 = (reader.result as string).split(",")[1];
-                await invoke("ding_create", {
-                  image_base64: base64,
-                  x: 100.0, // 默认位置
-                  y: 100.0,
-                  width: 300.0,
-                  height: 300.0,
-                });
-              };
-              reader.readAsDataURL(blob);
-            } catch (err) {
-              console.error("贴图失败:", err);
-            }
+            // 由 App.tsx 的全局 capture-done 监听处理，避免离开本页时失效
             break;
           }
           case "edit": {

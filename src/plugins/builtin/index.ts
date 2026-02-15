@@ -15,6 +15,7 @@ import {
   Languages,
   Workflow,
   BookOpen,
+  ScanText,
 } from "lucide-react";
 
 import { createElement } from "react";
@@ -78,6 +79,7 @@ const PluginMarket = lazy(() =>
 const QRCodePlugin = lazy(() => import("./QRCode/index"));
 const ImageSearchPlugin = lazy(() => import("./ImageSearch/index"));
 const CloudSyncPlugin = lazy(() => import("./CloudSync/index"));
+const OCRPlugin = lazy(() => import("./OCR/index"));
 
 // ── 所有内置插件定义（14 个） ──
 
@@ -239,6 +241,19 @@ export const builtinPlugins: MToolsPlugin[] = [
         },
       },
     ],
+  },
+
+  // ── OCR（独立结果页）──
+  {
+    id: "ocr",
+    name: "OCR",
+    description: "图片文字识别（支持截图直达）",
+    icon: createElement(ScanText, { className: "w-6 h-6" }),
+    color: "text-amber-500 bg-amber-500/10",
+    category: "工具",
+    keywords: ["ocr", "文字识别", "提取文字", "图片转文字"],
+    viewId: "ocr",
+    render: (props) => createElement(OCRPlugin, props),
   },
 
   // ── 翻译（独立）──

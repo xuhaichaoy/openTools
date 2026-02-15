@@ -22,6 +22,8 @@ export interface AgentStep {
   toolInput?: Record<string, unknown>;
   toolOutput?: unknown;
   timestamp: number;
+  /** 标记为流式中间状态 — UI 应替换同类型的上一个 streaming 步骤而非新增 */
+  streaming?: boolean;
 }
 
 export interface AgentConfig {
@@ -29,7 +31,10 @@ export interface AgentConfig {
   temperature: number;
   verbose: boolean;
   /** 危险操作确认回调，返回 true 则继续执行，false 则取消 */
-  confirmDangerousAction?: (toolName: string, params: Record<string, unknown>) => Promise<boolean>;
+  confirmDangerousAction?: (
+    toolName: string,
+    params: Record<string, unknown>,
+  ) => Promise<boolean>;
   /** 被视为危险操作的工具名称模式（包含即匹配） */
   dangerousToolPatterns?: string[];
 }
@@ -48,6 +53,7 @@ export class ReActAgent {
   private tools: AgentTool[];
   private config: AgentConfig;
   private steps: AgentStep[] = [];
+  private history: AgentStep[] = [];
   private onStep?: (step: AgentStep) => void;
 
   constructor(
@@ -55,11 +61,13 @@ export class ReActAgent {
     tools: AgentTool[],
     config?: Partial<AgentConfig>,
     onStep?: (step: AgentStep) => void,
+    history: AgentStep[] = [],
   ) {
     this.ai = ai;
     this.tools = tools;
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.onStep = onStep;
+    this.history = history;
   }
 
   private addStep(step: AgentStep) {
@@ -104,12 +112,35 @@ Final Answer: [最终回答]
 6. 用中文回答`;
   }
 
-  private buildConversation(): { role: string; content: string }[] {
-    const messages: { role: string; content: string }[] = [
+  private buildConversation(): {
+    role: "system" | "user" | "assistant";
+    content: string;
+  }[] {
+    const messages: {
+      role: "system" | "user" | "assistant";
+      content: string;
+    }[] = [
       { role: "system", content: this.buildSystemPrompt() },
     ];
 
-    // 将历史步骤转为对话
+    // 添加历史记录
+    for (const step of this.history) {
+      if (step.type === "thought" || step.type === "action") {
+        messages.push({ role: "assistant", content: step.content });
+      } else if (step.type === "observation") {
+        messages.push({
+          role: "user",
+          content: `Observation: ${step.content}`,
+        });
+      } else if (step.type === "answer") {
+        messages.push({
+          role: "assistant",
+          content: `Final Answer: ${step.content}`,
+        });
+      }
+    }
+
+    // 将当前步骤转为对话
     for (const step of this.steps) {
       if (step.type === "thought" || step.type === "action") {
         messages.push({ role: "assistant", content: step.content });
@@ -133,7 +164,9 @@ Final Answer: [最终回答]
     const result: ReturnType<typeof this.parseResponse> = {};
 
     // 提取 Thought
-    const thoughtMatch = response.match(/Thought:\s*(.+?)(?=\n(?:Action|Final Answer))/s);
+    const thoughtMatch = response.match(
+      /Thought:\s*(.+?)(?=\n(?:Action|Final Answer))/s,
+    );
     if (thoughtMatch) result.thought = thoughtMatch[1].trim();
 
     // 检查是否有 Final Answer
@@ -161,9 +194,61 @@ Final Answer: [最终回答]
   }
 
   /**
-   * 执行 Agent 推理循环
+   * 通过流式 API 获取 LLM 响应，实时推送思考过程给用户。
+   * 中间步骤标记为 streaming=true，UI 端应替换上一个 streaming 步骤而非新增。
    */
-  async run(userInput: string): Promise<string> {
+  private async streamLLM(
+    messages: { role: "system" | "user" | "assistant"; content: string }[],
+    signal?: AbortSignal,
+  ): Promise<string> {
+    let accumulated = "";
+    let lastPushedLen = 0;
+
+    // 实时推送"正在思考"的中间步骤（streaming=true 表示替换而非新增）
+    const pushThinking = () => {
+      const current = accumulated.trim();
+      if (!current || current.length <= lastPushedLen + 10) return;
+
+      // 提取当前可见的 Thought 片段
+      const thoughtMatch = current.match(
+        /Thought:\s*(.+?)(?=\n(?:Action|Final Answer)|$)/s,
+      );
+      const content = thoughtMatch
+        ? thoughtMatch[1].trim()
+        : current;
+
+      if (content) {
+        // streaming: true → 告知 UI 替换上一个同类型 streaming 步骤
+        this.onStep?.({
+          type: "thought",
+          content,
+          timestamp: Date.now(),
+          streaming: true,
+        });
+        lastPushedLen = current.length;
+      }
+    };
+
+    await this.ai.stream({
+      messages,
+      onChunk: (chunk) => {
+        if (signal?.aborted) return;
+        accumulated += chunk;
+        pushThinking();
+      },
+      onDone: (full) => {
+        accumulated = full;
+      },
+    });
+
+    if (signal?.aborted) throw new Error("Aborted");
+    return accumulated;
+  }
+
+  /**
+   * 执行 Agent 推理循环（使用流式输出，让用户实时看到思考过程）
+   */
+  async run(userInput: string, signal?: AbortSignal): Promise<string> {
     this.steps = [];
 
     // 添加用户输入
@@ -177,15 +262,32 @@ Final Answer: [最终回答]
     messages.push({ role: "user", content: userInput });
 
     for (let i = 0; i < this.config.maxIterations; i++) {
-      // 调用 LLM
-      const response = await this.ai.chat({
-        messages,
-        temperature: this.config.temperature,
-      });
+      // 检查取消
+      if (signal?.aborted) {
+        throw new Error("Aborted");
+      }
 
-      const parsed = this.parseResponse(response.content);
+      // 使用流式 API 获取 LLM 响应，实时推送思考过程
+      let responseContent: string;
+      try {
+        responseContent = await this.streamLLM(messages, signal);
+      } catch (e) {
+        if ((e as Error).message === "Aborted") throw e;
+        // 流式失败时降级为非流式
+        const response = await this.ai.chat({
+          messages,
+          temperature: this.config.temperature,
+        });
+        responseContent = response.content;
+      }
 
-      // 记录思考
+      if (signal?.aborted) {
+        throw new Error("Aborted");
+      }
+
+      const parsed = this.parseResponse(responseContent);
+
+      // 记录思考（最终版本，替换流式中间推送）
       if (parsed.thought) {
         this.addStep({
           type: "thought",
@@ -214,7 +316,7 @@ Final Answer: [最终回答]
             content: errorMsg,
             timestamp: Date.now(),
           });
-          messages.push({ role: "assistant", content: response.content });
+          messages.push({ role: "assistant", content: responseContent });
           messages.push({
             role: "user",
             content: `Observation: 错误 - ${errorMsg}，可用工具: ${this.tools.map((t) => t.name).join(", ")}`,
@@ -247,14 +349,21 @@ Final Answer: [最终回答]
               toolName: parsed.action,
               timestamp: Date.now(),
             });
-            messages.push({ role: "assistant", content: response.content });
-            messages.push({ role: "user", content: `Observation: ${cancelMsg}` });
+            messages.push({ role: "assistant", content: responseContent });
+            messages.push({
+              role: "user",
+              content: `Observation: ${cancelMsg}`,
+            });
             continue;
           }
         }
 
         try {
+          if (signal?.aborted) throw new Error("Aborted");
           const output = await tool.execute(parsed.actionInput || {});
+
+          if (signal?.aborted) throw new Error("Aborted");
+
           const outputStr =
             typeof output === "string"
               ? output
@@ -268,12 +377,13 @@ Final Answer: [最终回答]
             timestamp: Date.now(),
           });
 
-          messages.push({ role: "assistant", content: response.content });
+          messages.push({ role: "assistant", content: responseContent });
           messages.push({
             role: "user",
             content: `Observation: ${outputStr}`,
           });
         } catch (e) {
+          if ((e as Error).message === "Aborted") throw e;
           const errorStr = `工具执行失败: ${e}`;
           this.addStep({
             type: "error",
@@ -281,7 +391,7 @@ Final Answer: [最终回答]
             toolName: parsed.action,
             timestamp: Date.now(),
           });
-          messages.push({ role: "assistant", content: response.content });
+          messages.push({ role: "assistant", content: responseContent });
           messages.push({
             role: "user",
             content: `Observation: ${errorStr}`,
@@ -289,7 +399,7 @@ Final Answer: [最终回答]
         }
       } else {
         // 没有 action 也没有 final answer，可能格式不对
-        messages.push({ role: "assistant", content: response.content });
+        messages.push({ role: "assistant", content: responseContent });
         messages.push({
           role: "user",
           content:
