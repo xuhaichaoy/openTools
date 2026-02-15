@@ -38,6 +38,10 @@ open = "5"
 hostname = "0.4"
 dirs = "5"
 image = "0.25"
+base64 = "0.22"
+xcap = "0.8"
+arboard = "3"
+url = "2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = ["Win32_Graphics_Gdi", "Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }

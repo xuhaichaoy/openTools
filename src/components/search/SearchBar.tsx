@@ -1,5 +1,5 @@
-import { useRef, useEffect, useCallback } from "react";
-import { Search, Bot } from "lucide-react";
+import { useRef, useEffect, useCallback, useState } from "react";
+import { Search, Bot, X } from "lucide-react";
 import { useAppStore } from "@/store/app-store";
 import { invoke } from "@tauri-apps/api/core";
 import { ModeIndicator, detectMode } from "./ModeIndicator";
@@ -14,12 +14,16 @@ export function SearchBar({
   onSubmit,
   resultCount,
 }: {
-  onSubmit?: (value: string, mode: string) => void;
+  onSubmit?: (value: string, mode: string, images?: string[]) => void;
   resultCount?: number;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const measureRef = useRef<HTMLSpanElement>(null);
-  const { mode, searchValue, setSearchValue, reset } = useAppStore();
+  const { mode, setMode, searchValue, setSearchValue, reset } = useAppStore();
+  const [pendingImages, setPendingImages] = useState<
+    { path: string; preview: string }[]
+  >([]);
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
   const modeConfig = MODE_CONFIG[mode] || MODE_CONFIG.search;
   const ModeIcon = modeConfig.icon;
   const detectedMode = detectMode(searchValue);
@@ -53,8 +57,25 @@ export function SearchBar({
           invoke("hide_window");
         }
         e.preventDefault();
+      } else if (e.key === "Backspace" && !searchValue) {
+        if (pendingImages.length > 0) {
+          e.preventDefault();
+          const newImages = [...pendingImages];
+          newImages.pop();
+          setPendingImages(newImages);
+          if (newImages.length === 0 && mode === "ai") {
+            setMode("search");
+          }
+        }
       } else if (e.key === "Enter") {
-        onSubmit?.(searchValue, mode);
+        const paths = pendingImages.map((img) => img.path);
+        // 如果有图片，强制使用 AI 模式提交
+        if (paths.length > 0) {
+          onSubmit?.(searchValue, "ai", paths);
+        } else {
+          onSubmit?.(searchValue, mode);
+        }
+        setPendingImages([]);
         e.preventDefault();
       } else if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -83,6 +104,52 @@ export function SearchBar({
     handleDrag(e);
   };
 
+  const handlePaste = async (e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of Array.from(items)) {
+      if (item.type.startsWith("image/")) {
+        e.preventDefault();
+        const blob = item.getAsFile();
+        if (!blob) continue;
+
+        const reader = new FileReader();
+        reader.onload = async () => {
+          const dataUrl = reader.result as string;
+          const base64 = dataUrl.split(",")[1];
+          const ext = blob.type.split("/")[1] || "png";
+          const fileName = `search_img_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.${ext}`;
+
+          try {
+            const filePath = await invoke<string>("ai_save_chat_image", {
+              imageData: base64,
+              fileName,
+            });
+            setPendingImages((prev) => [
+              ...prev,
+              { path: filePath, preview: dataUrl },
+            ]);
+            // 粘贴图片通常意味着要用 AI 搜索
+            if (mode !== "ai") setMode("ai");
+          } catch (err) {
+            console.error("搜索框保存图片失败:", err);
+          }
+        };
+        reader.readAsDataURL(blob);
+      }
+    }
+  };
+
+  const removeImage = (index: number) => {
+    setPendingImages((prev) => {
+      const next = prev.filter((_, i) => i !== index);
+      if (next.length === 0 && mode === "ai" && !searchValue) {
+        setMode("search");
+      }
+      return next;
+    });
+  };
+
   return (
     <div
       className="flex items-center h-[50px] px-2"
@@ -97,11 +164,33 @@ export function SearchBar({
       {/* 输入区域容器：占据剩余空间，但 input 只按内容宽度 */}
       <div className="flex-1 ml-3 relative flex items-center h-full cursor-grab active:cursor-grabbing overflow-hidden">
         {/* 无内容时的 placeholder */}
-        {!searchValue && (
+        {!searchValue && pendingImages.length === 0 && (
           <div className="absolute inset-0 flex items-center text-[var(--color-text-secondary)] opacity-50 text-lg font-medium pointer-events-none select-none">
             {detectedMode.id !== "default"
               ? detectedMode.placeholder
               : modeConfig.label}
+          </div>
+        )}
+
+        {/* 图片缩略图 */}
+        {pendingImages.length > 0 && (
+          <div className="flex items-center gap-1.5 mr-2 shrink-0">
+            {pendingImages.map((img, i) => (
+              <div key={i} className="relative group/img">
+                <img
+                  src={img.preview}
+                  alt="预览"
+                  className="w-8 h-8 object-cover rounded border border-[var(--color-border)] shadow-sm cursor-zoom-in hover:brightness-90 transition-all"
+                  onClick={() => setPreviewImage(img.preview)}
+                />
+                <button
+                  onClick={() => removeImage(i)}
+                  className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full bg-red-500 text-white flex items-center justify-center opacity-0 group-hover/img:opacity-100 transition-opacity"
+                >
+                  <X className="w-2.5 h-2.5" />
+                </button>
+              </div>
+            ))}
           </div>
         )}
 
@@ -122,6 +211,7 @@ export function SearchBar({
           value={searchValue}
           onChange={(e) => setSearchValue(e.target.value)}
           onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
           autoFocus
           spellCheck={false}
           aria-label="搜索框"
@@ -139,6 +229,25 @@ export function SearchBar({
           Space
         </kbd>
       </div>
+      {/* 图片大图预览 */}
+      {previewImage && (
+        <div
+          className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 backdrop-blur-sm cursor-zoom-out animate-in fade-in duration-200"
+          onClick={() => setPreviewImage(null)}
+        >
+          <img
+            src={previewImage}
+            alt="预览大图"
+            className="max-w-[90vw] max-h-[90vh] object-contain rounded-lg shadow-2xl animate-in zoom-in-95 duration-200"
+          />
+          <button
+            className="absolute top-6 right-6 p-2 rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors shadow-lg"
+            onClick={() => setPreviewImage(null)}
+          >
+            <X className="w-6 h-6" />
+          </button>
+        </div>
+      )}
     </div>
   );
 }

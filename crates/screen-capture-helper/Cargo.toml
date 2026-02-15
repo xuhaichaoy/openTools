@@ -17,8 +17,6 @@ xcap = "0.8"
 enigo = { version = "0.3", features = [] }
 # 图像处理
 image = "0.25"
-# PDF 导出
-printpdf = "0.8"
 # GIF 编码
 gif = "0.13"
 # 序列化

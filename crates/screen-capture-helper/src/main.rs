@@ -5,7 +5,6 @@ mod export;
 mod recorder;
 
 use protocol::*;
-use serde_json::Value;
 use std::io::{self, BufRead, Write};
 use std::sync::mpsc;
 
@@ -116,6 +115,17 @@ fn handle_request(req: Request, event_tx: &mpsc::Sender<String>) -> Response {
                 Err(e) => return Response::err(id, format!("参数错误: {e}")),
             };
             match screenshot::crop_region(params) {
+                Ok(path) => Response::ok(id, serde_json::json!({ "path": path })),
+                Err(e) => Response::err(id, e),
+            }
+        }
+
+        "capture_screen_region" => {
+            let params: CaptureScreenRegionParams = match serde_json::from_value(req.params) {
+                Ok(p) => p,
+                Err(e) => return Response::err(id, format!("参数错误: {e}")),
+            };
+            match screenshot::capture_screen_region(params) {
                 Ok(path) => Response::ok(id, serde_json::json!({ "path": path })),
                 Err(e) => Response::err(id, e),
             }
@@ -233,7 +243,7 @@ fn do_scroll_capture(
     let windows = Window::all().map_err(|e| format!("枚举窗口失败: {e}"))?;
     let window = if let Some(wid) = params.window_id {
         windows.into_iter()
-            .find(|w| w.id() as u64 == wid)
+            .find(|w| w.id().ok().map(|id| id as u64) == Some(wid))
             .ok_or_else(|| format!("窗口 {} 不存在", wid))?
     } else if let Some(title) = &params.window_title {
         windows.into_iter()
@@ -266,7 +276,7 @@ fn do_scroll_capture(
         }).to_string());
 
         // 模拟滚动 (向下滚动 5 个单位)
-        use enigo::{Enigo, Mouse, Axis, Direction};
+        use enigo::{Mouse, Axis};
         enigo.scroll(5, Axis::Vertical)
             .map_err(|e| format!("滚动失败: {e}"))?;
 

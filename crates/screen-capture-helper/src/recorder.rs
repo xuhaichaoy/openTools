@@ -1,6 +1,5 @@
-use image::GenericImageView;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use xcap::Monitor;
 
@@ -57,7 +56,7 @@ pub fn start_gif_recording(
             .ok_or_else(|| format!("显示器 {} 不存在", id))?
             .clone()
     } else {
-        monitors.iter().find(|m| m.is_primary())
+        monitors.iter().find(|m| m.is_primary().unwrap_or(false))
             .or_else(|| monitors.first())
             .ok_or_else(|| "没有找到显示器".to_string())?
             .clone()
@@ -112,16 +111,17 @@ pub fn start_gif_recording(
             match monitor.capture_image() {
                 Ok(img) => {
                     // 缩放到 max_width
-                    let (w, h) = (img.width(), img.height());
+                    let w = img.width();
+                    let h = img.height();
                     let (tw, th) = if w > max_w {
                         let scale = max_w as f32 / w as f32;
                         (max_w, (h as f32 * scale) as u32)
                     } else {
                         (w, h)
                     };
-                    let resized = image::imageops::resize(
+                    let resized = ::image::imageops::resize(
                         &img, tw, th,
-                        image::imageops::FilterType::Nearest, // 快速, 录屏不需要高质量缩放
+                        ::image::imageops::FilterType::Nearest,
                     );
                     let delay = (frame_interval.as_millis() / 10) as u16; // GIF delay 单位是 10ms
                     frames.push((resized.into_raw(), tw, th, delay));
@@ -205,7 +205,7 @@ pub fn start_mp4_recording(
             .ok_or_else(|| format!("显示器 {} 不存在", id))?
             .clone()
     } else {
-        monitors.iter().find(|m| m.is_primary())
+        monitors.iter().find(|m| m.is_primary().unwrap_or(false))
             .or_else(|| monitors.first())
             .ok_or_else(|| "没有找到显示器".to_string())?
             .clone()
@@ -218,8 +218,8 @@ pub fn start_mp4_recording(
     let sender = event_sender.clone();
 
     // 获取显示器尺寸
-    let cap_w = monitor.width();
-    let cap_h = monitor.height();
+    let cap_w = monitor.width().unwrap_or(1920);
+    let cap_h = monitor.height().unwrap_or(1080);
     // 确保宽高是偶数 (H.264 要求)
     let enc_w = cap_w & !1;
     let enc_h = cap_h & !1;
@@ -300,8 +300,10 @@ pub fn start_mp4_recording(
             match monitor.capture_image() {
                 Ok(img) => {
                     // RGBA → RGB, 裁剪到偶数尺寸
-                    let cropped = if img.width() != enc_w || img.height() != enc_h {
-                        image::imageops::crop_imm(&img, 0, 0, enc_w, enc_h).to_image()
+                    let iw = img.width();
+                    let ih = img.height();
+                    let cropped = if iw != enc_w || ih != enc_h {
+                        ::image::imageops::crop_imm(&img, 0, 0, enc_w, enc_h).to_image()
                     } else {
                         img
                     };

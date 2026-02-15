@@ -1,3 +1,4 @@
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 
@@ -59,6 +60,23 @@ pub async fn get_python_path() -> Result<String, String> {
         }
     }
     Err("未找到 Python".to_string())
+}
+
+/// 读取文件并返回 base64 字符串（用于前端显示图片等）
+#[derive(serde::Deserialize)]
+pub(crate) struct ReadFileBase64Args {
+    #[serde(rename = "filePath")]
+    file_path: String,
+}
+
+#[tauri::command]
+pub async fn read_file_base64(args: ReadFileBase64Args) -> Result<String, String> {
+    let path = std::path::Path::new(&args.file_path);
+    if !path.exists() {
+        return Err(format!("文件不存在: {}", args.file_path));
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("读取失败: {}", e))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
 }
 
 /// 预览文件内容（限制读取大小）

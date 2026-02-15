@@ -159,18 +159,16 @@ fn scan_dirs(dirs: &[PathBuf], disabled_ids: &HashSet<String>) -> Vec<PluginInfo
         }
 
         // 先检查 base_dir 本身是否就是一个插件目录
-        if scan_plugin_dir(base_dir).is_some() {
-            if let Some((manifest, _)) = scan_plugin_dir(base_dir) {
-                let id = make_plugin_id(base_dir, &manifest);
-                if seen_ids.insert(id.clone()) {
-                    plugins.push(PluginInfo {
-                        enabled: !disabled_ids.contains(&id),
-                        id,
-                        is_builtin: false,
-                        manifest,
-                        dir_path: base_dir.to_string_lossy().to_string(),
-                    });
-                }
+        if let Some((manifest, _)) = scan_plugin_dir(base_dir) {
+            let id = make_plugin_id(base_dir, &manifest);
+            if seen_ids.insert(id.clone()) {
+                plugins.push(PluginInfo {
+                    enabled: !disabled_ids.contains(&id),
+                    id,
+                    is_builtin: false,
+                    manifest,
+                    dir_path: base_dir.to_string_lossy().to_string(),
+                });
             }
             continue;
         }
@@ -212,6 +210,31 @@ fn refresh_plugin_cache(app: &AppHandle) -> Vec<PluginInfo> {
     let cache = app.state::<Mutex<PluginCache>>();
     let mut cache = cache.lock().unwrap();
 
+    // 首次调用时从持久化存储恢复 dev_dirs 和 disabled_ids
+    if cache.dev_dirs.is_empty() && cache.plugins.is_empty() {
+        use tauri_plugin_store::StoreExt;
+        if let Ok(store) = app.store("plugin-settings.json") {
+            if let Some(dirs) = store.get("devDirs") {
+                if let Some(arr) = dirs.as_array() {
+                    for v in arr {
+                        if let Some(s) = v.as_str() {
+                            cache.dev_dirs.insert(s.to_string());
+                        }
+                    }
+                }
+            }
+            if let Some(disabled) = store.get("disabledIds") {
+                if let Some(arr) = disabled.as_array() {
+                    for v in arr {
+                        if let Some(s) = v.as_str() {
+                            cache.disabled_ids.insert(s.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let mut dirs = vec![get_plugins_dir(app)];
     for dev_dir in &cache.dev_dirs {
         dirs.push(PathBuf::from(dev_dir));
@@ -232,6 +255,17 @@ fn get_cached_plugins(app: &AppHandle) -> Vec<PluginInfo> {
     cache.plugins.clone()
 }
 
+/// 将 dev_dirs 和 disabled_ids 持久化到 Tauri Store
+fn persist_plugin_settings(app: &AppHandle, cache: &PluginCache) {
+    use tauri_plugin_store::StoreExt;
+    if let Ok(store) = app.store("plugin-settings.json") {
+        let dirs_vec: Vec<&String> = cache.dev_dirs.iter().collect();
+        store.set("devDirs", serde_json::to_value(&dirs_vec).unwrap_or_default());
+        let disabled_vec: Vec<&String> = cache.disabled_ids.iter().collect();
+        store.set("disabledIds", serde_json::to_value(&disabled_vec).unwrap_or_default());
+    }
+}
+
 // ── Tauri Commands ──
 
 /// 获取所有已安装的插件（刷新扫描）
@@ -247,6 +281,8 @@ pub async fn plugin_add_dev_dir(app: AppHandle, dir_path: String) -> Result<Vec<
         let cache = app.state::<Mutex<PluginCache>>();
         let mut cache = cache.lock().unwrap();
         cache.dev_dirs.insert(dir_path);
+        // 持久化到 Store
+        persist_plugin_settings(&app, &cache);
     }
     Ok(refresh_plugin_cache(&app))
 }
@@ -258,6 +294,7 @@ pub async fn plugin_remove_dev_dir(app: AppHandle, dir_path: String) -> Result<V
         let cache = app.state::<Mutex<PluginCache>>();
         let mut cache = cache.lock().unwrap();
         cache.dev_dirs.remove(&dir_path);
+        persist_plugin_settings(&app, &cache);
     }
     Ok(refresh_plugin_cache(&app))
 }
@@ -273,6 +310,7 @@ pub async fn plugin_set_enabled(app: AppHandle, plugin_id: String, enabled: bool
         } else {
             cache.disabled_ids.insert(plugin_id);
         }
+        persist_plugin_settings(&app, &cache);
     }
     Ok(refresh_plugin_cache(&app))
 }
@@ -459,9 +497,11 @@ pub async fn plugin_api_call(
             for (label, window) in app.webview_windows() {
                 if label.starts_with(&format!("plugin-{}", plugin_id)) {
                     let size = window.inner_size().map_err(|e| e.to_string())?;
+                    // height 参数来自 JS 侧逻辑像素，需乘以 scale_factor 转物理像素
+                    let scale = window.scale_factor().unwrap_or(1.0);
                     let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize {
                         width: size.width,
-                        height: height as u32,
+                        height: (height * scale) as u32,
                     }));
                     break;
                 }
@@ -488,6 +528,51 @@ pub async fn plugin_api_call(
         "shellOpenExternal" => {
             let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
             let _ = open::that(url);
+            Ok("null".to_string())
+        }
+        "shellOpenPath" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let _ = open::that(path);
+            Ok("null".to_string())
+        }
+        "shellShowItemInFolder" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            #[cfg(target_os = "macos")]
+            { let _ = std::process::Command::new("open").arg("-R").arg(path).spawn(); }
+            #[cfg(target_os = "windows")]
+            { let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path)).spawn(); }
+            #[cfg(target_os = "linux")]
+            { let _ = std::process::Command::new("xdg-open")
+                .arg(std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("/")))
+                .spawn(); }
+            Ok("null".to_string())
+        }
+        "getPath" => {
+            let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("home");
+            let path = match name {
+                "home" => dirs::home_dir(),
+                "desktop" => dirs::desktop_dir(),
+                "documents" | "document" => dirs::document_dir(),
+                "downloads" | "download" => dirs::download_dir(),
+                "pictures" | "picture" => dirs::picture_dir(),
+                "music" => dirs::audio_dir(),
+                "videos" | "video" => dirs::video_dir(),
+                "temp" | "tmp" => Some(std::env::temp_dir()),
+                _ => dirs::home_dir(),
+            };
+            match path {
+                Some(p) => Ok(serde_json::to_string(&p.to_string_lossy().to_string())
+                    .unwrap_or("null".to_string())),
+                None => Err("获取路径失败".to_string()),
+            }
+        }
+        "copyImage" => {
+            log::warn!("插件 {} 调用了 copyImage，暂不支持", plugin_id);
+            Err("copyImage 暂不支持".to_string())
+        }
+        "setSubInput" | "removeSubInput" | "redirect" => {
+            // 这些涉及主窗口 UI 交互，暂返回成功（stub）
+            log::info!("插件 {} 调用了 {}，暂为 stub", plugin_id, method);
             Ok("null".to_string())
         }
         "dbStorage.setItem" => {
@@ -590,7 +675,20 @@ fn get_pixel_at_screen(_x: i32, _y: i32) -> Result<String, String> {
 pub async fn plugin_start_color_picker(app: AppHandle) -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
-        let hex = macos_native_color_pick().await?;
+        // 隐藏主窗口
+        if let Some(win) = app.get_webview_window("main") {
+            let _ = win.hide();
+        }
+
+        let result = macos_native_color_pick().await;
+
+        // 恢复主窗口
+        if let Some(win) = app.get_webview_window("main") {
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+
+        let hex = result?;
         if !hex.is_empty() {
             use tauri_plugin_clipboard_manager::ClipboardExt;
             let _ = app.clipboard().write_text(hex.clone());
@@ -921,6 +1019,50 @@ fn generate_embed_bridge(plugin_id: &str) -> String {
     onPluginOut: function(cb) {{ window.__utoolsOnOutCallback = cb; }},
     redirect: function(l, p) {{ return __apiInvoke('redirect', {{ label: l, payload: p }}); }},
     outPlugin: function() {{ return __apiInvoke('outPlugin'); }}
+  }};
+
+  // ── mtools.ai SDK（供外部插件调用 AI 能力）──
+  var __aiReqId = 0;
+  window.mtools = {{
+    ai: {{
+      chat: function(opts) {{
+        return new Promise(function(resolve, reject) {{
+          var id = 'ai-' + (++__aiReqId);
+          function onResp(e) {{
+            if (e.data && e.data.type === 'mtools-ai-result' && e.data.id === id) {{
+              window.removeEventListener('message', onResp);
+              if (e.data.error) reject(new Error(e.data.error));
+              else resolve({{ content: e.data.content }});
+            }}
+          }}
+          window.addEventListener('message', onResp);
+          window.parent.postMessage({{ type: 'mtools-ai-chat', id: id, messages: opts.messages, model: opts.model, temperature: opts.temperature }}, '*');
+        }});
+      }},
+      stream: function(opts) {{
+        return new Promise(function(resolve, reject) {{
+          var id = 'ai-' + (++__aiReqId);
+          function onMsg(e) {{
+            if (!e.data || e.data.id !== id) return;
+            if (e.data.type === 'mtools-ai-chunk' && opts.onChunk) opts.onChunk(e.data.chunk);
+            if (e.data.type === 'mtools-ai-done') {{
+              window.removeEventListener('message', onMsg);
+              if (opts.onDone) opts.onDone(e.data.content);
+              resolve();
+            }}
+            if (e.data.type === 'mtools-ai-error') {{
+              window.removeEventListener('message', onMsg);
+              reject(new Error(e.data.error));
+            }}
+          }}
+          window.addEventListener('message', onMsg);
+          window.parent.postMessage({{ type: 'mtools-ai-stream', id: id, messages: opts.messages }}, '*');
+        }});
+      }},
+      getModels: function() {{
+        return __invoke('ai_list_models', {{}}).then(function(r) {{ return r || []; }}).catch(function() {{ return []; }});
+      }}
+    }}
   }};
 }})();
 "#, plugin_id_esc = plugin_id_esc)

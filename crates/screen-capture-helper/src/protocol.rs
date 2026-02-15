@@ -20,7 +20,8 @@ pub struct Response {
     pub error: Option<String>,
 }
 
-/// 推送事件 (id 为 null)
+/// 推送事件 (id 为 null)，用于 JSON-RPC 事件推送
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct Event {
     pub id: Option<()>, // 始终序列化为 null
@@ -37,6 +38,7 @@ impl Response {
     }
 }
 
+#[allow(dead_code)]
 impl Event {
     pub fn new(event: &str, data: Value) -> Self {
         Self {
@@ -57,6 +59,16 @@ pub struct CaptureFullscreenParams {
 #[derive(Debug, Deserialize)]
 pub struct CropRegionParams {
     pub image_path: String,
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// 按屏幕/图像坐标截取显示器上的某一区域（先截全屏再裁剪，得到的是实时区域内容）
+#[derive(Debug, Deserialize)]
+pub struct CaptureScreenRegionParams {
+    pub monitor_id: Option<u32>,
     pub x: u32,
     pub y: u32,
     pub width: u32,
@@ -91,6 +103,7 @@ pub struct RecorderStartParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
+#[allow(dead_code)] // Window/Region 变体字段待录屏实现时使用
 pub enum RecordTarget {
     #[serde(rename = "fullscreen")]
     FullScreen { monitor_id: Option<u32> },

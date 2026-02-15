@@ -1,19 +1,6 @@
-import {
-  Bot,
-  Database,
-  Hash,
-  Clock,
-  Wrench,
-  Settings,
-  Puzzle,
-  BookOpen,
-  Terminal,
-  Globe,
-  Grid,
-  Workflow,
-  Pipette,
-} from "lucide-react";
 import { useAppStore } from "@/store/app-store";
+import { registry } from "@/core/plugin-system/registry";
+import { Bot, Globe, Terminal } from "lucide-react";
 
 interface DashboardProps {
   onNavigate: (view: string) => void;
@@ -22,85 +9,25 @@ interface DashboardProps {
 export function Dashboard({ onNavigate }: DashboardProps) {
   const { setSelectedIndex, setSearchValue } = useAppStore();
 
-  const tools = [
-    {
-      id: "ai-chat",
-      icon: <Bot className="w-6 h-6" />,
-      title: "AI 助手",
-      action: () => onNavigate("chat"),
-      color: "text-indigo-500 bg-indigo-500/10",
-    },
-    {
-      id: "data-forge",
-      icon: <Database className="w-6 h-6" />,
-      title: "数据工坊",
-      action: () => onNavigate("data-forge"),
-      color: "text-purple-500 bg-purple-500/10",
-    },
-    {
-      id: "json",
-      icon: <Hash className="w-6 h-6" />,
-      title: "JSON",
-      action: () => onNavigate("json"),
-      color: "text-yellow-500 bg-yellow-500/10",
-    },
-    {
-      id: "timestamp",
-      icon: <Clock className="w-6 h-6" />,
-      title: "时间戳",
-      action: () => onNavigate("timestamp"),
-      color: "text-green-500 bg-green-500/10",
-    },
-    {
-      id: "base64",
-      icon: <Wrench className="w-6 h-6" />,
-      title: "Base64",
-      action: () => onNavigate("base64"),
-      color: "text-blue-500 bg-blue-500/10",
-    },
-    {
-      id: "color",
-      icon: <Pipette className="w-6 h-6" />,
-      title: "颜色",
-      action: () => onNavigate("color"),
-      color: "text-pink-500 bg-pink-500/10",
-    },
-    {
-      id: "knowledge-base",
-      icon: <BookOpen className="w-6 h-6" />,
-      title: "知识库",
-      action: () => onNavigate("knowledge-base"),
-      color: "text-emerald-500 bg-emerald-500/10",
-    },
-    {
-      id: "workflows",
-      icon: <Workflow className="w-6 h-6" />,
-      title: "工作流",
-      action: () => onNavigate("workflows"),
-      color: "text-teal-500 bg-teal-500/10",
-    },
-    {
-      id: "plugins",
-      icon: <Puzzle className="w-6 h-6" />,
-      title: "插件",
-      action: () => onNavigate("plugins"),
-      color: "text-orange-500 bg-orange-500/10",
-    },
-    {
-      id: "settings",
-      icon: <Settings className="w-6 h-6" />,
-      title: "设置",
-      action: () => onNavigate("settings"),
-      color: "text-gray-500 bg-gray-500/10",
-    },
-    {
-      id: "all",
-      icon: <Grid className="w-6 h-6" />,
-      title: "全部",
-      action: () => onNavigate("home"),
-      color: "text-cyan-500 bg-cyan-500/10",
-    },
-  ];
+  // AI 助手是 Core Shell 组件，不在 registry 中，手动添加为第一项
+  const aiEntry = {
+    id: "ai-chat",
+    icon: <Bot className="w-6 h-6" />,
+    title: "AI 助手",
+    action: () => onNavigate("chat"),
+    color: "text-indigo-500 bg-indigo-500/10",
+  };
+
+  // 从 registry 获取所有内置插件作为工具列表
+  const registryTools = registry.getAll().map((plugin) => ({
+    id: plugin.id,
+    icon: plugin.icon,
+    title: plugin.name,
+    action: () => onNavigate(plugin.viewId),
+    color: plugin.color,
+  }));
+
+  const tools = [aiEntry, ...registryTools];
 
   const quickActions = [
     {

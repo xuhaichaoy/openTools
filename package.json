@@ -19,6 +19,7 @@
     "@tauri-apps/plugin-dialog": "^2.6.0",
     "@tauri-apps/plugin-fs": "^2.4.5",
     "@xyflow/react": "^12.10.0",
+    "cropperjs": "^1.6.2",
     "highlight.js": "^11.11.1",
     "lucide-react": "^0.563.0",
     "pinyin-pro": "^3.28.0",

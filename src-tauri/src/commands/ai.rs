@@ -15,6 +15,9 @@ pub struct ChatMessage {
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// 图片路径列表（用于 vision API）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -586,18 +589,130 @@ async fn request_tool_confirmation(app: &AppHandle, name: &str, args: &str) -> R
     }
 }
 
-// ── API 请求结构 ──
+// ── API 请求构建 ──
 
-#[derive(Debug, Serialize)]
-struct AgentRequest {
-    model: String,
-    messages: Vec<ChatMessage>,
-    temperature: f32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u32>,
-    tools: Vec<serde_json::Value>,
-    stream: bool,
+/// 将 ChatMessage 转为 Vision API 兼容的 JSON（含图片 multipart content）
+fn message_to_api_json(msg: &ChatMessage) -> serde_json::Value {
+    let has_images = msg.images.as_ref().map_or(false, |imgs| !imgs.is_empty());
+
+    if has_images && msg.role == "user" {
+        // Vision multipart content: 专家建议文本在前，图片在后
+        let mut parts: Vec<serde_json::Value> = Vec::new();
+        
+        // 1. 文本部分
+        if let Some(text) = &msg.content {
+            if !text.is_empty() {
+                parts.push(serde_json::json!({
+                    "type": "text",
+                    "text": text
+                }));
+            }
+        }
+
+        // 2. 图片部分
+        if let Some(images) = &msg.images {
+            for img_path in images {
+                // 读取图片文件并转为 base64 data URI
+                match std::fs::read(img_path) {
+                    Ok(bytes) => {
+                        let ext = std::path::Path::new(img_path)
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("png");
+                        let mime = match ext {
+                            "jpg" | "jpeg" => "image/jpeg",
+                            "gif" => "image/gif",
+                            "webp" => "image/webp",
+                            _ => "image/png",
+                        };
+                        use base64::Engine;
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        parts.push(serde_json::json!({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": format!("data:{};base64,{}", mime, b64),
+                                "detail": "auto"
+                            }
+                        }));
+                    },
+                    Err(e) => {
+                        eprintln!("Failed to read image at {}: {}", img_path, e);
+                    }
+                }
+            }
+        }
+
+        let mut json = serde_json::json!({
+            "role": msg.role,
+            "content": parts
+        });
+        // 保留可选字段
+        if let Some(tc) = &msg.tool_calls { json["tool_calls"] = serde_json::to_value(tc).unwrap(); }
+        if let Some(id) = &msg.tool_call_id { json["tool_call_id"] = serde_json::json!(id); }
+        if let Some(n) = &msg.name { json["name"] = serde_json::json!(n); }
+        json
+    } else {
+        // 普通消息：直接序列化（images 字段 skip_serializing_if None）
+        let mut json = serde_json::json!({ "role": msg.role });
+        if let Some(c) = &msg.content { json["content"] = serde_json::json!(c); }
+        if let Some(tc) = &msg.tool_calls { json["tool_calls"] = serde_json::to_value(tc).unwrap(); }
+        if let Some(id) = &msg.tool_call_id { json["tool_call_id"] = serde_json::json!(id); }
+        if let Some(n) = &msg.name { json["name"] = serde_json::json!(n); }
+        json
+    }
 }
+
+/// 构建 API 请求体
+fn build_api_request(
+    model: &str,
+    messages: &[ChatMessage],
+    temperature: f32,
+    max_tokens: Option<u32>,
+    tools: &[serde_json::Value],
+    stream: bool,
+) -> serde_json::Value {
+    let api_messages: Vec<serde_json::Value> = messages.iter().map(message_to_api_json).collect();
+    let mut req = serde_json::json!({
+        "model": model,
+        "messages": api_messages,
+        "temperature": temperature,
+        "stream": stream,
+    });
+    if let Some(mt) = max_tokens {
+        req["max_tokens"] = serde_json::json!(mt);
+    }
+    if !tools.is_empty() {
+        req["tools"] = serde_json::json!(tools);
+    }
+    req
+}
+
+/// 保存聊天图片到应用数据目录，返回文件路径
+#[tauri::command]
+pub async fn ai_save_chat_image(
+    app: AppHandle,
+    image_data: String,  // base64 编码的图片数据（不含 data:... 前缀）
+    file_name: String,    // 文件名，如 "img_1234.png"
+) -> Result<String, String> {
+    use tauri::Manager;
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("获取数据目录失败: {}", e))?;
+    let images_dir = app_data_dir.join("chat_images");
+    std::fs::create_dir_all(&images_dir).map_err(|e| format!("创建目录失败: {}", e))?;
+
+    let file_path = images_dir.join(&file_name);
+
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&image_data)
+        .map_err(|e| format!("Base64 解码失败: {}", e))?;
+    std::fs::write(&file_path, &bytes).map_err(|e| format!("写入文件失败: {}", e))?;
+
+    Ok(file_path.to_string_lossy().to_string())
+}
+
 
 // ── Tauri Commands ──
 
@@ -628,13 +743,9 @@ pub async fn ai_chat(
 ) -> Result<String, String> {
     let client = reqwest::Client::new();
 
-    let request = serde_json::json!({
-        "model": config.model,
-        "messages": messages,
-        "temperature": config.temperature,
-        "max_tokens": config.max_tokens,
-        "stream": false,
-    });
+    let request = build_api_request(
+        &config.model, &messages, config.temperature, config.max_tokens, &[], false,
+    );
 
     let response = client
         .post(format!("{}/chat/completions", config.base_url))
@@ -684,17 +795,13 @@ pub async fn ai_chat_stream(
         tool_calls: None,
         tool_call_id: None,
         name: None,
+        images: None,
     }];
     full_messages.extend(messages);
 
-    let request = AgentRequest {
-        model: config.model.clone(),
-        messages: full_messages.clone(),
-        temperature: config.temperature,
-        max_tokens: config.max_tokens,
-        tools: tools.clone(),
-        stream: true,
-    };
+    let request = build_api_request(
+        &config.model, &full_messages, config.temperature, config.max_tokens, &tools, true,
+    );
 
     let response = client
         .post(format!("{}/chat/completions", config.base_url))
@@ -786,6 +893,7 @@ pub async fn ai_chat_stream(
                                     tool_calls: None,
                                     tool_call_id: Some(tc.id.clone()),
                                     name: Some(tc.function.name.clone()),
+                                    images: None,
                                 });
                             }
 
@@ -796,6 +904,7 @@ pub async fn ai_chat_stream(
                                 tool_calls: Some(pending_tool_calls.clone()),
                                 tool_call_id: None,
                                 name: None,
+                                images: None,
                             });
                             full_messages.extend(tool_messages);
 
@@ -805,14 +914,9 @@ pub async fn ai_chat_stream(
                                 if cancellation.is_cancelled() {
                                     break;
                                 }
-                                let follow_request = serde_json::json!({
-                                    "model": config.model,
-                                    "messages": full_messages,
-                                    "temperature": config.temperature,
-                                    "max_tokens": config.max_tokens,
-                                    "tools": tools,
-                                    "stream": false,
-                                });
+                                let follow_request = build_api_request(
+                                    &config.model, &full_messages, config.temperature, config.max_tokens, &tools, false,
+                                );
 
                                 match client
                                     .post(format!("{}/chat/completions", config.base_url))
@@ -876,6 +980,7 @@ pub async fn ai_chat_stream(
                                                                 tool_calls: None,
                                                                 tool_call_id: Some(tc.id.clone()),
                                                                 name: Some(tc.function.name.clone()),
+                                                                images: None,
                                                             });
                                                         }
 
@@ -885,6 +990,7 @@ pub async fn ai_chat_stream(
                                                             tool_calls: Some(round_tool_calls),
                                                             tool_call_id: None,
                                                             name: None,
+                                                            images: None,
                                                         });
                                                         full_messages.extend(round_tool_messages);
                                                         continue; // 继续下一轮

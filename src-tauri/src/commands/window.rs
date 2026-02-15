@@ -44,6 +44,17 @@ pub async fn hide_window(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// 显示主窗口
+#[tauri::command]
+pub async fn show_window_cmd(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.center();
+        window.show().map_err(|e| e.to_string())?;
+        let _ = window.set_focus();
+    }
+    Ok(())
+}
+
 /// 开始拖拽窗口（nchao 方式：记录初始位置，轮询鼠标移动）
 #[tauri::command]
 pub async fn start_drag(app: AppHandle) -> Result<(), String> {

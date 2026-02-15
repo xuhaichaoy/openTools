@@ -1,6 +1,6 @@
 import { memo, useCallback, useRef } from "react";
-import { User, Bot, Copy, Check, RefreshCw, Pencil } from "lucide-react";
 import { useState } from "react";
+import { User, Bot, Copy, Check, RefreshCw, Pencil, X } from "lucide-react";
 import type { ChatMessage } from "@/store/ai-store";
 import { useAIStore } from "@/store/ai-store";
 import { ToolCallDisplay } from "./ToolCallDisplay";
@@ -12,8 +12,13 @@ import rehypeHighlight from "rehype-highlight";
 function getTextFromChildren(children: React.ReactNode): string {
   if (children == null) return "";
   if (typeof children === "string") return children;
-  if (Array.isArray(children)) return children.map(getTextFromChildren).join("");
-  if (typeof children === "object" && "props" in children && children.props != null) {
+  if (Array.isArray(children))
+    return children.map(getTextFromChildren).join("");
+  if (
+    typeof children === "object" &&
+    "props" in children &&
+    children.props != null
+  ) {
     return getTextFromChildren((children as any).props.children);
   }
   return "";
@@ -92,7 +97,17 @@ function formatMsgTime(ts: number): string {
 }
 
 /** 消息操作栏 */
-function MessageActions({ msg, isUser, isLast, onEdit }: { msg: ChatMessage; isUser: boolean; isLast: boolean; onEdit?: () => void }) {
+function MessageActions({
+  msg,
+  isUser,
+  isLast,
+  onEdit,
+}: {
+  msg: ChatMessage;
+  isUser: boolean;
+  isLast: boolean;
+  onEdit?: () => void;
+}) {
   const [copied, setCopied] = useState(false);
   const { regenerateLastMessage, isStreaming } = useAIStore();
 
@@ -105,7 +120,9 @@ function MessageActions({ msg, isUser, isLast, onEdit }: { msg: ChatMessage; isU
   if (msg.streaming) return null;
 
   return (
-    <div className={`flex items-center gap-1 mt-1 ${isUser ? "justify-end mr-10" : "justify-start ml-10"}`}>
+    <div
+      className={`flex items-center gap-1 mt-1 ${isUser ? "justify-end mr-10" : "justify-start ml-10"}`}
+    >
       {/* 时间戳 */}
       <span className="text-[10px] text-[var(--color-text-secondary)] opacity-0 group-hover:opacity-50 transition-opacity select-none">
         {formatMsgTime(msg.timestamp)}
@@ -165,7 +182,12 @@ function HighlightText({ text, query }: { text: string; query?: string }) {
   while (idx !== -1) {
     if (idx > lastIdx) parts.push(text.slice(lastIdx, idx));
     parts.push(
-      <mark key={idx} className="bg-yellow-300/60 text-inherit rounded-sm px-0.5">{text.slice(idx, idx + query.length)}</mark>
+      <mark
+        key={idx}
+        className="bg-yellow-300/60 text-inherit rounded-sm px-0.5"
+      >
+        {text.slice(idx, idx + query.length)}
+      </mark>,
     );
     lastIdx = idx + query.length;
     idx = lowerText.indexOf(lowerQ, lastIdx);
@@ -187,6 +209,7 @@ export const MessageBubble = memo(function MessageBubble({
   const isUser = msg.role === "user";
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState(msg.content);
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
   const { editAndResend, isStreaming } = useAIStore();
   const editRef = useRef<HTMLTextAreaElement>(null);
 
@@ -199,7 +222,9 @@ export const MessageBubble = memo(function MessageBubble({
 
   return (
     <div className={`group mb-0.5 ${isUser ? "" : ""}`}>
-      <div className={`flex gap-1.5 mb-0.5 ${isUser ? "flex-row-reverse" : ""}`}>
+      <div
+        className={`flex gap-1.5 mb-0.5 ${isUser ? "flex-row-reverse" : ""}`}
+      >
         {/* 头像 */}
         <div
           className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 border border-[var(--color-border)] shadow-sm ${
@@ -217,7 +242,9 @@ export const MessageBubble = memo(function MessageBubble({
         <div
           className={`max-w-[85%] rounded-[20px] px-2.5 py-1.5 text-[13px] shadow-sm leading-relaxed ${
             isUser
-              ? (editing ? "bg-indigo-700 text-white rounded-tr-md" : "bg-indigo-600 text-white rounded-tr-md")
+              ? editing
+                ? "bg-indigo-700 text-white rounded-tr-md"
+                : "bg-indigo-600 text-white rounded-tr-md"
               : "bg-[var(--color-bg-secondary)] text-[var(--color-text)] border border-[var(--color-border)] rounded-tl-md"
           }`}
         >
@@ -226,7 +253,9 @@ export const MessageBubble = memo(function MessageBubble({
               {msg.toolCalls && msg.toolCalls.length > 0 && (
                 <ToolCallDisplay toolCalls={msg.toolCalls} />
               )}
-              <div className={`prose prose-invert prose-base max-w-none [&_p]:leading-7 [&_p]:my-2 [&_li]:my-1 first:[&_p]:mt-0 last:[&_p]:mb-0 ${msg.streaming ? "min-h-[1.5rem]" : ""}`}>
+              <div
+                className={`prose prose-invert prose-base max-w-none [&_p]:leading-7 [&_p]:my-2 [&_li]:my-1 first:[&_p]:mt-0 last:[&_p]:mb-0 ${msg.streaming ? "min-h-[1.5rem]" : ""}`}
+              >
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
                   rehypePlugins={[rehypeHighlight]}
@@ -247,6 +276,19 @@ export const MessageBubble = memo(function MessageBubble({
                         <CodeBlock className={className} {...props}>
                           {children}
                         </CodeBlock>
+                      );
+                    },
+                    img({ src, alt, ...props }) {
+                      return (
+                        <img
+                          src={src}
+                          alt={alt || "图片"}
+                          className="max-w-full rounded-lg my-2 cursor-pointer hover:opacity-90 transition-opacity"
+                          className="max-w-full rounded-lg my-2 cursor-zoom-in hover:opacity-90 transition-opacity"
+                          onClick={() => src && setPreviewImage(src)}
+                          loading="lazy"
+                          {...props}
+                        />
                       );
                     },
                   }}
@@ -271,13 +313,22 @@ export const MessageBubble = memo(function MessageBubble({
                   e.target.style.height = e.target.scrollHeight + "px";
                 }}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleEditSubmit(); }
-                  if (e.key === "Escape") { setEditing(false); setEditText(msg.content); }
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    handleEditSubmit();
+                  }
+                  if (e.key === "Escape") {
+                    setEditing(false);
+                    setEditText(msg.content);
+                  }
                 }}
               />
               <div className="flex justify-end gap-1.5">
                 <button
-                  onClick={() => { setEditing(false); setEditText(msg.content); }}
+                  onClick={() => {
+                    setEditing(false);
+                    setEditText(msg.content);
+                  }}
                   className="px-2.5 py-1 text-[11px] rounded-md text-white/70 hover:text-white hover:bg-white/10 transition-colors"
                 >
                   取消
@@ -292,8 +343,26 @@ export const MessageBubble = memo(function MessageBubble({
               </div>
             </div>
           ) : (
-            <div className="leading-7 whitespace-pre-wrap">
-              <HighlightText text={msg.content} query={searchQuery} />
+            <div>
+              {/* 用户消息图片 */}
+              {msg.images && msg.images.length > 0 && (
+                <div className="flex gap-1.5 flex-wrap mb-1.5">
+                  {msg.images.map((imgPath, i) => (
+                    <img
+                      key={i}
+                      src={`mtplugin://localhost${imgPath}`}
+                      alt={`图片 ${i + 1}`}
+                      className="max-w-[200px] max-h-[200px] object-cover rounded-lg cursor-zoom-in hover:opacity-90 transition-opacity"
+                      onClick={() =>
+                        setPreviewImage(`mtplugin://localhost${imgPath}`)
+                      }
+                    />
+                  ))}
+                </div>
+              )}
+              <div className="leading-7 whitespace-pre-wrap">
+                <HighlightText text={msg.content} query={searchQuery} />
+              </div>
             </div>
           )}
         </div>
@@ -305,8 +374,35 @@ export const MessageBubble = memo(function MessageBubble({
           msg={msg}
           isUser={isUser}
           isLast={isLastAssistant}
-          onEdit={isUser ? () => { setEditing(true); setEditText(msg.content); } : undefined}
+          onEdit={
+            isUser
+              ? () => {
+                  setEditing(true);
+                  setEditText(msg.content);
+                }
+              : undefined
+          }
         />
+      )}
+
+      {/* 图片大图预览 */}
+      {previewImage && (
+        <div
+          className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 backdrop-blur-sm cursor-zoom-out animate-in fade-in duration-200"
+          onClick={() => setPreviewImage(null)}
+        >
+          <img
+            src={previewImage}
+            alt="预览大图"
+            className="max-w-[90vw] max-h-[90vh] object-contain rounded-lg shadow-2xl animate-in zoom-in-95 duration-200"
+          />
+          <button
+            className="absolute top-6 right-6 p-2 rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors shadow-lg"
+            onClick={() => setPreviewImage(null)}
+          >
+            <X className="w-6 h-6" />
+          </button>
+        </div>
       )}
     </div>
   );

@@ -2,7 +2,12 @@ import { useState, useRef, useCallback, useEffect } from "react";
 
 interface ScreenshotOverlayProps {
   imageSrc: string;
-  onConfirm: (region: { x: number; y: number; width: number; height: number }) => void;
+  onConfirm: (region: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }) => void;
   onCancel: () => void;
 }
 
@@ -10,7 +15,11 @@ interface ScreenshotOverlayProps {
  * 全屏截图选区覆盖层
  * 在全屏截图上绘制选区矩形，用户框选后确认裁剪区域
  */
-export function ScreenshotOverlay({ imageSrc, onConfirm, onCancel }: ScreenshotOverlayProps) {
+export function ScreenshotOverlay({
+  imageSrc,
+  onConfirm,
+  onCancel,
+}: ScreenshotOverlayProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [startPos, setStartPos] = useState({ x: 0, y: 0 });
@@ -114,9 +123,18 @@ export function ScreenshotOverlay({ imageSrc, onConfirm, onCancel }: ScreenshotO
     // 提示文字
     if (!isDrawing && !hasSelection) {
       ctx.font = "14px system-ui, sans-serif";
-      ctx.fillStyle = "rgba(255, 255, 255, 0.7)";
+      ctx.fillStyle = "rgba(255, 255, 255, 1.0)";
+      ctx.shadowColor = "rgba(0, 0, 0, 0.8)";
+      ctx.shadowBlur = 4;
       ctx.textAlign = "center";
-      ctx.fillText("拖拽选择截图区域 · ESC 取消 · Shift 正方形", canvas.width / 2, canvas.height / 2);
+      ctx.fillText(
+        "拖拽选择截图区域 · ESC 取消 · Shift 正方形",
+        canvas.width / 2,
+        canvas.height / 2,
+      );
+      // Reset shadow
+      ctx.shadowColor = "transparent";
+      ctx.shadowBlur = 0;
     }
   }, [isDrawing, hasSelection, getSelectionRect]);
 
@@ -160,7 +178,10 @@ export function ScreenshotOverlay({ imageSrc, onConfirm, onCancel }: ScreenshotO
   };
 
   return (
-    <div className="fixed inset-0 z-[9999] cursor-crosshair" style={{ background: "transparent" }}>
+    <div
+      className="fixed inset-0 z-[9999] cursor-crosshair"
+      style={{ background: "transparent" }}
+    >
       <canvas
         ref={canvasRef}
         className="w-full h-full"
@@ -174,7 +195,10 @@ export function ScreenshotOverlay({ imageSrc, onConfirm, onCancel }: ScreenshotO
         <div
           className="absolute flex gap-2"
           style={{
-            left: Math.min(startPos.x, currentPos.x) + Math.abs(currentPos.x - startPos.x) - 100,
+            left:
+              Math.min(startPos.x, currentPos.x) +
+              Math.abs(currentPos.x - startPos.x) -
+              100,
             top: Math.max(startPos.y, currentPos.y) + 8,
           }}
         >

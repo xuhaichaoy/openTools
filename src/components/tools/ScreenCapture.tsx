@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -24,13 +24,19 @@ import {
   Circle,
 } from "lucide-react";
 import { useDragWindow } from "@/hooks/useDragWindow";
+import { RecorderFloat } from "./RecorderFloat";
 
 interface ScreenCaptureProps {
   onBack: () => void;
 }
 
 type Mode = "screenshot" | "long-screenshot" | "recording";
-type CaptureStep = "idle" | "downloading" | "selecting" | "capturing" | "preview";
+type CaptureStep =
+  | "idle"
+  | "downloading"
+  | "selecting"
+  | "capturing"
+  | "preview";
 
 interface MonitorInfo {
   id: number;
@@ -79,10 +85,71 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
   const [recordFps, setRecordFps] = useState(15);
   const [isRecording, setIsRecording] = useState(false);
   const [recordDuration, setRecordDuration] = useState(0);
+  const recordTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // 检查组件状态
   useEffect(() => {
     checkStatus();
+  }, []);
+
+  // 预创建隐藏的截图窗口（参考 eSearch 预创建 clip 窗口的做法）
+  // 用户点击区域截图时无需再创建窗口，直接发送数据并显示
+  useEffect(() => {
+    invoke("init_screenshot_window").catch(() => {});
+  }, []);
+
+  // 监听 helper 事件（录屏完成等）
+  useEffect(() => {
+    const unlisten = listen<{
+      event?: string;
+      data?: { output_path?: string; duration_secs?: number };
+    }>("screen-capture-event", (e) => {
+      const payload = e.payload;
+      if (payload?.event === "recorder_done" && payload.data?.output_path) {
+        if (recordTimerRef.current) {
+          clearInterval(recordTimerRef.current);
+          recordTimerRef.current = null;
+        }
+        setIsRecording(false);
+        setResultPath(payload.data.output_path);
+        setStep("preview");
+      }
+      if (
+        payload?.event === "recorder_status" &&
+        payload.data?.duration_secs != null
+      ) {
+        setRecordDuration(Math.floor(payload.data.duration_secs));
+      }
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
+
+  // 监听区域截图完成事件（从截图选区窗口返回）
+  useEffect(() => {
+    const unlisten = listen<{ path?: string }>("capture-done", (e) => {
+      if (e.payload?.path) {
+        setResultPath(e.payload.path);
+        setStep("preview");
+      }
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
+
+  // Debug: 监听 screenshot-data 事件
+  useEffect(() => {
+    const unlisten = listen("screenshot-data", (e) => {
+      console.log(
+        "主窗口收到 screenshot-data 事件 (虽然不应该由主窗口处理):",
+        e,
+      );
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
   }, []);
 
   const checkStatus = async () => {
@@ -126,16 +193,19 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
   };
 
   // 调用 helper
-  const callHelper = async (method: string, params: Record<string, unknown> = {}) => {
+  const callHelper = async (
+    method: string,
+    params: Record<string, unknown> = {},
+  ) => {
     return await invoke<unknown>("screen_capture_call", { method, params });
   };
 
   // 加载显示器列表
   const loadMonitors = async () => {
     try {
-      const list = await callHelper("list_monitors") as MonitorInfo[];
+      const list = (await callHelper("list_monitors")) as MonitorInfo[];
       setMonitors(list);
-      const primary = list.find(m => m.is_primary);
+      const primary = list.find((m) => m.is_primary);
       if (primary) setSelectedMonitor(primary.id);
     } catch (e) {
       setError(String(e));
@@ -145,10 +215,19 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
   // 加载窗口列表
   const loadWindows = async () => {
     try {
-      const list = await callHelper("list_windows") as WindowInfo[];
+      // 优先尝试使用 Native Xcap (修复 helper 拼接 bug)
+      // 如果 backend 未实现 list_windows_xcap，会抛错，catch 中回退到 helper (或者直接报错)
+      // 由于我们刚刚添加了 backend 命令，这里直接使用
+      const list = await invoke<WindowInfo[]>("list_windows_xcap");
       setWindows(list);
     } catch (e) {
-      setError(String(e));
+      console.warn("Native list_windows_xcap failed, trying helper...", e);
+      try {
+        const list = (await callHelper("list_windows")) as WindowInfo[];
+        setWindows(list);
+      } catch (e2) {
+        setError(String(e2));
+      }
     }
   };
 
@@ -162,19 +241,40 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
     }
   }, [status?.helper_installed, mode]);
 
-  // 区域截图
+  // 全屏截图（先隐藏窗口再截，避免截到弹窗）
   const handleScreenshot = async () => {
     setStep("capturing");
     setError(null);
     try {
-      const result = await callHelper("capture_fullscreen", {
-        monitor_id: selectedMonitor,
-      }) as { path: string };
-      setResultPath(result.path);
-      setStep("preview");
+      await invoke("hide_window");
+      await new Promise((r) => setTimeout(r, 500));
+      try {
+        const result = (await callHelper("capture_fullscreen", {
+          monitor_id: selectedMonitor,
+        })) as { path: string };
+        setResultPath(result.path);
+        setStep("preview");
+      } finally {
+        await invoke("show_window_cmd");
+      }
     } catch (e) {
       setError(String(e));
       setStep("idle");
+      await invoke("show_window_cmd").catch(() => {});
+    }
+  };
+
+  // 区域截图：截取全屏 → 打开截图选区窗口，在静态截图上框选（微信/钉钉方案）
+  const handleRegionScreenshot = async () => {
+    console.log("开始区域截图流程...");
+    setError(null);
+    try {
+      console.log("调用 backend start_capture command...");
+      const res = await invoke("start_capture", { monitorId: selectedMonitor });
+      console.log("start_capture 返回成功:", res);
+    } catch (e) {
+      console.error("start_capture 失败:", e);
+      setError(String(e));
     }
   };
 
@@ -183,14 +283,24 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
     setStep("capturing");
     setError(null);
     try {
-      const result = await callHelper("capture_window", {
-        window_id: windowId,
-      }) as { path: string };
-      setResultPath(result.path);
+      // 尝试 Native Capture
+      const path = await invoke<string>("capture_window_xcap_by_id", {
+        windowId,
+      });
+      setResultPath(path);
       setStep("preview");
     } catch (e) {
-      setError(String(e));
-      setStep("idle");
+      console.warn("Native capture failed, trying helper...", e);
+      try {
+        const result = (await callHelper("capture_window", {
+          window_id: windowId,
+        })) as { path: string };
+        setResultPath(result.path);
+        setStep("preview");
+      } catch (e2) {
+        setError(String(e2));
+        setStep("idle");
+      }
     }
   };
 
@@ -199,15 +309,24 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
     setStep("capturing");
     setError(null);
     try {
-      const result = await callHelper("scroll_capture", {
+      const result = (await callHelper("scroll_capture", {
         window_id: windowId,
         max_scrolls: 50,
         scroll_delay_ms: 400,
-      }) as { path: string };
+      })) as { path: string };
       setResultPath(result.path);
       setStep("preview");
     } catch (e) {
-      setError(String(e));
+      const msg = String(e);
+      if (
+        /permission|模拟|输入模拟|simulate|accessibility|辅助功能/i.test(msg)
+      ) {
+        setError(
+          "长截图需要「辅助功能」权限：系统设置 → 隐私与安全性 → 辅助功能 → 添加本应用（mTools）后重试。",
+        );
+      } else {
+        setError(msg);
+      }
       setStep("idle");
     }
   };
@@ -235,7 +354,7 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
     }
   };
 
-  // 开始录制
+  // 开始录制（完成事件由 screen-capture-event 统一处理）
   const handleStartRecording = async () => {
     if (recordFormat === "mp4" && !status?.ffmpeg_installed) {
       handleDownloadFfmpeg();
@@ -244,6 +363,10 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
     setIsRecording(true);
     setRecordDuration(0);
     setError(null);
+    if (recordTimerRef.current) {
+      clearInterval(recordTimerRef.current);
+      recordTimerRef.current = null;
+    }
     try {
       await callHelper("recorder_start", {
         target: { type: "fullscreen", monitor_id: selectedMonitor },
@@ -251,18 +374,9 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
         format: recordFormat,
         max_width: recordFormat === "gif" ? 640 : undefined,
       });
-      // 开始计时
-      const timer = setInterval(() => {
-        setRecordDuration(d => d + 1);
+      recordTimerRef.current = setInterval(() => {
+        setRecordDuration((d) => d + 1);
       }, 1000);
-      // 监听录制完成
-      const unlisten = await listen<{ output_path: string }>("recorder_done", (e) => {
-        clearInterval(timer);
-        setIsRecording(false);
-        setResultPath(e.payload.output_path);
-        setStep("preview");
-        unlisten();
-      });
     } catch (e) {
       setError(String(e));
       setIsRecording(false);
@@ -289,9 +403,12 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
           <div className="w-16 h-16 rounded-2xl bg-blue-500/10 flex items-center justify-center">
             <Camera className="w-8 h-8 text-blue-400" />
           </div>
-          <h3 className="text-base font-medium text-[var(--color-text)]">截图录屏工具</h3>
+          <h3 className="text-base font-medium text-[var(--color-text)]">
+            截图录屏工具
+          </h3>
           <p className="text-xs text-[var(--color-text-secondary)] text-center max-w-[280px]">
-            支持区域截图、滚动长截图、屏幕录制（GIF/MP4），导出 PNG/JPEG/PDF 格式
+            支持区域截图、滚动长截图、屏幕录制（GIF/MP4），导出 PNG/JPEG/PDF
+            格式
           </p>
           <div className="flex flex-col items-center gap-2 mt-2">
             {downloading ? (
@@ -308,9 +425,7 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
                 下载组件（约 15MB）
               </button>
             )}
-            {error && (
-              <p className="text-xs text-red-400 mt-1">{error}</p>
-            )}
+            {error && <p className="text-xs text-red-400 mt-1">{error}</p>}
           </div>
           <div className="mt-4 text-[10px] text-[var(--color-text-secondary)] space-y-1">
             <p>• 首次使用需下载截图录屏引擎</p>
@@ -326,16 +441,29 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
     <div className="flex flex-col h-full bg-[var(--color-bg)]">
       <Header onBack={onBack} onMouseDown={onMouseDown} />
 
+      {/* 录制浮层 */}
+      {isRecording && (
+        <RecorderFloat
+          format={recordFormat.toUpperCase()}
+          onStopped={() => {}}
+        />
+      )}
+
       {/* 模式 Tab */}
       <div className="flex border-b border-[var(--color-border)]">
-        {([
+        {[
           { key: "screenshot" as Mode, icon: Camera, label: "截图" },
           { key: "long-screenshot" as Mode, icon: ScrollText, label: "长截图" },
           { key: "recording" as Mode, icon: Video, label: "录屏" },
-        ]).map(tab => (
+        ].map((tab) => (
           <button
             key={tab.key}
-            onClick={() => { setMode(tab.key); setStep("idle"); setResultPath(null); setError(null); }}
+            onClick={() => {
+              setMode(tab.key);
+              setStep("idle");
+              setResultPath(null);
+              setError(null);
+            }}
             className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-medium border-b-2 transition-colors ${
               mode === tab.key
                 ? "border-blue-500 text-blue-400"
@@ -354,7 +482,10 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
           <div className="mb-3 p-2 rounded-lg bg-red-500/10 border border-red-500/20 text-xs text-red-400 flex items-center gap-2">
             <X className="w-3.5 h-3.5 flex-shrink-0" />
             {error}
-            <button onClick={() => setError(null)} className="ml-auto text-red-300 hover:text-red-200">
+            <button
+              onClick={() => setError(null)}
+              className="ml-auto text-red-300 hover:text-red-200"
+            >
               <X className="w-3 h-3" />
             </button>
           </div>
@@ -365,7 +496,10 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
             path={resultPath}
             format={mode === "recording" ? recordFormat : undefined}
             onSave={handleSave}
-            onBack={() => { setStep("idle"); setResultPath(null); }}
+            onBack={() => {
+              setStep("idle");
+              setResultPath(null);
+            }}
           />
         ) : step === "capturing" ? (
           <div className="flex flex-col items-center justify-center py-12 gap-3">
@@ -377,28 +511,33 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
         ) : (
           <>
             {/* 显示器选择 */}
-            {monitors.length > 1 && (mode === "screenshot" || mode === "recording") && (
-              <div className="mb-3">
-                <label className="text-[10px] text-[var(--color-text-secondary)] mb-1.5 block">显示器</label>
-                <div className="flex gap-2">
-                  {monitors.map(m => (
-                    <button
-                      key={m.id}
-                      onClick={() => setSelectedMonitor(m.id)}
-                      className={`flex-1 p-2 rounded-lg border text-xs text-center transition-colors ${
-                        selectedMonitor === m.id
-                          ? "border-blue-500 bg-blue-500/10 text-blue-400"
-                          : "border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]"
-                      }`}
-                    >
-                      <Monitor className="w-4 h-4 mx-auto mb-1" />
-                      <div>{m.name}</div>
-                      <div className="text-[10px] opacity-60">{m.width}x{m.height}</div>
-                    </button>
-                  ))}
+            {monitors.length > 1 &&
+              (mode === "screenshot" || mode === "recording") && (
+                <div className="mb-3">
+                  <label className="text-[10px] text-[var(--color-text-secondary)] mb-1.5 block">
+                    显示器
+                  </label>
+                  <div className="flex gap-2">
+                    {monitors.map((m) => (
+                      <button
+                        key={m.id}
+                        onClick={() => setSelectedMonitor(m.id)}
+                        className={`flex-1 p-2 rounded-lg border text-xs text-center transition-colors ${
+                          selectedMonitor === m.id
+                            ? "border-blue-500 bg-blue-500/10 text-blue-400"
+                            : "border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]"
+                        }`}
+                      >
+                        <Monitor className="w-4 h-4 mx-auto mb-1" />
+                        <div>{m.name}</div>
+                        <div className="text-[10px] opacity-60">
+                          {m.width}x{m.height}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
                 </div>
-              </div>
-            )}
+              )}
 
             {/* 截图模式 */}
             {mode === "screenshot" && (
@@ -411,21 +550,50 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
                     <Monitor className="w-5 h-5 text-blue-400" />
                   </div>
                   <div className="text-left">
-                    <div className="text-sm font-medium text-[var(--color-text)]">全屏截图</div>
-                    <div className="text-[10px] text-[var(--color-text-secondary)]">截取整个屏幕</div>
+                    <div className="text-sm font-medium text-[var(--color-text)]">
+                      全屏截图
+                    </div>
+                    <div className="text-[10px] text-[var(--color-text-secondary)]">
+                      截取整个屏幕（会先隐藏本窗口）
+                    </div>
+                  </div>
+                </button>
+
+                <button
+                  onClick={handleRegionScreenshot}
+                  className="w-full flex items-center gap-3 p-3 rounded-xl bg-[var(--color-bg-secondary)] hover:bg-[var(--color-bg-hover)] border border-[var(--color-border)] transition-colors"
+                >
+                  <div className="w-10 h-10 rounded-xl bg-green-500/10 flex items-center justify-center">
+                    <Camera className="w-5 h-5 text-green-400" />
+                  </div>
+                  <div className="text-left">
+                    <div className="text-sm font-medium text-[var(--color-text)]">
+                      区域截图
+                    </div>
+                    <div className="text-[10px] text-[var(--color-text-secondary)]">
+                      在桌面上直接框选区域截图
+                    </div>
                   </div>
                 </button>
 
                 {/* 窗口截图列表 */}
                 <div>
                   <div className="flex items-center justify-between mb-2">
-                    <label className="text-[10px] text-[var(--color-text-secondary)]">窗口截图</label>
-                    <button onClick={loadWindows} className="text-[10px] text-blue-400 hover:text-blue-300 flex items-center gap-1">
+                    <label className="text-[10px] text-[var(--color-text-secondary)]">
+                      窗口截图
+                    </label>
+                    <button
+                      onClick={loadWindows}
+                      className="text-[10px] text-blue-400 hover:text-blue-300 flex items-center gap-1"
+                    >
                       <RefreshCw className="w-3 h-3" />
                       刷新
                     </button>
                   </div>
-                  <WindowList windows={windows} onSelect={handleWindowCapture} />
+                  <WindowList
+                    windows={windows}
+                    onSelect={handleWindowCapture}
+                  />
                 </div>
               </div>
             )}
@@ -437,13 +605,22 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
                   选择要滚动截取的窗口，工具将自动滚动并拼接为一张长图
                 </p>
                 <div className="flex items-center justify-between mb-2">
-                  <label className="text-[10px] text-[var(--color-text-secondary)]">选择窗口</label>
-                  <button onClick={loadWindows} className="text-[10px] text-blue-400 hover:text-blue-300 flex items-center gap-1">
+                  <label className="text-[10px] text-[var(--color-text-secondary)]">
+                    选择窗口
+                  </label>
+                  <button
+                    onClick={loadWindows}
+                    className="text-[10px] text-blue-400 hover:text-blue-300 flex items-center gap-1"
+                  >
                     <RefreshCw className="w-3 h-3" />
                     刷新
                   </button>
                 </div>
-                <WindowList windows={windows} onSelect={handleScrollCapture} actionLabel="长截图" />
+                <WindowList
+                  windows={windows}
+                  onSelect={handleScrollCapture}
+                  actionLabel="长截图"
+                />
               </div>
             )}
 
@@ -452,7 +629,9 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
               <div className="space-y-3">
                 {/* 格式选择 */}
                 <div>
-                  <label className="text-[10px] text-[var(--color-text-secondary)] mb-1.5 block">录制格式</label>
+                  <label className="text-[10px] text-[var(--color-text-secondary)] mb-1.5 block">
+                    录制格式
+                  </label>
                   <div className="flex gap-2">
                     <button
                       onClick={() => setRecordFormat("gif")}
@@ -463,7 +642,9 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
                       }`}
                     >
                       <div className="font-medium">GIF</div>
-                      <div className="text-[10px] opacity-60 mt-0.5">适合短录制，无需额外下载</div>
+                      <div className="text-[10px] opacity-60 mt-0.5">
+                        适合短录制，无需额外下载
+                      </div>
                     </button>
                     <button
                       onClick={() => setRecordFormat("mp4")}
@@ -475,7 +656,9 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
                     >
                       <div className="font-medium">MP4</div>
                       <div className="text-[10px] opacity-60 mt-0.5">
-                        {status.ffmpeg_installed ? "H.264 高质量" : "需下载 ffmpeg (70MB)"}
+                        {status.ffmpeg_installed
+                          ? "H.264 高质量"
+                          : "需下载 ffmpeg (70MB)"}
                       </div>
                     </button>
                   </div>
@@ -483,9 +666,11 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
 
                 {/* FPS */}
                 <div>
-                  <label className="text-[10px] text-[var(--color-text-secondary)] mb-1.5 block">帧率</label>
+                  <label className="text-[10px] text-[var(--color-text-secondary)] mb-1.5 block">
+                    帧率
+                  </label>
                   <div className="flex gap-2">
-                    {[10, 15, 24, 30].map(fps => (
+                    {[10, 15, 24, 30].map((fps) => (
                       <button
                         key={fps}
                         onClick={() => setRecordFps(fps)}
@@ -506,8 +691,12 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
                   <div className="flex items-center gap-3 p-3 rounded-xl bg-red-500/10 border border-red-500/20">
                     <Circle className="w-4 h-4 text-red-400 animate-pulse" />
                     <div className="flex-1">
-                      <div className="text-sm font-medium text-red-400">正在录制</div>
-                      <div className="text-[10px] text-red-300">{formatDuration(recordDuration)}</div>
+                      <div className="text-sm font-medium text-red-400">
+                        正在录制
+                      </div>
+                      <div className="text-[10px] text-red-300">
+                        {formatDuration(recordDuration)}
+                      </div>
                     </div>
                     <button
                       onClick={handleStopRecording}
@@ -536,13 +725,22 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
 
 // ===== 子组件 =====
 
-function Header({ onBack, onMouseDown }: { onBack: () => void; onMouseDown: (e: React.MouseEvent) => void }) {
+function Header({
+  onBack,
+  onMouseDown,
+}: {
+  onBack: () => void;
+  onMouseDown: (e: React.MouseEvent) => void;
+}) {
   return (
     <div
       className="flex items-center gap-2 px-4 py-3 border-b border-[var(--color-border)] cursor-grab active:cursor-grabbing"
       onMouseDown={onMouseDown}
     >
-      <button onClick={onBack} className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]">
+      <button
+        onClick={onBack}
+        className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]"
+      >
         <ArrowLeft className="w-4 h-4" />
       </button>
       <h2 className="text-sm font-medium text-[var(--color-text)]">截图录屏</h2>
@@ -570,7 +768,7 @@ function WindowList({
 
   return (
     <div className="space-y-1.5 max-h-[280px] overflow-y-auto">
-      {windows.map(w => (
+      {windows.map((w) => (
         <button
           key={w.id}
           onClick={() => onSelect(w.id)}
@@ -587,8 +785,12 @@ function WindowList({
             </div>
           )}
           <div className="flex-1 text-left min-w-0">
-            <div className="text-xs font-medium text-[var(--color-text)] truncate">{w.title || w.app_name}</div>
-            <div className="text-[10px] text-[var(--color-text-secondary)]">{w.app_name} • {w.width}x{w.height}</div>
+            <div className="text-xs font-medium text-[var(--color-text)] truncate">
+              {w.title || w.app_name}
+            </div>
+            <div className="text-[10px] text-[var(--color-text-secondary)]">
+              {w.app_name} • {w.width}x{w.height}
+            </div>
           </div>
           <span className="text-[10px] text-blue-400 opacity-0 group-hover:opacity-100 transition-opacity">
             {actionLabel} →
@@ -623,7 +825,7 @@ function PreviewPanel({
           </div>
         ) : (
           <img
-            src={`mtplugin://localhost${path}`}
+            src={`mtplugin://localhost${path}?t=${new Date().getTime()}`}
             className="w-full"
             alt="截图预览"
           />

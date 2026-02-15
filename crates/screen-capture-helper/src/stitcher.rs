@@ -1,4 +1,4 @@
-use image::{GenericImageView, RgbaImage};
+use image::RgbaImage;
 
 /// 长截图拼接器
 pub struct Stitcher {

@@ -63,6 +63,7 @@ pub fn run() {
                 Some("png") => "image/png",
                 Some("jpg") | Some("jpeg") => "image/jpeg",
                 Some("gif") => "image/gif",
+                Some("bmp") => "image/bmp",
                 Some("svg") => "image/svg+xml",
                 Some("ico") => "image/x-icon",
                 Some("woff") => "font/woff",
@@ -76,6 +77,9 @@ pub fn run() {
                 .status(200)
                 .header("Content-Type", mime)
                 .header("Access-Control-Allow-Origin", "*")
+                // 禁止缓存（截图文件每次都不同，防止 webview 显示旧图）
+                .header("Cache-Control", "no-store, no-cache, must-revalidate")
+                .header("Pragma", "no-cache")
                 .body(content)
                 .unwrap()
         })
@@ -86,13 +90,16 @@ pub fn run() {
             commands::ai::ai_set_config,
             commands::ai::ai_confirm_tool,
             commands::ai::ai_stop_stream,
+            commands::ai::ai_save_chat_image,
             commands::window::toggle_main_window,
             commands::window::resize_window,
             commands::window::hide_window,
+            commands::window::show_window_cmd,
             commands::window::start_drag,
             commands::window::stop_drag,
             commands::system::run_python_script,
             commands::system::get_python_path,
+            commands::system::read_file_base64,
             commands::system::preview_file,
             commands::system::open_url,
             commands::system::open_file_location,
@@ -131,6 +138,15 @@ pub fn run() {
             commands::screen_capture::screen_capture_check,
             commands::screen_capture::screen_capture_download,
             commands::screen_capture::screen_capture_call,
+            commands::screen_capture::init_screenshot_window,
+            commands::screen_capture::screenshot_window_ready,
+            commands::screen_capture::show_screenshot_window,
+            commands::screen_capture::start_capture,
+            commands::screen_capture::finish_capture,
+            commands::screen_capture::cancel_capture,
+            commands::screen_capture::capture_all_windows,
+            commands::screen_capture::list_windows_xcap,
+            commands::screen_capture::capture_window_xcap_by_id,
         ])
         .setup(|app| {
             // 失焦隐藏的抑制标志（显示窗口后短时间内不自动隐藏）
