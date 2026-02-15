@@ -189,16 +189,21 @@ fn chunk_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
 
 /// 调用 Embedding API 获取向量
 async fn get_embeddings(app: &AppHandle, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
-    // 从 AI 配置中读取 API 信息
+    // 从 AI 配置中读取 API 信息（与 ai.rs 统一使用 config.json -> ai_config）
     use tauri_plugin_store::StoreExt;
-    let store = app.store("ai-config.json").map_err(|e| e.to_string())?;
+    let store = app.store("config.json").map_err(|e| e.to_string())?;
 
-    let base_url = store.get("base_url")
-        .and_then(|v| v.as_str().map(|s| s.to_string()))
-        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-    let api_key = store.get("api_key")
-        .and_then(|v| v.as_str().map(|s| s.to_string()))
-        .unwrap_or_default();
+    let ai_config = store.get("ai_config");
+    let base_url = ai_config.as_ref()
+        .and_then(|v| v.get("base_url"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("https://api.openai.com/v1")
+        .to_string();
+    let api_key = ai_config.as_ref()
+        .and_then(|v| v.get("api_key"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
 
     if api_key.is_empty() {
         return Err("请先配置 AI API Key".to_string());
@@ -558,9 +563,27 @@ pub async fn rag_search(
     let query_embeddings = get_embeddings(&app, &[query]).await?;
     let query_vec = query_embeddings.into_iter().next().ok_or("获取查询向量失败")?;
 
-    // 遍历所有文档的 chunks 和 vectors
+    // 遍历所有文档的 chunks 和 vectors，使用最小堆维护 top_k 高分结果
+    // 避免全量排序（O(n log n)），改为 O(n log k) 其中 k = top_k
     let docs = load_docs_index(&app);
-    let mut results: Vec<RetrievalResult> = Vec::new();
+    use std::collections::BinaryHeap;
+    use std::cmp::Reverse;
+
+    // 包装 f32 以支持 Ord（NaN 视为最小值）
+    #[derive(PartialEq, Clone, Copy)]
+    struct OrdF32(f32);
+    impl Eq for OrdF32 {}
+    impl PartialOrd for OrdF32 {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
+    }
+    impl Ord for OrdF32 {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            self.0.partial_cmp(&other.0).unwrap_or(std::cmp::Ordering::Equal)
+        }
+    }
+
+    let mut heap: BinaryHeap<Reverse<(OrdF32, usize)>> = BinaryHeap::new();
+    let mut all_candidates: Vec<RetrievalResult> = Vec::new();
 
     for doc in &docs {
         if doc.status != "indexed" {
@@ -574,18 +597,30 @@ pub async fn rag_search(
             if i < vectors.len() {
                 let score = cosine_similarity(&query_vec, &vectors[i]);
                 if score >= threshold {
-                    results.push(RetrievalResult {
+                    let idx = all_candidates.len();
+                    all_candidates.push(RetrievalResult {
                         chunk: chunk.clone(),
                         score,
                     });
+                    if heap.len() < top_k {
+                        heap.push(Reverse((OrdF32(score), idx)));
+                    } else if let Some(&Reverse((min_score, _))) = heap.peek() {
+                        if OrdF32(score) > min_score {
+                            heap.pop();
+                            heap.push(Reverse((OrdF32(score), idx)));
+                        }
+                    }
                 }
             }
         }
     }
 
-    // 按分数降序排序并截取 top_k
+    // 从堆中提取结果并按分数降序排列
+    let mut results: Vec<RetrievalResult> = heap
+        .into_iter()
+        .map(|Reverse((_, idx))| all_candidates[idx].clone())
+        .collect();
     results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-    results.truncate(top_k);
 
     Ok(results)
 }

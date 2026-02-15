@@ -149,6 +149,33 @@ pub async fn load_chat_history(app: tauri::AppHandle) -> Result<String, String> 
     Ok(val)
 }
 
+/// 保存 Agent 会话历史
+#[tauri::command]
+pub async fn save_agent_history(
+    app: tauri::AppHandle,
+    sessions: String,
+) -> Result<(), String> {
+    use tauri_plugin_store::StoreExt;
+    let store = app.store("agent-history.json").map_err(|e| e.to_string())?;
+    store.set(
+        "sessions",
+        serde_json::Value::String(sessions),
+    );
+    Ok(())
+}
+
+/// 加载 Agent 会话历史
+#[tauri::command]
+pub async fn load_agent_history(app: tauri::AppHandle) -> Result<String, String> {
+    use tauri_plugin_store::StoreExt;
+    let store = app.store("agent-history.json").map_err(|e| e.to_string())?;
+    let val = store
+        .get("sessions")
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "[]".to_string());
+    Ok(val)
+}
+
 /// 保存通用设置
 #[tauri::command]
 pub async fn save_general_settings(
@@ -239,5 +266,83 @@ pub async fn clean_old_chat_images(app: tauri::AppHandle, days: u64) -> Result<S
         Ok(format!("已清理 {} 张过期图片，释放 {:.2} MB 空间", deleted_count, total_size as f64 / 1024.0 / 1024.0))
     } else {
         Ok("没有需要清理的过期图片".to_string())
+    }
+}
+
+// ── Agent 文件系统 & Shell 工具 ──
+
+/// 读取文本文件
+#[tauri::command]
+pub async fn read_text_file(path: String) -> Result<String, String> {
+    let p = std::path::Path::new(&path);
+    if !p.exists() {
+        return Err(format!("文件不存在: {}", path));
+    }
+    std::fs::read_to_string(p).map_err(|e| format!("读取失败: {}", e))
+}
+
+/// 写入文本文件
+#[tauri::command]
+pub async fn write_text_file(path: String, content: String) -> Result<String, String> {
+    let p = std::path::Path::new(&path);
+    // 自动创建父目录
+    if let Some(parent) = p.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
+        }
+    }
+    std::fs::write(p, &content).map_err(|e| format!("写入失败: {}", e))?;
+    Ok(format!("已写入 {} 字节到 {}", content.len(), path))
+}
+
+/// 列出目录内容
+#[tauri::command]
+pub async fn list_directory(path: String) -> Result<String, String> {
+    let p = std::path::Path::new(&path);
+    if !p.exists() {
+        return Err(format!("目录不存在: {}", path));
+    }
+    if !p.is_dir() {
+        return Err(format!("不是目录: {}", path));
+    }
+
+    let mut entries: Vec<serde_json::Value> = Vec::new();
+    let dir = std::fs::read_dir(p).map_err(|e| format!("读取目录失败: {}", e))?;
+    for entry in dir {
+        if let Ok(entry) = entry {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            entries.push(serde_json::json!({
+                "name": name,
+                "is_dir": is_dir,
+                "size": size,
+            }));
+        }
+    }
+    serde_json::to_string_pretty(&entries).map_err(|e| format!("序列化失败: {}", e))
+}
+
+/// 执行 Shell 命令
+#[tauri::command]
+pub async fn run_shell_command(command: String) -> Result<String, String> {
+    let output = if cfg!(target_os = "windows") {
+        Command::new("cmd").args(["/C", &command]).output()
+    } else {
+        Command::new("sh").args(["-c", &command]).output()
+    };
+
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            let code = out.status.code().unwrap_or(-1);
+            Ok(serde_json::json!({
+                "exit_code": code,
+                "stdout": stdout,
+                "stderr": stderr,
+            }).to_string())
+        }
+        Err(e) => Err(format!("执行失败: {}", e)),
     }
 }

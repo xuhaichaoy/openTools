@@ -4,20 +4,61 @@ import {
   Bot,
   Settings,
   Wrench,
-  Clock,
-  Hash,
   Database,
   Puzzle,
-  BookOpen,
-  Workflow,
   Pipette,
   Camera,
-  LayoutGrid,
+  QrCode,
+  Search,
+  Cloud,
+  FileText,
+  Languages,
+  Workflow,
+  BookOpen,
 } from "lucide-react";
 
-// React.lazy 按需加载各工具组件
-const ChatView = lazy(() =>
-  import("@/components/ai/ChatView").then((m) => ({ default: m.ChatView })),
+import { createElement } from "react";
+
+// ── 壳组件 (懒加载) ──
+const DevToolbox = lazy(() =>
+  import("@/components/tools/DevToolbox").then((m) => ({
+    default: m.DevToolbox,
+  })),
+);
+const NoteHub = lazy(() =>
+  import("@/components/tools/NoteHub").then((m) => ({
+    default: m.NoteHub,
+  })),
+);
+const AICenter = lazy(() =>
+  import("@/components/tools/AICenter").then((m) => ({
+    default: m.AICenter,
+  })),
+);
+
+// ── 独立插件 (懒加载) ──
+const ScreenCapture = lazy(() =>
+  import("@/components/tools/ScreenCapture").then((m) => ({
+    default: m.ScreenCapture,
+  })),
+);
+const ScreenTranslatePlugin = lazy(
+  () => import("@/plugins/builtin/ScreenTranslate/index"),
+);
+const WorkflowList = lazy(() =>
+  import("@/components/workflows/WorkflowList").then((m) => ({
+    default: m.WorkflowList,
+  })),
+);
+const KnowledgeBase = lazy(() =>
+  import("@/components/rag/KnowledgeBase").then((m) => ({
+    default: m.KnowledgeBase,
+  })),
+);
+const ColorPicker = lazy(() =>
+  import("@/components/tools/ColorPicker").then((m) => ({
+    default: m.ColorPicker,
+  })),
 );
 const DataForgeLayout = lazy(() =>
   import("@/components/data-forge/DataForgeLayout").then((m) => ({
@@ -29,62 +70,48 @@ const SettingsPage = lazy(() =>
     default: m.SettingsPage,
   })),
 );
-const JsonFormatter = lazy(() =>
-  import("@/components/tools/JsonFormatter").then((m) => ({
-    default: m.JsonFormatter,
-  })),
-);
-const TimestampConverter = lazy(() =>
-  import("@/components/tools/TimestampConverter").then((m) => ({
-    default: m.TimestampConverter,
-  })),
-);
-const Base64Tool = lazy(() =>
-  import("@/components/tools/Base64Tool").then((m) => ({
-    default: m.Base64Tool,
-  })),
-);
-const ColorPicker = lazy(() =>
-  import("@/components/tools/ColorPicker").then((m) => ({
-    default: m.ColorPicker,
-  })),
-);
-const ScreenCapture = lazy(() =>
-  import("@/components/tools/ScreenCapture").then((m) => ({
-    default: m.ScreenCapture,
-  })),
-);
-const KnowledgeBase = lazy(() =>
-  import("@/components/rag/KnowledgeBase").then((m) => ({
-    default: m.KnowledgeBase,
-  })),
-);
-const WorkflowList = lazy(() =>
-  import("@/components/workflows/WorkflowList").then((m) => ({
-    default: m.WorkflowList,
-  })),
-);
 const PluginMarket = lazy(() =>
   import("@/components/plugins/PluginMarket").then((m) => ({
     default: m.PluginMarket,
   })),
 );
+const QRCodePlugin = lazy(() => import("./QRCode/index"));
+const ImageSearchPlugin = lazy(() => import("./ImageSearch/index"));
+const CloudSyncPlugin = lazy(() => import("./CloudSync/index"));
 
-// ── 所有内置插件定义 ──
-
-import { createElement } from "react";
+// ── 所有内置插件定义（14 个） ──
 
 export const builtinPlugins: MToolsPlugin[] = [
+  // ── 开发工具箱（JSON + 时间戳 + Base64）──
   {
-    id: "json-formatter",
-    name: "JSON",
-    description: "JSON 格式化、校验、压缩",
-    icon: createElement(Hash, { className: "w-6 h-6" }),
+    id: "dev-toolbox",
+    name: "开发工具箱",
+    description: "JSON 格式化、时间戳转换、Base64 编解码",
+    icon: createElement(Wrench, { className: "w-6 h-6" }),
     color: "text-yellow-500 bg-yellow-500/10",
     category: "工具",
-    keywords: ["json", "格式化", "format", "校验", "压缩"],
-    viewId: "json",
-    render: ({ onBack }) => createElement(JsonFormatter, { onBack }),
+    keywords: [
+      "json",
+      "格式化",
+      "format",
+      "校验",
+      "压缩",
+      "时间戳",
+      "timestamp",
+      "unix",
+      "日期",
+      "date",
+      "time",
+      "base64",
+      "编码",
+      "解码",
+      "encode",
+      "decode",
+      "开发",
+      "dev",
+    ],
+    viewId: "dev-toolbox",
+    render: (props) => createElement(DevToolbox, props),
     actions: [
       {
         name: "json_format",
@@ -114,19 +141,6 @@ export const builtinPlugins: MToolsPlugin[] = [
           }
         },
       },
-    ],
-  },
-  {
-    id: "timestamp",
-    name: "时间戳",
-    description: "Unix 时间戳 ⟷ 日期时间",
-    icon: createElement(Clock, { className: "w-6 h-6" }),
-    color: "text-green-500 bg-green-500/10",
-    category: "工具",
-    keywords: ["时间戳", "timestamp", "unix", "日期", "date", "time"],
-    viewId: "timestamp",
-    render: ({ onBack }) => createElement(TimestampConverter, { onBack }),
-    actions: [
       {
         name: "timestamp_now",
         description: "获取当前 Unix 时间戳",
@@ -161,19 +175,6 @@ export const builtinPlugins: MToolsPlugin[] = [
           };
         },
       },
-    ],
-  },
-  {
-    id: "base64",
-    name: "Base64",
-    description: "Base64 编码 / 解码",
-    icon: createElement(Wrench, { className: "w-6 h-6" }),
-    color: "text-blue-500 bg-blue-500/10",
-    category: "工具",
-    keywords: ["base64", "编码", "解码", "encode", "decode"],
-    viewId: "base64",
-    render: ({ onBack }) => createElement(Base64Tool, { onBack }),
-    actions: [
       {
         name: "base64_encode",
         description: "将文本编码为 Base64",
@@ -203,6 +204,236 @@ export const builtinPlugins: MToolsPlugin[] = [
       },
     ],
   },
+
+  // ── 截图（融合工具栏：OCR / 贴图 / 编辑 / 保存 / 复制）──
+  {
+    id: "screen-capture",
+    name: "截图",
+    description: "截图录屏，选区后直接 OCR / 贴图 / 编辑 / 保存 / 复制",
+    icon: createElement(Camera, { className: "w-6 h-6" }),
+    color: "text-sky-500 bg-sky-500/10",
+    category: "工具",
+    keywords: [
+      "截图",
+      "录屏",
+      "screenshot",
+      "capture",
+      "录制",
+      "ocr",
+      "贴图",
+      "pin",
+      "编辑",
+      "保存",
+      "复制",
+    ],
+    viewId: "screen-capture",
+    render: (props) => createElement(ScreenCapture, props),
+    actions: [
+      {
+        name: "take_screenshot",
+        description: "开始区域截图",
+        execute: async () => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          await invoke("start_capture", {});
+          return { info: "截图选区窗口已打开" };
+        },
+      },
+    ],
+  },
+
+  // ── 翻译（独立）──
+  {
+    id: "screen-translate",
+    name: "翻译",
+    description: "屏幕翻译、实时翻译、多语言",
+    icon: createElement(Languages, { className: "w-6 h-6" }),
+    color: "text-teal-500 bg-teal-500/10",
+    category: "工具",
+    keywords: [
+      "翻译",
+      "translate",
+      "屏幕翻译",
+      "实时翻译",
+      "多语言",
+      "language",
+    ],
+    viewId: "screen-translate",
+    render: (props) => createElement(ScreenTranslatePlugin, props),
+  },
+
+  // ── 笔记中心（速记 + AI 笔记 + Markdown 编辑）──
+  {
+    id: "note-hub",
+    name: "笔记中心",
+    description: "速记录入、AI 生成笔记、Markdown 编辑器",
+    icon: createElement(FileText, { className: "w-6 h-6" }),
+    color: "text-lime-500 bg-lime-500/10",
+    category: "工具",
+    keywords: [
+      "笔记",
+      "notes",
+      "markdown",
+      "编辑",
+      "记录",
+      "vditor",
+      "录入",
+      "capture",
+      "速记",
+      "mark",
+      "ai笔记",
+      "笔记生成",
+      "智能笔记",
+      "总结",
+      "note",
+    ],
+    viewId: "note-hub",
+    render: (props) => createElement(NoteHub, props),
+    actions: [
+      {
+        name: "capture_text",
+        description: "快速记录一段文字",
+        parameters: {
+          text: { type: "string", description: "要记录的文字", required: true },
+        },
+        execute: async ({ text }) => {
+          const { createMark } = await import("@/core/database/marks");
+          await createMark("text", text as string);
+          return { success: true, message: "已录入" };
+        },
+      },
+    ],
+  },
+
+  // ── AI 助手（Ask / Agent 双模式）──
+  {
+    id: "ai-center",
+    name: "AI 助手",
+    description: "AI 对话、智能 Agent（支持文件操作和 Shell）",
+    icon: createElement(Bot, { className: "w-6 h-6" }),
+    color: "text-indigo-500 bg-indigo-500/10",
+    category: "AI",
+    keywords: [
+      "ai",
+      "对话",
+      "chat",
+      "助手",
+      "agent",
+      "智能",
+      "react",
+      "自动",
+    ],
+    viewId: "ai-center",
+    render: (props) => createElement(AICenter, props),
+    actions: [
+      {
+        name: "read_file",
+        description: "读取本地文本文件的内容",
+        parameters: {
+          path: {
+            type: "string",
+            description: "文件的绝对路径",
+            required: true,
+          },
+        },
+        execute: async ({ path }) => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          return invoke("read_text_file", { path });
+        },
+      },
+      {
+        name: "write_file",
+        description: "将内容写入本地文本文件",
+        parameters: {
+          path: {
+            type: "string",
+            description: "文件的绝对路径",
+            required: true,
+          },
+          content: {
+            type: "string",
+            description: "要写入的文本内容",
+            required: true,
+          },
+        },
+        execute: async ({ path, content }) => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          return invoke("write_text_file", { path, content });
+        },
+      },
+      {
+        name: "list_dir",
+        description: "列出目录下的文件和文件夹",
+        parameters: {
+          path: {
+            type: "string",
+            description: "目录的绝对路径",
+            required: true,
+          },
+        },
+        execute: async ({ path }) => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          return invoke("list_directory", { path });
+        },
+      },
+      {
+        name: "shell",
+        description: "执行 Shell 命令并返回输出结果",
+        parameters: {
+          command: {
+            type: "string",
+            description: "要执行的 Shell 命令",
+            required: true,
+          },
+        },
+        execute: async ({ command }) => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          return invoke("run_shell_command", { command });
+        },
+      },
+    ],
+  },
+
+  // ── 工作流（独立）──
+  {
+    id: "workflows",
+    name: "工作流",
+    description: "AI 驱动的自动化工作流",
+    icon: createElement(Workflow, { className: "w-6 h-6" }),
+    color: "text-amber-500 bg-amber-500/10",
+    category: "AI",
+    keywords: [
+      "工作流",
+      "workflow",
+      "自动化",
+      "流程",
+      "automation",
+    ],
+    viewId: "workflows",
+    render: (props) => createElement(WorkflowList, props),
+  },
+
+  // ── 知识库（独立）──
+  {
+    id: "knowledge-base",
+    name: "知识库",
+    description: "文档导入、RAG 检索增强",
+    icon: createElement(BookOpen, { className: "w-6 h-6" }),
+    color: "text-emerald-500 bg-emerald-500/10",
+    category: "AI",
+    keywords: [
+      "知识库",
+      "knowledge",
+      "rag",
+      "文档",
+      "检索",
+      "document",
+    ],
+    viewId: "knowledge-base",
+    render: (props) => createElement(KnowledgeBase, props),
+  },
+
+  // ── 其他独立插件 ──
+
   {
     id: "color",
     name: "颜色",
@@ -212,18 +443,18 @@ export const builtinPlugins: MToolsPlugin[] = [
     category: "工具",
     keywords: ["颜色", "color", "取色", "调色板", "hex", "rgb", "hsl"],
     viewId: "color",
-    render: ({ onBack }) => createElement(ColorPicker, { onBack }),
+    render: (props) => createElement(ColorPicker, props),
   },
   {
-    id: "screen-capture",
-    name: "截图录屏",
-    description: "区域截图、滚动长截图、屏幕录制",
-    icon: createElement(Camera, { className: "w-6 h-6" }),
-    color: "text-sky-500 bg-sky-500/10",
+    id: "qr-code",
+    name: "二维码",
+    description: "二维码/条形码识别与生成",
+    icon: createElement(QrCode, { className: "w-6 h-6" }),
+    color: "text-violet-500 bg-violet-500/10",
     category: "工具",
-    keywords: ["截图", "录屏", "screenshot", "capture", "录制"],
-    viewId: "screen-capture",
-    render: ({ onBack }) => createElement(ScreenCapture, { onBack }),
+    keywords: ["二维码", "qrcode", "条形码", "扫码", "生成"],
+    viewId: "qr-code",
+    render: (props) => createElement(QRCodePlugin, props),
   },
   {
     id: "data-forge",
@@ -234,40 +465,18 @@ export const builtinPlugins: MToolsPlugin[] = [
     category: "数据",
     keywords: ["数据", "data", "导入", "导出", "工坊", "forge"],
     viewId: "data-forge",
-    render: ({ onBack }) => createElement(DataForgeLayout, { onBack }),
+    render: (props) => createElement(DataForgeLayout, props),
   },
   {
-    id: "knowledge-base",
-    name: "知识库",
-    description: "本地文档向量检索增强",
-    icon: createElement(BookOpen, { className: "w-6 h-6" }),
-    color: "text-emerald-500 bg-emerald-500/10",
-    category: "AI",
-    keywords: ["知识库", "knowledge", "rag", "文档", "检索"],
-    viewId: "knowledge-base",
-    render: ({ onBack }) => createElement(KnowledgeBase, { onBack }),
-  },
-  {
-    id: "workflows",
-    name: "工作流",
-    description: "多步骤自动化流程",
-    icon: createElement(Workflow, { className: "w-6 h-6" }),
-    color: "text-teal-500 bg-teal-500/10",
-    category: "AI",
-    keywords: ["工作流", "workflow", "自动化", "流程"],
-    viewId: "workflows",
-    render: ({ onBack }) => createElement(WorkflowList, { onBack }),
-  },
-  {
-    id: "plugins",
-    name: "插件",
-    description: "兼容 uTools / Rubick 格式",
-    icon: createElement(Puzzle, { className: "w-6 h-6" }),
-    color: "text-orange-500 bg-orange-500/10",
-    category: "系统",
-    keywords: ["插件", "plugin", "utools", "rubick"],
-    viewId: "plugins",
-    render: ({ onBack }) => createElement(PluginMarket, { onBack }),
+    id: "image-search",
+    name: "以图搜图",
+    description: "反向图片搜索 + AI 图片理解",
+    icon: createElement(Search, { className: "w-6 h-6" }),
+    color: "text-indigo-500 bg-indigo-500/10",
+    category: "工具",
+    keywords: ["以图搜图", "图片搜索", "image search", "识图", "搜图"],
+    viewId: "image-search",
+    render: (props) => createElement(ImageSearchPlugin, props),
   },
   {
     id: "settings",
@@ -278,17 +487,28 @@ export const builtinPlugins: MToolsPlugin[] = [
     category: "系统",
     keywords: ["设置", "settings", "配置", "快捷键"],
     viewId: "settings",
-    render: ({ onBack }) => createElement(SettingsPage, { onBack }),
+    render: (props) => createElement(SettingsPage, props),
   },
   {
-    id: "all-features",
-    name: "全部功能",
-    description: "查看所有可用工具和功能",
-    icon: createElement(LayoutGrid, { className: "w-6 h-6" }),
-    color: "text-cyan-500 bg-cyan-500/10",
+    id: "plugins",
+    name: "插件",
+    description: "兼容 uTools / Rubick 格式",
+    icon: createElement(Puzzle, { className: "w-6 h-6" }),
+    color: "text-orange-500 bg-orange-500/10",
     category: "系统",
-    keywords: ["全部", "all", "功能"],
-    viewId: "home",
-    render: () => null, // handled specially by App shell
+    keywords: ["插件", "plugin", "utools", "rubick"],
+    viewId: "plugins",
+    render: (props) => createElement(PluginMarket, props),
+  },
+  {
+    id: "cloud-sync",
+    name: "云同步",
+    description: "GitHub/Gitee/GitLab/WebDAV 同步",
+    icon: createElement(Cloud, { className: "w-6 h-6" }),
+    color: "text-sky-500 bg-sky-500/10",
+    category: "系统",
+    keywords: ["同步", "sync", "云", "github", "gitee", "webdav", "备份"],
+    viewId: "cloud-sync",
+    render: (props) => createElement(CloudSyncPlugin, props),
   },
 ];

@@ -578,6 +578,7 @@ pub async fn finish_capture(
     width: u32,
     height: u32,
     copy_to_clipboard: Option<bool>,
+    action: Option<String>,
 ) -> Result<String, String> {
     // 1. 隐藏截图窗口（不关闭，供下次复用）
     if let Some(win) = app.get_webview_window("screenshot") {
@@ -620,8 +621,12 @@ pub async fn finish_capture(
     .await
     .map_err(|e| format!("任务执行失败: {e}"))??;
 
-    // 3. 通知主窗口
-    let _ = app.emit("capture-done", serde_json::json!({ "path": result_str }));
+    // 3. 通知主窗口（含 action 字段）
+    let action_str = action.unwrap_or_else(|| "copy".to_string());
+    let _ = app.emit("capture-done", serde_json::json!({
+        "path": result_str,
+        "action": action_str,
+    }));
 
     // 4. 恢复主窗口
     if let Some(main_win) = app.get_webview_window("main") {

@@ -15,8 +15,9 @@ class PluginRegistry {
     this.plugins.set(plugin.id, plugin);
   }
 
-  /** 批量注册 */
+  /** 批量注册（先清空再注册，确保 HMR 时不残留旧插件） */
   registerAll(plugins: MToolsPlugin[]) {
+    this.plugins.clear();
     plugins.forEach((p) => this.register(p));
   }
 

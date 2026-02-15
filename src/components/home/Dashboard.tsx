@@ -1,6 +1,6 @@
 import { useAppStore } from "@/store/app-store";
 import { registry } from "@/core/plugin-system/registry";
-import { Bot, Globe, Terminal } from "lucide-react";
+import { Globe, Terminal } from "lucide-react";
 
 interface DashboardProps {
   onNavigate: (view: string) => void;
@@ -9,25 +9,14 @@ interface DashboardProps {
 export function Dashboard({ onNavigate }: DashboardProps) {
   const { setSelectedIndex, setSearchValue } = useAppStore();
 
-  // AI 助手是 Core Shell 组件，不在 registry 中，手动添加为第一项
-  const aiEntry = {
-    id: "ai-chat",
-    icon: <Bot className="w-6 h-6" />,
-    title: "AI 助手",
-    action: () => onNavigate("chat"),
-    color: "text-indigo-500 bg-indigo-500/10",
-  };
-
-  // 从 registry 获取所有内置插件作为工具列表
-  const registryTools = registry.getAll().map((plugin) => ({
+  // AI 助手已合并进 registry，直接从 registry 获取所有插件
+  const tools = registry.getAll().map((plugin) => ({
     id: plugin.id,
     icon: plugin.icon,
     title: plugin.name,
     action: () => onNavigate(plugin.viewId),
     color: plugin.color,
   }));
-
-  const tools = [aiEntry, ...registryTools];
 
   const quickActions = [
     {

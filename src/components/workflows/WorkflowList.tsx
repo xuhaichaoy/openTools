@@ -7,7 +7,7 @@ import { WorkflowRunner } from './WorkflowRunner'
 import type { Workflow } from '@/core/workflows/types'
 import { useDragWindow } from '@/hooks/useDragWindow'
 
-export function WorkflowList({ onBack }: { onBack: () => void }) {
+export function WorkflowList({ onBack }: { onBack?: () => void }) {
   const { workflows, loadWorkflows, createWorkflow, updateWorkflow, deleteWorkflow, executeWorkflow, currentExecution, clearExecution } = useWorkflowStore()
   const [mode, setMode] = useState<'list' | 'create' | 'edit'>('list')
   const [editingWorkflow, setEditingWorkflow] = useState<Workflow | null>(null)
@@ -81,11 +81,13 @@ export function WorkflowList({ onBack }: { onBack: () => void }) {
       {/* 头部 */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--color-border)] cursor-grab active:cursor-grabbing" onMouseDown={onMouseDown}>
         <div className="flex items-center gap-2">
-          <button onClick={onBack} className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]">
-            <ArrowLeft className="w-4 h-4" />
-          </button>
-          <span className="text-lg">🔄</span>
-          <span className="text-sm font-medium text-[var(--color-text)]">工作流</span>
+          {onBack && (
+            <button onClick={onBack} className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]">
+              <ArrowLeft className="w-4 h-4" />
+            </button>
+          )}
+          {onBack && <span className="text-lg">🔄</span>}
+          {onBack && <span className="text-sm font-medium text-[var(--color-text)]">工作流</span>}
           <span className="text-[10px] text-[var(--color-text-secondary)] ml-1">{workflows.length} 个</span>
         </div>
         <div className="flex items-center gap-1">

@@ -9,8 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::path::PathBuf;
 
-/// 显示窗口的统一帮助函数：居中 → 显示 → 聚焦，并临时抑制失焦隐藏
-/// 显示窗口的统一帮助函数：居中 → 显示 → 聚焦，并临时抑制失焦隐藏
+/// 显示窗口的统一帮助函数：显示 → 聚焦，并临时抑制失焦隐藏
 fn show_window(window: &tauri::WebviewWindow, suppress: &Arc<AtomicUsize>) {
     // 增加生成代数，表示新的抑制周期开始（非0即为抑制状态）
     let gen = suppress.fetch_add(1, Ordering::SeqCst) + 1;
@@ -42,6 +41,8 @@ pub fn run() {
         })
         .manage(commands::ai::StreamCancellation::new())
         .manage(std::sync::Mutex::new(commands::plugin::PluginCache::new()))
+        .manage(commands::mcp::McpServerManager::new())
+        .manage(commands::ding::DingManager::new())
         // 自定义协议：为插件文件提供 Tauri IPC 支持
         // 用 mtplugin://localhost/绝对路径 替代 file:// URL
         .register_uri_scheme_protocol("mtplugin", |_app, request| {
@@ -49,7 +50,27 @@ pub fn run() {
             let decoded = url_decode(raw_path);
             let file_path = PathBuf::from(&decoded);
 
-            if !file_path.exists() {
+            // 安全校验：规范化路径并拒绝包含 ".." 的路径遍历攻击
+            let canonical = match file_path.canonicalize() {
+                Ok(p) => p,
+                Err(_) => {
+                    return tauri::http::Response::builder()
+                        .status(404)
+                        .header("Content-Type", "text/plain")
+                        .body(b"Not Found".to_vec())
+                        .unwrap();
+                }
+            };
+            // 阻止 .. 路径遍历：解码后的路径不应包含 ".."
+            if decoded.contains("..") {
+                return tauri::http::Response::builder()
+                    .status(403)
+                    .header("Content-Type", "text/plain")
+                    .body(b"Forbidden: path traversal".to_vec())
+                    .unwrap();
+            }
+
+            if !canonical.exists() {
                 return tauri::http::Response::builder()
                     .status(404)
                     .header("Content-Type", "text/plain")
@@ -57,7 +78,7 @@ pub fn run() {
                     .unwrap();
             }
 
-            let content = std::fs::read(&file_path).unwrap_or_default();
+            let content = std::fs::read(&canonical).unwrap_or_default();
             let mime = match file_path.extension().and_then(|e| e.to_str()) {
                 Some("html") | Some("htm") => "text/html; charset=utf-8",
                 Some("js") | Some("mjs") => "application/javascript; charset=utf-8",
@@ -108,9 +129,15 @@ pub fn run() {
             commands::system::open_file_location,
             commands::system::save_chat_history,
             commands::system::load_chat_history,
+            commands::system::save_agent_history,
+            commands::system::load_agent_history,
             commands::system::save_general_settings,
             commands::system::load_general_settings,
             commands::system::clean_old_chat_images,
+            commands::system::read_text_file,
+            commands::system::write_text_file,
+            commands::system::list_directory,
+            commands::system::run_shell_command,
             commands::data_forge::dataforge_get_scripts,
             commands::data_forge::dataforge_search_scripts,
             commands::data_forge::dataforge_run_script,
@@ -151,180 +178,191 @@ pub fn run() {
             commands::screen_capture::capture_all_windows,
             commands::screen_capture::list_windows_xcap,
             commands::screen_capture::capture_window_xcap_by_id,
+            commands::webdav::webdav_test,
+            commands::webdav::webdav_create_dir,
+            commands::ocr::ocr_detect,
+            commands::ocr::ocr_detect_advanced,
+            commands::ocr::ocr_list_models,
+            commands::mcp::start_mcp_stdio_server,
+            commands::mcp::stop_mcp_server,
+            commands::mcp::send_mcp_message,
+            commands::ding::ding_create,
+            commands::ding::ding_close,
+            commands::ding::ding_set_opacity,
+            commands::ding::ding_list,
+            commands::ding::ding_close_all,
+            commands::translate::translate_text,
+            commands::git_sync::git_sync_push,
+            commands::git_sync::git_sync_pull,
+            commands::git_sync::git_sync_status,
         ])
         .setup(|app| {
-            // 失焦隐藏的抑制标志（显示窗口后短时间内不自动隐藏）
-            // 0: 不抑制, >0: 抑制中 (generation count)
             let suppress_hide = Arc::new(AtomicUsize::new(0));
-
-            // 创建系统托盘
-            let show_item = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
-            let settings = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_item, &settings, &quit])?;
-
-            let suppress_for_menu = suppress_hide.clone();
-            let suppress_for_tray = suppress_hide.clone();
-            TrayIconBuilder::new()
-                .menu(&menu)
-                .tooltip("mTools")
-                .icon(app.default_window_icon().unwrap().clone())
-                .on_menu_event(move |app, event| match event.id.as_ref() {
-                    "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            show_window(&window, &suppress_for_menu);
-                        }
-                    }
-                    "quit" => {
-                        app.exit(0);
-                    }
-                    _ => {}
-                })
-                .on_tray_icon_event(move |tray, event| {
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = event
-                    {
-                        let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("main") {
-                            show_window(&window, &suppress_for_tray);
-                        }
-                    }
-                })
-                .build(app)?;
-
-            // 注册全局快捷键（用结构化 API，避免字符串格式问题）
-            use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState, GlobalShortcutExt};
-
-            // Command+2 (macOS) 切换主窗口
-            let toggle_shortcut = Shortcut::new(Some(Modifiers::META), Code::Digit2);
-            // Ctrl+Shift+A 上下文操作
-            let context_shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyA);
-
-            let suppress_for_shortcut = suppress_hide.clone();
-            app.handle().plugin(
-                tauri_plugin_global_shortcut::Builder::new()
-                    .with_handler(move |app, shortcut, event| {
-                        if event.state == ShortcutState::Pressed {
-                            // Command+2 → 切换主窗口
-                            if shortcut == &toggle_shortcut {
-                                if let Some(window) = app.get_webview_window("main") {
-                                    if window.is_visible().unwrap_or(false) {
-                                        let _ = window.hide();
-                                    } else {
-                                        show_window(&window, &suppress_for_shortcut);
-                                    }
-                                }
-                            }
-
-                            // Ctrl+Shift+A → 上下文操作（读取剪贴板并发送给前端）
-                            if shortcut == &context_shortcut {
-                                use tauri_plugin_clipboard_manager::ClipboardExt;
-                                let text = app.clipboard().read_text().unwrap_or_default();
-                                if !text.is_empty() {
-                                    use tauri::Emitter;
-                                    let _ = app.emit("context-action", serde_json::json!({ "text": text }));
-                                    if let Some(window) = app.get_webview_window("main") {
-                                        show_window(&window, &suppress_for_shortcut);
-                                    }
-                                }
-                            }
-                        }
-                    })
-                    .build(),
-            )?;
-
-            // 注册快捷键
-            app.global_shortcut().register(toggle_shortcut)?;
-            app.global_shortcut().register(context_shortcut)?;
-
-            // 主窗口失焦隐藏（读取用户设置决定是否启用）
+            setup_tray(app, &suppress_hide)?;
+            setup_shortcuts(app, &suppress_hide)?;
             let main_window = app.get_webview_window("main").unwrap();
-            let window_clone = main_window.clone();
-            let suppress_for_focus = suppress_hide.clone();
-            let app_handle_for_focus = app.handle().clone();
-            main_window.on_window_event(move |event| {
-                if let tauri::WindowEvent::Focused(false) = event {
-                    // 如果处于抑制期（刚主动显示窗口），跳过自动隐藏
-                    if suppress_for_focus.load(Ordering::SeqCst) > 0 {
-                        return;
-                    }
-                    // 读取用户设置，未配置时默认启用
-                    let (hide_on_blur, always_on_top) = {
-                        use tauri_plugin_store::StoreExt;
-                        let settings = app_handle_for_focus.store("config.json").ok()
-                            .and_then(|store| store.get("general_settings"))
-                            .and_then(|v| v.as_str().map(|s| s.to_string()))
-                            .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok());
-                        
-                        let hide = settings.as_ref()
-                            .and_then(|obj| obj.get("hideOnBlur").and_then(|v| v.as_bool()))
-                            .unwrap_or(true);
-                        
-                        let top = settings.as_ref()
-                            .and_then(|obj| obj.get("alwaysOnTop").and_then(|v| v.as_bool()))
-                            .unwrap_or(true); // 默认置顶
-                        (hide, top)
-                    };
-
-                    // 确保窗口置顶状态正确（防抖或重新聚焦时可能丢失）
-                    let _ = window_clone.set_always_on_top(always_on_top);
-
-                    if !hide_on_blur {
-                        return;
-                    }
-                    if !hide_on_blur {
-                        return;
-                    }
-                    // 失焦时隐藏窗口（延迟判断，防止误触）
-                    let w = window_clone.clone();
-                    let s = suppress_for_focus.clone();
-                    std::thread::spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_millis(500));
-                        // 再次检查抑制标志和焦点状态
-                        if s.load(Ordering::SeqCst) == 0 && !w.is_focused().unwrap_or(true) {
-                            let _ = w.hide();
-                        }
-                    });
-                }
-            });
-
-            // macOS: 设置窗口在所有桌面可见 (CanJoinAllSpaces + MoveToActiveSpace)
-            #[cfg(target_os = "macos")]
-            #[allow(deprecated)]
-            unsafe {
-                use cocoa::appkit::{NSWindow, NSWindowCollectionBehavior};
-                use cocoa::base::id;
-                
-                let ns_window = main_window.ns_window().unwrap() as id;
-                let behavior = ns_window.collectionBehavior();
-                ns_window.setCollectionBehavior_(
-                    behavior 
-                    | NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces 
-                );
-            }
-
-            // 启动时显示窗口
+            setup_window_events(&main_window, app.handle(), &suppress_hide);
+            setup_macos_window(&main_window);
             show_window(&main_window, &suppress_hide);
-
-            // 启动时异步清理 7 天前的过期图片
-            let app_handle_for_clean = app.handle().clone();
-            std::thread::spawn(move || {
-                // 延迟 5 秒执行，避开启动高峰
-                std::thread::sleep(std::time::Duration::from_secs(5));
-                if let Err(e) = tauri::async_runtime::block_on(
-                    commands::system::clean_old_chat_images(app_handle_for_clean, 7)
-                ) {
-                    log::warn!("自动清理图片失败: {}", e);
-                }
-            });
-
+            schedule_cleanup(app.handle());
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+// ── Setup 子函数 ──
+
+/// 创建系统托盘
+fn setup_tray(app: &tauri::App, suppress_hide: &Arc<AtomicUsize>) -> Result<(), Box<dyn std::error::Error>> {
+    let show_item = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show_item, &settings, &quit])?;
+
+    let suppress_for_menu = suppress_hide.clone();
+    let suppress_for_tray = suppress_hide.clone();
+    TrayIconBuilder::new()
+        .menu(&menu)
+        .tooltip("mTools")
+        .icon(app.default_window_icon().unwrap().clone())
+        .on_menu_event(move |app, event| match event.id.as_ref() {
+            "show" => {
+                if let Some(window) = app.get_webview_window("main") {
+                    show_window(&window, &suppress_for_menu);
+                }
+            }
+            "quit" => { app.exit(0); }
+            _ => {}
+        })
+        .on_tray_icon_event(move |tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                let app = tray.app_handle();
+                if let Some(window) = app.get_webview_window("main") {
+                    show_window(&window, &suppress_for_tray);
+                }
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
+/// 注册全局快捷键
+fn setup_shortcuts(app: &tauri::App, suppress_hide: &Arc<AtomicUsize>) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState, GlobalShortcutExt};
+
+    let toggle_shortcut = Shortcut::new(Some(Modifiers::META), Code::Digit2);
+    let context_shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyA);
+
+    let suppress_for_shortcut = suppress_hide.clone();
+    app.handle().plugin(
+        tauri_plugin_global_shortcut::Builder::new()
+            .with_handler(move |app, shortcut, event| {
+                if event.state == ShortcutState::Pressed {
+                    if shortcut == &toggle_shortcut {
+                        if let Some(window) = app.get_webview_window("main") {
+                            if window.is_visible().unwrap_or(false) {
+                                let _ = window.hide();
+                            } else {
+                                show_window(&window, &suppress_for_shortcut);
+                            }
+                        }
+                    }
+                    if shortcut == &context_shortcut {
+                        use tauri_plugin_clipboard_manager::ClipboardExt;
+                        let text = app.clipboard().read_text().unwrap_or_default();
+                        if !text.is_empty() {
+                            use tauri::Emitter;
+                            let _ = app.emit("context-action", serde_json::json!({ "text": text }));
+                            if let Some(window) = app.get_webview_window("main") {
+                                show_window(&window, &suppress_for_shortcut);
+                            }
+                        }
+                    }
+                }
+            })
+            .build(),
+    )?;
+    app.global_shortcut().register(toggle_shortcut)?;
+    app.global_shortcut().register(context_shortcut)?;
+    Ok(())
+}
+
+/// 设置主窗口失焦隐藏行为
+fn setup_window_events(
+    main_window: &tauri::WebviewWindow,
+    app_handle: &tauri::AppHandle,
+    suppress_hide: &Arc<AtomicUsize>,
+) {
+    let window_clone = main_window.clone();
+    let suppress_for_focus = suppress_hide.clone();
+    let app_handle_for_focus = app_handle.clone();
+    main_window.on_window_event(move |event| {
+        if let tauri::WindowEvent::Focused(false) = event {
+            if suppress_for_focus.load(Ordering::SeqCst) > 0 {
+                return;
+            }
+            let (hide_on_blur, always_on_top) = {
+                use tauri_plugin_store::StoreExt;
+                let settings = app_handle_for_focus.store("config.json").ok()
+                    .and_then(|store| store.get("general_settings"))
+                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+                    .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok());
+                let hide = settings.as_ref()
+                    .and_then(|obj| obj.get("hideOnBlur").and_then(|v| v.as_bool()))
+                    .unwrap_or(true);
+                let top = settings.as_ref()
+                    .and_then(|obj| obj.get("alwaysOnTop").and_then(|v| v.as_bool()))
+                    .unwrap_or(true);
+                (hide, top)
+            };
+            let _ = window_clone.set_always_on_top(always_on_top);
+            if !hide_on_blur {
+                return;
+            }
+            let w = window_clone.clone();
+            let s = suppress_for_focus.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if s.load(Ordering::SeqCst) == 0 && !w.is_focused().unwrap_or(true) {
+                    let _ = w.hide();
+                }
+            });
+        }
+    });
+}
+
+/// macOS: 设置窗口在所有桌面可见
+fn setup_macos_window(_main_window: &tauri::WebviewWindow) {
+    #[cfg(target_os = "macos")]
+    #[allow(deprecated)]
+    unsafe {
+        use cocoa::appkit::{NSWindow, NSWindowCollectionBehavior};
+        use cocoa::base::id;
+        let ns_window = _main_window.ns_window().unwrap() as id;
+        let behavior = ns_window.collectionBehavior();
+        ns_window.setCollectionBehavior_(
+            behavior | NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces,
+        );
+    }
+}
+
+/// 启动时异步清理过期图片
+fn schedule_cleanup(app_handle: &tauri::AppHandle) {
+    let handle = app_handle.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        if let Err(e) = tauri::async_runtime::block_on(
+            commands::system::clean_old_chat_images(handle, 7),
+        ) {
+            log::warn!("自动清理图片失败: {}", e);
+        }
+    });
 }
 
 /// URL percent-decode：将 %20 等还原为原始字符

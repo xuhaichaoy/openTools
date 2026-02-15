@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useImperativeHandle, forwardRef } from "react";
 import {
   Plus,
   Loader2,
@@ -23,7 +23,15 @@ import { ConversationList } from "./ConversationList";
 import { ToolConfirmDialog } from "./ToolConfirmDialog";
 import { useDragWindow } from "@/hooks/useDragWindow";
 
-export function ChatView({ onBack }: { onBack?: () => void }) {
+export interface ChatViewHandle {
+  toggleHistory: () => void;
+  toggleSearch: () => void;
+  exportChat: () => void;
+  newChat: () => void;
+  hasMessages: () => boolean;
+}
+
+export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideModelSelector?: boolean; headless?: boolean }>(function ChatView({ onBack, hideModelSelector, headless }, ref) {
   const [input, setInput] = useState("");
   const [pendingImages, setPendingImages] = useState<string[]>([]);
   const [pendingImagePreviews, setPendingImagePreviews] = useState<string[]>(
@@ -41,6 +49,7 @@ export function ChatView({ onBack }: { onBack?: () => void }) {
   const isComposingRef = useRef(false);
   const prevMessagesLengthRef = useRef(0);
   const scrollThrottleRef = useRef(0);
+  const handleExportRef = useRef<(() => void) | null>(null);
   const {
     getCurrentConversation,
     sendMessage,
@@ -56,6 +65,26 @@ export function ChatView({ onBack }: { onBack?: () => void }) {
   const { onMouseDown } = useDragWindow();
   const conversation = getCurrentConversation();
   const messages = conversation?.messages || [];
+
+  // 暴露控制接口给父组件（headless 模式下由父组件驱动）
+  useImperativeHandle(ref, () => ({
+    toggleHistory: () => setShowHistory((v) => !v),
+    toggleSearch: () => {
+      setShowSearch((v) => {
+        if (v) setSearchQuery("");
+        return !v;
+      });
+    },
+    exportChat: () => handleExportRef.current?.(),
+    newChat: () => {
+      createConversation();
+      setInput("");
+      setShowSearch(false);
+      setSearchQuery("");
+      inputRef.current?.focus();
+    },
+    hasMessages: () => messages.length > 0,
+  }));
 
   // 初次进入自动聚焦输入框
   useEffect(() => {
@@ -211,6 +240,7 @@ export function ChatView({ onBack }: { onBack?: () => void }) {
       toast("warning", "导出失败");
     }
   };
+  handleExportRef.current = handleExport;
 
   const handleSend = async () => {
     const trimmed = input.trim();
@@ -310,7 +340,8 @@ export function ChatView({ onBack }: { onBack?: () => void }) {
 
       {/* 主体 */}
       <div className="flex flex-col flex-1 min-w-0">
-        {/* 头部 */}
+        {/* 头部 — headless 模式下隐藏（由父组件 AICenter 统一管理） */}
+        {!headless && (
         <div
           className="flex items-center justify-between px-6 h-12 border-b border-[var(--color-border)] bg-[var(--color-bg)]/80 backdrop-blur-md sticky top-0 z-10 cursor-grab active:cursor-grabbing"
           onMouseDown={onMouseDown}
@@ -351,7 +382,7 @@ export function ChatView({ onBack }: { onBack?: () => void }) {
           </div>
 
           <div className="flex-1 flex justify-end items-center gap-1">
-            <ModelSelector />
+            {!hideModelSelector && <ModelSelector />}
             {messages.length > 0 && (
               <>
                 <button
@@ -388,6 +419,7 @@ export function ChatView({ onBack }: { onBack?: () => void }) {
             </button>
           </div>
         </div>
+        )}
 
         {/* 搜索栏 */}
         {showSearch && (
@@ -722,4 +754,4 @@ export function ChatView({ onBack }: { onBack?: () => void }) {
       )}
     </div>
   );
-}
+});

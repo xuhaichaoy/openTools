@@ -1,0 +1,23 @@
+.vditor {
+  border: none !important;
+}
+.vditor-toolbar {
+  background-color: transparent !important;
+  border-bottom: 1px solid #e5e7eb !important;
+  padding-left: 10px !important;
+}
+.vditor-content {
+  background-color: transparent !important;
+}
+.vditor-reset {
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Roboto,
+    "Helvetica Neue",
+    Arial,
+    sans-serif !important;
+}

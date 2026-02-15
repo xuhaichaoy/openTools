@@ -208,7 +208,7 @@ fn scan_dirs(dirs: &[PathBuf], disabled_ids: &HashSet<String>) -> Vec<PluginInfo
 /// 重新扫描并更新缓存，返回最新列表
 fn refresh_plugin_cache(app: &AppHandle) -> Vec<PluginInfo> {
     let cache = app.state::<Mutex<PluginCache>>();
-    let mut cache = cache.lock().unwrap();
+    let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
 
     // 首次调用时从持久化存储恢复 dev_dirs 和 disabled_ids
     if cache.dev_dirs.is_empty() && cache.plugins.is_empty() {
@@ -247,7 +247,7 @@ fn refresh_plugin_cache(app: &AppHandle) -> Vec<PluginInfo> {
 /// 从缓存获取插件列表（不重新扫描）
 fn get_cached_plugins(app: &AppHandle) -> Vec<PluginInfo> {
     let cache = app.state::<Mutex<PluginCache>>();
-    let cache = cache.lock().unwrap();
+    let cache = cache.lock().unwrap_or_else(|e| e.into_inner());
     if cache.plugins.is_empty() {
         drop(cache);
         return refresh_plugin_cache(app);
@@ -279,7 +279,7 @@ pub async fn plugin_list(app: AppHandle) -> Result<Vec<PluginInfo>, String> {
 pub async fn plugin_add_dev_dir(app: AppHandle, dir_path: String) -> Result<Vec<PluginInfo>, String> {
     {
         let cache = app.state::<Mutex<PluginCache>>();
-        let mut cache = cache.lock().unwrap();
+        let mut cache = cache.lock().map_err(|e| format!("Lock poisoned: {}", e))?;
         cache.dev_dirs.insert(dir_path);
         // 持久化到 Store
         persist_plugin_settings(&app, &cache);
@@ -292,7 +292,7 @@ pub async fn plugin_add_dev_dir(app: AppHandle, dir_path: String) -> Result<Vec<
 pub async fn plugin_remove_dev_dir(app: AppHandle, dir_path: String) -> Result<Vec<PluginInfo>, String> {
     {
         let cache = app.state::<Mutex<PluginCache>>();
-        let mut cache = cache.lock().unwrap();
+        let mut cache = cache.lock().map_err(|e| format!("Lock poisoned: {}", e))?;
         cache.dev_dirs.remove(&dir_path);
         persist_plugin_settings(&app, &cache);
     }
@@ -304,7 +304,7 @@ pub async fn plugin_remove_dev_dir(app: AppHandle, dir_path: String) -> Result<V
 pub async fn plugin_set_enabled(app: AppHandle, plugin_id: String, enabled: bool) -> Result<Vec<PluginInfo>, String> {
     {
         let cache = app.state::<Mutex<PluginCache>>();
-        let mut cache = cache.lock().unwrap();
+        let mut cache = cache.lock().map_err(|e| format!("Lock poisoned: {}", e))?;
         if enabled {
             cache.disabled_ids.remove(&plugin_id);
         } else {

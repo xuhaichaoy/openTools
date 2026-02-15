@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { ArrowLeft, Copy, Check, ArrowDown, ArrowUp } from 'lucide-react'
 import { useDragWindow } from '@/hooks/useDragWindow'
 
-export function Base64Tool({ onBack }: { onBack: () => void }) {
+export function Base64Tool({ onBack }: { onBack?: () => void }) {
   const [input, setInput] = useState('')
   const [output, setOutput] = useState('')
   const [mode, setMode] = useState<'encode' | 'decode'>('encode')
@@ -54,10 +54,14 @@ export function Base64Tool({ onBack }: { onBack: () => void }) {
       {/* 头部 */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--color-border)] shrink-0 cursor-grab active:cursor-grabbing" onMouseDown={onMouseDown}>
         <div className="flex items-center gap-2">
-          <button onClick={onBack} className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]">
-            <ArrowLeft className="w-4 h-4" />
-          </button>
-          <span className="text-sm font-medium text-[var(--color-text)]">Base64 编解码</span>
+          {onBack && (
+            <>
+              <button onClick={onBack} className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]">
+                <ArrowLeft className="w-4 h-4" />
+              </button>
+              <span className="text-sm font-medium text-[var(--color-text)]">Base64 编解码</span>
+            </>
+          )}
         </div>
         <div className="flex items-center gap-1">
           <button

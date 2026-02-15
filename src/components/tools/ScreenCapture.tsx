@@ -27,7 +27,7 @@ import { useDragWindow } from "@/hooks/useDragWindow";
 import { RecorderFloat } from "./RecorderFloat";
 
 interface ScreenCaptureProps {
-  onBack: () => void;
+  onBack?: () => void;
 }
 
 type Mode = "screenshot" | "long-screenshot" | "recording";
@@ -126,12 +126,63 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
     };
   }, []);
 
-  // 监听区域截图完成事件（从截图选区窗口返回）
+  // 监听区域截图完成事件（从截图选区窗口返回），根据 action 分发
   useEffect(() => {
-    const unlisten = listen<{ path?: string }>("capture-done", (e) => {
-      if (e.payload?.path) {
-        setResultPath(e.payload.path);
-        setStep("preview");
+    const unlisten = listen<{ path?: string; action?: string }>("capture-done", async (e) => {
+      const { path: capPath, action: capAction } = e.payload || {};
+      if (!capPath) return;
+
+      switch (capAction) {
+        case "ocr": {
+          // 通过事件总线通知 OCR 插件处理
+          const bc = new BroadcastChannel("mtools-events");
+          bc.postMessage({ type: "OCR_REQUEST", payload: { imagePath: capPath } });
+          bc.close();
+          // 导航到 OCR 结果（emit 给 App 层切换视图）
+          window.dispatchEvent(new CustomEvent("navigate-plugin", { detail: { viewId: "screen-capture", action: "ocr", path: capPath } }));
+          break;
+        }
+        case "pin": {
+          // 调用贴图 ding 命令
+          try {
+            await invoke("ding_create", { imagePath: capPath });
+          } catch (err) {
+            console.error("贴图失败:", err);
+          }
+          break;
+        }
+        case "edit": {
+          // 通过事件总线通知图片编辑器
+          const bc = new BroadcastChannel("mtools-events");
+          bc.postMessage({ type: "EDIT_IMAGE_REQUEST", payload: { imagePath: capPath } });
+          bc.close();
+          break;
+        }
+        case "save": {
+          // 弹出保存对话框
+          try {
+            const filePath = await save({
+              defaultPath: `screenshot-${Date.now()}.png`,
+              filters: [{ name: "PNG", extensions: ["png"] }],
+            });
+            if (filePath) {
+              // 复制文件到目标位置
+              const { readFile, writeFile } = await import("@tauri-apps/plugin-fs");
+              const data = await readFile(capPath);
+              await writeFile(filePath, data);
+            }
+          } catch (err) {
+            console.error("保存截图失败:", err);
+          }
+          break;
+        }
+        case "copy":
+        default: {
+          // 默认行为：显示预览
+          setResultPath(capPath);
+          setStep("preview");
+          break;
+        }
       }
     });
     return () => {
@@ -729,9 +780,10 @@ function Header({
   onBack,
   onMouseDown,
 }: {
-  onBack: () => void;
+  onBack?: () => void;
   onMouseDown: (e: React.MouseEvent) => void;
 }) {
+  if (!onBack) return null;
   return (
     <div
       className="flex items-center gap-2 px-4 py-3 border-b border-[var(--color-border)] cursor-grab active:cursor-grabbing"

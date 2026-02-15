@@ -116,7 +116,8 @@ export const useRAGStore = create<RAGState>((set, get) => ({
   setSearchQuery: (q) => set({ searchQuery: q }),
 }))
 
-// 监听索引进度事件
+// 监听索引进度事件（应用生命周期级别，存储 unlisten 以供需要时清理）
+let _unlistenRagProgress: (() => void) | null = null
 listen<{ docId: string; status: string; progress?: number; error?: string }>(
   'rag-index-progress',
   (event) => {
@@ -129,4 +130,10 @@ listen<{ docId: string; status: string; progress?: number; error?: string }>(
       ),
     }))
   }
-)
+).then((fn) => { _unlistenRagProgress = fn })
+
+/** 清理 RAG 进度监听器（用于测试或热重载场景） */
+export function cleanupRAGListener() {
+  _unlistenRagProgress?.()
+  _unlistenRagProgress = null
+}

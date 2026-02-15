@@ -1,6 +1,14 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import {
+  DEFAULT_AI_BASE_URL,
+  DEFAULT_AI_MODEL,
+  DEFAULT_AI_TEMPERATURE,
+  MAX_CONVERSATIONS,
+  MAX_MESSAGES_PER_CONVERSATION,
+  PERSIST_DEBOUNCE_MS,
+} from "@/core/constants";
 
 export interface ToolCallInfo {
   id: string;
@@ -71,12 +79,23 @@ interface AIState {
 const generateId = () =>
   Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
 
+// 防抖持久化：合并短时间内多次写入，避免 setTimeout 泄漏
+let _persistTimer: ReturnType<typeof setTimeout> | null = null;
+let _lastPersistedHash = "";
+function debouncedPersist() {
+  if (_persistTimer) clearTimeout(_persistTimer);
+  _persistTimer = setTimeout(() => {
+    _persistTimer = null;
+    useAIStore.getState().persistHistory();
+  }, PERSIST_DEBOUNCE_MS);
+}
+
 export const useAIStore = create<AIState>((set, get) => ({
   config: {
-    base_url: "https://api.openai.com/v1",
+    base_url: DEFAULT_AI_BASE_URL,
     api_key: "",
-    model: "gpt-4o",
-    temperature: 0.7,
+    model: DEFAULT_AI_MODEL,
+    temperature: DEFAULT_AI_TEMPERATURE,
     max_tokens: null,
     enable_advanced_tools: false,
     system_prompt: "",
@@ -129,8 +148,8 @@ export const useAIStore = create<AIState>((set, get) => ({
   persistHistory: async () => {
     try {
       const { conversations } = get();
-      const MAX_PERSIST_CONVERSATIONS = 50;
-      const MAX_PERSIST_MESSAGES = 100;
+      const MAX_PERSIST_CONVERSATIONS = MAX_CONVERSATIONS;
+      const MAX_PERSIST_MESSAGES = MAX_MESSAGES_PER_CONVERSATION;
       const trimmed = conversations
         .slice(0, MAX_PERSIST_CONVERSATIONS)
         .map((c) => ({
@@ -140,9 +159,14 @@ export const useAIStore = create<AIState>((set, get) => ({
             streaming: false, // 清除 streaming 状态
           })),
         }));
-      await invoke("save_chat_history", {
-        conversations: JSON.stringify(trimmed),
-      });
+      const json = JSON.stringify(trimmed);
+      // 跳过内容未变的重复写入（避免频繁磁盘 IO）
+      const hash = json.length + ":" + (json.charCodeAt(0) || 0) + ":" + (json.charCodeAt(json.length - 1) || 0);
+      if (hash === _lastPersistedHash && json.length < 100000) {
+        return;
+      }
+      _lastPersistedHash = hash;
+      await invoke("save_chat_history", { conversations: json });
     } catch (e) {
       console.error("保存对话历史失败:", e);
     }
@@ -160,8 +184,7 @@ export const useAIStore = create<AIState>((set, get) => ({
       conversations: [conversation, ...state.conversations],
       currentConversationId: id,
     }));
-    // 异步持久化
-    setTimeout(() => get().persistHistory(), 100);
+    debouncedPersist();
     return id;
   },
 
@@ -183,7 +206,7 @@ export const useAIStore = create<AIState>((set, get) => ({
           : state.currentConversationId,
       };
     });
-    setTimeout(() => get().persistHistory(), 100);
+    debouncedPersist();
   },
 
   renameConversation: (id, title) => {
@@ -192,7 +215,7 @@ export const useAIStore = create<AIState>((set, get) => ({
         c.id === id ? { ...c, title } : c,
       ),
     }));
-    setTimeout(() => get().persistHistory(), 100);
+    debouncedPersist();
   },
 
   clearConversation: (id) => {
@@ -201,7 +224,7 @@ export const useAIStore = create<AIState>((set, get) => ({
         c.id === id ? { ...c, messages: [] } : c,
       ),
     }));
-    setTimeout(() => get().persistHistory(), 100);
+    debouncedPersist();
   },
 
   confirmTool: async (approved: boolean) => {
@@ -237,7 +260,7 @@ export const useAIStore = create<AIState>((set, get) => ({
           : c,
       ),
     }));
-    setTimeout(() => get().persistHistory(), 200);
+    debouncedPersist();
   },
 
   regenerateLastMessage: async () => {
@@ -431,8 +454,7 @@ export const useAIStore = create<AIState>((set, get) => ({
           updateAssistant((m) => ({ ...m, streaming: false }));
           set({ isStreaming: false });
           cleanup();
-          // 对话完成后持久化
-          setTimeout(() => get().persistHistory(), 200);
+          debouncedPersist();
         }
       },
     );

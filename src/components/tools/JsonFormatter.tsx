@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { ArrowLeft, Copy, Check, Minimize2, Maximize2, AlertCircle } from 'lucide-react'
 import { useDragWindow } from '@/hooks/useDragWindow'
 
-export function JsonFormatter({ onBack }: { onBack: () => void }) {
+export function JsonFormatter({ onBack }: { onBack?: () => void }) {
   const [input, setInput] = useState('')
   const [output, setOutput] = useState('')
   const [error, setError] = useState('')
@@ -45,10 +45,14 @@ export function JsonFormatter({ onBack }: { onBack: () => void }) {
       {/* 头部 */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--color-border)] shrink-0 cursor-grab active:cursor-grabbing" onMouseDown={onMouseDown}>
         <div className="flex items-center gap-2">
-          <button onClick={onBack} className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]">
-            <ArrowLeft className="w-4 h-4" />
-          </button>
-          <span className="text-sm font-medium text-[var(--color-text)]">JSON 格式化</span>
+          {onBack && (
+            <>
+              <button onClick={onBack} className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]">
+                <ArrowLeft className="w-4 h-4" />
+              </button>
+              <span className="text-sm font-medium text-[var(--color-text)]">JSON 格式化</span>
+            </>
+          )}
         </div>
         <div className="flex items-center gap-1">
           <select

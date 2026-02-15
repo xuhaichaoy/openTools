@@ -480,7 +480,7 @@ export function ScreenshotSelector() {
     resetState();
   };
 
-  const handleConfirm = async () => {
+  const handleConfirmWithAction = async (action: string) => {
     const r = rectRef.current;
     if (r.w < 5 || r.h < 5) return;
     const scale = getScale();
@@ -494,7 +494,8 @@ export function ScreenshotSelector() {
         y,
         width: w,
         height: h,
-        copyToClipboard: true,
+        copyToClipboard: action === "copy",
+        action,
       });
     } catch (e) {
       console.error("区域截图失败:", e);
@@ -502,6 +503,9 @@ export function ScreenshotSelector() {
     }
     resetState();
   };
+
+  // 兼容双击 / Enter 确认（默认 copy 行为）
+  const handleConfirm = async () => handleConfirmWithAction("copy");
 
   const resetState = () => {
     modeRef.current = "idle";
@@ -545,12 +549,13 @@ export function ScreenshotSelector() {
     if (!toolbarInfo.visible) return { display: "none" };
     const r = toolbarInfo.rect;
     const gap = 8,
-      toolbarW = 170,
+      toolbarW = 420,
       toolbarH = 36;
     const winW = window.innerWidth,
       winH = window.innerHeight;
-    let left = r.x + r.w - toolbarW;
-    if (left < gap) left = r.x;
+    // 居中于选区下方
+    let left = r.x + (r.w - toolbarW) / 2;
+    if (left < gap) left = gap;
     if (left + toolbarW > winW - gap) left = winW - toolbarW - gap;
     let top = r.y + r.h + gap;
     if (top + toolbarH > winH - gap) {
@@ -566,6 +571,48 @@ export function ScreenshotSelector() {
     if (screenshotData.base64) return screenshotData.base64;
     return `mtplugin://localhost${screenshotData.path}`;
   }, [screenshotData]);
+
+  // ============ 工具栏按钮子组件 ============
+  const ToolbarBtn = ({
+    label,
+    onClick,
+    highlight,
+    children,
+  }: {
+    label: string;
+    onClick: () => void;
+    highlight?: boolean;
+    children: React.ReactNode;
+  }) => (
+    <button
+      onClick={onClick}
+      className="flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors"
+      style={
+        highlight
+          ? { background: "#3b82f6", color: "#fff" }
+          : { color: "rgba(255,255,255,0.8)" }
+      }
+      onMouseEnter={(e) => {
+        if (highlight) {
+          e.currentTarget.style.background = "#2563eb";
+        } else {
+          e.currentTarget.style.background = "rgba(255,255,255,0.12)";
+          e.currentTarget.style.color = "#fff";
+        }
+      }}
+      onMouseLeave={(e) => {
+        if (highlight) {
+          e.currentTarget.style.background = "#3b82f6";
+        } else {
+          e.currentTarget.style.background = "transparent";
+          e.currentTarget.style.color = "rgba(255,255,255,0.8)";
+        }
+      }}
+    >
+      {children}
+      {label}
+    </button>
+  );
 
   // ============ 未收到截图数据时不渲染内容（窗口处于隐藏状态） ============
   if (!screenshotData) {
@@ -615,58 +662,72 @@ export function ScreenshotSelector() {
         />
       )}
 
-      {/* 浮动工具栏 */}
+      {/* 浮动功能工具栏 */}
       {toolbarInfo.visible && (
         <div
-          className="flex items-center gap-1.5 rounded-lg shadow-xl"
+          className="flex items-center gap-1 rounded-lg shadow-xl"
           style={{
             ...getToolbarStyle(),
-            background: "rgba(30, 30, 30, 0.9)",
+            background: "rgba(30, 30, 30, 0.92)",
             backdropFilter: "blur(12px)",
             padding: "4px 6px",
-            border: "1px solid rgba(255,255,255,0.1)",
+            border: "1px solid rgba(255,255,255,0.12)",
           }}
         >
-          <button
-            onClick={handleConfirm}
-            className="flex items-center gap-1 px-3 py-1.5 rounded-md text-white text-xs font-medium transition-colors"
-            style={{ background: "#3b82f6" }}
-            onMouseEnter={(e) => (e.currentTarget.style.background = "#2563eb")}
-            onMouseLeave={(e) => (e.currentTarget.style.background = "#3b82f6")}
-          >
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <polyline points="20 6 9 17 4 12" />
+          {/* OCR 文字识别 */}
+          <ToolbarBtn label="OCR" onClick={() => handleConfirmWithAction("ocr")}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+              <line x1="16" y1="13" x2="8" y2="13" />
+              <line x1="16" y1="17" x2="8" y2="17" />
             </svg>
-            完成
-          </button>
-          <button
-            onClick={handleCancel}
-            className="flex items-center gap-1 px-3 py-1.5 rounded-md text-white/70 text-xs font-medium transition-colors hover:text-white hover:bg-white/10"
-          >
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
+          </ToolbarBtn>
+
+          {/* 贴图 */}
+          <ToolbarBtn label="贴图" onClick={() => handleConfirmWithAction("pin")}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="12" y1="17" x2="12" y2="22" />
+              <path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z" />
+            </svg>
+          </ToolbarBtn>
+
+          {/* 编辑标注 */}
+          <ToolbarBtn label="编辑" onClick={() => handleConfirmWithAction("edit")}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+            </svg>
+          </ToolbarBtn>
+
+          <div style={{ width: 1, height: 20, background: "rgba(255,255,255,0.15)", margin: "0 2px" }} />
+
+          {/* 保存 */}
+          <ToolbarBtn label="保存" onClick={() => handleConfirmWithAction("save")}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+              <polyline points="17 21 17 13 7 13 7 21" />
+              <polyline points="7 3 7 8 15 8" />
+            </svg>
+          </ToolbarBtn>
+
+          {/* 复制 */}
+          <ToolbarBtn label="复制" highlight onClick={() => handleConfirmWithAction("copy")}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+            </svg>
+          </ToolbarBtn>
+
+          <div style={{ width: 1, height: 20, background: "rgba(255,255,255,0.15)", margin: "0 2px" }} />
+
+          {/* 取消 */}
+          <ToolbarBtn label="取消" onClick={handleCancel}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
               <line x1="18" y1="6" x2="6" y2="18" />
               <line x1="6" y1="6" x2="18" y2="18" />
             </svg>
-            取消
-          </button>
+          </ToolbarBtn>
         </div>
       )}
     </div>

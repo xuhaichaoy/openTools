@@ -4,7 +4,7 @@ import { useRAGStore } from '@/store/rag-store'
 import { open } from '@tauri-apps/plugin-dialog'
 import { useDragWindow } from '@/hooks/useDragWindow'
 
-export function KnowledgeBase({ onBack }: { onBack: () => void }) {
+export function KnowledgeBase({ onBack }: { onBack?: () => void }) {
   const {
     docs, stats, isLoading, isIndexing,
     searchResults, searchQuery,
@@ -67,11 +67,15 @@ export function KnowledgeBase({ onBack }: { onBack: () => void }) {
       {/* 顶部 */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--color-border)] cursor-grab active:cursor-grabbing" onMouseDown={onMouseDown}>
         <div className="flex items-center gap-2">
-          <button onClick={onBack} className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]">
-            <ArrowLeft className="w-4 h-4" />
-          </button>
-          <BookOpen className="w-4 h-4 text-emerald-400" />
-          <span className="text-sm font-medium text-[var(--color-text)]">知识库</span>
+          {onBack && (
+            <>
+              <button onClick={onBack} className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]">
+                <ArrowLeft className="w-4 h-4" />
+              </button>
+              <BookOpen className="w-4 h-4 text-emerald-400" />
+              <span className="text-sm font-medium text-[var(--color-text)]">知识库</span>
+            </>
+          )}
         </div>
         <button
           onClick={handleImport}

@@ -1,7 +1,6 @@
 import { useState, useCallback, useEffect, Suspense } from "react";
 import { SearchBar } from "@/components/search/SearchBar";
 import { ResultList, type ResultItem } from "@/components/search/ResultList";
-import { ChatView } from "@/components/ai/ChatView";
 import { ScreenshotSelector } from "@/components/tools/ScreenshotSelector";
 import { ContextActionPanel } from "@/components/ai/ContextActionPanel";
 import { Home } from "@/components/navigation/Home";
@@ -12,9 +11,10 @@ import { useWorkflowStore } from "@/store/workflow-store";
 import { usePluginStore } from "@/store/plugin-store";
 import { useAppStore } from "@/store/app-store";
 import { useAIStore } from "@/store/ai-store";
+import { useAgentStore } from "@/store/agent-store";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Bot, Globe, Puzzle, Terminal, Database, Workflow } from "lucide-react";
+import { Bot, Globe, Puzzle, Terminal, Database, Workflow as WorkflowIcon } from "lucide-react";
 
 // 插件注册中心
 import { registry } from "@/core/plugin-system/registry";
@@ -26,24 +26,19 @@ import { ScopedStorage } from "@/core/plugin-system/storage";
 registry.registerAll(builtinPlugins);
 
 // 核心壳保留的特殊视图（不走插件注册）
-type ShellView = "main" | "chat" | "plugin-embed" | "context-action" | "home";
+type ShellView = "main" | "plugin-embed" | "context-action" | "home";
 
-// 窗口尺寸常量
-const WINDOW_HEIGHT_COLLAPSED = 60;
-const WINDOW_HEIGHT_EXPANDED = 520;
-const WINDOW_HEIGHT_CHAT = 640;
-const WINDOW_HEIGHT_MAX = 460;
-const RESULT_ITEM_HEIGHT = 56;
-
-// 对话/历史限制
-const MAX_CONVERSATIONS = 50;
-const MAX_MESSAGES_PER_CONVERSATION = 100;
+import {
+  WINDOW_HEIGHT_COLLAPSED,
+  WINDOW_HEIGHT_EXPANDED,
+  WINDOW_HEIGHT_CHAT,
+} from "@/core/constants";
 
 // 独立窗口模式检测：截图选区窗口
 const specialView = (window as any).__SCREENSHOT_MODE__ ? "screenshot" : null;
 
 function App() {
-  // 如果是截图选区窗口，只渲染选区 UI
+  // 截图选区窗口使用独立组件，避免加载主应用逻辑
   if (specialView === "screenshot") {
     return (
       <div className="w-full h-full" style={{ background: "#000" }}>
@@ -51,7 +46,11 @@ function App() {
       </div>
     );
   }
+  return <MainApp />;
+}
 
+/** 主应用组件 — 所有 hooks 在此无条件调用，符合 Rules of Hooks */
+function MainApp() {
   // view 可以是 ShellView 或任意插件的 viewId
   const [view, setView] = useState<string>("main");
   const [contextText, setContextText] = useState("");
@@ -75,6 +74,7 @@ function App() {
   useEffect(() => {
     useAIStore.getState().loadConfig();
     useAIStore.getState().loadHistory();
+    useAgentStore.getState().loadHistory();
     useWorkflowStore.getState().loadWorkflows();
     usePluginStore.getState().loadPlugins();
 
@@ -238,7 +238,7 @@ function App() {
           category: "AI",
           action: () => {
             useAIStore.getState().sendMessage(searchValue.slice(3));
-            setView("chat");
+            setView("ai-center");
           },
         },
       ];
@@ -318,7 +318,7 @@ function App() {
                 .sendMessage(
                   `请执行以下 shell 命令并解释结果：\`${cmd.trim()}\``,
                 );
-              setView("chat");
+              setView("ai-center");
             }
           },
         },
@@ -349,7 +349,7 @@ function App() {
           id: `wf-${matchedWorkflow.id}`,
           title: `${matchedWorkflow.icon} 运行: ${matchedWorkflow.name}`,
           description: matchedWorkflow.description,
-          icon: <Workflow className="w-6 h-6" />,
+          icon: <WorkflowIcon className="w-6 h-6" />,
           color: "text-teal-500 bg-teal-500/10",
           category: "工作流",
           action: () => {
@@ -427,7 +427,7 @@ function App() {
           setWindowExpanded(false);
         }
       }
-    } else if (view === "chat") {
+    } else if (view === "ai-center") {
       invoke("resize_window", { height: WINDOW_HEIGHT_CHAT });
       setWindowExpanded(true);
     } else {
@@ -449,7 +449,7 @@ function App() {
 
         if (finalQuery || (images && images.length > 0)) {
           useAIStore.getState().sendMessage(finalQuery, images);
-          setView("chat");
+          setView("ai-center");
         }
         return;
       }
@@ -461,7 +461,7 @@ function App() {
           useAIStore
             .getState()
             .sendMessage(`请执行以下 shell 命令并解释结果：\`${cmd}\``);
-          setView("chat");
+          setView("ai-center");
         }
         return;
       }
@@ -516,14 +516,7 @@ function App() {
         </>
       )}
 
-      {/* AI 助手 — Core Shell 核心组件 */}
-      {view === "chat" && (
-        <div className="h-full">
-          <ChatView onBack={() => setView("main")} />
-        </div>
-      )}
-
-      {/* 注册中心的插件 — 统一渲染 */}
+      {/* 注册中心的插件 — 统一渲染（含合并后的 AI 助手） */}
       {activePlugin && activePlugin.viewId !== "home" && (
         <Suspense
           fallback={

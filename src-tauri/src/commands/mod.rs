@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod mcp;
 pub mod window;
 pub mod system;
 pub mod data_forge;
@@ -6,3 +7,8 @@ pub mod plugin;
 pub mod rag;
 pub mod workflow;
 pub mod screen_capture;
+pub mod webdav;
+pub mod ocr;
+pub mod ding;
+pub mod translate;
+pub mod git_sync;
