@@ -804,18 +804,26 @@ fn generate_utools_shim(plugin_id: &str) -> String {
     format!(r#"
 (function() {{
   'use strict';
+  // Security: Capture the invoke function and strictly remove the global API
+  const coreInvoke = window.__TAURI__?.core?.invoke;
+  if (coreInvoke) {{
+      delete window.__TAURI__;
+  }} else {{
+      console.error('[mTools] Panic: Tauri API not found during shim initialization');
+  }}
+
   const __pluginId = '{plugin_id}';
   let __callId = 0;
 
   function __invoke(method, args) {{
     return new Promise((resolve, reject) => {{
-      if (!window.__TAURI__ || !window.__TAURI__.core) {{
-        console.warn('[mTools] Tauri IPC 不可用, 方法:', method);
+      if (!coreInvoke) {{
+        console.warn('[mTools] Tauri IPC unavailable or stripped', method);
         reject(new Error('Tauri IPC not available'));
         return;
       }}
       const id = ++__callId;
-      window.__TAURI__.core.invoke('plugin_api_call', {{
+      coreInvoke('plugin_api_call', {{
         pluginId: __pluginId,
         method: method,
         args: JSON.stringify(args || {{}}),
@@ -827,6 +835,7 @@ fn generate_utools_shim(plugin_id: &str) -> String {
       }});
     }});
   }}
+
 
   const utools = {{
     hideMainWindow() {{ __invoke('hideMainWindow'); }},

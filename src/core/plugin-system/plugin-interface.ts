@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import type { PluginStorage } from "./storage";
 
 // ── AI SDK 接口 ──
 
@@ -72,8 +73,13 @@ export interface MToolsPlugin {
    * 渲染函数
    * @param onBack 返回主界面
    * @param ai 核心壳提供的 AI SDK
+   * @param storage 插件独立的持久化存储
    */
-  render: (props: { onBack: () => void; ai: MToolsAI }) => ReactNode;
+  render: (props: {
+    onBack: () => void;
+    ai: MToolsAI;
+    storage: PluginStorage;
+  }) => ReactNode;
 
   /** AI 可调用的无 UI 动作 */
   actions?: PluginAction[];

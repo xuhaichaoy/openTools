@@ -95,7 +95,10 @@ impl StreamCancellation {
 
 /// 判断工具是否为"危险"操作，需要用户确认才能执行
 fn is_dangerous_tool(name: &str) -> bool {
-    matches!(name, "run_shell_command" | "write_file" | "open_path")
+    matches!(
+        name,
+        "run_shell_command" | "write_file" | "open_path" | "run_data_script"
+    )
 }
 
 // ── Function Calling 工具定义 ──

@@ -7,6 +7,7 @@ import { ContextActionPanel } from "@/components/ai/ContextActionPanel";
 import { Home } from "@/components/navigation/Home";
 import { Dashboard } from "@/components/home/Dashboard";
 import { PluginEmbed } from "@/components/plugins/PluginEmbed";
+import { PluginErrorBoundary } from "@/components/plugins/PluginErrorBoundary";
 import { useWorkflowStore } from "@/store/workflow-store";
 import { usePluginStore } from "@/store/plugin-store";
 import { useAppStore } from "@/store/app-store";
@@ -19,6 +20,7 @@ import { Bot, Globe, Puzzle, Terminal, Database, Workflow } from "lucide-react";
 import { registry } from "@/core/plugin-system/registry";
 import { builtinPlugins } from "@/plugins/builtin";
 import { getMToolsAI } from "@/core/ai/mtools-ai";
+import { ScopedStorage } from "@/core/plugin-system/storage";
 
 // 初始化：注册所有内置插件
 registry.registerAll(builtinPlugins);
@@ -130,6 +132,10 @@ function App() {
         const id = d.id as string;
         const cmd = d.cmd as string;
         const args = (d.args as Record<string, unknown>) ?? {};
+
+        // 安全白名单：只允许外部插件调用特定的 Tauri 命令
+        const SAFE_COMMANDS = ["open_url", "plugin_start_color_picker"];
+
         const send = (result: unknown, error?: string) => {
           try {
             source.postMessage(
@@ -143,6 +149,16 @@ function App() {
             );
           } catch (_) {}
         };
+
+        if (!SAFE_COMMANDS.includes(cmd)) {
+          console.warn(`[Security] Blocked unauthorized invoke: ${cmd}`);
+          send(
+            undefined,
+            `Permission denied: Command '${cmd}' is not allowed.`,
+          );
+          return;
+        }
+
         try {
           const result = await invoke(cmd, args);
           send(result);
@@ -516,12 +532,18 @@ function App() {
             </div>
           }
         >
-          <div className="h-full">
-            {activePlugin.render({
-              onBack: () => setView("main"),
-              ai: getMToolsAI(),
-            })}
-          </div>
+          <PluginErrorBoundary
+            pluginId={activePlugin.id}
+            onReset={() => setView("main")}
+          >
+            <div className="h-full">
+              {activePlugin.render({
+                onBack: () => setView("main"),
+                ai: getMToolsAI(),
+                storage: new ScopedStorage(activePlugin.id),
+              })}
+            </div>
+          </PluginErrorBoundary>
         </Suspense>
       )}
 
@@ -533,15 +555,23 @@ function App() {
       {/* 外部插件嵌入 */}
       {view === "plugin-embed" && embedTarget && (
         <div className="h-full">
-          <PluginEmbed
+          <PluginErrorBoundary
             pluginId={embedTarget.pluginId}
-            featureCode={embedTarget.featureCode}
-            title={embedTarget.title}
-            onBack={() => {
+            onReset={() => {
               setView("main");
               setEmbedTarget(null);
             }}
-          />
+          >
+            <PluginEmbed
+              pluginId={embedTarget.pluginId}
+              featureCode={embedTarget.featureCode}
+              title={embedTarget.title}
+              onBack={() => {
+                setView("main");
+                setEmbedTarget(null);
+              }}
+            />
+          </PluginErrorBoundary>
         </div>
       )}
 
