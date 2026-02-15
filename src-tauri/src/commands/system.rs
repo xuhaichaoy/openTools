@@ -155,7 +155,19 @@ pub async fn save_general_settings(
     app: tauri::AppHandle,
     settings: String,
 ) -> Result<(), String> {
+    use tauri::Manager;
     use tauri_plugin_store::StoreExt;
+
+    // 1. 尝试应用设置（如 alwaysOnTop）
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&settings) {
+        if let Some(always_on_top) = json.get("alwaysOnTop").and_then(|v| v.as_bool()) {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.set_always_on_top(always_on_top);
+            }
+        }
+    }
+
+    // 2. 持久化存储
     let store = app.store("config.json").map_err(|e| e.to_string())?;
     store.set(
         "general_settings",

@@ -10,7 +10,7 @@ pub async fn toggle_main_window(app: AppHandle) -> Result<(), String> {
         if window.is_visible().unwrap_or(false) {
             window.hide().map_err(|e| e.to_string())?;
         } else {
-            window.center().map_err(|e| e.to_string())?;
+            // window.center().map_err(|e| e.to_string())?; // removed
             window.show().map_err(|e| e.to_string())?;
             window.set_focus().map_err(|e| e.to_string())?;
         }
@@ -48,7 +48,7 @@ pub async fn hide_window(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn show_window_cmd(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.center();
+        // let _ = window.center(); // removed
         window.show().map_err(|e| e.to_string())?;
         let _ = window.set_focus();
     }

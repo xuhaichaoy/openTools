@@ -5,12 +5,14 @@ import { invoke } from "@tauri-apps/api/core";
 interface AppSettings {
   hideOnBlur: boolean;
   autoStart: boolean;
+  alwaysOnTop: boolean;
   theme: "light" | "dark";
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
   hideOnBlur: true,
   autoStart: false,
+  alwaysOnTop: true,
   theme: "light",
 };
 
@@ -102,6 +104,16 @@ export function GeneralSettings() {
             className="w-4 h-4 rounded accent-[var(--color-accent)]"
             checked={settings.hideOnBlur}
             onChange={(e) => updateSetting("hideOnBlur", e.target.checked)}
+          />
+        </label>
+
+        <label className="flex items-center justify-between cursor-pointer">
+          <span className="text-xs text-[var(--color-text)]">窗口始终置顶</span>
+          <input
+            type="checkbox"
+            className="w-4 h-4 rounded accent-[var(--color-accent)]"
+            checked={settings.alwaysOnTop}
+            onChange={(e) => updateSetting("alwaysOnTop", e.target.checked)}
           />
         </label>
 

@@ -12,7 +12,7 @@ use std::path::PathBuf;
 /// 显示窗口的统一帮助函数：居中 → 显示 → 聚焦，并临时抑制失焦隐藏
 fn show_window(window: &tauri::WebviewWindow, suppress: &Arc<AtomicBool>) {
     suppress.store(true, Ordering::SeqCst);
-    let _ = window.center();
+    // let _ = window.center(); // removed to keep last position
     let _ = window.show();
     let _ = window.set_focus();
     // 1.5 秒后取消抑制，给窗口足够时间获取焦点
@@ -247,15 +247,29 @@ pub fn run() {
                         return;
                     }
                     // 读取用户设置，未配置时默认启用
-                    let hide_on_blur = {
+                    let (hide_on_blur, always_on_top) = {
                         use tauri_plugin_store::StoreExt;
-                        app_handle_for_focus.store("config.json").ok()
+                        let settings = app_handle_for_focus.store("config.json").ok()
                             .and_then(|store| store.get("general_settings"))
                             .and_then(|v| v.as_str().map(|s| s.to_string()))
-                            .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+                            .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok());
+                        
+                        let hide = settings.as_ref()
                             .and_then(|obj| obj.get("hideOnBlur").and_then(|v| v.as_bool()))
-                            .unwrap_or(true)
+                            .unwrap_or(true);
+                        
+                        let top = settings.as_ref()
+                            .and_then(|obj| obj.get("alwaysOnTop").and_then(|v| v.as_bool()))
+                            .unwrap_or(true); // 默认置顶
+                        (hide, top)
                     };
+
+                    // 确保窗口置顶状态正确（防抖或重新聚焦时可能丢失）
+                    let _ = window_clone.set_always_on_top(always_on_top);
+
+                    if !hide_on_blur {
+                        return;
+                    }
                     if !hide_on_blur {
                         return;
                     }
