@@ -5,7 +5,6 @@ import { save } from "@tauri-apps/plugin-dialog";
 import {
   ArrowLeft,
   Camera,
-  ScrollText,
   Video,
   Monitor,
   AppWindow,
@@ -23,6 +22,10 @@ import {
   Play,
   Circle,
 } from "lucide-react";
+import {
+  emitPluginEvent,
+  PluginEventTypes,
+} from "@/core/plugin-system/event-bus";
 import { useDragWindow } from "@/hooks/useDragWindow";
 import { RecorderFloat } from "./RecorderFloat";
 
@@ -30,7 +33,7 @@ interface ScreenCaptureProps {
   onBack?: () => void;
 }
 
-type Mode = "screenshot" | "long-screenshot" | "recording";
+type Mode = "screenshot" | "recording";
 type CaptureStep =
   | "idle"
   | "downloading"
@@ -128,63 +131,109 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
 
   // 监听区域截图完成事件（从截图选区窗口返回），根据 action 分发
   useEffect(() => {
-    const unlisten = listen<{ path?: string; action?: string }>("capture-done", async (e) => {
-      const { path: capPath, action: capAction } = e.payload || {};
-      if (!capPath) return;
+    const unlisten = listen<{ path?: string; action?: string }>(
+      "capture-done",
+      async (e) => {
+        const { path: capPath, action: capAction } = e.payload || {};
+        if (!capPath) return;
 
-      switch (capAction) {
-        case "ocr": {
-          // 通过事件总线通知 OCR 插件处理
-          const bc = new BroadcastChannel("mtools-events");
-          bc.postMessage({ type: "OCR_REQUEST", payload: { imagePath: capPath } });
-          bc.close();
-          // 导航到 OCR 结果（emit 给 App 层切换视图）
-          window.dispatchEvent(new CustomEvent("navigate-plugin", { detail: { viewId: "screen-capture", action: "ocr", path: capPath } }));
-          break;
-        }
-        case "pin": {
-          // 调用贴图 ding 命令
-          try {
-            await invoke("ding_create", { imagePath: capPath });
-          } catch (err) {
-            console.error("贴图失败:", err);
-          }
-          break;
-        }
-        case "edit": {
-          // 通过事件总线通知图片编辑器
-          const bc = new BroadcastChannel("mtools-events");
-          bc.postMessage({ type: "EDIT_IMAGE_REQUEST", payload: { imagePath: capPath } });
-          bc.close();
-          break;
-        }
-        case "save": {
-          // 弹出保存对话框
-          try {
-            const filePath = await save({
-              defaultPath: `screenshot-${Date.now()}.png`,
-              filters: [{ name: "PNG", extensions: ["png"] }],
-            });
-            if (filePath) {
-              // 复制文件到目标位置
-              const { readFile, writeFile } = await import("@tauri-apps/plugin-fs");
-              const data = await readFile(capPath);
-              await writeFile(filePath, data);
+        switch (capAction) {
+          case "ocr": {
+            // 通过事件总线通知 OCR 插件处理
+            try {
+              const { readFile } = await import("@tauri-apps/plugin-fs");
+              const fileData = await readFile(capPath);
+              const blob = new Blob([fileData]);
+              const reader = new FileReader();
+              reader.onload = () => {
+                const base64 = (reader.result as string).split(",")[1];
+                emitPluginEvent(
+                  PluginEventTypes.SCREENSHOT_CAPTURED,
+                  "screen-capture",
+                  {
+                    imageBase64: base64,
+                  },
+                );
+                // 导航到 OCR 结果（emit 给 App 层切换视图）
+                // 注意：OCR 插件监听的是 SCREENSHOT_CAPTURED，会自动处理。
+                // 这里主要是为了让 App 切换到 OCR 界面
+                window.dispatchEvent(
+                  new CustomEvent("navigate-plugin", {
+                    detail: { viewId: "ocr", action: "ocr", path: capPath },
+                  }),
+                );
+              };
+              reader.readAsDataURL(blob);
+            } catch (e) {
+              console.error("OCR 请求失败:", e);
             }
-          } catch (err) {
-            console.error("保存截图失败:", err);
+            break;
           }
-          break;
+          case "pin": {
+            // 调用贴图 ding 命令 (需转 base64)
+            try {
+              const { readFile } = await import("@tauri-apps/plugin-fs");
+              const fileData = await readFile(capPath);
+              // Uint8Array -> Base64
+              // 使用 FileReader 或者 reduce
+              const blob = new Blob([fileData]);
+              const reader = new FileReader();
+              reader.onload = async () => {
+                const base64 = (reader.result as string).split(",")[1];
+                await invoke("ding_create", {
+                  image_base64: base64,
+                  x: 100.0, // 默认位置
+                  y: 100.0,
+                  width: 300.0,
+                  height: 300.0,
+                });
+              };
+              reader.readAsDataURL(blob);
+            } catch (err) {
+              console.error("贴图失败:", err);
+            }
+            break;
+          }
+          case "edit": {
+            // 通过事件总线通知图片编辑器
+            const bc = new BroadcastChannel("mtools-events");
+            bc.postMessage({
+              type: "EDIT_IMAGE_REQUEST",
+              payload: { imagePath: capPath },
+            });
+            bc.close();
+            break;
+          }
+          case "save": {
+            // 弹出保存对话框
+            try {
+              const { save } = await import("@tauri-apps/plugin-dialog");
+              const filePath = await save({
+                defaultPath: `screenshot-${Date.now()}.png`,
+                filters: [{ name: "PNG", extensions: ["png"] }],
+              });
+              if (filePath) {
+                // 复制文件到目标位置
+                const { readFile, writeFile } =
+                  await import("@tauri-apps/plugin-fs");
+                const data = await readFile(capPath);
+                await writeFile(filePath, data);
+              }
+            } catch (err) {
+              console.error("保存截图失败:", err);
+            }
+            break;
+          }
+          case "copy":
+          default: {
+            // 默认行为：显示预览
+            setResultPath(capPath);
+            setStep("preview");
+            break;
+          }
         }
-        case "copy":
-        default: {
-          // 默认行为：显示预览
-          setResultPath(capPath);
-          setStep("preview");
-          break;
-        }
-      }
-    });
+      },
+    );
     return () => {
       unlisten.then((fn) => fn());
     };
@@ -286,11 +335,9 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
   useEffect(() => {
     if (status?.helper_installed) {
       loadMonitors();
-      if (mode === "long-screenshot" || mode === "recording") {
-        loadWindows();
-      }
+      loadWindows();
     }
-  }, [status?.helper_installed, mode]);
+  }, [status?.helper_installed]);
 
   // 全屏截图（先隐藏窗口再截，避免截到弹窗）
   const handleScreenshot = async () => {
@@ -504,7 +551,6 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
       <div className="flex border-b border-[var(--color-border)]">
         {[
           { key: "screenshot" as Mode, icon: Camera, label: "截图" },
-          { key: "long-screenshot" as Mode, icon: ScrollText, label: "长截图" },
           { key: "recording" as Mode, icon: Video, label: "录屏" },
         ].map((tab) => (
           <button
@@ -556,7 +602,7 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
           <div className="flex flex-col items-center justify-center py-12 gap-3">
             <Loader2 className="w-8 h-8 text-blue-400 animate-spin" />
             <p className="text-sm text-[var(--color-text-secondary)]">
-              {mode === "long-screenshot" ? "正在滚动截取..." : "正在截图..."}
+              正在截图...
             </p>
           </div>
         ) : (
@@ -627,7 +673,7 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
                   </div>
                 </button>
 
-                {/* 窗口截图列表 */}
+                {/* 窗口截图列表（含长截图） */}
                 <div>
                   <div className="flex items-center justify-between mb-2">
                     <label className="text-[10px] text-[var(--color-text-secondary)]">
@@ -641,37 +687,15 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
                       刷新
                     </button>
                   </div>
+                  <p className="text-[10px] text-[var(--color-text-secondary)] mb-2">
+                    选择窗口进行截图，或使用长截图自动滚动拼接
+                  </p>
                   <WindowList
                     windows={windows}
                     onSelect={handleWindowCapture}
+                    onScrollCapture={handleScrollCapture}
                   />
                 </div>
-              </div>
-            )}
-
-            {/* 长截图模式 */}
-            {mode === "long-screenshot" && (
-              <div>
-                <p className="text-xs text-[var(--color-text-secondary)] mb-3">
-                  选择要滚动截取的窗口，工具将自动滚动并拼接为一张长图
-                </p>
-                <div className="flex items-center justify-between mb-2">
-                  <label className="text-[10px] text-[var(--color-text-secondary)]">
-                    选择窗口
-                  </label>
-                  <button
-                    onClick={loadWindows}
-                    className="text-[10px] text-blue-400 hover:text-blue-300 flex items-center gap-1"
-                  >
-                    <RefreshCw className="w-3 h-3" />
-                    刷新
-                  </button>
-                </div>
-                <WindowList
-                  windows={windows}
-                  onSelect={handleScrollCapture}
-                  actionLabel="长截图"
-                />
               </div>
             )}
 
@@ -803,11 +827,11 @@ function Header({
 function WindowList({
   windows,
   onSelect,
-  actionLabel = "截图",
+  onScrollCapture,
 }: {
   windows: WindowInfo[];
   onSelect: (id: number) => void;
-  actionLabel?: string;
+  onScrollCapture?: (id: number) => void;
 }) {
   if (windows.length === 0) {
     return (
@@ -821,9 +845,8 @@ function WindowList({
   return (
     <div className="space-y-1.5 max-h-[280px] overflow-y-auto">
       {windows.map((w) => (
-        <button
+        <div
           key={w.id}
-          onClick={() => onSelect(w.id)}
           className="w-full flex items-center gap-2.5 p-2 rounded-lg bg-[var(--color-bg-secondary)] hover:bg-[var(--color-bg-hover)] border border-[var(--color-border)] transition-colors group"
         >
           {w.thumbnail ? (
@@ -844,10 +867,23 @@ function WindowList({
               {w.app_name} • {w.width}x{w.height}
             </div>
           </div>
-          <span className="text-[10px] text-blue-400 opacity-0 group-hover:opacity-100 transition-opacity">
-            {actionLabel} →
-          </span>
-        </button>
+          <div className="flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+            <button
+              onClick={() => onSelect(w.id)}
+              className="text-[10px] text-blue-400 hover:text-blue-300 px-1.5 py-0.5 rounded hover:bg-blue-500/10 transition-colors"
+            >
+              截图
+            </button>
+            {onScrollCapture && (
+              <button
+                onClick={() => onScrollCapture(w.id)}
+                className="text-[10px] text-green-400 hover:text-green-300 px-1.5 py-0.5 rounded hover:bg-green-500/10 transition-colors"
+              >
+                长截图
+              </button>
+            )}
+          </div>
+        </div>
       ))}
     </div>
   );

@@ -175,6 +175,7 @@ pub fn run() {
             commands::screen_capture::start_capture,
             commands::screen_capture::finish_capture,
             commands::screen_capture::cancel_capture,
+            commands::screen_capture::get_last_screenshot,
             commands::screen_capture::capture_all_windows,
             commands::screen_capture::list_windows_xcap,
             commands::screen_capture::capture_window_xcap_by_id,

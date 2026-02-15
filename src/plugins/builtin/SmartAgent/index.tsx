@@ -17,6 +17,7 @@ import {
   Pencil,
   Check,
   X,
+  ImagePlus,
 } from "lucide-react";
 import {
   ReActAgent,
@@ -67,7 +68,11 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(function 
   const [showTools, setShowTools] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const isComposingRef = useRef(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [pendingImages, setPendingImages] = useState<string[]>([]);
+  const [pendingImagePreviews, setPendingImagePreviews] = useState<string[]>([]);
 
   // 危险操作确认对话框
   const [confirmDialog, setConfirmDialog] = useState<{
@@ -147,15 +152,108 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(function 
     setAvailableTools(tools);
   }, [ai]);
 
+  // 粘贴图片处理
+  const handlePaste = useCallback(async (e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of Array.from(items)) {
+      if (item.type.startsWith("image/")) {
+        e.preventDefault();
+        const blob = item.getAsFile();
+        if (!blob) continue;
+        const reader = new FileReader();
+        reader.onload = async () => {
+          const dataUrl = reader.result as string;
+          setPendingImagePreviews((prev) => [...prev, dataUrl]);
+          const base64 = dataUrl.split(",")[1];
+          const ext = blob.type.split("/")[1] || "png";
+          const fileName = `agent_img_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.${ext}`;
+          try {
+            const { invoke } = await import("@tauri-apps/api/core");
+            const filePath = await invoke<string>("ai_save_chat_image", {
+              imageData: base64,
+              fileName,
+            });
+            setPendingImages((prev) => [...prev, filePath]);
+          } catch (err) {
+            console.error("保存图片失败:", err);
+            setPendingImagePreviews((prev) => prev.slice(0, -1));
+          }
+        };
+        reader.readAsDataURL(blob);
+      }
+    }
+  }, []);
+
+  const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !file.type.startsWith("image/")) return;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const dataUrl = reader.result as string;
+      setPendingImagePreviews((prev) => [...prev, dataUrl]);
+      const base64 = dataUrl.split(",")[1];
+      const ext = file.type.split("/")[1] || "png";
+      const fileName = `agent_img_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.${ext}`;
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const filePath = await invoke<string>("ai_save_chat_image", {
+          imageData: base64,
+          fileName,
+        });
+        setPendingImages((prev) => [...prev, filePath]);
+      } catch (err) {
+        console.error("保存图片失败:", err);
+        setPendingImagePreviews((prev) => prev.slice(0, -1));
+      }
+    };
+    reader.readAsDataURL(file);
+    e.target.value = "";
+  }, []);
+
+  const removeImage = useCallback((index: number) => {
+    setPendingImages((prev) => prev.filter((_, i) => i !== index));
+    setPendingImagePreviews((prev) => prev.filter((_, i) => i !== index));
+  }, []);
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    // keyCode 229 = IME 正在处理；isComposingRef = 输入法组合中
+    if (
+      e.key === "Enter" &&
+      !e.shiftKey &&
+      !isComposingRef.current &&
+      e.keyCode !== 229
+    ) {
+      e.preventDefault();
+      handleRunRef.current?.();
+    }
+  }, []);
+
+  const handleRunRef = useRef<(() => void) | null>(null);
+
   const handleRun = useCallback(async () => {
-    if (!ai || !input.trim() || running) return;
-    const query = input.trim();
+    if (!ai || (!input.trim() && pendingImages.length === 0) || running) return;
+
+    // 构建查询文本：如果有图片，将图片路径附加到查询中
+    let query = input.trim();
+    const imagePaths = [...pendingImages];
+    if (imagePaths.length > 0) {
+      const imageInfo = imagePaths.map((p) => p).join("\n");
+      query = query
+        ? `${query}\n\n[用户附带了以下图片文件]\n${imageInfo}`
+        : `请分析以下图片文件:\n${imageInfo}`;
+    }
 
     // 创建新会话并清空输入
     const sessionId = createSession(query);
     setInput("");
+    setPendingImages([]);
+    setPendingImagePreviews([]);
     setRunning(true);
     setExpandedSteps(new Set());
+    if (inputRef.current) {
+      inputRef.current.style.height = "auto";
+    }
 
     const collectedSteps: AgentStep[] = [];
 
@@ -193,7 +291,10 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(function 
       setRunning(false);
       inputRef.current?.focus();
     }
-  }, [ai, input, running, availableTools, createSession, updateSession]);
+  }, [ai, input, running, availableTools, pendingImages, createSession, updateSession]);
+
+  // 保持 ref 与最新 handleRun 同步
+  handleRunRef.current = handleRun;
 
   const toggleStep = useCallback((idx: number) => {
     setExpandedSteps((prev) => {
@@ -418,21 +519,77 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(function 
         </div>
 
         {/* 输入区域 */}
-        <div className="p-3 border-t border-[var(--color-border)]">
-          <div className="flex gap-2">
+        <div className="p-2 pb-1 border-t border-[var(--color-border)]">
+          <div className="relative flex items-end gap-1 bg-[var(--color-bg-secondary)] p-1 px-2 rounded-xl border border-[var(--color-border)] shadow-sm focus-within:shadow-md focus-within:border-emerald-500/30 transition-all">
+            {/* 添加图片按钮 */}
+            {/* <button
+              onClick={() => fileInputRef.current?.click()}
+              className="p-1.5 rounded-lg text-[var(--color-text-secondary)] hover:text-emerald-500 hover:bg-emerald-500/5 transition-colors shrink-0 self-center mb-0.5"
+              title="添加图片"
+            >
+              <ImagePlus className="w-4 h-4" />
+            </button> */}
             <input
-              ref={inputRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleRun()}
-              placeholder="输入任务或问题... (如: 把当前时间戳转成日期)"
-              disabled={running || !ai}
-              className="flex-1 px-3 py-2 bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/50 disabled:opacity-50"
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={handleFileSelect}
             />
+
+            <div className="flex-1 flex flex-col min-w-0">
+              {/* 图片预览区 */}
+              {pendingImagePreviews.length > 0 && (
+                <div className="flex gap-2 flex-wrap px-1 pt-1.5 pb-1">
+                  {pendingImagePreviews.map((preview, i) => (
+                    <div key={i} className="relative group shrink-0">
+                      <img
+                        src={preview}
+                        alt={`待发送图片 ${i + 1}`}
+                        className="w-14 h-14 object-cover rounded-lg border border-[var(--color-border)] hover:brightness-90 transition-all shadow-sm"
+                      />
+                      <button
+                        onClick={() => removeImage(i)}
+                        className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-red-500 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-sm z-10"
+                      >
+                        <X className="w-2.5 h-2.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <textarea
+                ref={inputRef}
+                className="w-full bg-transparent text-[var(--color-text)] text-[14px] px-1 outline-none resize-none min-h-[32px] max-h-[120px] placeholder:text-[var(--color-text-secondary)]/50 leading-relaxed py-2"
+                placeholder={
+                  pendingImages.length > 0
+                    ? "输入描述（可省略）..."
+                    : "输入任务或问题..."
+                }
+                value={input}
+                onChange={(e) => {
+                  setInput(e.target.value);
+                  e.target.style.height = "auto";
+                  e.target.style.height = e.target.scrollHeight + "px";
+                }}
+                onKeyDown={handleKeyDown}
+                onPaste={handlePaste}
+                onCompositionStart={() => { isComposingRef.current = true; }}
+                onCompositionEnd={() => {
+                  setTimeout(() => { isComposingRef.current = false; }, 200);
+                }}
+                rows={1}
+                style={{ height: "auto" }}
+                disabled={running || !ai}
+              />
+            </div>
+
+            {/* 发送按钮 */}
             <button
               onClick={handleRun}
-              disabled={running || !input.trim() || !ai}
-              className="px-4 py-2 bg-emerald-500 text-white rounded-lg hover:bg-emerald-600 transition-colors disabled:opacity-50"
+              disabled={running || (!input.trim() && pendingImages.length === 0) || !ai}
+              className="p-2 rounded-full bg-emerald-500 text-white hover:bg-emerald-600 disabled:opacity-40 disabled:hover:bg-emerald-500 disabled:cursor-not-allowed transition-all shadow-sm active:scale-95 shrink-0 self-end mb-0.5"
+              aria-label="发送"
             >
               {running ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -442,7 +599,7 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(function 
             </button>
           </div>
           {!ai && (
-            <p className="text-xs text-red-500 mt-1">
+            <p className="text-xs text-red-500 mt-1 px-1">
               请先在设置中配置 AI 模型
             </p>
           )}

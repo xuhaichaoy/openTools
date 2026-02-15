@@ -26,6 +26,10 @@ static SCREENSHOT_WINDOW_READY: AtomicBool = AtomicBool::new(false);
 static CURRENT_SCREENSHOT_PATH: std::sync::LazyLock<Mutex<Option<String>>> =
     std::sync::LazyLock::new(|| Mutex::new(None));
 
+// 缓存最后一次截图数据，供前端 reload 后拉取
+static LAST_SCREENSHOT_DATA: std::sync::LazyLock<Mutex<Option<Value>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+
 fn get_helpers_dir(app: &AppHandle) -> PathBuf {
     let data_dir = app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("."));
     data_dir.join("helpers")
@@ -551,22 +555,46 @@ async fn start_capture_inner(app: &AppHandle, monitor_id: Option<u32>) -> Result
         }
     }
 
-    // 7. 通过事件发送截图数据到截图窗口（参考 eSearch 的 clip_init IPC）
+    // 7. 通过事件发送截图数据到截图窗口
     println!("[ScreenCapture] Emitting screenshot-data: path={}", path_str);
-    let _ = app.emit("screenshot-data", serde_json::json!({
+    let payload = serde_json::json!({
         "path": path_str,
         "base64": data_url,
         "width": img_w,
         "height": img_h,
-    }));
+    });
 
-    // 8. 显示并聚焦截图窗口（关键修复：之前忘了 show，导致窗口不可见）
+    // 保存到缓存
+    if let Ok(mut guard) = LAST_SCREENSHOT_DATA.lock() {
+        *guard = Some(payload.clone());
+    }
+
+    if let Some(win) = app.get_webview_window("screenshot") {
+        println!("[ScreenCapture] Window found, emitting to target window");
+        if let Err(e) = win.emit("screenshot-data", &payload) {
+             eprintln!("[ScreenCapture] Emit to window failed: {}", e);
+             // Fallback to global emit
+             let _ = app.emit("screenshot-data", &payload);
+        }
+    } else {
+        println!("[ScreenCapture] Window not found (unexpected), emitting globally");
+        let _ = app.emit("screenshot-data", &payload);
+    }
+
+    // 8. 显示并聚焦截图窗口
     if let Some(win) = app.get_webview_window("screenshot") {
         let _ = win.show();
         let _ = win.set_focus();
     }
 
     Ok(path_str)
+}
+
+/// 获取最后一次截图数据（用于前端加载/刷新后恢复状态）
+#[tauri::command]
+pub async fn get_last_screenshot() -> Result<Option<Value>, String> {
+    let guard = LAST_SCREENSHOT_DATA.lock().map_err(|e| e.to_string())?;
+    Ok(guard.clone())
 }
 
 /// 完成区域截图：裁剪 → 复制到剪贴板 → 隐藏截图窗口 → 通知主窗口
@@ -579,6 +607,7 @@ pub async fn finish_capture(
     height: u32,
     copy_to_clipboard: Option<bool>,
     action: Option<String>,
+    annotated_image: Option<String>,
 ) -> Result<String, String> {
     // 1. 隐藏截图窗口（不关闭，供下次复用）
     if let Some(win) = app.get_webview_window("screenshot") {
@@ -587,18 +616,39 @@ pub async fn finish_capture(
 
     // 2. 在阻塞线程中裁剪并复制到剪贴板
     let do_copy = copy_to_clipboard.unwrap_or(true);
-    let source_path = CURRENT_SCREENSHOT_PATH.lock()
-        .map_err(|e| format!("获取截图路径失败: {e}"))?
-        .clone()
-        .ok_or_else(|| "没有可用的截图源文件".to_string())?;
+    let source_path_opt = CURRENT_SCREENSHOT_PATH.lock()
+        .map_err(|e| format!("获取截图锁失败: {e}"))?
+        .clone();
+
+    // 如果没有 annotated_image，则必须有 source_path
+    if annotated_image.is_none() && source_path_opt.is_none() {
+         return Err("没有可用的截图源文件".to_string());
+    }
+
     let result_str = tokio::task::spawn_blocking(move || -> Result<String, String> {
-        let img = image::open(&source_path).map_err(|e| format!("打开截图失败: {e}"))?;
-        let cropped = img.crop_imm(x, y, width, height);
-        let result_path = std::env::temp_dir().join("51toolbox-screenshot-cropped.png");
-        cropped.save(&result_path).map_err(|e| format!("保存裁剪截图失败: {e}"))?;
+        let dynamic_img = if let Some(base64_str) = annotated_image {
+             // Case A: 前端传来了已标注的图片 (Base64)
+             // 去掉头部的 "data:image/png;base64,"
+             let data = base64_str.split(',').last().unwrap_or(&base64_str);
+             use base64::{engine::general_purpose, Engine as _};
+             let bytes = general_purpose::STANDARD
+                 .decode(data)
+                 .map_err(|e| format!("Base64 解码失败: {e}"))?;
+             image::load_from_memory(&bytes)
+                 .map_err(|e| format!("加载标注图片失败: {e}"))?
+        } else {
+             // Case B: 仅裁剪原图
+             let path = source_path_opt.unwrap();
+             let img = image::open(&path).map_err(|e| format!("打开截图失败: {e}"))?;
+             img.crop_imm(x, y, width, height)
+        };
+        
+        // 保存（统一存为 png）
+        let result_path = std::env::temp_dir().join("51toolbox-screenshot-result.png");
+        dynamic_img.save(&result_path).map_err(|e| format!("保存截图结果失败: {e}"))?;
 
         if do_copy {
-            let rgba = cropped.to_rgba8();
+            let rgba = dynamic_img.to_rgba8();
             let w = rgba.width() as usize;
             let h = rgba.height() as usize;
             let bytes = rgba.into_raw();
