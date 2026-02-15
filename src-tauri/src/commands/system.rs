@@ -197,5 +197,47 @@ fn detect_python() -> Result<String, String> {
             }
         }
     }
-    Err("未找到 Python，请确保 Python 3 已安装并在 PATH 中".to_string())
+    Err("未找到 Python".to_string())
+}
+
+/// 清理 N 天前的聊天图片缓存
+#[tauri::command]
+pub async fn clean_old_chat_images(app: tauri::AppHandle, days: u64) -> Result<String, String> {
+    use tauri::Manager;
+    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let images_dir = app_data_dir.join("chat_images");
+
+    if !images_dir.exists() {
+        return Ok("目录不存在，无需清理".to_string());
+    }
+
+    let mut deleted_count = 0;
+    let mut total_size = 0;
+    let now = std::time::SystemTime::now();
+    let retention_period = std::time::Duration::from_secs(days * 24 * 60 * 60);
+
+    let entries = std::fs::read_dir(&images_dir).map_err(|e| e.to_string())?;
+    for entry in entries {
+        if let Ok(entry) = entry {
+            if let Ok(metadata) = entry.metadata() {
+                if let Ok(modified) = metadata.modified() {
+                    if let Ok(age) = now.duration_since(modified) {
+                        if age > retention_period {
+                            let size = metadata.len();
+                            if std::fs::remove_file(entry.path()).is_ok() {
+                                deleted_count += 1;
+                                total_size += size;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if deleted_count > 0 {
+        Ok(format!("已清理 {} 张过期图片，释放 {:.2} MB 空间", deleted_count, total_size as f64 / 1024.0 / 1024.0))
+    } else {
+        Ok("没有需要清理的过期图片".to_string())
+    }
 }

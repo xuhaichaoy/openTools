@@ -283,7 +283,6 @@ export const MessageBubble = memo(function MessageBubble({
                         <img
                           src={src}
                           alt={alt || "图片"}
-                          className="max-w-full rounded-lg my-2 cursor-pointer hover:opacity-90 transition-opacity"
                           className="max-w-full rounded-lg my-2 cursor-zoom-in hover:opacity-90 transition-opacity"
                           onClick={() => src && setPreviewImage(src)}
                           loading="lazy"

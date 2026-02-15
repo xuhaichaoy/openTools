@@ -5,21 +5,24 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     menu::{Menu, MenuItem},
 };
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::path::PathBuf;
 
 /// 显示窗口的统一帮助函数：居中 → 显示 → 聚焦，并临时抑制失焦隐藏
-fn show_window(window: &tauri::WebviewWindow, suppress: &Arc<AtomicBool>) {
-    suppress.store(true, Ordering::SeqCst);
+/// 显示窗口的统一帮助函数：居中 → 显示 → 聚焦，并临时抑制失焦隐藏
+fn show_window(window: &tauri::WebviewWindow, suppress: &Arc<AtomicUsize>) {
+    // 增加生成代数，表示新的抑制周期开始（非0即为抑制状态）
+    let gen = suppress.fetch_add(1, Ordering::SeqCst) + 1;
     // let _ = window.center(); // removed to keep last position
     let _ = window.show();
     let _ = window.set_focus();
-    // 1.5 秒后取消抑制，给窗口足够时间获取焦点
+    // 1.5 秒后取消抑制，但只有当当前代数未发生变化时才重置（避免覆盖新的抑制请求）
     let s = suppress.clone();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(1500));
-        s.store(false, Ordering::SeqCst);
+        // CAS: 只有当当前值仍等于 gen 时，才将其重置为 0
+        let _ = s.compare_exchange(gen, 0, Ordering::SeqCst, Ordering::SeqCst);
     });
 }
 
@@ -107,6 +110,7 @@ pub fn run() {
             commands::system::load_chat_history,
             commands::system::save_general_settings,
             commands::system::load_general_settings,
+            commands::system::clean_old_chat_images,
             commands::data_forge::dataforge_get_scripts,
             commands::data_forge::dataforge_search_scripts,
             commands::data_forge::dataforge_run_script,
@@ -150,7 +154,8 @@ pub fn run() {
         ])
         .setup(|app| {
             // 失焦隐藏的抑制标志（显示窗口后短时间内不自动隐藏）
-            let suppress_hide = Arc::new(AtomicBool::new(false));
+            // 0: 不抑制, >0: 抑制中 (generation count)
+            let suppress_hide = Arc::new(AtomicUsize::new(0));
 
             // 创建系统托盘
             let show_item = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
@@ -243,7 +248,7 @@ pub fn run() {
             main_window.on_window_event(move |event| {
                 if let tauri::WindowEvent::Focused(false) = event {
                     // 如果处于抑制期（刚主动显示窗口），跳过自动隐藏
-                    if suppress_for_focus.load(Ordering::SeqCst) {
+                    if suppress_for_focus.load(Ordering::SeqCst) > 0 {
                         return;
                     }
                     // 读取用户设置，未配置时默认启用
@@ -279,15 +284,42 @@ pub fn run() {
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_millis(500));
                         // 再次检查抑制标志和焦点状态
-                        if !s.load(Ordering::SeqCst) && !w.is_focused().unwrap_or(true) {
+                        if s.load(Ordering::SeqCst) == 0 && !w.is_focused().unwrap_or(true) {
                             let _ = w.hide();
                         }
                     });
                 }
             });
 
+            // macOS: 设置窗口在所有桌面可见 (CanJoinAllSpaces + MoveToActiveSpace)
+            #[cfg(target_os = "macos")]
+            #[allow(deprecated)]
+            unsafe {
+                use cocoa::appkit::{NSWindow, NSWindowCollectionBehavior};
+                use cocoa::base::id;
+                
+                let ns_window = main_window.ns_window().unwrap() as id;
+                let behavior = ns_window.collectionBehavior();
+                ns_window.setCollectionBehavior_(
+                    behavior 
+                    | NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces 
+                );
+            }
+
             // 启动时显示窗口
             show_window(&main_window, &suppress_hide);
+
+            // 启动时异步清理 7 天前的过期图片
+            let app_handle_for_clean = app.handle().clone();
+            std::thread::spawn(move || {
+                // 延迟 5 秒执行，避开启动高峰
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                if let Err(e) = tauri::async_runtime::block_on(
+                    commands::system::clean_old_chat_images(app_handle_for_clean, 7)
+                ) {
+                    log::warn!("自动清理图片失败: {}", e);
+                }
+            });
 
             Ok(())
         })
