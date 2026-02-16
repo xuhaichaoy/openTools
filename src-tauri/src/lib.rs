@@ -305,6 +305,7 @@ pub fn run() {
             commands::file_search::file_search,
             commands::file_search::file_open,
             commands::file_search::file_show_in_folder,
+            commands::file_search::app_search,
         ])
         .setup(|app| {
             let suppress_hide = Arc::new(AtomicUsize::new(0));

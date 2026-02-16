@@ -66,7 +66,14 @@
     "global-shortcut:default",
     "global-shortcut:allow-register",
     "global-shortcut:allow-unregister",
+    "global-shortcut:allow-unregister",
     "fs:default",
+    {
+      "identifier": "fs:scope",
+      "allow": [
+        "$APPDATA/**"
+      ]
+    },
     "process:default",
     "store:default",
     "log:default"

@@ -285,6 +285,286 @@ pub async fn file_search(
     Ok(results)
 }
 
+// ── 本地应用搜索 ──
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AppSearchResult {
+    /// 应用显示名称
+    pub name: String,
+    /// 应用完整路径
+    pub path: String,
+}
+
+/// macOS: 使用 mdfind 搜索应用程序
+#[cfg(target_os = "macos")]
+fn platform_app_search(query: &str, max_results: usize) -> Result<Vec<AppSearchResult>, String> {
+    let mdfind_query = format!(
+        "kMDItemContentType == 'com.apple.application-bundle' && kMDItemDisplayName == '*{}*'c",
+        query
+    );
+
+    let output = Command::new("mdfind")
+        .arg("-limit")
+        .arg(max_results.to_string())
+        .arg(&mdfind_query)
+        .output()
+        .map_err(|e| format!("mdfind 执行失败: {}", e))?;
+
+    if !output.status.success() {
+        return fallback_app_search_macos(query, max_results);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let results: Vec<AppSearchResult> = stdout
+        .lines()
+        .filter(|line| !line.is_empty() && line.ends_with(".app"))
+        .map(|line| {
+            let path = Path::new(line);
+            let name = path
+                .file_stem()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            AppSearchResult {
+                name,
+                path: line.to_string(),
+            }
+        })
+        .collect();
+
+    Ok(results)
+}
+
+/// macOS 降级：直接扫描 /Applications 目录
+#[cfg(target_os = "macos")]
+fn fallback_app_search_macos(query: &str, max_results: usize) -> Result<Vec<AppSearchResult>, String> {
+    let query_lower = query.to_lowercase();
+    let mut results = Vec::new();
+    let dirs = ["/Applications", "/System/Applications"];
+
+    for dir in &dirs {
+        if results.len() >= max_results {
+            break;
+        }
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if results.len() >= max_results {
+                    break;
+                }
+                let path = entry.path();
+                if let Some(ext) = path.extension() {
+                    if ext == "app" {
+                        let name = path
+                            .file_stem()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if name.to_lowercase().contains(&query_lower) {
+                            results.push(AppSearchResult {
+                                name,
+                                path: path.display().to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 也搜索 ~/Applications
+    if let Some(home) = dirs::home_dir() {
+        let user_apps = home.join("Applications");
+        if user_apps.exists() {
+            if let Ok(entries) = std::fs::read_dir(&user_apps) {
+                for entry in entries.flatten() {
+                    if results.len() >= max_results {
+                        break;
+                    }
+                    let path = entry.path();
+                    if let Some(ext) = path.extension() {
+                        if ext == "app" {
+                            let name = path
+                                .file_stem()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("")
+                                .to_string();
+                            if name.to_lowercase().contains(&query_lower) {
+                                results.push(AppSearchResult {
+                                    name,
+                                    path: path.display().to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+/// Windows: 搜索已安装应用（开始菜单快捷方式 + Program Files）
+#[cfg(target_os = "windows")]
+fn platform_app_search(query: &str, max_results: usize) -> Result<Vec<AppSearchResult>, String> {
+    let query_lower = query.to_lowercase();
+    let mut results = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    // 搜索开始菜单快捷方式
+    let start_menu_dirs: Vec<String> = vec![
+        r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs".to_string(),
+    ];
+    let user_start = if let Some(home) = dirs::home_dir() {
+        Some(format!(
+            "{}\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs",
+            home.display()
+        ))
+    } else {
+        None
+    };
+    let all_dirs: Vec<&str> = start_menu_dirs
+        .iter()
+        .map(|s| s.as_str())
+        .chain(user_start.iter().map(|s| s.as_str()))
+        .collect();
+
+    for dir in all_dirs {
+        if results.len() >= max_results {
+            break;
+        }
+        scan_lnk_files(dir, &query_lower, max_results, &mut results, &mut seen);
+    }
+
+    Ok(results)
+}
+
+#[cfg(target_os = "windows")]
+fn scan_lnk_files(
+    dir: &str,
+    query_lower: &str,
+    max_results: usize,
+    results: &mut Vec<AppSearchResult>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if results.len() >= max_results {
+                return;
+            }
+            let path = entry.path();
+            if path.is_dir() {
+                scan_lnk_files(&path.display().to_string(), query_lower, max_results, results, seen);
+            } else if let Some(ext) = path.extension() {
+                if ext == "lnk" {
+                    let name = path
+                        .file_stem()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if name.to_lowercase().contains(query_lower) && !seen.contains(&name.to_lowercase()) {
+                        seen.insert(name.to_lowercase());
+                        results.push(AppSearchResult {
+                            name,
+                            path: path.display().to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Linux: 搜索 .desktop 文件
+#[cfg(target_os = "linux")]
+fn platform_app_search(query: &str, max_results: usize) -> Result<Vec<AppSearchResult>, String> {
+    let query_lower = query.to_lowercase();
+    let mut results = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    let desktop_dirs = vec![
+        "/usr/share/applications".to_string(),
+        "/usr/local/share/applications".to_string(),
+    ];
+    let user_desktop = if let Some(home) = dirs::home_dir() {
+        Some(format!("{}/.local/share/applications", home.display()))
+    } else {
+        None
+    };
+
+    let all_dirs: Vec<&str> = desktop_dirs
+        .iter()
+        .map(|s| s.as_str())
+        .chain(user_desktop.iter().map(|s| s.as_str()))
+        .collect();
+
+    for dir in all_dirs {
+        if results.len() >= max_results {
+            break;
+        }
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if results.len() >= max_results {
+                    break;
+                }
+                let path = entry.path();
+                if let Some(ext) = path.extension() {
+                    if ext == "desktop" {
+                        if let Ok(content) = std::fs::read_to_string(&path) {
+                            let name = content
+                                .lines()
+                                .find(|l| l.starts_with("Name="))
+                                .map(|l| l.trim_start_matches("Name=").to_string())
+                                .unwrap_or_default();
+                            let exec = content
+                                .lines()
+                                .find(|l| l.starts_with("Exec="))
+                                .map(|l| l.trim_start_matches("Exec=").to_string())
+                                .unwrap_or_default();
+                            // 检查是否隐藏
+                            let no_display = content
+                                .lines()
+                                .any(|l| l.trim() == "NoDisplay=true");
+                            if !no_display
+                                && !name.is_empty()
+                                && name.to_lowercase().contains(&query_lower)
+                                && !seen.contains(&name.to_lowercase())
+                            {
+                                seen.insert(name.to_lowercase());
+                                results.push(AppSearchResult {
+                                    name,
+                                    path: if exec.is_empty() {
+                                        path.display().to_string()
+                                    } else {
+                                        exec.split_whitespace().next().unwrap_or("").to_string()
+                                    },
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+/// 搜索本地已安装应用
+#[tauri::command]
+pub async fn app_search(
+    query: String,
+    max_results: Option<usize>,
+) -> Result<Vec<AppSearchResult>, String> {
+    let query = query.trim().to_string();
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let max = max_results.unwrap_or(10).min(30);
+    platform_app_search(&query, max)
+}
+
 /// 使用系统默认程序打开文件
 #[tauri::command]
 pub async fn file_open(path: String) -> Result<(), String> {

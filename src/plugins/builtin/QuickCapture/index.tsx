@@ -76,16 +76,25 @@ const QuickCapturePlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   const handleSubmit = useCallback(async () => {
-    if (!inputContent.trim()) return;
-    await addMark(inputType, inputContent.trim(), { tags: inputTags });
-    emitPluginEvent(PluginEventTypes.MARK_CREATED, "quick-capture", {
+    console.log("[QuickCapture] handleSubmit called", {
       type: inputType,
-      content: inputContent.trim(),
-      tags: inputTags,
+      content: inputContent,
     });
-    setInputContent("");
-    setInputTags([]);
-    inputRef.current?.focus();
+    if (!inputContent.trim()) return;
+    try {
+      await addMark(inputType, inputContent.trim(), { tags: inputTags });
+      console.log("[QuickCapture] addMark success");
+      emitPluginEvent(PluginEventTypes.MARK_CREATED, "quick-capture", {
+        type: inputType,
+        content: inputContent.trim(),
+        tags: inputTags,
+      });
+      setInputContent("");
+      setInputTags([]);
+      inputRef.current?.focus();
+    } catch (error) {
+      console.error("[QuickCapture] Failed to add mark:", error);
+    }
   }, [inputType, inputContent, inputTags, addMark]);
 
   const handleAddTag = useCallback(async () => {

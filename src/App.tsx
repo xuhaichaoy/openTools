@@ -15,7 +15,25 @@ import { useAIStore } from "@/store/ai-store";
 import { useAgentStore } from "@/store/agent-store";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, emit } from "@tauri-apps/api/event";
-import { Bot, Globe, Puzzle, Terminal, Database, Workflow as WorkflowIcon, ClipboardList, File, Folder, FileImage, FileVideo, FileAudio, FileText, FileCode, Archive, AppWindow } from "lucide-react";
+import {
+  Bot,
+  Globe,
+  Puzzle,
+  Terminal,
+  Database,
+  Workflow as WorkflowIcon,
+  ClipboardList,
+  File,
+  Folder,
+  FileImage,
+  FileVideo,
+  FileAudio,
+  FileText,
+  FileCode,
+  Archive,
+  AppWindow,
+  Rocket,
+} from "lucide-react";
 import {
   emitPluginEvent,
   PluginEventTypes,
@@ -54,7 +72,10 @@ function createBridgeToken(): string {
 function formatFileSize(bytes: number): string {
   if (bytes === 0) return "";
   const units = ["B", "KB", "MB", "GB"];
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const i = Math.min(
+    Math.floor(Math.log(bytes) / Math.log(1024)),
+    units.length - 1,
+  );
   const size = bytes / Math.pow(1024, i);
   return `${size < 10 ? size.toFixed(1) : Math.round(size)} ${units[i]}`;
 }
@@ -108,9 +129,7 @@ function isAllowedPluginApiMethod(method: unknown): method is string {
   return allowed.has(method);
 }
 
-function isValidPluginApiCallArgs(
-  args: Record<string, unknown>,
-): args is {
+function isValidPluginApiCallArgs(args: Record<string, unknown>): args is {
   pluginId: string;
   method: string;
   args: string;
@@ -163,7 +182,8 @@ function MainApp() {
   });
   const { mode, searchValue, setWindowExpanded, reset } = useAppStore();
   const { config } = useAIStore();
-  const lastCaptureHandledRef = (window as any).__LAST_CAPTURE_HANDLED_REF__ ||
+  const lastCaptureHandledRef =
+    (window as any).__LAST_CAPTURE_HANDLED_REF__ ||
     ((window as any).__LAST_CAPTURE_HANDLED_REF__ = { key: "", ts: 0 });
 
   const handleDirectColorPicker = useCallback(async () => {
@@ -186,44 +206,103 @@ function MainApp() {
   const [fileResults, setFileResults] = useState<FileSearchResult[]>([]);
   const fileSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // ── 应用搜索（异步 + 防抖） ──
+  interface AppSearchResult {
+    name: string;
+    path: string;
+  }
+  const [appResults, setAppResults] = useState<AppSearchResult[]>([]);
+  const appSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   useEffect(() => {
     // 清理上一次定时器
     if (fileSearchTimerRef.current) {
       clearTimeout(fileSearchTimerRef.current);
       fileSearchTimerRef.current = null;
     }
+    if (appSearchTimerRef.current) {
+      clearTimeout(appSearchTimerRef.current);
+      appSearchTimerRef.current = null;
+    }
 
     const trimmed = searchValue.trim();
 
     // 仅在有 >= 2 字符的查询词时触发文件搜索（f 前缀 或 普通搜索）
     const isFilePrefix = trimmed.startsWith("f ");
-    const query = isFilePrefix ? trimmed.slice(2).trim() : trimmed;
+    const isAppPrefix = trimmed.startsWith("app ");
+    const query = isFilePrefix
+      ? trimmed.slice(2).trim()
+      : isAppPrefix
+        ? trimmed.slice(4).trim()
+        : trimmed;
 
-    // 前缀模式（bd/gg/bing/ai/cb/data/）不搜文件
-    const prefixModes = ["ai ", "bd ", "gg ", "bing ", "/ ", "cb", "data "];
-    const isPrefix = prefixModes.some((p) => trimmed.startsWith(p) || trimmed === p.trim());
-    if (!query || query.length < 2 || (isPrefix && !isFilePrefix)) {
+    // 前缀模式（bd/gg/bing/ai/cb/data/）不搜文件/应用
+    const prefixModes = [
+      "ai ",
+      "bd ",
+      "gg ",
+      "bing ",
+      "/ ",
+      "cb",
+      "data ",
+      "sn ",
+      "bk ",
+    ];
+    const isPrefix = prefixModes.some(
+      (p) => trimmed.startsWith(p) || trimmed === p.trim(),
+    );
+    if (
+      !query ||
+      query.length < 2 ||
+      (isPrefix && !isFilePrefix && !isAppPrefix)
+    ) {
       setFileResults([]);
+      setAppResults([]);
       return;
     }
 
-    // 300ms 防抖
-    fileSearchTimerRef.current = setTimeout(async () => {
-      try {
-        const results = await invoke<FileSearchResult[]>("file_search", {
-          query,
-          maxResults: isFilePrefix ? 24 : 8, // f 前缀模式显示更多结果
-        });
-        setFileResults(results);
-      } catch (e) {
-        console.warn("文件搜索失败:", e);
-        setFileResults([]);
-      }
-    }, 300);
+    // 300ms 防抖 — 文件搜索
+    if (!isAppPrefix) {
+      fileSearchTimerRef.current = setTimeout(async () => {
+        try {
+          const results = await invoke<FileSearchResult[]>("file_search", {
+            query,
+            maxResults: isFilePrefix ? 24 : 8,
+          });
+          setFileResults(results);
+        } catch (e) {
+          console.warn("文件搜索失败:", e);
+          setFileResults([]);
+        }
+      }, 300);
+    } else {
+      setFileResults([]);
+    }
+
+    // 200ms 防抖 — 应用搜索（比文件稍快，优先展示）
+    if (!isFilePrefix) {
+      appSearchTimerRef.current = setTimeout(async () => {
+        try {
+          const results = await invoke<AppSearchResult[]>("app_search", {
+            query,
+            maxResults: isAppPrefix ? 20 : 5,
+          });
+          setAppResults(results);
+        } catch (e) {
+          console.warn("应用搜索失败:", e);
+          setAppResults([]);
+        }
+      }, 200);
+    } else {
+      setAppResults([]);
+    }
 
     return () => {
       if (fileSearchTimerRef.current) {
         clearTimeout(fileSearchTimerRef.current);
+      }
+      if (appSearchTimerRef.current) {
+        clearTimeout(appSearchTimerRef.current);
       }
     };
   }, [searchValue]);
@@ -340,9 +419,7 @@ function MainApp() {
           (a) => a.pluginId === pluginId && a.action.name === actionName,
         );
         if (!found) {
-          throw new Error(
-            `找不到插件动作: ${pluginId}/${actionName}`,
-          );
+          throw new Error(`找不到插件动作: ${pluginId}/${actionName}`);
         }
         // 解析参数
         let parsedParams: Record<string, unknown> = {};
@@ -352,10 +429,9 @@ function MainApp() {
           /* 忽略无效 JSON */
         }
         // 执行 action
-        const result = await found.action.execute(
-          parsedParams,
-          { ai: getMToolsAI() },
-        );
+        const result = await found.action.execute(parsedParams, {
+          ai: getMToolsAI(),
+        });
         // 返回结果给后端
         await emit("workflow-plugin-action-result", {
           requestId,
@@ -383,80 +459,77 @@ function MainApp() {
       imageBase64?: string;
       imageWidth?: number;
       imageHeight?: number;
-    }>(
-      "capture-done",
-      async (e) => {
-        const {
-          path: capPath,
-          action,
-          imageBase64,
-          imageWidth,
-          imageHeight,
-        } = e.payload || {};
-        if (!capPath) return;
+    }>("capture-done", async (e) => {
+      const {
+        path: capPath,
+        action,
+        imageBase64,
+        imageWidth,
+        imageHeight,
+      } = e.payload || {};
+      if (!capPath) return;
 
-        // 去重：StrictMode/重复监听/重复事件时，短时间内同 key 只处理一次
-        const key = `${action || "copy"}|${capPath}`;
-        const now = Date.now();
-        if (
-          lastCaptureHandledRef.key === key &&
-          now - lastCaptureHandledRef.ts < 1200
-        ) {
-          return;
-        }
-        lastCaptureHandledRef.key = key;
-        lastCaptureHandledRef.ts = now;
+      // 去重：StrictMode/重复监听/重复事件时，短时间内同 key 只处理一次
+      const key = `${action || "copy"}|${capPath}`;
+      const now = Date.now();
+      if (
+        lastCaptureHandledRef.key === key &&
+        now - lastCaptureHandledRef.ts < 1200
+      ) {
+        return;
+      }
+      lastCaptureHandledRef.key = key;
+      lastCaptureHandledRef.ts = now;
 
-        if (action === "pin") {
-          try {
-            if (!imageBase64) {
-              console.warn("pin 缺少 imageBase64，跳过");
-              return;
-            }
-            const srcW = Math.max(1, imageWidth || 300);
-            const srcH = Math.max(1, imageHeight || 300);
-            const maxW = 560;
-            const maxH = 420;
-            const scale = Math.min(maxW / srcW, maxH / srcH, 1);
-            const width = Math.round(srcW * scale);
-            const height = Math.round(srcH * scale);
-            await invoke("ding_create", {
-              imageBase64,
-              x: 100.0,
-              y: 100.0,
-              width,
-              height,
-            });
-          } catch (err) {
-            console.error("全局贴图失败:", err);
+      if (action === "pin") {
+        try {
+          if (!imageBase64) {
+            console.warn("pin 缺少 imageBase64，跳过");
+            return;
           }
-          return;
+          const srcW = Math.max(1, imageWidth || 300);
+          const srcH = Math.max(1, imageHeight || 300);
+          const maxW = 560;
+          const maxH = 420;
+          const scale = Math.min(maxW / srcW, maxH / srcH, 1);
+          const width = Math.round(srcW * scale);
+          const height = Math.round(srcH * scale);
+          await invoke("ding_create", {
+            imageBase64,
+            x: 100.0,
+            y: 100.0,
+            width,
+            height,
+          });
+        } catch (err) {
+          console.error("全局贴图失败:", err);
         }
+        return;
+      }
 
-        if (action === "ocr") {
-          try {
-            if (!imageBase64) {
-              console.warn("ocr 缺少 imageBase64，跳过");
-              return;
-            }
-            (window as any).__PENDING_OCR_IMAGE__ = imageBase64;
-            setView("ocr");
-            // 先切到 OCR 页，再投喂截图事件；插件端也会从全局变量兜底读取
-            setTimeout(() => {
-              emitPluginEvent(
-                PluginEventTypes.SCREENSHOT_CAPTURED,
-                "screen-capture",
-                {
-                  imageBase64,
-                },
-              );
-            }, 80);
-          } catch (err) {
-            console.error("全局 OCR 处理失败:", err);
+      if (action === "ocr") {
+        try {
+          if (!imageBase64) {
+            console.warn("ocr 缺少 imageBase64，跳过");
+            return;
           }
+          (window as any).__PENDING_OCR_IMAGE__ = imageBase64;
+          setView("ocr");
+          // 先切到 OCR 页，再投喂截图事件；插件端也会从全局变量兜底读取
+          setTimeout(() => {
+            emitPluginEvent(
+              PluginEventTypes.SCREENSHOT_CAPTURED,
+              "screen-capture",
+              {
+                imageBase64,
+              },
+            );
+          }, 80);
+        } catch (err) {
+          console.error("全局 OCR 处理失败:", err);
         }
-      },
-    ).then((fn) => {
+      }
+    }).then((fn) => {
       if (disposed) {
         fn();
         return;
@@ -503,7 +576,9 @@ function MainApp() {
       if (isBridgeMessage) {
         const origin = typeof e.origin === "string" ? e.origin : "";
         if (!isAllowedEmbedOrigin(origin)) {
-          console.warn(`[Security] Blocked bridge message from origin: ${origin}`);
+          console.warn(
+            `[Security] Blocked bridge message from origin: ${origin}`,
+          );
           return;
         }
         const sec = embedSecurityRef.current;
@@ -575,7 +650,10 @@ function MainApp() {
             return;
           }
           if (!isAllowedPluginApiMethod(args.method)) {
-            send(undefined, "Permission denied: plugin API method is not allowed.");
+            send(
+              undefined,
+              "Permission denied: plugin API method is not allowed.",
+            );
             return;
           }
         }
@@ -603,7 +681,12 @@ function MainApp() {
             temperature: d.temperature,
           });
           source.postMessage(
-            { type: "mtools-ai-result", id: d.id, token, content: result.content },
+            {
+              type: "mtools-ai-result",
+              id: d.id,
+              token,
+              content: result.content,
+            },
             targetOrigin,
           );
         } catch (err) {
@@ -657,46 +740,69 @@ function MainApp() {
   // ── 文件搜索结果 → ResultItem 转换 ──
   const getFileIcon = useCallback((fileType: string) => {
     switch (fileType) {
-      case "folder": return <Folder className="w-6 h-6" />;
-      case "image": return <FileImage className="w-6 h-6" />;
-      case "video": return <FileVideo className="w-6 h-6" />;
-      case "audio": return <FileAudio className="w-6 h-6" />;
-      case "code": return <FileCode className="w-6 h-6" />;
-      case "text": case "document": return <FileText className="w-6 h-6" />;
-      case "archive": return <Archive className="w-6 h-6" />;
-      case "executable": return <AppWindow className="w-6 h-6" />;
-      default: return <File className="w-6 h-6" />;
+      case "folder":
+        return <Folder className="w-6 h-6" />;
+      case "image":
+        return <FileImage className="w-6 h-6" />;
+      case "video":
+        return <FileVideo className="w-6 h-6" />;
+      case "audio":
+        return <FileAudio className="w-6 h-6" />;
+      case "code":
+        return <FileCode className="w-6 h-6" />;
+      case "text":
+      case "document":
+        return <FileText className="w-6 h-6" />;
+      case "archive":
+        return <Archive className="w-6 h-6" />;
+      case "executable":
+        return <AppWindow className="w-6 h-6" />;
+      default:
+        return <File className="w-6 h-6" />;
     }
   }, []);
 
   const getFileColor = useCallback((fileType: string) => {
     switch (fileType) {
-      case "folder": return "text-yellow-500 bg-yellow-500/10";
-      case "image": return "text-pink-500 bg-pink-500/10";
-      case "video": return "text-red-500 bg-red-500/10";
-      case "audio": return "text-purple-500 bg-purple-500/10";
-      case "code": return "text-green-500 bg-green-500/10";
-      case "text": case "document": return "text-blue-500 bg-blue-500/10";
-      case "archive": return "text-amber-500 bg-amber-500/10";
-      case "executable": return "text-gray-500 bg-gray-500/10";
-      default: return "text-slate-500 bg-slate-500/10";
+      case "folder":
+        return "text-yellow-500 bg-yellow-500/10";
+      case "image":
+        return "text-pink-500 bg-pink-500/10";
+      case "video":
+        return "text-red-500 bg-red-500/10";
+      case "audio":
+        return "text-purple-500 bg-purple-500/10";
+      case "code":
+        return "text-green-500 bg-green-500/10";
+      case "text":
+      case "document":
+        return "text-blue-500 bg-blue-500/10";
+      case "archive":
+        return "text-amber-500 bg-amber-500/10";
+      case "executable":
+        return "text-gray-500 bg-gray-500/10";
+      default:
+        return "text-slate-500 bg-slate-500/10";
     }
   }, []);
 
-  const fileResultToItem = useCallback((f: FileSearchResult): ResultItem => {
-    const sizeStr = f.is_dir ? "文件夹" : formatFileSize(f.size);
-    return {
-      id: `file-${f.path}`,
-      title: f.name,
-      description: `${f.path}${f.modified ? ` · ${f.modified}` : ""}${sizeStr ? ` · ${sizeStr}` : ""}`,
-      icon: getFileIcon(f.file_type),
-      color: getFileColor(f.file_type),
-      category: "文件",
-      action: () => {
-        invoke("file_open", { path: f.path });
-      },
-    };
-  }, [getFileIcon, getFileColor]);
+  const fileResultToItem = useCallback(
+    (f: FileSearchResult): ResultItem => {
+      const sizeStr = f.is_dir ? "文件夹" : formatFileSize(f.size);
+      return {
+        id: `file-${f.path}`,
+        title: f.name,
+        description: `${f.path}${f.modified ? ` · ${f.modified}` : ""}${sizeStr ? ` · ${sizeStr}` : ""}`,
+        icon: getFileIcon(f.file_type),
+        color: getFileColor(f.file_type),
+        category: "文件",
+        action: () => {
+          invoke("file_open", { path: f.path });
+        },
+      };
+    },
+    [getFileIcon, getFileColor],
+  );
 
   // ── 统一搜索 ──
   const getFilteredResults = useCallback((): ResultItem[] => {
@@ -836,6 +942,21 @@ function MainApp() {
       return fileResults.map(fileResultToItem);
     }
 
+    // app 前缀：仅搜索本地应用
+    if (searchValue.startsWith("app ")) {
+      return appResults.map((a) => ({
+        id: `app-${a.path}`,
+        title: a.name,
+        description: a.path,
+        icon: <Rocket className="w-6 h-6" />,
+        color: "text-green-500 bg-green-500/10",
+        category: "应用",
+        action: () => {
+          invoke("file_open", { path: a.path });
+        },
+      }));
+    }
+
     // sn 前缀：快捷短语
     if (searchValue.startsWith("sn ") || searchValue === "sn") {
       const keyword = searchValue.slice(3).trim();
@@ -924,14 +1045,28 @@ function MainApp() {
       };
     });
 
-    // 文件搜索结果混排（排在插件之后）
+    // 本地应用搜索结果混排（排在插件之后，文件之前）
+    const appItems: ResultItem[] = appResults.map((a) => ({
+      id: `app-${a.path}`,
+      title: a.name,
+      description: a.path,
+      icon: <Rocket className="w-6 h-6" />,
+      color: "text-green-500 bg-green-500/10",
+      category: "应用",
+      action: () => {
+        invoke("file_open", { path: a.path });
+      },
+    }));
+
+    // 文件搜索结果混排（排在应用之后）
     const fileItems: ResultItem[] = fileResults.map(fileResultToItem);
 
     // 书签搜索结果混排（排在文件之后，最多显示 6 条）
     const bmStore = useBookmarkStore.getState();
-    const bmMatches = searchValue.length >= 2
-      ? bmStore.searchBookmarks(searchValue).slice(0, 6)
-      : [];
+    const bmMatches =
+      searchValue.length >= 2
+        ? bmStore.searchBookmarks(searchValue).slice(0, 6)
+        : [];
     const bookmarkItems: ResultItem[] = bmMatches.map((bm) => ({
       id: `bm-${bm.id}`,
       title: bm.title,
@@ -945,8 +1080,20 @@ function MainApp() {
       },
     }));
 
-    return [...builtinResults, ...pluginResults, ...fileItems, ...bookmarkItems];
-  }, [searchValue, config.model, handleDirectColorPicker, fileResults]);
+    return [
+      ...appItems,
+      ...builtinResults,
+      ...pluginResults,
+      ...fileItems,
+      ...bookmarkItems,
+    ];
+  }, [
+    searchValue,
+    config.model,
+    handleDirectColorPicker,
+    fileResults,
+    appResults,
+  ]);
 
   // 窗口大小管理
   useEffect(() => {

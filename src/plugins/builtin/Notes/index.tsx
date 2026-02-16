@@ -19,6 +19,7 @@ const Notes: React.FC = () => {
   const [currentFile, setCurrentFile] = useState<string | null>(null);
   const [notesDir, setNotesDir] = useState<string>("");
   const editorRef = useRef<HTMLDivElement>(null);
+  const vditorInstanceRef = useRef<Vditor | null>(null);
 
   // Initialize directory and load files
   useEffect(() => {
@@ -54,67 +55,80 @@ const Notes: React.FC = () => {
     }
   };
 
-  // Initialize Vditor
   useEffect(() => {
     if (!editorRef.current) return;
 
-    const vditorInstance = new Vditor(editorRef.current, {
-      height: "100%",
-      cache: { enable: false },
-      mode: "ir",
-      toolbarConfig: {
-        pin: true,
-      },
-      toolbar: [
-        "emoji",
-        "headings",
-        "bold",
-        "italic",
-        "strike",
-        "link",
-        "|",
-        "list",
-        "ordered-list",
-        "check",
-        "outdent",
-        "indent",
-        "|",
-        "quote",
-        "line",
-        "code",
-        "inline-code",
-        "insert-before",
-        "insert-after",
-        "|",
-        "upload",
-        "record",
-        "table",
-        "|",
-        "undo",
-        "redo",
-        "|",
-        "edit-mode",
-        "content-theme",
-        "code-theme",
-        "export",
-      ],
-      after: () => {
-        setVditor(vditorInstance);
-        if (currentFile) {
-          loadFileContent(currentFile, vditorInstance);
-        } else {
-          vditorInstance.setValue(
-            "# Welcome to Notes\nSelect or create a file to start.",
-          );
-        }
-      },
-      input: (value) => {
-        // Auto-save logic could go here
-      },
-    });
+    let instance: Vditor | undefined;
+    try {
+      instance = new Vditor(editorRef.current, {
+        height: "100%",
+        cache: { enable: false },
+        mode: "ir",
+        toolbarConfig: {
+          pin: true,
+        },
+        toolbar: [
+          "emoji",
+          "headings",
+          "bold",
+          "italic",
+          "strike",
+          "link",
+          "|",
+          "list",
+          "ordered-list",
+          "check",
+          "outdent",
+          "indent",
+          "|",
+          "quote",
+          "line",
+          "code",
+          "inline-code",
+          "insert-before",
+          "insert-after",
+          "|",
+          "upload",
+          "record",
+          "table",
+          "|",
+          "undo",
+          "redo",
+          "|",
+          "edit-mode",
+          "content-theme",
+          "code-theme",
+          "export",
+        ],
+        after: () => {
+          // Check if component is still mounted and instance matches
+          if (vditorInstanceRef.current === instance) {
+            setVditor(instance);
+            if (currentFile) {
+              loadFileContent(currentFile, instance);
+            } else {
+              instance.setValue(
+                "# Welcome to Notes\nSelect or create a file to start.",
+              );
+            }
+          } else {
+            // Orphaned instance, destroy it
+            instance?.destroy();
+          }
+        },
+      });
+      vditorInstanceRef.current = instance;
+    } catch (e) {
+      console.error("Failed to initialize Vditor:", e);
+    }
 
     return () => {
-      vditorInstance?.destroy();
+      try {
+        instance?.destroy();
+      } catch (e) {
+        console.warn("Error destroying Vditor:", e);
+      }
+      vditorInstanceRef.current = null;
       setVditor(undefined);
     };
   }, []);
@@ -189,10 +203,22 @@ const Notes: React.FC = () => {
   };
 
   return (
-    <div className="flex h-full w-full" style={{ background: "var(--color-bg)", color: "var(--color-text)" }}>
+    <div
+      className="flex h-full w-full"
+      style={{ background: "var(--color-bg)", color: "var(--color-text)" }}
+    >
       {/* Sidebar */}
-      <div className="w-64 border-r flex flex-col" style={{ borderColor: "var(--color-border)", background: "var(--color-bg-secondary, var(--color-bg))" }}>
-        <div className="p-4 border-b flex justify-between items-center" style={{ borderColor: "var(--color-border)" }}>
+      <div
+        className="w-64 border-r flex flex-col"
+        style={{
+          borderColor: "var(--color-border)",
+          background: "var(--color-bg-secondary, var(--color-bg))",
+        }}
+      >
+        <div
+          className="p-4 border-b flex justify-between items-center"
+          style={{ borderColor: "var(--color-border)" }}
+        >
           <h2 className="font-semibold text-lg flex items-center gap-2">
             <FolderOpen size={20} />
             Notes

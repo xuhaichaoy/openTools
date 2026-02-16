@@ -47,7 +47,8 @@ export class JsonCollection<T extends { id: string }> {
       });
       this.cache = JSON.parse(raw) as T[];
       return this.cache;
-    } catch {
+    } catch (e) {
+      console.error(`[JsonCollection] Failed to load ${this.name}:`, e);
       this.cache = [];
       return [];
     }
@@ -59,7 +60,9 @@ export class JsonCollection<T extends { id: string }> {
     this.cache = items;
     await writeTextFile(this.filePath, JSON.stringify(items, null, 2), {
       baseDir: BaseDirectory.AppData,
-    });
+    }).catch((e) =>
+      console.error(`[JsonCollection] Failed to save ${this.name}:`, e),
+    );
   }
 
   /** 通过 ID 获取单条 */
