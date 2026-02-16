@@ -1,23 +1,45 @@
 import { useState, useEffect } from 'react'
-import { ArrowLeft, Upload, Trash2, RefreshCw, Search, BookOpen, HardDrive, FileText, AlertCircle, CheckCircle, Loader2 } from 'lucide-react'
+import { ArrowLeft, Upload, Trash2, RefreshCw, Search, BookOpen, HardDrive, FileText, AlertCircle, CheckCircle, Loader2, Share2 } from 'lucide-react'
 import { useRAGStore } from '@/store/rag-store'
+import { useAuthStore } from '@/store/auth-store'
+import { useTeamStore } from '@/store/team-store'
 import { open } from '@tauri-apps/plugin-dialog'
 import { useDragWindow } from '@/hooks/useDragWindow'
 
 export function KnowledgeBase({ onBack }: { onBack?: () => void }) {
   const {
     docs, stats, isLoading, isIndexing,
-    searchResults, searchQuery,
+    searchResults, searchQuery, teamDocs,
     loadDocs, loadStats, importDoc, removeDoc, reindexDoc,
-    search, setSearchQuery,
+    search, setSearchQuery, loadTeamDocs,
   } = useRAGStore()
 
-  const [activeTab, setActiveTab] = useState<'docs' | 'search'>('docs')
+  const { isLoggedIn } = useAuthStore()
+  const { teams, activeTeamId, loadTeams, shareResource } = useTeamStore()
+  const [sharingDocId, setSharingDocId] = useState<string | null>(null)
+
+  const [activeTab, setActiveTab] = useState<'docs' | 'search' | 'team'>('docs')
 
   useEffect(() => {
     loadDocs()
     loadStats()
-  }, [])
+    if (isLoggedIn) {
+      loadTeams()
+      loadTeamDocs()
+    }
+  }, [isLoggedIn])
+
+  const handleShareToTeam = async (docId: string, docName: string) => {
+    if (!activeTeamId) return
+    setSharingDocId(docId)
+    try {
+      await shareResource(activeTeamId, 'knowledge_doc', docId, docName)
+    } catch (e) {
+      console.error('分享失败:', e)
+    } finally {
+      setSharingDocId(null)
+    }
+  }
 
   const handleImport = async () => {
     try {
@@ -119,6 +141,18 @@ export function KnowledgeBase({ onBack }: { onBack?: () => void }) {
         >
           检索测试
         </button>
+        {isLoggedIn && teams.length > 0 && (
+          <button
+            onClick={() => setActiveTab('team')}
+            className={`text-xs px-3 py-1.5 rounded-t-lg border-b-2 transition-colors ${
+              activeTab === 'team'
+                ? 'border-[#F28F36] text-[#F28F36] bg-[var(--color-bg-secondary)]'
+                : 'border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text)]'
+            }`}
+          >
+            团队文档 {teamDocs.length > 0 && <span className="ml-1 text-[9px] px-1 py-0.5 rounded-full bg-[#F28F36]/10 text-[#F28F36]">{teamDocs.length}</span>}
+          </button>
+        )}
       </div>
       <div className="h-px bg-[var(--color-border)]" />
 
@@ -164,6 +198,20 @@ export function KnowledgeBase({ onBack }: { onBack?: () => void }) {
                   </div>
                 </div>
                 <div className="flex items-center gap-1 ml-2">
+                  {isLoggedIn && teams.length > 0 && (
+                    <button
+                      onClick={() => handleShareToTeam(doc.id, doc.name)}
+                      disabled={sharingDocId === doc.id}
+                      className="p-1.5 rounded hover:bg-[#F28F36]/10 text-[var(--color-text-secondary)] hover:text-[#F28F36] transition-colors"
+                      title="公开到团队"
+                    >
+                      {sharingDocId === doc.id ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Share2 className="w-3.5 h-3.5" />
+                      )}
+                    </button>
+                  )}
                   <button
                     onClick={() => reindexDoc(doc.id)}
                     disabled={isIndexing}
@@ -237,6 +285,38 @@ export function KnowledgeBase({ onBack }: { onBack?: () => void }) {
                 <p className="text-xs">输入关键词后点击检索</p>
               </div>
             )}
+          </div>
+        )}
+
+        {activeTab === 'team' && (
+          <div className="space-y-2">
+            {teamDocs.length === 0 && (
+              <div className="text-center py-8 text-[var(--color-text-secondary)]">
+                <BookOpen className="w-10 h-10 mx-auto mb-3 opacity-30" />
+                <p className="text-xs">团队暂无共享文档</p>
+                <p className="text-[10px] mt-1">在「文档管理」中点击分享按钮将文档共享给团队</p>
+              </div>
+            )}
+            {teamDocs.map((td) => {
+              const isLocal = docs.some((d) => d.id === td.resource_id)
+              return (
+                <div key={td.id} className="flex items-center justify-between p-3 rounded-lg bg-[var(--color-bg-secondary)] border border-[var(--color-border)] hover:border-[#F28F36]/30 transition-colors">
+                  <div className="min-w-0 flex-1">
+                    <div className="text-xs font-medium text-[var(--color-text)] truncate">{td.resource_name ?? td.resource_id}</div>
+                    <div className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
+                      分享者: {td.username} · {new Date(td.shared_at).toLocaleDateString()}
+                    </div>
+                  </div>
+                  <div className="ml-2">
+                    {isLocal ? (
+                      <span className="text-[10px] px-2 py-1 rounded bg-emerald-500/10 text-emerald-400">已在本地</span>
+                    ) : (
+                      <span className="text-[10px] px-2 py-1 rounded bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]">需导入</span>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
           </div>
         )}
       </div>

@@ -1,6 +1,7 @@
 import { useRef, useEffect, useCallback, useState } from "react";
-import { Search, Bot, X } from "lucide-react";
+import { Search, Bot, X, User } from "lucide-react";
 import { useAppStore } from "@/store/app-store";
+import { useAuthStore } from "@/store/auth-store";
 import { invoke } from "@tauri-apps/api/core";
 import { ModeIndicator, detectMode } from "./ModeIndicator";
 import { useDragWindow } from "@/hooks/useDragWindow";
@@ -221,7 +222,7 @@ export function SearchBar({
         />
       </div>
 
-      <div className="flex items-center gap-1 text-xs text-[var(--color-text-secondary)] shrink-0 pointer-events-none">
+      <div className="flex items-center gap-1 text-xs text-[var(--color-text-secondary)] shrink-0 mr-1">
         <kbd className="px-1.5 py-0.5 bg-[var(--color-bg-secondary)] rounded text-[10px]">
           ⌥
         </kbd>
@@ -229,6 +230,11 @@ export function SearchBar({
           Space
         </kbd>
       </div>
+
+      <div className="flex items-center shrink-0 ml-1 border-l border-[var(--color-border)] pl-3">
+        <UserAvatar />
+      </div>
+
       {/* 图片大图预览 */}
       {previewImage && (
         <div
@@ -249,5 +255,37 @@ export function SearchBar({
         </div>
       )}
     </div>
+  );
+}
+
+function UserAvatar() {
+  const { user, isLoggedIn } = useAuthStore();
+  const { requestNavigate } = useAppStore();
+
+  const handleClick = () => {
+    if (isLoggedIn) {
+      // 打开管理中心
+      requestNavigate("management-center");
+    } else {
+      // 打开登录弹窗 (发送事件或直接设置 store)
+      window.dispatchEvent(new CustomEvent("open-login-modal"));
+    }
+  };
+
+  return (
+    <button
+      onClick={handleClick}
+      className="w-8 h-8 rounded-full overflow-hidden flex items-center justify-center bg-[var(--color-bg-secondary)] hover:bg-[var(--color-bg-tertiary)] transition-colors cursor-pointer border border-[var(--color-border)]"
+    >
+      {isLoggedIn && user?.avatar_url ? (
+        <img
+          src={user.avatar_url}
+          alt={user.username}
+          className="w-full h-full object-cover"
+        />
+      ) : (
+        <User className="w-4 h-4 text-[var(--color-text-secondary)]" />
+      )}
+    </button>
   );
 }

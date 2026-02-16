@@ -5,12 +5,13 @@
  * - 静态片段：用户预设内容（邮箱签名、代码模板、常用回复）
  * - 动态片段：内容由 AI 实时生成（如「今天日期」「随机密码」）
  *
- * 持久化到 localStorage
+ * 持久化到 SyncableCollection（文件存储 + 同步元数据）
  */
 
 import { create } from "zustand";
+import { SyncableCollection, type SyncMeta } from "@/core/database/index";
 
-export interface Snippet {
+export interface Snippet extends SyncMeta {
   id: string;
   /** 标题 */
   title: string;
@@ -30,62 +31,43 @@ export interface Snippet {
   lastUsedAt: number;
   /** 使用次数 */
   useCount: number;
+  /** 版本号（同步用） */
+  version: number;
+  /** 是否已删除（软删除，同步用） */
+  deleted: boolean;
+  /** 更新时间 */
+  updatedAt: number;
 }
 
 interface SnippetStore {
   snippets: Snippet[];
-  /** 是否已加载 */
   loaded: boolean;
 
-  /** 加载所有片段 */
-  loadSnippets: () => void;
-  /** 添加片段 */
-  addSnippet: (snippet: Omit<Snippet, "id" | "createdAt" | "lastUsedAt" | "useCount">) => string;
-  /** 更新片段 */
-  updateSnippet: (id: string, updates: Partial<Omit<Snippet, "id" | "createdAt">>) => void;
-  /** 删除片段 */
-  deleteSnippet: (id: string) => void;
-  /** 搜索片段（标题、关键词、内容模糊匹配） */
+  loadSnippets: () => Promise<void>;
+  addSnippet: (
+    snippet: Omit<Snippet, "id" | "createdAt" | "lastUsedAt" | "useCount">,
+  ) => Promise<string>;
+  updateSnippet: (
+    id: string,
+    updates: Partial<Omit<Snippet, "id" | "createdAt">>,
+  ) => Promise<void>;
+  deleteSnippet: (id: string) => Promise<void>;
   searchSnippets: (query: string) => Snippet[];
-  /** 按关键词精确匹配 */
   matchByKeyword: (keyword: string) => Snippet | undefined;
-  /** 标记使用（更新使用时间和次数） */
-  markUsed: (id: string) => void;
-  /** 按分类获取 */
+  markUsed: (id: string) => Promise<void>;
   getCategories: () => string[];
-  /** 导出所有片段为 JSON */
   exportSnippets: () => string;
-  /** 从 JSON 导入片段 */
-  importSnippets: (json: string) => number;
+  importSnippets: (json: string) => Promise<number>;
 }
 
-const STORAGE_KEY = "mtools-snippets";
+export const snippetsDb = new SyncableCollection<Snippet>("snippets");
+
+const OLD_STORAGE_KEY = "mtools-snippets";
 
 function generateId(): string {
   return `sn_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 }
 
-function persist(snippets: Snippet[]) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(snippets));
-  } catch (e) {
-    console.warn("[snippet-store] 持久化失败:", e);
-  }
-}
-
-function loadFromStorage(): Snippet[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      return JSON.parse(raw);
-    }
-  } catch (e) {
-    console.warn("[snippet-store] 读取失败:", e);
-  }
-  return [];
-}
-
-/** 简单的拼音/模糊搜索（大小写不敏感） */
 function fuzzyMatch(text: string, query: string): boolean {
   return text.toLowerCase().includes(query.toLowerCase());
 }
@@ -94,13 +76,37 @@ export const useSnippetStore = create<SnippetStore>((set, get) => ({
   snippets: [],
   loaded: false,
 
-  loadSnippets() {
+  async loadSnippets() {
     if (get().loaded) return;
-    const snippets = loadFromStorage();
+    let snippets = await snippetsDb.getAll();
+
+    // 从 localStorage 迁移（一次性）
+    if (snippets.length === 0) {
+      try {
+        const raw = localStorage.getItem(OLD_STORAGE_KEY);
+        if (raw) {
+          const legacy: Snippet[] = JSON.parse(raw);
+          if (Array.isArray(legacy) && legacy.length > 0) {
+            for (const s of legacy) {
+              await snippetsDb.create({
+                ...s,
+                _version: s.version || Date.now(),
+                _dirty: true,
+              });
+            }
+            snippets = await snippetsDb.getAll();
+            localStorage.removeItem(OLD_STORAGE_KEY);
+          }
+        }
+      } catch (e) {
+        console.warn("[snippet-store] localStorage 迁移失败:", e);
+      }
+    }
+
     set({ snippets, loaded: true });
   },
 
-  addSnippet(data) {
+  async addSnippet(data) {
     const id = generateId();
     const snippet: Snippet = {
       ...data,
@@ -108,30 +114,33 @@ export const useSnippetStore = create<SnippetStore>((set, get) => ({
       createdAt: Date.now(),
       lastUsedAt: 0,
       useCount: 0,
+      version: Date.now(),
+      deleted: false,
+      updatedAt: Date.now(),
     };
-    const snippets = [...get().snippets, snippet];
-    set({ snippets });
-    persist(snippets);
+    await snippetsDb.create(snippet);
+    set({ snippets: await snippetsDb.getAll() });
     return id;
   },
 
-  updateSnippet(id, updates) {
-    const snippets = get().snippets.map((s) =>
-      s.id === id ? { ...s, ...updates } : s,
-    );
-    set({ snippets });
-    persist(snippets);
+  async updateSnippet(id, updates) {
+    await snippetsDb.update(id, {
+      ...updates,
+      version: Date.now(),
+      updatedAt: Date.now(),
+    } as Partial<Snippet>);
+    set({ snippets: await snippetsDb.getAll() });
   },
 
-  deleteSnippet(id) {
-    const snippets = get().snippets.filter((s) => s.id !== id);
-    set({ snippets });
-    persist(snippets);
+  async deleteSnippet(id) {
+    await snippetsDb.softDelete(id);
+    set({ snippets: await snippetsDb.getAll() });
   },
 
   searchSnippets(query) {
-    if (!query.trim()) return get().snippets;
-    return get().snippets.filter(
+    const all = get().snippets.filter((s) => !s.deleted);
+    if (!query.trim()) return all;
+    return all.filter(
       (s) =>
         fuzzyMatch(s.title, query) ||
         fuzzyMatch(s.keyword, query) ||
@@ -142,22 +151,32 @@ export const useSnippetStore = create<SnippetStore>((set, get) => ({
 
   matchByKeyword(keyword) {
     return get().snippets.find(
-      (s) => s.keyword && s.keyword.toLowerCase() === keyword.toLowerCase(),
+      (s) =>
+        !s.deleted &&
+        s.keyword &&
+        s.keyword.toLowerCase() === keyword.toLowerCase(),
     );
   },
 
-  markUsed(id) {
-    const snippets = get().snippets.map((s) =>
-      s.id === id
-        ? { ...s, lastUsedAt: Date.now(), useCount: s.useCount + 1 }
-        : s,
-    );
-    set({ snippets });
-    persist(snippets);
+  async markUsed(id) {
+    const sn = get().snippets.find((s) => s.id === id);
+    if (!sn) return;
+    await snippetsDb.update(id, {
+      lastUsedAt: Date.now(),
+      useCount: sn.useCount + 1,
+      version: Date.now(),
+      updatedAt: Date.now(),
+    } as Partial<Snippet>);
+    set({ snippets: await snippetsDb.getAll() });
   },
 
   getCategories() {
-    const cats = new Set(get().snippets.map((s) => s.category).filter(Boolean));
+    const cats = new Set(
+      get()
+        .snippets.filter((s) => !s.deleted)
+        .map((s) => s.category)
+        .filter(Boolean),
+    );
     return Array.from(cats);
   },
 
@@ -165,16 +184,24 @@ export const useSnippetStore = create<SnippetStore>((set, get) => ({
     return JSON.stringify(get().snippets, null, 2);
   },
 
-  importSnippets(json) {
+  async importSnippets(json) {
     try {
       const imported: Snippet[] = JSON.parse(json);
       if (!Array.isArray(imported)) return 0;
       const existingIds = new Set(get().snippets.map((s) => s.id));
-      const newSnippets = imported.filter((s) => s.id && s.title && !existingIds.has(s.id));
+      const newSnippets = imported.filter(
+        (s) => s.id && s.title && !existingIds.has(s.id),
+      );
       if (newSnippets.length === 0) return 0;
-      const snippets = [...get().snippets, ...newSnippets];
-      set({ snippets });
-      persist(snippets);
+      for (const s of newSnippets) {
+        await snippetsDb.create({
+          ...s,
+          version: Date.now(),
+          deleted: false,
+          updatedAt: Date.now(),
+        });
+      }
+      set({ snippets: await snippetsDb.getAll() });
       return newSnippets.length;
     } catch {
       return 0;

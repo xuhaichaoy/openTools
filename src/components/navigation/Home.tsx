@@ -139,12 +139,12 @@ export function Home({ onNavigate, onBack }: HomeProps) {
       action: () => onNavigate("plugins"),
     },
     {
-      id: "settings",
+      id: "management-center",
       icon: <Settings className="w-5 h-5" />,
-      title: "设置",
-      description: "AI 模型、通用配置、凭证",
+      title: "管理中心",
+      description: "账号、设置、AI 模型、数据同步",
       color: "text-gray-400 bg-gray-400/10",
-      action: () => onNavigate("settings"),
+      action: () => onNavigate("management-center"),
     },
   ];
 

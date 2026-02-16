@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import type { KnowledgeDoc, RetrievalResult, RAGConfig, RAGStats } from '@/core/rag/types'
 import { DEFAULT_RAG_CONFIG } from '@/core/rag/types'
+import { useTeamStore, type SharedResource } from '@/store/team-store'
 
 interface RAGState {
   // 状态
@@ -13,6 +14,7 @@ interface RAGState {
   isIndexing: boolean
   searchResults: RetrievalResult[]
   searchQuery: string
+  teamDocs: SharedResource[]
 
   // 操作
   loadDocs: () => Promise<void>
@@ -23,6 +25,7 @@ interface RAGState {
   updateConfig: (config: Partial<RAGConfig>) => Promise<void>
   loadStats: () => Promise<void>
   setSearchQuery: (q: string) => void
+  loadTeamDocs: () => Promise<void>
 }
 
 export const useRAGStore = create<RAGState>((set, get) => ({
@@ -33,6 +36,7 @@ export const useRAGStore = create<RAGState>((set, get) => ({
   isIndexing: false,
   searchResults: [],
   searchQuery: '',
+  teamDocs: [],
 
   loadDocs: async () => {
     set({ isLoading: true })
@@ -114,6 +118,22 @@ export const useRAGStore = create<RAGState>((set, get) => ({
   },
 
   setSearchQuery: (q) => set({ searchQuery: q }),
+
+  loadTeamDocs: async () => {
+    try {
+      const teamStore = useTeamStore.getState()
+      const { activeTeamId } = teamStore
+      if (!activeTeamId) {
+        set({ teamDocs: [] })
+        return
+      }
+      const resources = await teamStore.listSharedResources(activeTeamId, 'knowledge_doc')
+      set({ teamDocs: resources })
+    } catch (e) {
+      console.error('加载团队知识库文档失败:', e)
+      set({ teamDocs: [] })
+    }
+  },
 }))
 
 // 监听索引进度事件（应用生命周期级别，存储 unlisten 以供需要时清理）

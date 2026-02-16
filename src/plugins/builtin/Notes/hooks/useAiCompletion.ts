@@ -1,20 +1,7 @@
 import { useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-interface AIConfig {
-  base_url: string;
-  api_key: string;
-  model: string;
-  temperature: number;
-  max_tokens?: number;
-  enable_advanced_tools: boolean;
-  system_prompt: string;
-}
-
-interface ChatMessage {
-  role: string;
-  content: string;
-}
+import { AIConfig, ChatMessage } from "@/core/ai/types";
 
 export function useAiCompletion(onAccept?: (text: string) => void) {
   const [completion, setCompletion] = useState("");

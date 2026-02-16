@@ -12,8 +12,15 @@ import {
   ArrowUpFromLine,
   ArrowDownToLine,
   AlertCircle,
+  Zap,
 } from "lucide-react";
 import type { PluginStorage } from "@/core/plugin-system/storage";
+import { useAuthStore } from "@/store/auth-store";
+import { useBookmarkStore } from "@/store/bookmark-store";
+import { useSnippetStore } from "@/store/snippet-store";
+import { useWorkflowStore } from "@/store/workflow-store";
+import { marksDb, tagsDb } from "@/core/database/marks";
+import { getServerUrl } from "@/store/server-store";
 
 interface SyncProvider {
   id: string;
@@ -46,6 +53,12 @@ const PROVIDERS: SyncProvider[] = [
     name: "WebDAV",
     icon: <Cloud className="w-5 h-5" />,
     color: "text-blue-600 bg-blue-50",
+  },
+  {
+    id: "mtools",
+    name: "mTools Cloud",
+    icon: <Zap className="w-5 h-5" />,
+    color: "text-amber-600 bg-amber-50",
   },
 ];
 
@@ -137,6 +150,19 @@ const CloudSyncPlugin: React.FC<CloudSyncPluginProps> = ({
         if (!status.connected) {
           setError("连接失败，请检查 Token 和仓库名");
         }
+      } else if (config.provider === "mtools") {
+        const { token } = useAuthStore.getState();
+        if (!token) {
+          setError("请先登录账号");
+          setConnected(false);
+          return;
+        }
+        const ok = await invoke<boolean>("mtools_sync_test", {
+          token,
+          baseUrl: getServerUrl(),
+        });
+        setConnected(ok);
+        if (!ok) setError("无法连接到 mTools 服务器");
       }
     } catch (e) {
       setError(String(e));
@@ -158,12 +184,95 @@ const CloudSyncPlugin: React.FC<CloudSyncPluginProps> = ({
           password: config.webdavPassword,
           path: `${config.webdavPath || ""}/51toolbox`,
         });
-      } else {
+      } else if (config.provider !== "mtools") {
         await invoke("git_sync_push", {
           provider: config.provider,
           token: config.token,
           repo: config.repo,
           branch: config.branch,
+        });
+      } else if (config.provider === "mtools") {
+        const { token } = useAuthStore.getState();
+        if (!token) throw new Error("未登录");
+
+        // 1. 同步书签
+        const bookmarks = useBookmarkStore.getState().bookmarks;
+        await invoke("mtools_sync_push", {
+          token,
+          baseUrl: getServerUrl(),
+          request: {
+            data_type: "bookmarks",
+            items: bookmarks.map((b) => ({
+              data_id: b.id,
+              content: b,
+              version: b.version || 1,
+              deleted: b.deleted || false,
+            })),
+          },
+        });
+
+        // 2. 同步代码片段
+        const snippets = useSnippetStore.getState().snippets;
+        await invoke("mtools_sync_push", {
+          token,
+          baseUrl: getServerUrl(),
+          request: {
+            data_type: "snippets",
+            items: snippets.map((s) => ({
+              data_id: s.id,
+              content: s,
+              version: s.version || 1,
+              deleted: s.deleted || false,
+            })),
+          },
+        });
+
+        // 3. 同步工作流
+        const workflows = useWorkflowStore.getState().workflows.filter(w => !w.builtin);
+        await invoke("mtools_sync_push", {
+          token,
+          baseUrl: getServerUrl(),
+          request: {
+            data_type: "workflows",
+            items: workflows.map((w) => ({
+              data_id: w.id,
+              content: w,
+              version: (w as any).version || 1,
+              deleted: false,
+            })),
+          },
+        });
+
+        // 4. 同步 Marks (笔记)
+        const marks = await marksDb.getAll();
+        await invoke("mtools_sync_push", {
+          token,
+          baseUrl: getServerUrl(),
+          request: {
+            data_type: "marks",
+            items: marks.map((m) => ({
+              data_id: m.id,
+              content: m,
+              version: m.version || 1,
+              deleted: m.deleted || false,
+            })),
+          },
+        });
+
+        // 5. 同步 Tags
+        const tags = await tagsDb.getAll();
+        await invoke("mtools_sync_push", {
+          token,
+          baseUrl: getServerUrl(),
+          request: {
+            data_type: "tags",
+            items: tags.map((t) => ({
+              data_id: t.id,
+              content: t,
+              version: t.version || 1,
+              deleted: t.deleted || false,
+            })),
+          },
         });
       }
       setLastSync(new Date().toLocaleString("zh-CN"));
@@ -178,12 +287,89 @@ const CloudSyncPlugin: React.FC<CloudSyncPluginProps> = ({
     setSyncing(true);
     setError(null);
     try {
-      await invoke("git_sync_pull", {
-        provider: config.provider,
-        token: config.token,
-        repo: config.repo,
-        branch: config.branch,
-      });
+      if (config.provider === "webdav") {
+        // WebDAV pull not implemented yet
+      } else if (config.provider !== "mtools") {
+        await invoke("git_sync_pull", {
+          provider: config.provider,
+          token: config.token,
+          repo: config.repo,
+          branch: config.branch,
+        });
+      } else if (config.provider === "mtools") {
+        const { token } = useAuthStore.getState();
+        if (!token) throw new Error("未登录");
+
+        // 1. 拉取书签
+        const bookmarkResp = await invoke<any>("mtools_sync_pull", {
+          token,
+          baseUrl: getServerUrl(),
+          dataType: "bookmarks",
+        });
+        if (bookmarkResp.items && bookmarkResp.items.length > 0) {
+            const items = bookmarkResp.items.map((i: any) => i.content);
+            localStorage.setItem("mtools-bookmarks", JSON.stringify(items));
+            useBookmarkStore.setState({ bookmarks: items, loaded: true });
+        }
+
+        // 2. 拉取代码片段
+        const snippetResp = await invoke<any>("mtools_sync_pull", {
+          token,
+          baseUrl: getServerUrl(),
+          dataType: "snippets",
+        });
+        if (snippetResp.items && snippetResp.items.length > 0) {
+            const items = snippetResp.items.map((i: any) => i.content);
+            localStorage.setItem("mtools-snippets", JSON.stringify(items));
+            useSnippetStore.setState({ snippets: items, loaded: true });
+        }
+
+        // 3. 拉取工作流
+        const workflowResp = await invoke<any>("mtools_sync_pull", {
+          token,
+          baseUrl: getServerUrl(),
+          dataType: "workflows",
+        });
+        if (workflowResp.items && workflowResp.items.length > 0) {
+            for (const item of workflowResp.items) {
+                await invoke("workflow_create", { workflow: item.content });
+            }
+            useWorkflowStore.getState().loadWorkflows();
+        }
+
+        // 4. 拉取 Marks
+        const marksResp = await invoke<any>("mtools_sync_pull", {
+          token,
+          baseUrl: getServerUrl(),
+          dataType: "marks",
+        });
+        if (marksResp.items && marksResp.items.length > 0) {
+            // 这里简单全量同步，后续应做增量合并
+            const items = marksResp.items.map((i: any) => i.content);
+            const { writeTextFile } = await import("@tauri-apps/plugin-fs");
+            const { BaseDirectory: BD } = await import("@tauri-apps/plugin-fs");
+            await writeTextFile("mtools-db/marks.json", JSON.stringify(items, null, 2), {
+                baseDir: BD.AppData,
+            });
+            marksDb.invalidateCache();
+        }
+
+        // 5. 拉取 Tags
+        const tagsResp = await invoke<any>("mtools_sync_pull", {
+          token,
+          baseUrl: getServerUrl(),
+          dataType: "tags",
+        });
+        if (tagsResp.items && tagsResp.items.length > 0) {
+            const items = tagsResp.items.map((i: any) => i.content);
+            const { writeTextFile } = await import("@tauri-apps/plugin-fs");
+            const { BaseDirectory: BD } = await import("@tauri-apps/plugin-fs");
+            await writeTextFile("mtools-db/tags.json", JSON.stringify(items, null, 2), {
+                baseDir: BD.AppData,
+            });
+            tagsDb.invalidateCache();
+        }
+      }
       setLastSync(new Date().toLocaleString("zh-CN"));
     } catch (e) {
       setError(`拉取失败: ${e}`);

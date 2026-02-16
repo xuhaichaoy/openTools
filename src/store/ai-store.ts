@@ -9,47 +9,24 @@ import {
   MAX_MESSAGES_PER_CONVERSATION,
   PERSIST_DEBOUNCE_MS,
 } from "@/core/constants";
+import { useAuthStore } from "./auth-store";
+import { routeAIRequest } from "@/core/ai/router";
 
-export interface ToolCallInfo {
-  id: string;
-  name: string;
-  arguments: string;
-  result?: string;
-}
+import type {
+  ToolCallInfo,
+  ChatMessage,
+  Conversation,
+  AIConfig,
+  PendingToolConfirm,
+} from "@/core/ai/types";
 
-export interface ChatMessage {
-  id: string;
-  role: "system" | "user" | "assistant" | "tool";
-  content: string;
-  timestamp: number;
-  streaming?: boolean;
-  toolCalls?: ToolCallInfo[]; // assistant 消息中的工具调用
-  images?: string[]; // 图片文件路径列表（用于 vision API）
-}
-
-export interface Conversation {
-  id: string;
-  title: string;
-  messages: ChatMessage[];
-  createdAt: number;
-}
-
-export interface AIConfig {
-  base_url: string;
-  api_key: string;
-  model: string;
-  temperature: number;
-  max_tokens: number | null;
-  enable_advanced_tools: boolean;
-  system_prompt: string;
-  /** 对话时自动检索知识库 */
-  enable_rag_auto_search: boolean;
-}
-
-export interface PendingToolConfirm {
-  name: string;
-  arguments: string;
-}
+export type {
+  ToolCallInfo,
+  ChatMessage,
+  Conversation,
+  AIConfig,
+  PendingToolConfirm,
+};
 
 interface AIState {
   config: AIConfig;
@@ -102,6 +79,7 @@ export const useAIStore = create<AIState>((set, get) => ({
     enable_advanced_tools: false,
     system_prompt: "",
     enable_rag_auto_search: false,
+    source: "own_key",
   },
   conversations: [],
   currentConversationId: null,
@@ -164,7 +142,12 @@ export const useAIStore = create<AIState>((set, get) => ({
         }));
       const json = JSON.stringify(trimmed);
       // 跳过内容未变的重复写入（避免频繁磁盘 IO）
-      const hash = json.length + ":" + (json.charCodeAt(0) || 0) + ":" + (json.charCodeAt(json.length - 1) || 0);
+      const hash =
+        json.length +
+        ":" +
+        (json.charCodeAt(0) || 0) +
+        ":" +
+        (json.charCodeAt(json.length - 1) || 0);
       if (hash === _lastPersistedHash && json.length < 100000) {
         return;
       }
@@ -490,10 +473,12 @@ export const useAIStore = create<AIState>((set, get) => ({
       }));
 
     try {
-      await invoke("ai_chat_stream", {
+      const { token } = useAuthStore.getState();
+      await routeAIRequest({
         messages: apiMessages,
         config: state.config,
         conversationId,
+        token: token,
       });
     } catch (e) {
       console.error("AI 对话失败:", e);

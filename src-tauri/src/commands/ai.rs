@@ -48,6 +48,12 @@ pub struct AIConfig {
     /// 对话时自动检索知识库（RAG）
     #[serde(default)]
     pub enable_rag_auto_search: bool,
+    /// AI 来源：own_key / team / platform
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// 团队模式时的团队 ID
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_id: Option<String>,
 }
 
 impl Default for AIConfig {
@@ -61,6 +67,8 @@ impl Default for AIConfig {
             enable_advanced_tools: false,
             system_prompt: String::new(),
             enable_rag_auto_search: false,
+            source: Some("own_key".to_string()),
+            team_id: None,
         }
     }
 }
@@ -101,7 +109,15 @@ impl StreamCancellation {
 fn is_dangerous_tool(name: &str) -> bool {
     matches!(
         name,
-        "run_shell_command" | "write_file" | "open_path" | "run_data_script"
+        "run_shell_command"
+            | "write_file"
+            | "open_path"
+            | "run_data_script"
+            | "native_calendar_create_event"
+            | "native_reminder_create"
+            | "native_notes_create"
+            | "native_mail_create"
+            | "native_shortcuts_run"
     )
 }
 
@@ -333,11 +349,252 @@ fn get_advanced_tools() -> Vec<serde_json::Value> {
     .clone()
 }
 
+fn get_native_app_tools() -> Vec<serde_json::Value> {
+    serde_json::json!([
+        {
+            "type": "function",
+            "function": {
+                "name": "native_calendar_create_event",
+                "description": "在 macOS 日历应用中创建一个日程事件。支持指定日历、标题、时间、地点等。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {
+                            "type": "string",
+                            "description": "事件标题"
+                        },
+                        "start_date": {
+                            "type": "string",
+                            "description": "开始时间，ISO 8601 格式，如 2026-02-17T10:00:00"
+                        },
+                        "end_date": {
+                            "type": "string",
+                            "description": "结束时间，ISO 8601 格式。若不填则默认与开始时间相同"
+                        },
+                        "calendar": {
+                            "type": "string",
+                            "description": "日历名称（如「日历」「工作」等），不填则使用默认日历"
+                        },
+                        "location": {
+                            "type": "string",
+                            "description": "地点"
+                        },
+                        "notes": {
+                            "type": "string",
+                            "description": "备注"
+                        },
+                        "all_day": {
+                            "type": "boolean",
+                            "description": "是否为全天事件"
+                        }
+                    },
+                    "required": ["title", "start_date"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "native_calendar_list_events",
+                "description": "查询日历中最近的日程事件。可指定查询未来几天的日程。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "days": {
+                            "type": "integer",
+                            "description": "查询未来几天的日程，默认 1（今天）",
+                            "default": 1
+                        }
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "native_reminder_create",
+                "description": "在 macOS 提醒事项中创建一条提醒。支持指定列表、截止日期、优先级。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {
+                            "type": "string",
+                            "description": "提醒标题"
+                        },
+                        "notes": {
+                            "type": "string",
+                            "description": "备注说明"
+                        },
+                        "due_date": {
+                            "type": "string",
+                            "description": "截止日期，ISO 8601 格式，如 2026-02-17T18:00:00"
+                        },
+                        "list_name": {
+                            "type": "string",
+                            "description": "提醒列表名称（如「提醒事项」「工作」），不填使用默认列表"
+                        },
+                        "priority": {
+                            "type": "integer",
+                            "description": "优先级: 0=无, 1=高, 5=中, 9=低"
+                        }
+                    },
+                    "required": ["title"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "native_reminder_list_incomplete",
+                "description": "查询未完成的提醒事项列表。可指定某个列表或查询全部。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "list_name": {
+                            "type": "string",
+                            "description": "提醒列表名称，不填则查询所有列表"
+                        }
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "native_notes_create",
+                "description": "在 macOS 备忘录中创建一条新笔记。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {
+                            "type": "string",
+                            "description": "备忘录标题"
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": "备忘录内容"
+                        },
+                        "folder": {
+                            "type": "string",
+                            "description": "文件夹名称，不填使用默认文件夹"
+                        }
+                    },
+                    "required": ["title", "body"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "native_notes_search",
+                "description": "在 macOS 备忘录中搜索笔记。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "搜索关键词"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "最大返回数量，默认10",
+                            "default": 10
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "native_mail_create",
+                "description": "使用 macOS 邮件应用创建一封邮件草稿并打开编辑窗口。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "to": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "收件人邮箱地址列表"
+                        },
+                        "subject": {
+                            "type": "string",
+                            "description": "邮件主题"
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": "邮件正文"
+                        },
+                        "cc": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "抄送邮箱地址列表"
+                        }
+                    },
+                    "required": ["to", "subject", "body"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "native_shortcuts_run",
+                "description": "运行一个 macOS 快捷指令（Shortcuts），可传入输入文本。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "快捷指令名称"
+                        },
+                        "input": {
+                            "type": "string",
+                            "description": "传给快捷指令的输入文本（可选）"
+                        }
+                    },
+                    "required": ["name"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "native_app_open",
+                "description": "打开/激活一个本机应用程序。如果应用已运行则切换到前台。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "app_name": {
+                            "type": "string",
+                            "description": "应用名称，如 Safari、Calendar、Reminders、Notes、Finder、Terminal 等"
+                        }
+                    },
+                    "required": ["app_name"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "native_app_list_interactive",
+                "description": "列出所有可以通过 AI 交互的本机应用及其支持的操作。用户询问「能做什么」「有哪些应用」时调用。",
+                "parameters": { "type": "object", "properties": {} }
+            }
+        }
+    ])
+    .as_array()
+    .unwrap()
+    .clone()
+}
+
 fn get_tools(enable_advanced: bool) -> Vec<serde_json::Value> {
     let mut tools = get_base_tools();
     if enable_advanced {
         tools.extend(get_advanced_tools());
     }
+    // 原生应用工具始终启用
+    tools.extend(get_native_app_tools());
     tools
 }
 
@@ -345,11 +602,21 @@ fn get_system_prompt(enable_advanced: bool, custom_prompt: &str) -> String {
     let base = "你是 mTools 的 AI 助手，一个强大的桌面效率工具。你可以：\n\
      1. 搜索和执行数据导入导出脚本（数据工坊）\n\
      2. 读写剪贴板\n\
-     3. 搜索本地知识库（RAG 检索增强）\n\n\
+     3. 搜索本地知识库（RAG 检索增强）\n\
+     4. 调用本机原生应用（日历、提醒事项、备忘录、邮件、快捷指令等）\n\n\
      当用户需要处理数据时，先用 search_data_scripts 搜索合适的脚本，\n\
      然后向用户确认参数，最后用 run_data_script 执行。\n\
      当用户提问的内容可能存在于知识库文档中时，使用 search_knowledge_base 检索相关信息，\n\
-     并基于检索结果提供准确的回答，注明信息来源。\n";
+     并基于检索结果提供准确的回答，注明信息来源。\n\n\
+     你拥有强大的本机应用交互能力：\n\
+     - 日历：创建日程事件、查看今日/近期日程（native_calendar_create_event, native_calendar_list_events）\n\
+     - 提醒事项：创建提醒、查看未完成提醒（native_reminder_create, native_reminder_list_incomplete）\n\
+     - 备忘录：创建笔记、搜索笔记（native_notes_create, native_notes_search）\n\
+     - 邮件：创建邮件草稿（native_mail_create）\n\
+     - 快捷指令：运行 macOS 快捷指令（native_shortcuts_run）\n\
+     - 打开应用：启动或切换到任意应用（native_app_open）\n\
+     当用户说「定一个日程」「提醒我」「记一下」「发邮件」等，应自动识别意图并调用对应的原生应用工具。\n\
+     调用前先从用户描述中提取关键信息（时间、标题、内容等），缺少必要信息时简短追问。\n";
 
     let mut prompt = if enable_advanced {
         format!(
@@ -557,6 +824,80 @@ async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<String,
             let lines: Vec<&str> = stdout.lines().collect();
             let top_lines: Vec<&str> = lines.iter().take(31).copied().collect();
             Ok(format!("当前运行进程 (前30):\n{}", top_lines.join("\n")))
+        }
+        // ── 原生应用工具 ──
+        "native_calendar_create_event" => {
+            let title = args_value["title"].as_str().unwrap_or("").to_string();
+            let start_date = args_value["start_date"].as_str().unwrap_or("").to_string();
+            let end_date = args_value["end_date"].as_str().map(|s| s.to_string());
+            let calendar = args_value["calendar"].as_str().map(|s| s.to_string());
+            let location = args_value["location"].as_str().map(|s| s.to_string());
+            let notes = args_value["notes"].as_str().map(|s| s.to_string());
+            let all_day = args_value["all_day"].as_bool();
+            let result = super::native_apps::native_calendar_create_event(
+                calendar, title, start_date, end_date, location, notes, all_day,
+            ).await?;
+            Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
+        }
+        "native_calendar_list_events" => {
+            let days = args_value["days"].as_i64().map(|d| d as i32);
+            let result = super::native_apps::native_calendar_list_events(days).await?;
+            Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
+        }
+        "native_reminder_create" => {
+            let title = args_value["title"].as_str().unwrap_or("").to_string();
+            let list_name = args_value["list_name"].as_str().map(|s| s.to_string());
+            let notes = args_value["notes"].as_str().map(|s| s.to_string());
+            let due_date = args_value["due_date"].as_str().map(|s| s.to_string());
+            let priority = args_value["priority"].as_i64().map(|p| p as i32);
+            let result = super::native_apps::native_reminder_create(
+                list_name, title, notes, due_date, priority,
+            ).await?;
+            Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
+        }
+        "native_reminder_list_incomplete" => {
+            let list_name = args_value["list_name"].as_str().map(|s| s.to_string());
+            let result = super::native_apps::native_reminder_list_incomplete(list_name).await?;
+            Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
+        }
+        "native_notes_create" => {
+            let title = args_value["title"].as_str().unwrap_or("").to_string();
+            let body = args_value["body"].as_str().unwrap_or("").to_string();
+            let folder = args_value["folder"].as_str().map(|s| s.to_string());
+            let result = super::native_apps::native_notes_create(folder, title, body).await?;
+            Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
+        }
+        "native_notes_search" => {
+            let query = args_value["query"].as_str().unwrap_or("").to_string();
+            let limit = args_value["limit"].as_u64().map(|l| l as usize);
+            let result = super::native_apps::native_notes_search(query, limit).await?;
+            Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
+        }
+        "native_mail_create" => {
+            let to: Vec<String> = args_value["to"].as_array()
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                .unwrap_or_default();
+            let subject = args_value["subject"].as_str().unwrap_or("").to_string();
+            let body = args_value["body"].as_str().unwrap_or("").to_string();
+            let cc: Option<Vec<String>> = args_value["cc"].as_array()
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect());
+            let result = super::native_apps::native_mail_create(to, subject, body, cc).await?;
+            Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
+        }
+        "native_shortcuts_run" => {
+            let shortcut_name = args_value["name"].as_str().unwrap_or("").to_string();
+            let input = args_value["input"].as_str().map(|s| s.to_string());
+            let result = super::native_apps::native_shortcuts_run(shortcut_name, input).await?;
+            Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
+        }
+        "native_app_open" => {
+            let app_name = args_value["app_name"].as_str().unwrap_or("").to_string();
+            let result = super::native_apps::native_app_open(app_name).await?;
+            Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
+        }
+        "native_app_list_interactive" => {
+            let result = super::native_apps::native_app_list_interactive().await?;
+            Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
         }
         _ => Err(format!("未知工具: {}", name)),
     }

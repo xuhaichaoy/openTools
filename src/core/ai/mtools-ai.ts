@@ -6,10 +6,14 @@
  * 无需自行管理 API Key 或模型选择。
  */
 
-import type { MToolsAI, AIToolCall } from "@/core/plugin-system/plugin-interface";
+import type {
+  MToolsAI,
+  AIToolCall,
+} from "@/core/plugin-system/plugin-interface";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useAIStore, type AIConfig } from "@/store/ai-store";
+import { useAIStore } from "@/store/ai-store";
+import type { AIConfig } from "@/core/ai/types";
 
 const generateId = () =>
   Math.random().toString(36).substring(2, 15) + Date.now().toString(36);

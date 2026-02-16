@@ -5,6 +5,8 @@ import { ScreenshotSelector } from "@/components/tools/ScreenshotSelector";
 import { ContextActionPanel } from "@/components/ai/ContextActionPanel";
 import { Home } from "@/components/navigation/Home";
 import { Dashboard } from "@/components/home/Dashboard";
+import { LoginModal } from "@/components/auth/LoginModal";
+import { SyncManager } from "@/components/auth/SyncManager";
 import { PluginEmbed } from "@/components/plugins/PluginEmbed";
 import { PluginErrorBoundary } from "@/components/plugins/PluginErrorBoundary";
 import { useWorkflowStore } from "@/store/workflow-store";
@@ -1275,6 +1277,9 @@ function MainApp() {
           />
         </div>
       )}
+
+      <LoginModal />
+      <SyncManager />
     </div>
   );
 }

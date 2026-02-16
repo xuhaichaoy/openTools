@@ -188,6 +188,197 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
         },
       });
 
+      // ── 本机原生应用工具 ──
+
+      tools.push({
+        name: "native_calendar_list",
+        description: "列出本机所有日历账户",
+        execute: async () => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          return invoke("native_calendar_list");
+        },
+      });
+
+      tools.push({
+        name: "native_calendar_list_events",
+        description: "查看日历事件列表（今日或指定日期范围）",
+        parameters: {
+          from_date: { type: "string", description: "开始日期 (YYYY-MM-DD)，默认今天" },
+          to_date: { type: "string", description: "结束日期 (YYYY-MM-DD)，默认同 from_date" },
+        },
+        execute: async (params) => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          return invoke("native_calendar_list_events", {
+            fromDate: params.from_date || null,
+            toDate: params.to_date || null,
+          });
+        },
+      });
+
+      tools.push({
+        name: "native_calendar_create_event",
+        description: "在日历中创建新事件/日程",
+        parameters: {
+          title: { type: "string", description: "事件标题" },
+          start_date: { type: "string", description: "开始时间 (ISO 8601，如 2026-02-16T14:00:00)" },
+          end_date: { type: "string", description: "结束时间 (ISO 8601)" },
+          notes: { type: "string", description: "备注（可选）" },
+          location: { type: "string", description: "地点（可选）" },
+        },
+        execute: async (params) => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          return invoke("native_calendar_create_event", {
+            title: String(params.title),
+            startDate: String(params.start_date),
+            endDate: String(params.end_date),
+            notes: params.notes ? String(params.notes) : null,
+            location: params.location ? String(params.location) : null,
+            calendarName: null,
+          });
+        },
+      });
+
+      tools.push({
+        name: "native_reminder_lists",
+        description: "列出本机所有提醒事项列表",
+        execute: async () => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          return invoke("native_reminder_lists");
+        },
+      });
+
+      tools.push({
+        name: "native_reminder_list_incomplete",
+        description: "查看未完成的提醒事项",
+        parameters: {
+          list_name: { type: "string", description: "提醒事项列表名称（可选，不填则查所有列表）" },
+        },
+        execute: async (params) => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          return invoke("native_reminder_list_incomplete", {
+            listName: params.list_name ? String(params.list_name) : null,
+          });
+        },
+      });
+
+      tools.push({
+        name: "native_reminder_create",
+        description: "创建一条新的提醒事项",
+        parameters: {
+          title: { type: "string", description: "提醒标题" },
+          notes: { type: "string", description: "备注（可选）" },
+          due_date: { type: "string", description: "截止时间 (ISO 8601，可选)" },
+          list_name: { type: "string", description: "目标列表名称（可选，默认使用系统默认列表）" },
+        },
+        execute: async (params) => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          return invoke("native_reminder_create", {
+            title: String(params.title),
+            notes: params.notes ? String(params.notes) : null,
+            dueDate: params.due_date ? String(params.due_date) : null,
+            listName: params.list_name ? String(params.list_name) : null,
+          });
+        },
+      });
+
+      tools.push({
+        name: "native_notes_search",
+        description: "搜索 macOS 备忘录中的笔记",
+        parameters: {
+          keyword: { type: "string", description: "搜索关键词" },
+        },
+        execute: async (params) => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          return invoke("native_notes_search", {
+            keyword: String(params.keyword),
+          });
+        },
+      });
+
+      tools.push({
+        name: "native_notes_create",
+        description: "在 macOS 备忘录中创建新笔记",
+        parameters: {
+          title: { type: "string", description: "笔记标题" },
+          body: { type: "string", description: "笔记正文内容" },
+          folder_name: { type: "string", description: "文件夹名称（可选，默认使用「备忘录」）" },
+        },
+        execute: async (params) => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          return invoke("native_notes_create", {
+            title: String(params.title),
+            body: String(params.body),
+            folderName: params.folder_name ? String(params.folder_name) : null,
+          });
+        },
+      });
+
+      tools.push({
+        name: "native_mail_create",
+        description: "创建邮件草稿（打开系统邮件应用）",
+        parameters: {
+          to: { type: "string", description: "收件人邮箱" },
+          subject: { type: "string", description: "邮件主题" },
+          body: { type: "string", description: "邮件正文" },
+        },
+        execute: async (params) => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          return invoke("native_mail_create", {
+            to: String(params.to),
+            subject: String(params.subject),
+            body: String(params.body),
+          });
+        },
+      });
+
+      tools.push({
+        name: "native_shortcuts_list",
+        description: "列出 macOS 快捷指令列表",
+        execute: async () => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          return invoke("native_shortcuts_list");
+        },
+      });
+
+      tools.push({
+        name: "native_shortcuts_run",
+        description: "运行指定的 macOS 快捷指令",
+        parameters: {
+          name: { type: "string", description: "快捷指令名称" },
+          input: { type: "string", description: "传入的输入文本（可选）" },
+        },
+        execute: async (params) => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          return invoke("native_shortcuts_run", {
+            name: String(params.name),
+            input: params.input ? String(params.input) : null,
+          });
+        },
+      });
+
+      tools.push({
+        name: "native_app_open",
+        description: "打开或切换到本机应用（如微信、Safari、访达等）",
+        parameters: {
+          app_name: { type: "string", description: "应用名称（如 Safari、微信、备忘录）" },
+        },
+        execute: async (params) => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          return invoke("native_app_open", {
+            appName: String(params.app_name),
+          });
+        },
+      });
+
+      tools.push({
+        name: "native_app_list",
+        description: "列出本机已安装的可交互应用列表",
+        execute: async () => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          return invoke("native_app_list_interactive");
+        },
+      });
+
       setAvailableTools(tools);
     }, [ai]);
 
@@ -341,7 +532,16 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
         {
           maxIterations: 8,
           verbose: true,
-          dangerousToolPatterns: ["write_file", "shell", "run_shell"],
+          dangerousToolPatterns: [
+            "write_file",
+            "shell",
+            "run_shell",
+            "native_calendar_create",
+            "native_reminder_create",
+            "native_notes_create",
+            "native_mail_create",
+            "native_shortcuts_run",
+          ],
           confirmDangerousAction: (toolName, params) =>
             new Promise<boolean>((resolve) => {
               setConfirmDialog({ toolName, params, resolve });

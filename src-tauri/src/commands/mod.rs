@@ -12,5 +12,7 @@ pub mod ocr;
 pub mod ding;
 pub mod translate;
 pub mod git_sync;
+pub mod mtools_sync;
 pub mod clipboard;
 pub mod file_search;
+pub mod native_apps;

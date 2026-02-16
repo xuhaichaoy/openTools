@@ -2,7 +2,6 @@ import { lazy } from "react";
 import type { MToolsPlugin } from "@/core/plugin-system/plugin-interface";
 import {
   Bot,
-  Settings,
   Wrench,
   Database,
   Puzzle,
@@ -20,6 +19,7 @@ import {
   ClipboardList,
   TextCursorInput,
   Bookmark,
+  User,
 } from "lucide-react";
 
 import { createElement } from "react";
@@ -70,11 +70,7 @@ const DataForgeLayout = lazy(() =>
     default: m.DataForgeLayout,
   })),
 );
-const SettingsPage = lazy(() =>
-  import("@/components/settings/SettingsPage").then((m) => ({
-    default: m.SettingsPage,
-  })),
-);
+// SettingsPage 已合并到 ManagementCenter
 const PluginMarket = lazy(() =>
   import("@/components/plugins/PluginMarket").then((m) => ({
     default: m.PluginMarket,
@@ -86,10 +82,13 @@ const CloudSyncPlugin = lazy(() => import("./CloudSync/index"));
 const OCRPlugin = lazy(() => import("./OCR/index"));
 const SystemActionsPlugin = lazy(() => import("./SystemActions/index"));
 const ClipboardHistoryPlugin = lazy(() => import("./ClipboardHistory/index"));
-const SnippetsPlugin = lazy(() => import("./Snippets/index").then((m) => ({ default: m.Snippets })));
+const SnippetsPlugin = lazy(() =>
+  import("./Snippets/index").then((m) => ({ default: m.Snippets })),
+);
 const BookmarksPlugin = lazy(() => import("./Bookmarks/index"));
+const ManagementCenterPlugin = lazy(() => import("./ManagementCenter/index"));
 
-// ── 所有内置插件定义（14 个） ──
+// ── 所有内置插件定义（15 个） ──
 
 export const builtinPlugins: MToolsPlugin[] = [
   // ── 开发工具箱（JSON + 时间戳 + Base64）──
@@ -335,16 +334,7 @@ export const builtinPlugins: MToolsPlugin[] = [
     icon: createElement(Bot, { className: "w-6 h-6" }),
     color: "text-indigo-500 bg-indigo-500/10",
     category: "AI",
-    keywords: [
-      "ai",
-      "对话",
-      "chat",
-      "助手",
-      "agent",
-      "智能",
-      "react",
-      "自动",
-    ],
+    keywords: ["ai", "对话", "chat", "助手", "agent", "智能", "react", "自动"],
     viewId: "ai-center",
     render: (props) => createElement(AICenter, props),
     actions: [
@@ -424,13 +414,7 @@ export const builtinPlugins: MToolsPlugin[] = [
     icon: createElement(Workflow, { className: "w-6 h-6" }),
     color: "text-amber-500 bg-amber-500/10",
     category: "AI",
-    keywords: [
-      "工作流",
-      "workflow",
-      "自动化",
-      "流程",
-      "automation",
-    ],
+    keywords: ["工作流", "workflow", "自动化", "流程", "automation"],
     viewId: "workflows",
     render: (props) => createElement(WorkflowList, props),
   },
@@ -443,14 +427,7 @@ export const builtinPlugins: MToolsPlugin[] = [
     icon: createElement(BookOpen, { className: "w-6 h-6" }),
     color: "text-emerald-500 bg-emerald-500/10",
     category: "AI",
-    keywords: [
-      "知识库",
-      "knowledge",
-      "rag",
-      "文档",
-      "检索",
-      "document",
-    ],
+    keywords: ["知识库", "knowledge", "rag", "文档", "检索", "document"],
     viewId: "knowledge-base",
     render: (props) => createElement(KnowledgeBase, props),
   },
@@ -501,17 +478,7 @@ export const builtinPlugins: MToolsPlugin[] = [
     viewId: "image-search",
     render: (props) => createElement(ImageSearchPlugin, props),
   },
-  {
-    id: "settings",
-    name: "设置",
-    description: "AI 模型配置、快捷键、通用设置",
-    icon: createElement(Settings, { className: "w-6 h-6" }),
-    color: "text-gray-500 bg-gray-500/10",
-    category: "系统",
-    keywords: ["设置", "settings", "配置", "快捷键"],
-    viewId: "settings",
-    render: (props) => createElement(SettingsPage, props),
-  },
+  // 「设置」已合并到「管理中心」，不再单独注册
   {
     id: "plugins",
     name: "插件",
@@ -544,8 +511,20 @@ export const builtinPlugins: MToolsPlugin[] = [
     color: "text-amber-500 bg-amber-500/10",
     category: "系统",
     keywords: [
-      "系统", "锁屏", "休眠", "深色", "暗黑", "回收站", "wifi",
-      "截图", "静音", "桌面", "system", "lock", "sleep", "dark",
+      "系统",
+      "锁屏",
+      "休眠",
+      "深色",
+      "暗黑",
+      "回收站",
+      "wifi",
+      "截图",
+      "静音",
+      "桌面",
+      "system",
+      "lock",
+      "sleep",
+      "dark",
     ],
     viewId: "system-actions",
     render: (props) => createElement(SystemActionsPlugin, props),
@@ -595,8 +574,15 @@ export const builtinPlugins: MToolsPlugin[] = [
     color: "text-cyan-500 bg-cyan-500/10",
     category: "工具",
     keywords: [
-      "剪贴板", "clipboard", "复制", "粘贴", "历史", "cb",
-      "copy", "paste", "history",
+      "剪贴板",
+      "clipboard",
+      "复制",
+      "粘贴",
+      "历史",
+      "cb",
+      "copy",
+      "paste",
+      "history",
     ],
     viewId: "clipboard-history",
     render: (props) => createElement(ClipboardHistoryPlugin, props),
@@ -605,7 +591,11 @@ export const builtinPlugins: MToolsPlugin[] = [
         name: "clipboard_search",
         description: "搜索剪贴板历史记录",
         parameters: {
-          keyword: { type: "string", description: "搜索关键词", required: true },
+          keyword: {
+            type: "string",
+            description: "搜索关键词",
+            required: true,
+          },
         },
         execute: async ({ keyword }) => {
           const { invoke } = await import("@tauri-apps/api/core");
@@ -619,7 +609,11 @@ export const builtinPlugins: MToolsPlugin[] = [
         name: "clipboard_latest",
         description: "获取最近的剪贴板记录",
         parameters: {
-          count: { type: "number", description: "获取条数（默认5）", required: false },
+          count: {
+            type: "number",
+            description: "获取条数（默认5）",
+            required: false,
+          },
         },
         execute: async ({ count }) => {
           const { invoke } = await import("@tauri-apps/api/core");
@@ -641,8 +635,17 @@ export const builtinPlugins: MToolsPlugin[] = [
     color: "text-emerald-500 bg-emerald-500/10",
     category: "工具",
     keywords: [
-      "快捷短语", "文本片段", "snippets", "模板", "template",
-      "短语", "snippet", "sn", "快捷", "文本", "签名",
+      "快捷短语",
+      "文本片段",
+      "snippets",
+      "模板",
+      "template",
+      "短语",
+      "snippet",
+      "sn",
+      "快捷",
+      "文本",
+      "签名",
     ],
     viewId: "snippets",
     render: (props) => createElement(SnippetsPlugin, props),
@@ -661,25 +664,43 @@ export const builtinPlugins: MToolsPlugin[] = [
       },
       {
         name: "snippet_get_content",
-        description: "获取指定快捷短语的内容（静态片段直接返回，动态片段需要 AI 生成）",
+        description:
+          "获取指定快捷短语的内容（静态片段直接返回，动态片段需要 AI 生成）",
         parameters: {
-          keyword: { type: "string", description: "短语的触发关键词", required: true },
+          keyword: {
+            type: "string",
+            description: "短语的触发关键词",
+            required: true,
+          },
         },
         execute: async ({ keyword }, { ai }) => {
           const { useSnippetStore } = await import("@/store/snippet-store");
           useSnippetStore.getState().loadSnippets();
-          const snippet = useSnippetStore.getState().matchByKeyword(keyword as string);
+          const snippet = useSnippetStore
+            .getState()
+            .matchByKeyword(keyword as string);
           if (!snippet) return { error: `未找到关键词为「${keyword}」的短语` };
           if (snippet.isDynamic && snippet.dynamicPrompt) {
             const result = await ai.chat({
               messages: [
-                { role: "system", content: "根据提示词生成内容，直接输出，不要解释。" },
+                {
+                  role: "system",
+                  content: "根据提示词生成内容，直接输出，不要解释。",
+                },
                 { role: "user", content: snippet.dynamicPrompt },
               ],
             });
-            return { title: snippet.title, content: result.content.trim(), dynamic: true };
+            return {
+              title: snippet.title,
+              content: result.content.trim(),
+              dynamic: true,
+            };
           }
-          return { title: snippet.title, content: snippet.content, dynamic: false };
+          return {
+            title: snippet.title,
+            content: snippet.content,
+            dynamic: false,
+          };
         },
       },
     ],
@@ -694,8 +715,17 @@ export const builtinPlugins: MToolsPlugin[] = [
     color: "text-blue-500 bg-blue-500/10",
     category: "工具",
     keywords: [
-      "书签", "bookmark", "网址", "收藏", "链接", "url",
-      "bk", "网页", "导航", "chrome", "firefox",
+      "书签",
+      "bookmark",
+      "网址",
+      "收藏",
+      "链接",
+      "url",
+      "bk",
+      "网页",
+      "导航",
+      "chrome",
+      "firefox",
     ],
     viewId: "bookmarks",
     render: (props) => createElement(BookmarksPlugin, props),
@@ -709,8 +739,14 @@ export const builtinPlugins: MToolsPlugin[] = [
         execute: async ({ query }) => {
           const { useBookmarkStore } = await import("@/store/bookmark-store");
           useBookmarkStore.getState().loadBookmarks();
-          const results = useBookmarkStore.getState().searchBookmarks(query as string);
-          return results.map((b) => ({ title: b.title, url: b.url, category: b.category }));
+          const results = useBookmarkStore
+            .getState()
+            .searchBookmarks(query as string);
+          return results.map((b) => ({
+            title: b.title,
+            url: b.url,
+            category: b.category,
+          }));
         },
       },
       {
@@ -726,5 +762,16 @@ export const builtinPlugins: MToolsPlugin[] = [
         },
       },
     ],
+  },
+  {
+    id: "management-center",
+    name: "管理中心",
+    description: "账号、数据同步及团队管理",
+    icon: createElement(User, { className: "w-6 h-6" }),
+    color: "text-indigo-500 bg-indigo-500/10",
+    category: "系统",
+    keywords: ["账号", "登录", "管理", "中心", "同步", "团队"],
+    viewId: "management-center",
+    render: (props) => createElement(ManagementCenterPlugin, props),
   },
 ];

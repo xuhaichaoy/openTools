@@ -24,6 +24,13 @@ async function ensureDbDir(): Promise<void> {
   }
 }
 
+/** 同步元数据接口 — 可选，由 SyncableCollection 使用 */
+export interface SyncMeta {
+  _version?: number;
+  _dirty?: boolean;
+  _syncedAt?: number;
+}
+
 /** 通用 JSON 集合存储 */
 export class JsonCollection<T extends { id: string }> {
   private name: string;
@@ -124,5 +131,125 @@ export class JsonCollection<T extends { id: string }> {
   /** 清空缓存（下次读取时重新从文件加载） */
   invalidateCache(): void {
     this.cache = null;
+  }
+
+  /** 批量设置（同步引擎 pull 后覆盖用） */
+  async setAll(items: T[]): Promise<void> {
+    await this.saveAll(items);
+  }
+}
+
+/**
+ * 支持同步的 JSON 集合 — 写操作自动维护 _version/_dirty/_syncedAt
+ *
+ * T 必须同时拥有 SyncMeta 中的字段（声明为可选）。
+ * 适用于 Marks、Tags 等需要与服务端同步的数据集合。
+ */
+export class SyncableCollection<
+  T extends { id: string } & SyncMeta,
+> extends JsonCollection<T> {
+  /** 新增一条，自动标记 dirty */
+  override async create(item: T): Promise<T> {
+    const now = Date.now();
+    const syncItem = {
+      ...item,
+      _version: item._version ?? now,
+      _dirty: true,
+      _syncedAt: item._syncedAt ?? undefined,
+    };
+    return super.create(syncItem);
+  }
+
+  /** 更新一条，自动递增版本、标记 dirty */
+  override async update(
+    id: string,
+    partial: Partial<T>,
+  ): Promise<T | undefined> {
+    const merged = {
+      ...partial,
+      _version: Date.now(),
+      _dirty: true,
+    } as Partial<T>;
+    return super.update(id, merged);
+  }
+
+  /** 软删除（标记 deleted + dirty） */
+  async softDelete(id: string): Promise<T | undefined> {
+    return this.update(id, {
+      deleted: true,
+      _version: Date.now(),
+      _dirty: true,
+    } as unknown as Partial<T>);
+  }
+
+  /** 获取所有 dirty 条目（待推送） */
+  async getDirty(): Promise<T[]> {
+    return this.query((item) => item._dirty === true);
+  }
+
+  /** 同步完成后，清除 dirty 标记、更新 _syncedAt */
+  async markSynced(ids: string[]): Promise<void> {
+    const all = await this.getAll();
+    const now = Date.now();
+    let changed = false;
+    for (const item of all) {
+      if (ids.includes(item.id) && item._dirty) {
+        item._dirty = false;
+        item._syncedAt = now;
+        changed = true;
+      }
+    }
+    if (changed) {
+      await this.setAll(all);
+    }
+  }
+
+  /** 批量合并云端数据（pull 后调用），只合并版本更高的条目 */
+  async mergeFromCloud(
+    cloudItems: Array<{
+      data_id: string;
+      content: Record<string, unknown>;
+      version: number;
+      deleted: boolean;
+    }>,
+  ): Promise<number> {
+    const all = await this.getAll();
+    let merged = 0;
+
+    for (const cloud of cloudItems) {
+      const idx = all.findIndex((i) => i.id === cloud.data_id);
+      const cloudVersion = cloud.version;
+
+      if (idx >= 0) {
+        const localVersion = all[idx]._version ?? 0;
+        if (cloudVersion > localVersion) {
+          all[idx] = {
+            ...all[idx],
+            ...cloud.content,
+            id: cloud.data_id,
+            _version: cloudVersion,
+            _dirty: false,
+            _syncedAt: Date.now(),
+            deleted: cloud.deleted,
+          } as T;
+          merged++;
+        }
+      } else {
+        all.unshift({
+          ...cloud.content,
+          id: cloud.data_id,
+          _version: cloudVersion,
+          _dirty: false,
+          _syncedAt: Date.now(),
+          deleted: cloud.deleted,
+        } as T);
+        merged++;
+      }
+    }
+
+    if (merged > 0) {
+      await this.setAll(all);
+    }
+    return merged;
   }
 }

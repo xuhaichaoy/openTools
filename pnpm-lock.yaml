@@ -23,6 +23,9 @@ importers:
       '@tauri-apps/plugin-fs':
         specifier: ^2.4.5
         version: 2.4.5
+      '@tauri-apps/plugin-store':
+        specifier: ^2.4.2
+        version: 2.4.2
       '@xyflow/react':
         specifier: ^12.10.0
         version: 12.10.0(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -784,6 +787,9 @@ packages:
 
   '@tauri-apps/plugin-fs@2.4.5':
     resolution: {integrity: sha512-dVxWWGE6VrOxC7/jlhyE+ON/Cc2REJlM35R3PJX3UvFw2XwYhLGQVAIyrehenDdKjotipjYEVc4YjOl3qq90fA==}
+
+  '@tauri-apps/plugin-store@2.4.2':
+    resolution: {integrity: sha512-0ClHS50Oq9HEvLPhNzTNFxbWVOqoAp3dRvtewQBeqfIQ0z5m3JRnOISIn2ZVPCrQC0MyGyhTS9DWhHjpigQE7A==}
 
   '@types/babel__core@7.20.5':
     resolution: {integrity: sha512-qoQprZvz5wQFJwMDqeseRXWv3rqMvhgpbXFfVyWhbx9X47POIA6i/+dXefEmZKoAgOaTdaIgNSMqMIU61yRyzA==}
@@ -2851,6 +2857,10 @@ snapshots:
       '@tauri-apps/api': 2.10.1
 
   '@tauri-apps/plugin-fs@2.4.5':
+    dependencies:
+      '@tauri-apps/api': 2.10.1
+
+  '@tauri-apps/plugin-store@2.4.2':
     dependencies:
       '@tauri-apps/api': 2.10.1
 

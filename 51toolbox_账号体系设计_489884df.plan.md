@@ -4,13 +4,13 @@ overview: 参考 uTools 管理中心模式，为 51ToolBox 设计自建后端账
 todos:
   - id: phase-1-backend
     content: 阶段一：后端服务（2-3 周）— Axum + PG + Redis，认证、AI Proxy（平台+团队Key双通道）、能量系统、同步API、团队（CRUD+共享+AI Key管理+用量统计）、订阅/支付stub
-    status: pending
+    status: in-progress
   - id: phase-2-client-auth
     content: 阶段二：客户端认证 + 管理中心（2 周）— 后端地址配置、搜索栏头像、登录弹窗、管理中心UI、AI三来源配置、auth-store
-    status: pending
+    status: in-progress
   - id: phase-3-sync-energy
     content: 阶段三：数据同步 + AI 路由接入（2-3 周）— JsonCollection同步元数据、同步引擎、逐个接入数据模块、AIRouter三来源路由、能量展示
-    status: pending
+    status: in-progress
   - id: phase-4-team
     content: 阶段四：团队功能（1-2 周）— 团队空间UI、成员管理、共享知识库/工作流、团队AI Key配置页、用量统计面板
     status: pending
@@ -89,8 +89,6 @@ graph TB
     TeamSvc --> DB
 ```
 
-
-
 ## 二、后端部署模式
 
 ### 2.1 公共服务 vs 私有部署
@@ -118,13 +116,11 @@ graph TB
 
 ### 3.1 三种 AI 来源
 
-
-| 来源     | 配置方       | Key 存储        | 费用           | 需登录 |
-| ------ | --------- | ------------- | ------------ | --- |
-| 自有 Key | 用户自己      | 客户端本地         | 免费（用户自付API费） | 否   |
-| 团队 Key | **团队管理员** | **后端服务器（加密）** | 免费（团队/公司承担）  | 是   |
-| 平台服务   | 平台运营      | **后端服务器**     | 按 token 扣能量  | 是   |
-
+| 来源     | 配置方         | Key 存储               | 费用                  | 需登录 |
+| -------- | -------------- | ---------------------- | --------------------- | ------ |
+| 自有 Key | 用户自己       | 客户端本地             | 免费（用户自付API费） | 否     |
+| 团队 Key | **团队管理员** | **后端服务器（加密）** | 免费（团队/公司承担） | 是     |
+| 平台服务 | 平台运营       | **后端服务器**         | 按 token 扣能量       | 是     |
 
 用户可按模型粒度混合使用三种来源（如 GPT-4o 用自有Key，DeepSeek 用团队Key，Claude 用平台服务）。
 
@@ -152,8 +148,6 @@ sequenceDiagram
     Server->>Server: 记录成员用量
 ```
 
-
-
 - Key 只存服务端，客户端只知道有哪些模型可用
 - 不消耗成员个人能量
 - 服务端记录每个成员用量（token数），供管理员查看简单统计
@@ -171,18 +165,21 @@ sequenceDiagram
 interface AIModelConfig {
   id: string;
   name: string;
-  source: 'own_key' | 'team' | 'platform';
+  source: "own_key" | "team" | "platform";
   own_base_url?: string;
   own_api_key?: string;
   own_model_id?: string;
-  team_id?: string;  // 团队模式需要
+  team_id?: string; // 团队模式需要
 }
 
 async function routeAIRequest(config: AIModelConfig, req: ChatRequest) {
   switch (config.source) {
-    case 'own_key':  return directCall(config, req);      // 直连
-    case 'team':     return teamProxyCall(config, req);   // POST /ai/team-chat
-    case 'platform': return platformProxyCall(config, req); // POST /ai/chat
+    case "own_key":
+      return directCall(config, req); // 直连
+    case "team":
+      return teamProxyCall(config, req); // POST /ai/team-chat
+    case "platform":
+      return platformProxyCall(config, req); // POST /ai/chat
   }
 }
 ```
@@ -431,8 +428,6 @@ sequenceDiagram
     API-->>App: {new_access_token, new_refresh_token}
 ```
 
-
-
 - **手机号登录**: 短信验证码，首次自动注册
 - **邮箱登录**: 邮箱 + 密码
 - **OAuth**: 微信扫码、GitHub
@@ -525,10 +520,10 @@ POST   /vouchers/redeem                  -- 兑换代金券 (stub: 返回 501)
 ```typescript
 // src/core/auth/energy.ts
 interface EnergyService {
-  getBalance(): Promise<number>;             // 从服务端获取余额
-  getCachedBalance(): number;                // 本地缓存余额（UI 展示用）
+  getBalance(): Promise<number>; // 从服务端获取余额
+  getCachedBalance(): number; // 本地缓存余额（UI 展示用）
   getLogs(page: number, size: number): Promise<EnergyLog[]>;
-  estimateCost(model: string, inputTokens: number): number;  // 预估消耗
+  estimateCost(model: string, inputTokens: number): number; // 预估消耗
 }
 
 // 注意：不需要 consume() 方法，能量扣减在 /ai/chat 后端自动完成
@@ -565,8 +560,6 @@ sequenceDiagram
     Server-->>ClientB: { changes: [{type:"marks", id:"xxx", content:{...}, version:3}] }
     ClientB->>ClientB: 合并到本地存储
 ```
-
-
 
 **核心原则:**
 
@@ -608,13 +601,11 @@ src/core/sync/
 
 ### 8.1 用户状态
 
-
-| 状态        | 本地功能 | AI 自有Key | AI 团队Key | AI 平台服务 | 数据同步 | 团队     |
-| --------- | ---- | -------- | -------- | ------- | ---- | ------ |
-| 未登录       | 全部可用 | 可用       | 不可用      | 不可用     | 不可用  | 不可用    |
-| 已登录(Free) | 全部可用 | 可用       | 可用（所在团队） | 可用（扣能量） | 可用   | 可创建/加入 |
-| 已登录(Pro)  | 全部可用 | 可用       | 可用       | 可用（折扣）  | 可用   | 可创建/加入 |
-
+| 状态         | 本地功能 | AI 自有Key | AI 团队Key       | AI 平台服务    | 数据同步 | 团队        |
+| ------------ | -------- | ---------- | ---------------- | -------------- | -------- | ----------- |
+| 未登录       | 全部可用 | 可用       | 不可用           | 不可用         | 不可用   | 不可用      |
+| 已登录(Free) | 全部可用 | 可用       | 可用（所在团队） | 可用（扣能量） | 可用     | 可创建/加入 |
+| 已登录(Pro)  | 全部可用 | 可用       | 可用             | 可用（折扣）   | 可用     | 可创建/加入 |
 
 注：Pro 套餐的具体差异待支付系统上线后定义，当前 Free 和 Pro 功能一致。
 
@@ -622,23 +613,23 @@ src/core/sync/
 
 ```typescript
 // src/core/auth/feature-gate.ts
-type UserState = 'anonymous' | 'free' | 'pro' | 'team';
+type UserState = "anonymous" | "free" | "pro" | "team";
 
 interface FeatureGate {
   // 核心判断
   isLoggedIn(): boolean;
   getUserState(): UserState;
-  
+
   // 功能检查
-  canSync(): boolean;               // 仅已登录
-  canUsePlatformAI(): boolean;      // 仅已登录
-  canUseTeamAI(): boolean;          // 仅已登录 + 所在团队有 AI 配置
-  canUseTeam(): boolean;            // 仅已登录
+  canSync(): boolean; // 仅已登录
+  canUsePlatformAI(): boolean; // 仅已登录
+  canUseTeamAI(): boolean; // 仅已登录 + 所在团队有 AI 配置
+  canUseTeam(): boolean; // 仅已登录
   hasEnoughEnergy(estimated: number): boolean;
-  
+
   // UI 引导
-  showLoginPrompt(feature: string): void;     // 未登录时引导登录
-  showEnergyPrompt(): void;                   // 能量不足时引导购买/切换自有Key
+  showLoginPrompt(feature: string): void; // 未登录时引导登录
+  showEnergyPrompt(): void; // 能量不足时引导购买/切换自有Key
 }
 ```
 
@@ -676,22 +667,18 @@ graph LR
     teamPool --> BrowseRes
 ```
 
-
-
 ### 9.2 数据归属与可见性
 
-
-| 场景            | 数据归属         | 可见性               |
-| ------------- | ------------ | ----------------- |
-| 用户创建知识库文档     | 个人私有         | 仅自己               |
-| 用户将文档「公开到团队」  | **仍归个人**     | 团队成员可见/可在 RAG 中使用 |
-| 用户取消公开        | 仍归个人         | 恢复仅自己可见           |
-| 用户创建工作流       | 个人私有         | 仅自己               |
-| 用户将工作流「公开到团队」 | **原件仍归个人**   | 团队成员可浏览模板         |
-| 成员从团队导入工作流    | **生成个人私有副本** | 副本归导入者，与原件无关      |
-| 用户退出/被移出团队    | 个人数据不受影响     | 其已公开的资源从团队移除      |
-| 团队解散          | 所有个人数据不受影响   | 公开关系清除            |
-
+| 场景                       | 数据归属             | 可见性                       |
+| -------------------------- | -------------------- | ---------------------------- |
+| 用户创建知识库文档         | 个人私有             | 仅自己                       |
+| 用户将文档「公开到团队」   | **仍归个人**         | 团队成员可见/可在 RAG 中使用 |
+| 用户取消公开               | 仍归个人             | 恢复仅自己可见               |
+| 用户创建工作流             | 个人私有             | 仅自己                       |
+| 用户将工作流「公开到团队」 | **原件仍归个人**     | 团队成员可浏览模板           |
+| 成员从团队导入工作流       | **生成个人私有副本** | 副本归导入者，与原件无关     |
+| 用户退出/被移出团队        | 个人数据不受影响     | 其已公开的资源从团队移除     |
+| 团队解散                   | 所有个人数据不受影响 | 公开关系清除                 |
 
 ### 9.3 团队结构与权限
 
@@ -730,32 +717,28 @@ team_shared_resources (团队公开资源关系表，只存关系不存内容)
 
 ### 10.1 需要同步的数据模块（仅已登录用户）
 
-
-| 模块               | 现有存储位置                                  | 改造内容                                   |
-| ---------------- | --------------------------------------- | -------------------------------------- |
-| Notes/Marks      | `mtools-db/marks.json` (JsonCollection) | 增加同步元数据，接入同步引擎                         |
-| Tags             | `mtools-db/tags.json` (JsonCollection)  | 同上                                     |
-| Bookmarks        | localStorage `mtools-bookmarks`         | **迁移**到 JsonCollection + 同步            |
-| Snippets         | localStorage `mtools-snippets`          | **迁移**到 JsonCollection + 同步            |
-| Workflows        | `AppData/workflows/*.json` (Rust)       | 后端增加同步 Tauri command                   |
+| 模块             | 现有存储位置                            | 改造内容                                                        |
+| ---------------- | --------------------------------------- | --------------------------------------------------------------- |
+| Notes/Marks      | `mtools-db/marks.json` (JsonCollection) | 增加同步元数据，接入同步引擎                                    |
+| Tags             | `mtools-db/tags.json` (JsonCollection)  | 同上                                                            |
+| Bookmarks        | localStorage `mtools-bookmarks`         | **迁移**到 JsonCollection + 同步                                |
+| Snippets         | localStorage `mtools-snippets`          | **迁移**到 JsonCollection + 同步                                |
+| Workflows        | `AppData/workflows/*.json` (Rust)       | 后端增加同步 Tauri command                                      |
 | AI Config        | `config.json` (Tauri Store)             | 同步模型配置列表（**不含自有 API Key**，仅同步模型名/来源选择） |
-| General Settings | `config.json` (Tauri Store)             | 同步通用偏好设置                               |
-
+| General Settings | `config.json` (Tauri Store)             | 同步通用偏好设置                                                |
 
 ### 10.2 受 AI 三来源影响的模块
 
 所有 AI 调用接入路由层，根据模型配置决定走自有 Key / 团队 Key / 平台服务：
 
-
-| 模块               | 涉及文件                                                                         | 改造内容                              |
-| ---------------- | ---------------------------------------------------------------------------- | --------------------------------- |
+| 模块             | 涉及文件                                                                     | 改造内容                                     |
+| ---------------- | ---------------------------------------------------------------------------- | -------------------------------------------- |
 | AI Center        | [src/store/ai-store.ts](src/store/ai-store.ts)                               | 对话调用走 `AIRouter`，平台模式走 `/ai/chat` |
-| Smart Agent      | [src/store/agent-store.ts](src/store/agent-store.ts)                         | Agent 多轮调用走 `AIRouter`            |
-| Knowledge Base   | [src/store/rag-store.ts](src/store/rag-store.ts)                             | RAG AI 回答走 `AIRouter`             |
-| Screen Translate | [src/plugins/builtin/ScreenTranslate/](src/plugins/builtin/ScreenTranslate/) | AI 翻译走 `AIRouter`                 |
-| Snippets (动态)    | [src/store/snippet-store.ts](src/store/snippet-store.ts)                     | AI 动态生成走 `AIRouter`               |
-| Data Forge       | [src/store/data-forge-store.ts](src/store/data-forge-store.ts)               | AI 脚本生成走 `AIRouter`               |
-
+| Smart Agent      | [src/store/agent-store.ts](src/store/agent-store.ts)                         | Agent 多轮调用走 `AIRouter`                  |
+| Knowledge Base   | [src/store/rag-store.ts](src/store/rag-store.ts)                             | RAG AI 回答走 `AIRouter`                     |
+| Screen Translate | [src/plugins/builtin/ScreenTranslate/](src/plugins/builtin/ScreenTranslate/) | AI 翻译走 `AIRouter`                         |
+| Snippets (动态)  | [src/store/snippet-store.ts](src/store/snippet-store.ts)                     | AI 动态生成走 `AIRouter`                     |
+| Data Forge       | [src/store/data-forge-store.ts](src/store/data-forge-store.ts)               | AI 脚本生成走 `AIRouter`                     |
 
 ### 10.3 不需要账号管理的模块（纯本地/设备相关）
 
@@ -844,25 +827,23 @@ src-tauri/src/commands/sync_v2.rs  # 新版同步
 
 ### 11.2 需要改造的现有文件
 
-
-| 文件                                                                                 | 改造内容                                              |
-| ---------------------------------------------------------------------------------- | ------------------------------------------------- |
-| [src/App.tsx](src/App.tsx)                                                         | 启动时检查登录状态、已登录则初始化同步引擎、新增 management-center 视图     |
-| [src/components/search/SearchBar.tsx](src/components/search/SearchBar.tsx)         | 右侧新增用户头像按钮                                        |
-| [src/core/database/index.ts](src/core/database/index.ts)                           | JsonCollection 增加 `_version`/`_syncedAt`/`_dirty` |
-| [src/store/ai-store.ts](src/store/ai-store.ts)                                     | AI 配置增加 `source` 字段，对话调用走 `AIRouter`              |
-| [src/store/agent-store.ts](src/store/agent-store.ts)                               | Agent 调用走 `AIRouter`                              |
-| [src/store/rag-store.ts](src/store/rag-store.ts)                                   | RAG AI 走 `AIRouter` + 支持团队共享知识库                   |
-| [src/store/workflow-store.ts](src/store/workflow-store.ts)                         | 支持从团队模板导入                                         |
-| [src/store/bookmark-store.ts](src/store/bookmark-store.ts)                         | localStorage 迁移到 JsonCollection + 同步              |
-| [src/store/snippet-store.ts](src/store/snippet-store.ts)                           | localStorage 迁移到 JsonCollection + 同步              |
-| [src/store/data-forge-store.ts](src/store/data-forge-store.ts)                     | AI 调用走 `AIRouter`                                 |
-| [src/plugins/builtin/CloudSync/index.tsx](src/plugins/builtin/CloudSync/index.tsx) | 废弃，功能迁入管理中心「我的数据」                                 |
-| [src/components/settings/](src/components/settings/)                               | 偏好设置迁入管理中心                                        |
-| [src/plugins/builtin/index.ts](src/plugins/builtin/index.ts)                       | 注册 ManagementCenter                               |
-| [src-tauri/src/lib.rs](src-tauri/src/lib.rs)                                       | 注册 auth/sync_v2 commands                          |
-| [src-tauri/capabilities/default.json](src-tauri/capabilities/default.json)         | 新增后端 API 域名的 HTTP 请求权限                            |
-
+| 文件                                                                               | 改造内容                                                                |
+| ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| [src/App.tsx](src/App.tsx)                                                         | 启动时检查登录状态、已登录则初始化同步引擎、新增 management-center 视图 |
+| [src/components/search/SearchBar.tsx](src/components/search/SearchBar.tsx)         | 右侧新增用户头像按钮                                                    |
+| [src/core/database/index.ts](src/core/database/index.ts)                           | JsonCollection 增加 `_version`/`_syncedAt`/`_dirty`                     |
+| [src/store/ai-store.ts](src/store/ai-store.ts)                                     | AI 配置增加 `source` 字段，对话调用走 `AIRouter`                        |
+| [src/store/agent-store.ts](src/store/agent-store.ts)                               | Agent 调用走 `AIRouter`                                                 |
+| [src/store/rag-store.ts](src/store/rag-store.ts)                                   | RAG AI 走 `AIRouter` + 支持团队共享知识库                               |
+| [src/store/workflow-store.ts](src/store/workflow-store.ts)                         | 支持从团队模板导入                                                      |
+| [src/store/bookmark-store.ts](src/store/bookmark-store.ts)                         | localStorage 迁移到 JsonCollection + 同步                               |
+| [src/store/snippet-store.ts](src/store/snippet-store.ts)                           | localStorage 迁移到 JsonCollection + 同步                               |
+| [src/store/data-forge-store.ts](src/store/data-forge-store.ts)                     | AI 调用走 `AIRouter`                                                    |
+| [src/plugins/builtin/CloudSync/index.tsx](src/plugins/builtin/CloudSync/index.tsx) | 废弃，功能迁入管理中心「我的数据」                                      |
+| [src/components/settings/](src/components/settings/)                               | 偏好设置迁入管理中心                                                    |
+| [src/plugins/builtin/index.ts](src/plugins/builtin/index.ts)                       | 注册 ManagementCenter                                                   |
+| [src-tauri/src/lib.rs](src-tauri/src/lib.rs)                                       | 注册 auth/sync_v2 commands                                              |
+| [src-tauri/capabilities/default.json](src-tauri/capabilities/default.json)         | 新增后端 API 域名的 HTTP 请求权限                                       |
 
 ## 十二、建议实施顺序
 
@@ -890,8 +871,7 @@ src-tauri/src/commands/sync_v2.rs  # 新版同步
 - JsonCollection 同步元数据改造
 - 同步引擎（登录后激活）+ 离线队列
 - 逐个接入: Marks -> Tags -> Bookmarks -> Snippets -> Workflows -> Settings
-- AI 路由层 `AIRouter`：所有 AI 调用点接入三来源路由
--「我的数据」展示同步状态
+- AI 路由层 `AIRouter`：所有 AI 调用点接入三来源路由 -「我的数据」展示同步状态
 
 **阶段四（1-2 周）: 团队功能**
 
@@ -901,4 +881,3 @@ src-tauri/src/commands/sync_v2.rs  # 新版同步
 - 资源公开（知识库/工作流「公开到团队」）
 - 团队 RAG 搜索（个人 + 团队公开文档）
 - 工作流模板导入（团队模板 -> 个人私有副本）
-

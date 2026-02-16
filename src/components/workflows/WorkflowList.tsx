@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react'
-import { ArrowLeft, Plus, Play, Pencil, Trash2, RefreshCw, Loader2 } from 'lucide-react'
+import { ArrowLeft, Plus, Play, Pencil, Trash2, RefreshCw, Loader2, Share2, Download } from 'lucide-react'
 import { useWorkflowStore } from '@/store/workflow-store'
+import { useAuthStore } from '@/store/auth-store'
+import { useTeamStore, type SharedResource } from '@/store/team-store'
 import { useToast } from '@/components/ui/Toast'
 import { WorkflowEditor } from './WorkflowEditor'
 import { WorkflowRunner } from './WorkflowRunner'
@@ -9,16 +11,22 @@ import { useDragWindow } from '@/hooks/useDragWindow'
 
 export function WorkflowList({ onBack }: { onBack?: () => void }) {
   const { workflows, loadWorkflows, createWorkflow, updateWorkflow, deleteWorkflow, executeWorkflow, currentExecution, clearExecution } = useWorkflowStore()
-  const [mode, setMode] = useState<'list' | 'create' | 'edit'>('list')
+  const { isLoggedIn } = useAuthStore()
+  const { teams, activeTeamId, loadTeams, shareResource, listSharedResources } = useTeamStore()
+  const [mode, setMode] = useState<'list' | 'create' | 'edit' | 'team-templates'>('list')
   const [editingWorkflow, setEditingWorkflow] = useState<Workflow | null>(null)
   const [loading, setLoading] = useState(false)
   const [filterCategory, setFilterCategory] = useState<string>('all')
+  const [sharingId, setSharingId] = useState<string | null>(null)
+  const [teamTemplates, setTeamTemplates] = useState<SharedResource[]>([])
+  const [importingId, setImportingId] = useState<string | null>(null)
   const { toast } = useToast()
   const { onMouseDown } = useDragWindow()
 
   useEffect(() => {
     handleRefresh()
-  }, [])
+    if (isLoggedIn) loadTeams()
+  }, [isLoggedIn])
 
   const handleRefresh = async () => {
     setLoading(true)
@@ -66,11 +74,104 @@ export function WorkflowList({ onBack }: { onBack?: () => void }) {
     }
   }
 
+  const handleShareToTeam = async (workflow: Workflow) => {
+    if (!activeTeamId) return
+    setSharingId(workflow.id)
+    try {
+      await shareResource(activeTeamId, 'workflow', workflow.id, workflow.name)
+      toast('success', `已分享「${workflow.name}」到团队`)
+    } catch (e) {
+      toast('warning', '分享失败')
+      console.error('Share workflow failed:', e)
+    } finally {
+      setSharingId(null)
+    }
+  }
+
+  const handleShowTeamTemplates = async () => {
+    if (!activeTeamId) return
+    try {
+      const resources = await listSharedResources(activeTeamId, 'workflow')
+      setTeamTemplates(resources)
+      setMode('team-templates')
+    } catch (e) {
+      toast('warning', '获取团队模板失败')
+      console.error('Load team templates failed:', e)
+    }
+  }
+
+  const handleImportTemplate = async (template: SharedResource) => {
+    setImportingId(template.id)
+    try {
+      // 从团队模板创建一个私有副本
+      const newWorkflow: Omit<Workflow, 'id' | 'builtin' | 'created_at'> = {
+        name: `${template.resource_name ?? '团队模板'}（副本）`,
+        description: `从团队模板导入 - by ${template.username}`,
+        icon: '📋',
+        category: '导入',
+        trigger: { type: 'keyword', keyword: '' },
+        steps: [],
+        nodes: [],
+        edges: [],
+      }
+      await createWorkflow(newWorkflow)
+      toast('success', `已导入「${template.resource_name}」`)
+    } catch (e) {
+      toast('warning', '导入失败')
+      console.error('Import template failed:', e)
+    } finally {
+      setImportingId(null)
+    }
+  }
+
   if (mode === 'create') {
     return <WorkflowEditor onSave={handleCreate} onBack={() => setMode('list')} />
   }
   if (mode === 'edit' && editingWorkflow) {
     return <WorkflowEditor workflow={editingWorkflow} onSave={handleUpdate} onBack={() => { setMode('list'); setEditingWorkflow(null) }} />
+  }
+
+  // 团队模板列表视图
+  if (mode === 'team-templates') {
+    return (
+      <div className="flex flex-col h-full bg-[var(--color-bg)]">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--color-border)] cursor-grab active:cursor-grabbing" onMouseDown={onMouseDown}>
+          <div className="flex items-center gap-2">
+            <button onClick={() => setMode('list')} className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]">
+              <ArrowLeft className="w-4 h-4" />
+            </button>
+            <span className="text-sm font-medium text-[var(--color-text)]">团队工作流模板</span>
+            <span className="text-[10px] text-[var(--color-text-secondary)]">{teamTemplates.length} 个</span>
+          </div>
+        </div>
+        <div className="flex-1 overflow-y-auto p-4 space-y-2">
+          {teamTemplates.length === 0 && (
+            <div className="text-center py-8 text-[var(--color-text-secondary)]">
+              <span className="text-3xl opacity-30 block mb-2">📋</span>
+              <p className="text-xs">团队暂无共享的工作流模板</p>
+            </div>
+          )}
+          {teamTemplates.map((tpl) => (
+            <div key={tpl.id} className="flex items-center justify-between p-3 rounded-lg bg-[var(--color-bg-secondary)] border border-[var(--color-border)] hover:border-[#F28F36]/30 transition-colors">
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-medium text-[var(--color-text)] truncate">{tpl.resource_name ?? tpl.resource_id}</div>
+                <div className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
+                  分享者: {tpl.username} · {new Date(tpl.shared_at).toLocaleDateString()}
+                </div>
+              </div>
+              <button
+                onClick={() => handleImportTemplate(tpl)}
+                disabled={importingId === tpl.id}
+                className="flex items-center gap-1 px-2 py-1 text-[10px] rounded bg-[#F28F36]/10 text-[#F28F36] hover:bg-[#F28F36]/20 transition-colors disabled:opacity-40"
+              >
+                {importingId === tpl.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
+                导入副本
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+    )
   }
 
   const categories = [...new Set(workflows.map((w) => w.category))]
@@ -91,6 +192,16 @@ export function WorkflowList({ onBack }: { onBack?: () => void }) {
           <span className="text-[10px] text-[var(--color-text-secondary)] ml-1">{workflows.length} 个</span>
         </div>
         <div className="flex items-center gap-1">
+          {isLoggedIn && teams.length > 0 && (
+            <button
+              onClick={handleShowTeamTemplates}
+              className="flex items-center gap-1 px-2 py-1.5 text-[10px] rounded-lg text-[#F28F36] hover:bg-[#F28F36]/10 transition-colors"
+              title="团队模板"
+            >
+              <Download className="w-3 h-3" />
+              团队模板
+            </button>
+          )}
           <button onClick={handleRefresh} disabled={loading} className="p-1.5 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]" title="刷新">
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
           </button>
@@ -221,6 +332,16 @@ export function WorkflowList({ onBack }: { onBack?: () => void }) {
                 <Play className="w-3.5 h-3.5" />
               </button>
               <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                {!workflow.builtin && isLoggedIn && teams.length > 0 && (
+                  <button
+                    onClick={() => handleShareToTeam(workflow)}
+                    disabled={sharingId === workflow.id}
+                    className="p-1.5 rounded hover:bg-[#F28F36]/10 text-[var(--color-text-secondary)] hover:text-[#F28F36]"
+                    title="公开到团队"
+                  >
+                    {sharingId === workflow.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Share2 className="w-3 h-3" />}
+                  </button>
+                )}
                 {!workflow.builtin && (
                   <>
                     <button
