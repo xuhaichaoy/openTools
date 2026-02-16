@@ -42,6 +42,8 @@ export interface AIConfig {
   max_tokens: number | null;
   enable_advanced_tools: boolean;
   system_prompt: string;
+  /** 对话时自动检索知识库 */
+  enable_rag_auto_search: boolean;
 }
 
 export interface PendingToolConfirm {
@@ -99,6 +101,7 @@ export const useAIStore = create<AIState>((set, get) => ({
     max_tokens: null,
     enable_advanced_tools: false,
     system_prompt: "",
+    enable_rag_auto_search: false,
   },
   conversations: [],
   currentConversationId: null,

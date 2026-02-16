@@ -45,6 +45,9 @@ pub struct AIConfig {
     pub enable_advanced_tools: bool,
     #[serde(default)]
     pub system_prompt: String,
+    /// 对话时自动检索知识库（RAG）
+    #[serde(default)]
+    pub enable_rag_auto_search: bool,
 }
 
 impl Default for AIConfig {
@@ -57,6 +60,7 @@ impl Default for AIConfig {
             max_tokens: None,
             enable_advanced_tools: false,
             system_prompt: String::new(),
+            enable_rag_auto_search: false,
         }
     }
 }
@@ -791,10 +795,38 @@ pub async fn ai_chat_stream(
     let cancellation = app.state::<StreamCancellation>();
     cancellation.reset();
 
+    // 构建 system prompt（可能包含 RAG 检索结果）
+    let mut system_prompt = get_system_prompt(enable_advanced, &config.system_prompt);
+
+    // RAG 自动检索：如果开启，从用户最后一条消息中提取查询词进行知识库检索
+    if config.enable_rag_auto_search {
+        if let Some(user_query) = messages.iter().rev().find(|m| m.role == "user").and_then(|m| m.content.as_ref()) {
+            match super::rag::rag_search(app.clone(), user_query.clone(), Some(3), Some(0.5)).await {
+                Ok(results) if !results.is_empty() => {
+                    let mut rag_context = String::from(
+                        "\n\n---\n以下是从用户知识库中检索到的相关信息，请参考回答（如有引用请标注来源文档）：\n\n"
+                    );
+                    for (i, r) in results.iter().enumerate() {
+                        rag_context.push_str(&format!(
+                            "[{}] 来源：{}（相关度 {:.0}%）\n{}\n\n",
+                            i + 1, r.chunk.metadata.source, r.score * 100.0, r.chunk.content,
+                        ));
+                    }
+                    system_prompt.push_str(&rag_context);
+                    log::info!("RAG 自动检索：注入 {} 条知识库结果", results.len());
+                }
+                Ok(_) => { /* 无相关结果，不注入 */ }
+                Err(e) => {
+                    log::warn!("RAG 自动检索失败: {}", e);
+                }
+            }
+        }
+    }
+
     // 注入 system prompt
     let mut full_messages = vec![ChatMessage {
         role: "system".to_string(),
-        content: Some(get_system_prompt(enable_advanced, &config.system_prompt)),
+        content: Some(system_prompt),
         tool_calls: None,
         tool_call_id: None,
         name: None,
@@ -1074,6 +1106,165 @@ pub async fn ai_chat_stream(
                                 }
 
                                 // 填充 function 字段
+                                if let Some(func) = tc["function"].as_object() {
+                                    if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
+                                        pending_tool_calls[idx].function.name = name.to_string();
+                                    }
+                                    if let Some(args) = func.get("arguments").and_then(|a| a.as_str()) {
+                                        tc_args_buffer
+                                            .entry(idx)
+                                            .or_default()
+                                            .push_str(args);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = app.emit(
+                    "ai-stream-error",
+                    serde_json::json!({
+                        "conversation_id": conversation_id,
+                        "error": format!("流读取错误: {}", e),
+                    }),
+                );
+                return Err(format!("流读取错误: {}", e));
+            }
+        }
+    }
+
+    let _ = app.emit(
+        "ai-stream-done",
+        serde_json::json!({ "conversation_id": conversation_id }),
+    );
+    Ok(())
+}
+
+/// Agent 专用流式对话 — 前端传入 tools 定义，后端不执行工具
+/// 收到 tool_calls 时通过事件通知前端，由 Agent 自行执行
+#[tauri::command]
+pub async fn ai_agent_stream(
+    app: AppHandle,
+    messages: Vec<ChatMessage>,
+    config: AIConfig,
+    tools: Vec<serde_json::Value>,
+    conversation_id: String,
+) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let cancellation = app.state::<StreamCancellation>();
+    cancellation.reset();
+
+    let request = build_api_request(
+        &config.model, &messages, config.temperature, config.max_tokens, &tools, true,
+    );
+
+    let response = client
+        .post(format!("{}/chat/completions", config.base_url))
+        .header("Authorization", format!("Bearer {}", config.api_key))
+        .header("Content-Type", "application/json")
+        .json(&request)
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {}", e))?;
+
+    if !response.status().is_success() {
+        let body = response.text().await.unwrap_or_default();
+        let _ = app.emit(
+            "ai-stream-error",
+            serde_json::json!({
+                "conversation_id": conversation_id,
+                "error": format!("API 错误: {}", body),
+            }),
+        );
+        return Err(format!("API 错误: {}", body));
+    }
+
+    // 流式读取 SSE — 收集 content 和 tool_calls
+    use futures_util::StreamExt;
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+    let mut pending_tool_calls: Vec<ToolCall> = Vec::new();
+    let mut tc_args_buffer: HashMap<usize, String> = HashMap::new();
+
+    while let Some(chunk) = stream.next().await {
+        if cancellation.is_cancelled() {
+            let _ = app.emit(
+                "ai-stream-done",
+                serde_json::json!({ "conversation_id": conversation_id }),
+            );
+            return Ok(());
+        }
+
+        match chunk {
+            Ok(bytes) => {
+                buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+                while let Some(pos) = buffer.find('\n') {
+                    let line = buffer[..pos].trim().to_string();
+                    buffer = buffer[pos + 1..].to_string();
+
+                    if !line.starts_with("data: ") {
+                        continue;
+                    }
+                    let data = &line[6..];
+                    if data == "[DONE]" {
+                        // 如果有 pending tool_calls，组装完整参数后通知前端
+                        if !pending_tool_calls.is_empty() {
+                            for (idx, args) in &tc_args_buffer {
+                                if let Some(tc) = pending_tool_calls.get_mut(*idx) {
+                                    tc.function.arguments = args.clone();
+                                }
+                            }
+                            // 通知前端：有工具需要调用（Agent 自行执行）
+                            let _ = app.emit(
+                                "ai-agent-tool-calls",
+                                serde_json::json!({
+                                    "conversation_id": conversation_id,
+                                    "tool_calls": &pending_tool_calls,
+                                }),
+                            );
+                        }
+
+                        let _ = app.emit(
+                            "ai-stream-done",
+                            serde_json::json!({ "conversation_id": conversation_id }),
+                        );
+                        return Ok(());
+                    }
+
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data) {
+                        let delta = &parsed["choices"][0]["delta"];
+
+                        // 普通内容 chunk
+                        if let Some(content) = delta["content"].as_str() {
+                            let _ = app.emit(
+                                "ai-stream-chunk",
+                                serde_json::json!({
+                                    "conversation_id": conversation_id,
+                                    "content": content,
+                                }),
+                            );
+                        }
+
+                        // tool_calls delta — 收集但不执行
+                        if let Some(tcs) = delta["tool_calls"].as_array() {
+                            for tc in tcs {
+                                let idx = tc["index"].as_u64().unwrap_or(0) as usize;
+                                while pending_tool_calls.len() <= idx {
+                                    pending_tool_calls.push(ToolCall {
+                                        id: String::new(),
+                                        call_type: "function".to_string(),
+                                        function: FunctionCall {
+                                            name: String::new(),
+                                            arguments: String::new(),
+                                        },
+                                    });
+                                }
+                                if let Some(id) = tc["id"].as_str() {
+                                    pending_tool_calls[idx].id = id.to_string();
+                                }
                                 if let Some(func) = tc["function"].as_object() {
                                     if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
                                         pending_tool_calls[idx].function.name = name.to_string();

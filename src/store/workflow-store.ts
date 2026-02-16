@@ -70,6 +70,8 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     try {
       await invoke('workflow_create', { workflow })
       set((state) => ({ workflows: [...state.workflows, workflow] }))
+      // 通知调度器重新加载此工作流
+      invoke('workflow_scheduler_reload', { workflowId: workflow.id }).catch(() => {})
       return workflow
     } catch (e) {
       console.error('创建工作流失败:', e)
@@ -84,6 +86,8 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       set((state) => ({
         workflows: state.workflows.map((w) => (w.id === workflow.id ? workflow : w)),
       }))
+      // 通知调度器重新加载此工作流（触发器可能变更）
+      invoke('workflow_scheduler_reload', { workflowId: workflow.id }).catch(() => {})
     } catch (e) {
       console.error('更新工作流失败:', e)
       throw e
@@ -98,6 +102,8 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       set((state) => ({
         workflows: state.workflows.filter((w) => w.id !== id),
       }))
+      // 通知调度器移除此工作流的定时任务
+      invoke('workflow_scheduler_reload', { workflowId: id }).catch(() => {})
     } catch (e) {
       console.error('删除工作流失败:', e)
       throw e

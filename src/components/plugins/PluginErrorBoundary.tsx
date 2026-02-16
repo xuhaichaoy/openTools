@@ -1,5 +1,5 @@
 import React, { Component, type ReactNode } from "react";
-import { AlertTriangle, RefreshCw } from "lucide-react";
+import { AlertTriangle, RefreshCw, ArrowLeft } from "lucide-react";
 
 interface Props {
   children: ReactNode;
@@ -30,7 +30,13 @@ export class PluginErrorBoundary extends Component<Props, State> {
     );
   }
 
-  handleReset = () => {
+  /** 仅重置错误状态，让子组件重新渲染（真正的重试） */
+  handleRetry = () => {
+    this.setState({ hasError: false, error: null });
+  };
+
+  /** 返回首页（重置状态 + 导航回主页） */
+  handleBack = () => {
     this.setState({ hasError: false, error: null });
     this.props.onReset?.();
   };
@@ -46,13 +52,22 @@ export class PluginErrorBoundary extends Component<Props, State> {
           <p className="text-[var(--color-text-secondary)] mb-6 max-w-md break-words">
             {this.state.error?.message || "未知错误"}
           </p>
-          <button
-            onClick={this.handleReset}
-            className="flex items-center gap-2 px-4 py-2 bg-[var(--color-item-hover)] hover:bg-[var(--color-item-hover-active)] rounded-lg transition-colors"
-          >
-            <RefreshCw className="w-4 h-4" />
-            重试
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={this.handleRetry}
+              className="flex items-center gap-2 px-4 py-2 bg-orange-500/10 hover:bg-orange-500/20 text-orange-500 rounded-lg transition-colors"
+            >
+              <RefreshCw className="w-4 h-4" />
+              重试
+            </button>
+            <button
+              onClick={this.handleBack}
+              className="flex items-center gap-2 px-4 py-2 bg-[var(--color-item-hover)] hover:bg-[var(--color-item-hover-active)] text-[var(--color-text-secondary)] rounded-lg transition-colors"
+            >
+              <ArrowLeft className="w-4 h-4" />
+              返回首页
+            </button>
+          </div>
         </div>
       );
     }

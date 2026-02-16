@@ -2,9 +2,17 @@
 
 /** 触发方式 */
 export interface WorkflowTrigger {
-  type: 'manual' | 'keyword' | 'hotkey' | 'clipboard'
+  type: 'manual' | 'keyword' | 'hotkey' | 'clipboard' | 'cron' | 'interval' | 'once'
   keyword?: string
   hotkey?: string
+  /** Cron 表达式（type=cron 时使用，如 "0 9 * * 1-5" = 工作日早9点） */
+  cron?: string
+  /** 间隔秒数（type=interval 时使用） */
+  intervalSeconds?: number
+  /** 一次性触发时间 ISO 字符串（type=once 时使用） */
+  onceAt?: string
+  /** 定时任务是否启用 */
+  enabled?: boolean
 }
 
 /** 变量定义 */
@@ -30,6 +38,7 @@ export type StepType =
   | 'user_input'
   | 'notification'
   | 'condition'
+  | 'plugin_action'
 
 /** 画布节点类型（包含特殊节点） */
 export type NodeType = StepType | 'start' | 'end'
@@ -117,6 +126,7 @@ export const stepTypeInfo: Record<StepType, { label: string; icon: string; descr
   user_input: { label: '用户输入', icon: '✏️', description: '等待用户输入内容', color: '#ec4899' },
   notification: { label: '发送通知', icon: '🔔', description: '发送系统通知', color: '#f97316' },
   condition: { label: '条件判断', icon: '❓', description: '根据条件决定是否执行', color: '#eab308' },
+  plugin_action: { label: '插件动作', icon: '🧩', description: '调用内置插件暴露的 Action', color: '#f97316' },
 }
 
 /** 特殊节点类型描述 */

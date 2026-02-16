@@ -39,6 +39,8 @@ export interface AppState {
   aiInitialMode: AIInitialMode
   /** 待处理的嵌入打开请求（一次性消费） */
   pendingEmbed: EmbedRequest | null
+  /** 待处理的视图导航请求（一次性消费） */
+  pendingNavigate: string | null
 
   setMode: (mode: AppMode) => void
   setSearchValue: (value: string) => void
@@ -54,6 +56,10 @@ export interface AppState {
   requestEmbed: (req: EmbedRequest) => void
   /** 消费嵌入请求 */
   consumeEmbed: () => EmbedRequest | null
+  /** 请求导航到指定视图（子页面 → 主应用） */
+  requestNavigate: (viewId: string) => void
+  /** 消费导航请求 */
+  consumeNavigate: () => string | null
   reset: () => void
 }
 
@@ -65,6 +71,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   recentTools: loadRecentTools(),
   aiInitialMode: 'ask' as AIInitialMode,
   pendingEmbed: null as EmbedRequest | null,
+  pendingNavigate: null as string | null,
 
   setMode: (mode) => set({ mode }),
   setSearchValue: (value) => {
@@ -93,6 +100,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   consumeEmbed: () => {
     const current = get().pendingEmbed
     if (current) set({ pendingEmbed: null })
+    return current
+  },
+  requestNavigate: (viewId) => set({ pendingNavigate: viewId }),
+  consumeNavigate: () => {
+    const current = get().pendingNavigate
+    if (current) set({ pendingNavigate: null })
     return current
   },
   reset: () => set({ mode: 'search', searchValue: '', selectedIndex: 0, windowExpanded: false }),

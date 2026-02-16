@@ -1,6 +1,8 @@
+import { useMemo } from 'react'
 import { X } from 'lucide-react'
 import type { WorkflowNode, StepType } from '@/core/workflows/types'
 import { stepTypeInfo } from '@/core/workflows/types'
+import { registry } from '@/core/plugin-system/registry'
 
 interface NodeConfigPanelProps {
   node: WorkflowNode
@@ -329,7 +331,58 @@ function StepConfigFields({
         </Field>
       )
 
+    case 'plugin_action':
+      return <PluginActionConfig config={config} onChange={onChange} inputClass={inputClass} textareaClass={textareaClass} />
+
     default:
       return null
   }
+}
+
+/** plugin_action 专用配置面板 */
+function PluginActionConfig({
+  config,
+  onChange,
+  inputClass,
+  textareaClass,
+}: {
+  config: Record<string, unknown>
+  onChange: (key: string, val: unknown) => void
+  inputClass: string
+  textareaClass: string
+}) {
+  const allActions = useMemo(() => registry.getAllActions(), [])
+  const selectedKey = `${config.pluginId || ''}::${config.actionName || ''}`
+
+  return (
+    <>
+      <Field label="插件动作">
+        <select
+          value={selectedKey}
+          onChange={(e) => {
+            const [pluginId, actionName] = e.target.value.split('::')
+            onChange('pluginId', pluginId)
+            onChange('actionName', actionName)
+          }}
+          className={inputClass}
+        >
+          <option value="::">请选择…</option>
+          {allActions.map(({ pluginId, pluginName, action }) => (
+            <option key={`${pluginId}::${action.name}`} value={`${pluginId}::${action.name}`}>
+              {pluginName} / {action.description || action.name}
+            </option>
+          ))}
+        </select>
+      </Field>
+      <Field label="参数 JSON（可用 {{变量}}）">
+        <textarea
+          value={(config.params as string) || '{}'}
+          onChange={(e) => onChange('params', e.target.value)}
+          placeholder='如 {"text":"{{prev.output}}"}'
+          rows={4}
+          className={`${textareaClass} font-mono`}
+        />
+      </Field>
+    </>
+  )
 }

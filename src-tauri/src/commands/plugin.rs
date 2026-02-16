@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 // ── 类型定义 ──
 
@@ -578,13 +578,70 @@ pub async fn plugin_api_call(
             }
         }
         "copyImage" => {
-            log::warn!("插件 {} 调用了 copyImage，暂不支持", plugin_id);
-            Err("copyImage 暂不支持".to_string())
+            // 将 base64 图片写入临时文件，然后写入系统剪贴板
+            let base64_data = args.get("base64").and_then(|v| v.as_str()).unwrap_or("");
+            if base64_data.is_empty() {
+                return Err("base64 数据为空".to_string());
+            }
+            // 去除可能的 data:image/xxx;base64, 前缀
+            let pure_b64 = if let Some(pos) = base64_data.find(",") {
+                &base64_data[pos + 1..]
+            } else {
+                base64_data
+            };
+            use base64::Engine;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(pure_b64)
+                .map_err(|e| format!("base64 解码失败: {}", e))?;
+            // 写入临时 PNG 文件
+            let tmp_dir = std::env::temp_dir();
+            let tmp_path = tmp_dir.join(format!("mtools_copyimg_{}.png", std::process::id()));
+            std::fs::write(&tmp_path, &bytes).map_err(|e| format!("写入临时图片失败: {}", e))?;
+            // 通过事件通知前端将图片写入剪贴板（利用已有的 clipboard 插件）
+            let _ = app.emit("plugin-copy-image", serde_json::json!({ "path": tmp_path.to_string_lossy() }));
+            Ok("true".to_string())
         }
-        "setSubInput" | "removeSubInput" | "redirect" => {
-            // 这些涉及主窗口 UI 交互，暂返回成功（stub）
-            log::info!("插件 {} 调用了 {}，暂为 stub", plugin_id, method);
+        "screenCapture" => {
+            // 触发截图，截图完成后通过事件回传给插件
+            let _ = app.emit("plugin-screen-capture", serde_json::json!({ "pluginId": plugin_id }));
             Ok("null".to_string())
+        }
+        "setSubInput" => {
+            // 通知主窗口显示子输入框
+            let placeholder = args.get("placeholder").and_then(|v| v.as_str()).unwrap_or("");
+            let is_focus = args.get("isFocus").and_then(|v| v.as_bool()).unwrap_or(true);
+            let _ = app.emit("plugin-set-sub-input", serde_json::json!({
+                "pluginId": plugin_id,
+                "placeholder": placeholder,
+                "isFocus": is_focus,
+            }));
+            Ok("null".to_string())
+        }
+        "removeSubInput" => {
+            let _ = app.emit("plugin-remove-sub-input", serde_json::json!({ "pluginId": plugin_id }));
+            Ok("null".to_string())
+        }
+        "redirect" => {
+            // 关闭当前插件，打开目标 feature
+            let label = args.get("label").and_then(|v| v.as_str()).unwrap_or("");
+            let payload = args.get("payload").cloned().unwrap_or(serde_json::Value::Null);
+            let _ = app.emit("plugin-redirect", serde_json::json!({
+                "pluginId": plugin_id,
+                "label": label,
+                "payload": payload,
+            }));
+            Ok("null".to_string())
+        }
+        "getFeatures" => {
+            // 返回当前插件的 features 列表
+            let plugins = get_cached_plugins(&app);
+            if let Some(plugin) = plugins.iter().find(|p| p.id == plugin_id) {
+                let features_json = serde_json::to_string(&plugin.manifest.features)
+                    .unwrap_or("[]".to_string());
+                Ok(features_json)
+            } else {
+                Ok("[]".to_string())
+            }
         }
         "dbStorage.setItem" => {
             use tauri_plugin_store::StoreExt;
@@ -873,7 +930,11 @@ fn generate_utools_shim(plugin_id: &str) -> String {
     shellOpenExternal(url) {{ __invoke('shellOpenExternal', {{ url }}); }},
     shellOpenPath(path) {{ __invoke('shellOpenPath', {{ path }}); }},
     shellShowItemInFolder(path) {{ __invoke('shellShowItemInFolder', {{ path }}); }},
-    screenCapture(callback) {{ console.warn('[mTools] screenCapture 暂未实现'); callback && callback(null); }},
+    screenCapture(callback) {{
+      window.__utoolsScreenCaptureCallback = callback;
+      __invoke('screenCapture');
+    }},
+    getFeatures() {{ return __invoke('getFeatures'); }},
     screenColorPick(callback) {{
       __invoke('plugin_start_color_picker').then(function(hex) {{
         callback && callback(hex || null);

@@ -261,6 +261,10 @@ pub fn run() {
             commands::workflow::workflow_update,
             commands::workflow::workflow_delete,
             commands::workflow::workflow_execute,
+            commands::workflow::workflow_scheduler_start,
+            commands::workflow::workflow_scheduler_stop,
+            commands::workflow::workflow_scheduler_reload,
+            commands::workflow::workflow_scheduler_status,
             commands::screen_capture::screen_capture_check,
             commands::screen_capture::screen_capture_download,
             commands::screen_capture::screen_capture_call,
@@ -293,6 +297,14 @@ pub fn run() {
             commands::git_sync::git_sync_push,
             commands::git_sync::git_sync_pull,
             commands::git_sync::git_sync_status,
+            commands::clipboard::clipboard_history_list,
+            commands::clipboard::clipboard_history_clear,
+            commands::clipboard::clipboard_history_delete,
+            commands::clipboard::clipboard_history_write,
+            commands::ai::ai_agent_stream,
+            commands::file_search::file_search,
+            commands::file_search::file_open,
+            commands::file_search::file_show_in_folder,
         ])
         .setup(|app| {
             let suppress_hide = Arc::new(AtomicUsize::new(0));
@@ -306,6 +318,7 @@ pub fn run() {
             setup_macos_window(&main_window);
             show_window(&main_window, &suppress_hide);
             schedule_cleanup(app.handle());
+            commands::clipboard::start_clipboard_watcher(app.handle());
             Ok(())
         })
         .run(tauri::generate_context!())

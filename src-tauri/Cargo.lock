@@ -6429,6 +6429,7 @@ dependencies = [
  "log",
  "ndarray 0.16.1",
  "objc",
+ "once_cell",
  "open",
  "ort",
  "percent-encoding",

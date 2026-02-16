@@ -19,6 +19,10 @@ export function WorkflowEditor({ workflow, onSave, onTest, onBack }: WorkflowEdi
   const [category, setCategory] = useState(workflow?.category || '自定义')
   const [triggerType, setTriggerType] = useState<string>(workflow?.trigger.type || 'manual')
   const [triggerKeyword, setTriggerKeyword] = useState(workflow?.trigger.keyword || '')
+  const [triggerCron, setTriggerCron] = useState(workflow?.trigger.cron || '')
+  const [triggerInterval, setTriggerInterval] = useState(workflow?.trigger.intervalSeconds?.toString() || '3600')
+  const [triggerOnceAt, setTriggerOnceAt] = useState(workflow?.trigger.onceAt || '')
+  const [triggerEnabled, setTriggerEnabled] = useState(workflow?.trigger.enabled !== false)
   const { onMouseDown } = useDragWindow()
 
   // 初始化节点和边：优先用 nodes/edges，否则从 steps 转换
@@ -61,6 +65,9 @@ export function WorkflowEditor({ workflow, onSave, onTest, onBack }: WorkflowEdi
       trigger: {
         type: triggerType as WorkflowTrigger['type'],
         ...(triggerKeyword && { keyword: triggerKeyword }),
+        ...(triggerType === 'cron' && { cron: triggerCron, enabled: triggerEnabled }),
+        ...(triggerType === 'interval' && { intervalSeconds: parseInt(triggerInterval) || 3600, enabled: triggerEnabled }),
+        ...(triggerType === 'once' && { onceAt: triggerOnceAt, enabled: triggerEnabled }),
       },
       steps,
       nodes,
@@ -121,6 +128,9 @@ export function WorkflowEditor({ workflow, onSave, onTest, onBack }: WorkflowEdi
           >
             <option value="manual">手动触发</option>
             <option value="keyword">关键词</option>
+            <option value="cron">Cron 定时</option>
+            <option value="interval">固定间隔</option>
+            <option value="once">一次性定时</option>
           </select>
           {triggerType === 'keyword' && (
             <input
@@ -130,6 +140,48 @@ export function WorkflowEditor({ workflow, onSave, onTest, onBack }: WorkflowEdi
               placeholder="关键词"
               className="w-20 bg-[var(--color-bg-secondary)] text-[10px] text-[var(--color-text)] rounded-lg px-2 py-1.5 border border-[var(--color-border)] outline-none focus:border-indigo-500/50"
             />
+          )}
+          {triggerType === 'cron' && (
+            <input
+              type="text"
+              value={triggerCron}
+              onChange={(e) => setTriggerCron(e.target.value)}
+              placeholder="分 时 日 月 周 (如 0 9 * * 1-5)"
+              title="Cron 表达式：分(0-59) 时(0-23) 日(1-31) 月(1-12) 周(0-7, 0和7=周日)"
+              className="w-44 bg-[var(--color-bg-secondary)] text-[10px] text-[var(--color-text)] rounded-lg px-2 py-1.5 border border-[var(--color-border)] outline-none focus:border-indigo-500/50 font-mono"
+            />
+          )}
+          {triggerType === 'interval' && (
+            <div className="flex items-center gap-1">
+              <input
+                type="number"
+                value={triggerInterval}
+                onChange={(e) => setTriggerInterval(e.target.value)}
+                min="60"
+                step="60"
+                className="w-16 bg-[var(--color-bg-secondary)] text-[10px] text-[var(--color-text)] rounded-lg px-2 py-1.5 border border-[var(--color-border)] outline-none focus:border-indigo-500/50"
+              />
+              <span className="text-[10px] text-[var(--color-text-secondary)]">秒</span>
+            </div>
+          )}
+          {triggerType === 'once' && (
+            <input
+              type="datetime-local"
+              value={triggerOnceAt ? triggerOnceAt.slice(0, 16) : ''}
+              onChange={(e) => setTriggerOnceAt(e.target.value ? new Date(e.target.value).toISOString() : '')}
+              className="bg-[var(--color-bg-secondary)] text-[10px] text-[var(--color-text)] rounded-lg px-2 py-1.5 border border-[var(--color-border)] outline-none focus:border-indigo-500/50"
+            />
+          )}
+          {(triggerType === 'cron' || triggerType === 'interval' || triggerType === 'once') && (
+            <label className="flex items-center gap-1 text-[10px] text-[var(--color-text-secondary)] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={triggerEnabled}
+                onChange={(e) => setTriggerEnabled(e.target.checked)}
+                className="rounded w-3 h-3"
+              />
+              启用
+            </label>
           )}
 
           {/* 分类 */}

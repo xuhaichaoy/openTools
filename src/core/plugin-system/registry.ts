@@ -1,11 +1,21 @@
 import type { MToolsPlugin, PluginAction } from "./plugin-interface";
+import type { ExternalPluginAction } from "./types";
 import { multiFieldPinyinScore } from "@/utils/pinyin-search";
+
+/** 外部插件注册的 action 记录 */
+interface ExternalActionEntry {
+  pluginId: string;
+  pluginName: string;
+  action: ExternalPluginAction;
+}
 
 /**
  * 插件注册中心 — 统一管理内置插件的注册、查询、搜索
  */
 class PluginRegistry {
   private plugins: Map<string, MToolsPlugin> = new Map();
+  /** 外部插件声明的 AI actions */
+  private externalActions: ExternalActionEntry[] = [];
 
   /** 注册一个内置插件 */
   register(plugin: MToolsPlugin) {
@@ -19,6 +29,11 @@ class PluginRegistry {
   registerAll(plugins: MToolsPlugin[]) {
     this.plugins.clear();
     plugins.forEach((p) => this.register(p));
+  }
+
+  /** 注册外部插件的 AI actions（由 plugin-store loadPlugins 后调用） */
+  registerExternalActions(entries: ExternalActionEntry[]) {
+    this.externalActions = entries;
   }
 
   /** 获取指定插件 */
@@ -63,7 +78,7 @@ class PluginRegistry {
   }
 
   /**
-   * 获取所有插件暴露给 AI 的 actions
+   * 获取所有插件暴露给 AI 的 actions（内置 + 外部）
    * 用于 AI tool_call 发现
    */
   getAllActions(): {
@@ -76,6 +91,7 @@ class PluginRegistry {
       pluginName: string;
       action: PluginAction;
     }[] = [];
+    // 内置插件 actions
     for (const plugin of this.plugins.values()) {
       if (plugin.actions) {
         for (const action of plugin.actions) {
@@ -83,7 +99,34 @@ class PluginRegistry {
         }
       }
     }
+    // 外部插件声明的 actions（通过事件桥执行）
+    for (const entry of this.externalActions) {
+      result.push({
+        pluginId: entry.pluginId,
+        pluginName: entry.pluginName,
+        action: {
+          name: entry.action.name,
+          description: entry.action.description,
+          parameters: entry.action.parameters,
+          execute: async (params, ctx) => {
+            // 外部插件的 action 通过 Tauri 事件桥执行
+            const { invoke } = await import("@tauri-apps/api/core");
+            const result = await invoke<string>("plugin_api_call", {
+              pluginId: entry.pluginId,
+              method: "mtools_action",
+              args: JSON.stringify({ actionName: entry.action.name, params }),
+            });
+            return result;
+          },
+        },
+      });
+    }
     return result;
+  }
+
+  /** 获取外部插件的 actions（仅描述信息，用于 Agent 工具发现） */
+  getExternalActions(): ExternalActionEntry[] {
+    return [...this.externalActions];
   }
 }
 

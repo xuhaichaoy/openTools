@@ -1,17 +1,21 @@
-import { useState } from 'react'
-import { Languages, Sparkles, BookOpen, MessageSquare, Copy, Check, ArrowLeft, Loader2 } from 'lucide-react'
+import { useState, useMemo } from 'react'
+import {
+  Languages, Sparkles, BookOpen, MessageSquare, Copy, Check, ArrowLeft,
+  Loader2, ExternalLink, Braces, Bug, FileText, FolderOpen, Clock,
+  Mail, Hash, MessageCircle,
+} from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import { useAIStore } from '@/store/ai-store'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useDragWindow } from '@/hooks/useDragWindow'
+import { getRecommendedActions, type RecommendedAction } from '@/core/context-detector'
 
-const ACTIONS = [
-  { id: 'translate', label: '翻译', icon: Languages, color: 'text-blue-400', prompt: '请将以下文本翻译为中文（如果是中文则翻译为英文），只返回翻译结果：\n\n' },
-  { id: 'polish', label: '润色', icon: Sparkles, color: 'text-yellow-400', prompt: '请润色以下文本，使其更加通顺、专业。只返回润色后的结果：\n\n' },
-  { id: 'explain', label: '解释', icon: BookOpen, color: 'text-green-400', prompt: '请用简洁的中文解释以下内容：\n\n' },
-  { id: 'summarize', label: '总结', icon: MessageSquare, color: 'text-purple-400', prompt: '请用3-5个要点总结以下内容：\n\n' },
-]
+/** lucide icon 名称映射 */
+const ICON_MAP: Record<string, React.ComponentType<{ className?: string }>> = {
+  Languages, Sparkles, BookOpen, MessageSquare, Copy, ExternalLink,
+  Braces, Bug, FileText, FolderOpen, Clock, Mail, Hash, MessageCircle,
+}
 
 interface ContextActionPanelProps {
   selectedText: string
@@ -26,19 +30,96 @@ export function ContextActionPanel({ selectedText, onBack }: ContextActionPanelP
   const { config } = useAIStore()
   const { onMouseDown } = useDragWindow()
 
-  const handleAction = async (actionId: string) => {
-    const action = ACTIONS.find((a) => a.id === actionId)
-    if (!action || !config.api_key) return
+  // 根据内容智能检测推荐操作
+  const { detections, actions } = useMemo(
+    () => getRecommendedActions(selectedText),
+    [selectedText],
+  )
+  const primaryType = detections[0]
 
-    setActiveAction(actionId)
+  /** 处理特殊操作（无需 AI） */
+  const handleSpecialAction = async (action: RecommendedAction): Promise<boolean> => {
+    switch (action.id) {
+      case 'copy': {
+        await navigator.clipboard.writeText(selectedText)
+        setCopied(true)
+        setTimeout(() => setCopied(false), 1500)
+        return true
+      }
+      case 'open_url': {
+        await invoke('open_url', { url: selectedText.trim() })
+        return true
+      }
+      case 'open_folder': {
+        await invoke('shell_open_path', { path: selectedText.trim() })
+        return true
+      }
+      case 'read_file': {
+        try {
+          const content = await invoke<string>('read_text_file', { path: selectedText.trim() })
+          setResult(content.slice(0, 5000))
+          setActiveAction(action.id)
+        } catch (e) {
+          setResult(`❌ 读取失败: ${e}`)
+          setActiveAction(action.id)
+        }
+        return true
+      }
+      case 'format_json': {
+        try {
+          const parsed = JSON.parse(selectedText.trim())
+          setResult('```json\n' + JSON.stringify(parsed, null, 2) + '\n```')
+          setActiveAction(action.id)
+        } catch {
+          setResult('❌ JSON 格式无效')
+          setActiveAction(action.id)
+        }
+        return true
+      }
+      case 'convert_ts': {
+        const ts = parseInt(selectedText.trim(), 10)
+        const ms = ts > 1e12 ? ts : ts * 1000
+        const date = new Date(ms)
+        setResult(
+          `**时间戳**: ${selectedText.trim()}\n\n` +
+          `**本地时间**: ${date.toLocaleString('zh-CN', { hour12: false })}\n\n` +
+          `**ISO 格式**: ${date.toISOString()}\n\n` +
+          `**UTC**: ${date.toUTCString()}`
+        )
+        setActiveAction(action.id)
+        return true
+      }
+      case 'ask_ai':
+        // 不做特殊处理，走通用 AI prompt
+        return false
+      default:
+        return false
+    }
+  }
+
+  const handleAction = async (action: RecommendedAction) => {
+    // 先尝试特殊操作
+    const handled = await handleSpecialAction(action)
+    if (handled) return
+
+    // AI 操作
+    if (!config.api_key) {
+      setResult('❌ 请先在设置中配置 AI API Key')
+      setActiveAction(action.id)
+      return
+    }
+
+    setActiveAction(action.id)
     setResult('')
     setIsLoading(true)
 
+    const prompt = action.prompt
+      ? action.prompt + selectedText
+      : `请分析并处理以下内容：\n\n${selectedText}`
+
     try {
       const response = await invoke<string>('ai_chat', {
-        messages: [
-          { role: 'user', content: action.prompt + selectedText },
-        ],
+        messages: [{ role: 'user', content: prompt }],
         config,
       })
       setResult(response)
@@ -60,11 +141,23 @@ export function ContextActionPanel({ selectedText, onBack }: ContextActionPanelP
   return (
     <div className="flex flex-col h-full bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] shadow-2xl overflow-hidden">
       {/* 头部 */}
-      <div className="flex items-center gap-2 px-4 py-2 border-b border-[var(--color-border)] shrink-0 cursor-grab active:cursor-grabbing" onMouseDown={onMouseDown}>
-        <button onClick={onBack} className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]">
+      <div
+        className="flex items-center gap-2 px-4 py-2 border-b border-[var(--color-border)] shrink-0 cursor-grab active:cursor-grabbing"
+        onMouseDown={onMouseDown}
+      >
+        <button
+          onClick={onBack}
+          className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]"
+        >
           <ArrowLeft className="w-4 h-4" />
         </button>
         <span className="text-sm font-medium text-[var(--color-text)]">上下文操作</span>
+        {/* 类型标签 */}
+        {primaryType && (
+          <span className="ml-auto text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400">
+            {primaryType.label}
+          </span>
+        )}
       </div>
 
       {/* 原文 */}
@@ -76,14 +169,14 @@ export function ContextActionPanel({ selectedText, onBack }: ContextActionPanelP
         </div>
       </div>
 
-      {/* 操作按钮 */}
-      <div className="flex gap-2 px-4 py-2 border-b border-[var(--color-border)]">
-        {ACTIONS.map((action) => {
-          const Icon = action.icon
+      {/* 推荐操作按钮 */}
+      <div className="flex flex-wrap gap-2 px-4 py-2 border-b border-[var(--color-border)]">
+        {actions.map((action) => {
+          const Icon = ICON_MAP[action.icon] || MessageCircle
           return (
             <button
               key={action.id}
-              onClick={() => handleAction(action.id)}
+              onClick={() => handleAction(action)}
               disabled={isLoading}
               className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg transition-colors ${
                 activeAction === action.id
@@ -111,7 +204,7 @@ export function ContextActionPanel({ selectedText, onBack }: ContextActionPanelP
           </div>
         ) : (
           <div className="text-xs text-[var(--color-text-secondary)] text-center mt-8">
-            选择一个操作来处理选中的文本
+            根据内容类型推荐了操作，点击即可执行
           </div>
         )}
       </div>

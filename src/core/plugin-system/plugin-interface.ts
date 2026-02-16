@@ -3,6 +3,26 @@ import type { PluginStorage } from "./storage";
 
 // ── AI SDK 接口 ──
 
+/** OpenAI Function Calling 工具定义 */
+export interface AIToolDefinition {
+  type: "function";
+  function: {
+    name: string;
+    description: string;
+    parameters?: Record<string, unknown>;
+  };
+}
+
+/** Function Calling 返回的工具调用 */
+export interface AIToolCall {
+  id: string;
+  type: string;
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
 /** Core Shell 向所有插件暴露的 AI 能力 */
 export interface MToolsAI {
   /** 单轮对话 */
@@ -18,6 +38,21 @@ export interface MToolsAI {
     onChunk: (chunk: string) => void;
     onDone?: (full: string) => void;
   }): Promise<void>;
+
+  /**
+   * 带工具定义的流式对话 — Agent 专用
+   * 后端传递 tools 给 API，收到 tool_calls 时通知前端，不自动执行。
+   * 返回值区分两种结果：纯文本回复 或 工具调用请求。
+   */
+  streamWithTools?(options: {
+    messages: { role: string; content: string | null; tool_calls?: AIToolCall[]; tool_call_id?: string; name?: string }[];
+    tools: AIToolDefinition[];
+    onChunk: (chunk: string) => void;
+    onDone?: (full: string) => void;
+  }): Promise<
+    | { type: "content"; content: string }
+    | { type: "tool_calls"; toolCalls: AIToolCall[] }
+  >;
 
   /** 文本向量化 */
   embedding(text: string): Promise<number[]>;

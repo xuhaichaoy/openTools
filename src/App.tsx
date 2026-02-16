@@ -9,12 +9,13 @@ import { PluginEmbed } from "@/components/plugins/PluginEmbed";
 import { PluginErrorBoundary } from "@/components/plugins/PluginErrorBoundary";
 import { useWorkflowStore } from "@/store/workflow-store";
 import { usePluginStore } from "@/store/plugin-store";
+import { useBookmarkStore } from "@/store/bookmark-store";
 import { useAppStore } from "@/store/app-store";
 import { useAIStore } from "@/store/ai-store";
 import { useAgentStore } from "@/store/agent-store";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import { Bot, Globe, Puzzle, Terminal, Database, Workflow as WorkflowIcon } from "lucide-react";
+import { listen, emit } from "@tauri-apps/api/event";
+import { Bot, Globe, Puzzle, Terminal, Database, Workflow as WorkflowIcon, ClipboardList, File, Folder, FileImage, FileVideo, FileAudio, FileText, FileCode, Archive, AppWindow } from "lucide-react";
 import {
   emitPluginEvent,
   PluginEventTypes,
@@ -48,6 +49,14 @@ function createBridgeToken(): string {
     return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
   }
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes === 0) return "";
+  const units = ["B", "KB", "MB", "GB"];
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const size = bytes / Math.pow(1024, i);
+  return `${size < 10 ? size.toFixed(1) : Math.round(size)} ${units[i]}`;
 }
 
 function isAllowedEmbedOrigin(origin: string): boolean {
@@ -165,6 +174,60 @@ function MainApp() {
     }
   }, []);
 
+  // ── 文件搜索（异步 + 防抖） ──
+  interface FileSearchResult {
+    name: string;
+    path: string;
+    is_dir: boolean;
+    size: number;
+    modified: string | null;
+    file_type: string;
+  }
+  const [fileResults, setFileResults] = useState<FileSearchResult[]>([]);
+  const fileSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    // 清理上一次定时器
+    if (fileSearchTimerRef.current) {
+      clearTimeout(fileSearchTimerRef.current);
+      fileSearchTimerRef.current = null;
+    }
+
+    const trimmed = searchValue.trim();
+
+    // 仅在有 >= 2 字符的查询词时触发文件搜索（f 前缀 或 普通搜索）
+    const isFilePrefix = trimmed.startsWith("f ");
+    const query = isFilePrefix ? trimmed.slice(2).trim() : trimmed;
+
+    // 前缀模式（bd/gg/bing/ai/cb/data/）不搜文件
+    const prefixModes = ["ai ", "bd ", "gg ", "bing ", "/ ", "cb", "data "];
+    const isPrefix = prefixModes.some((p) => trimmed.startsWith(p) || trimmed === p.trim());
+    if (!query || query.length < 2 || (isPrefix && !isFilePrefix)) {
+      setFileResults([]);
+      return;
+    }
+
+    // 300ms 防抖
+    fileSearchTimerRef.current = setTimeout(async () => {
+      try {
+        const results = await invoke<FileSearchResult[]>("file_search", {
+          query,
+          maxResults: isFilePrefix ? 24 : 8, // f 前缀模式显示更多结果
+        });
+        setFileResults(results);
+      } catch (e) {
+        console.warn("文件搜索失败:", e);
+        setFileResults([]);
+      }
+    }, 300);
+
+    return () => {
+      if (fileSearchTimerRef.current) {
+        clearTimeout(fileSearchTimerRef.current);
+      }
+    };
+  }, [searchValue]);
+
   // 启动时加载 AI 配置、对话历史、工作流、插件和通用设置
   useEffect(() => {
     useAIStore.getState().loadConfig();
@@ -172,6 +235,24 @@ function MainApp() {
     useAgentStore.getState().loadHistory();
     useWorkflowStore.getState().loadWorkflows();
     usePluginStore.getState().loadPlugins();
+    useBookmarkStore.getState().loadBookmarks();
+
+    // 启动定时工作流调度器
+    invoke("workflow_scheduler_start").catch((e) =>
+      console.warn("定时调度启动失败:", e),
+    );
+
+    // 监听定时工作流触发事件
+    let unlistenScheduled: (() => void) | undefined;
+    listen<{ workflowId: string; workflowName: string }>(
+      "workflow-scheduled-trigger",
+      (event) => {
+        const { workflowId } = event.payload;
+        useWorkflowStore.getState().executeWorkflow(workflowId);
+      },
+    ).then((fn) => {
+      unlistenScheduled = fn;
+    });
 
     // 加载主题设置
     invoke<string>("load_general_settings")
@@ -182,6 +263,10 @@ function MainApp() {
         }
       })
       .catch((e) => console.error("Failed to load settings:", e));
+
+    return () => {
+      unlistenScheduled?.();
+    };
   }, []);
 
   useEffect(() => {
@@ -214,6 +299,17 @@ function MainApp() {
     }
   }, [pendingEmbed]);
 
+  // 监听 app-store 的导航请求（来自 PluginMarket 内置插件点击等）
+  const pendingNavigate = useAppStore((s) => s.pendingNavigate);
+  useEffect(() => {
+    if (pendingNavigate) {
+      const viewId = useAppStore.getState().consumeNavigate();
+      if (viewId) {
+        setView(viewId);
+      }
+    }
+  }, [pendingNavigate]);
+
   // 监听 Rust 发来的上下文操作事件
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -221,6 +317,56 @@ function MainApp() {
       setContextText(event.payload.text);
       setView("context-action");
       invoke("resize_window", { height: WINDOW_HEIGHT_EXPANDED });
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, []);
+
+  // 监听工作流插件动作请求（后端 → 前端）
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<{
+      requestId: string;
+      pluginId: string;
+      actionName: string;
+      params: string;
+    }>("workflow-plugin-action", async (event) => {
+      const { requestId, pluginId, actionName, params } = event.payload;
+      try {
+        // 查找注册表中的 action
+        const allActions = registry.getAllActions();
+        const found = allActions.find(
+          (a) => a.pluginId === pluginId && a.action.name === actionName,
+        );
+        if (!found) {
+          throw new Error(
+            `找不到插件动作: ${pluginId}/${actionName}`,
+          );
+        }
+        // 解析参数
+        let parsedParams: Record<string, unknown> = {};
+        try {
+          parsedParams = JSON.parse(params);
+        } catch {
+          /* 忽略无效 JSON */
+        }
+        // 执行 action
+        const result = await found.action.execute(
+          parsedParams,
+          { ai: getMToolsAI() },
+        );
+        // 返回结果给后端
+        await emit("workflow-plugin-action-result", {
+          requestId,
+          result: typeof result === "string" ? result : JSON.stringify(result),
+        });
+      } catch (e: unknown) {
+        await emit("workflow-plugin-action-result", {
+          requestId,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
     }).then((fn) => {
       unlisten = fn;
     });
@@ -508,6 +654,50 @@ function MainApp() {
     return () => window.removeEventListener("message", handler);
   }, []);
 
+  // ── 文件搜索结果 → ResultItem 转换 ──
+  const getFileIcon = useCallback((fileType: string) => {
+    switch (fileType) {
+      case "folder": return <Folder className="w-6 h-6" />;
+      case "image": return <FileImage className="w-6 h-6" />;
+      case "video": return <FileVideo className="w-6 h-6" />;
+      case "audio": return <FileAudio className="w-6 h-6" />;
+      case "code": return <FileCode className="w-6 h-6" />;
+      case "text": case "document": return <FileText className="w-6 h-6" />;
+      case "archive": return <Archive className="w-6 h-6" />;
+      case "executable": return <AppWindow className="w-6 h-6" />;
+      default: return <File className="w-6 h-6" />;
+    }
+  }, []);
+
+  const getFileColor = useCallback((fileType: string) => {
+    switch (fileType) {
+      case "folder": return "text-yellow-500 bg-yellow-500/10";
+      case "image": return "text-pink-500 bg-pink-500/10";
+      case "video": return "text-red-500 bg-red-500/10";
+      case "audio": return "text-purple-500 bg-purple-500/10";
+      case "code": return "text-green-500 bg-green-500/10";
+      case "text": case "document": return "text-blue-500 bg-blue-500/10";
+      case "archive": return "text-amber-500 bg-amber-500/10";
+      case "executable": return "text-gray-500 bg-gray-500/10";
+      default: return "text-slate-500 bg-slate-500/10";
+    }
+  }, []);
+
+  const fileResultToItem = useCallback((f: FileSearchResult): ResultItem => {
+    const sizeStr = f.is_dir ? "文件夹" : formatFileSize(f.size);
+    return {
+      id: `file-${f.path}`,
+      title: f.name,
+      description: `${f.path}${f.modified ? ` · ${f.modified}` : ""}${sizeStr ? ` · ${sizeStr}` : ""}`,
+      icon: getFileIcon(f.file_type),
+      color: getFileColor(f.file_type),
+      category: "文件",
+      action: () => {
+        invoke("file_open", { path: f.path });
+      },
+    };
+  }, [getFileIcon, getFileColor]);
+
   // ── 统一搜索 ──
   const getFilteredResults = useCallback((): ResultItem[] => {
     if (!searchValue) return [];
@@ -611,6 +801,21 @@ function MainApp() {
       ];
     }
 
+    if (searchValue.startsWith("cb ") || searchValue === "cb") {
+      const keyword = searchValue.slice(3).trim();
+      return [
+        {
+          id: "clipboard-history-enter",
+          title: keyword ? `剪贴板搜索：${keyword}` : "打开剪贴板历史",
+          description: "查看和搜索剪贴板记录",
+          icon: <ClipboardList className="w-6 h-6" />,
+          color: "text-cyan-500 bg-cyan-500/10",
+          category: "工具",
+          action: () => setView("clipboard-history"),
+        },
+      ];
+    }
+
     if (searchValue.startsWith("data ")) {
       const query = searchValue.slice(5);
       return [
@@ -622,6 +827,43 @@ function MainApp() {
           color: "text-purple-500 bg-purple-500/10",
           category: "数据",
           action: () => setView("data-forge"),
+        },
+      ];
+    }
+
+    // f 前缀：仅搜索文件
+    if (searchValue.startsWith("f ")) {
+      return fileResults.map(fileResultToItem);
+    }
+
+    // sn 前缀：快捷短语
+    if (searchValue.startsWith("sn ") || searchValue === "sn") {
+      const keyword = searchValue.slice(3).trim();
+      return [
+        {
+          id: "snippets-enter",
+          title: keyword ? `搜索短语：${keyword}` : "打开快捷短语",
+          description: "管理和使用文本片段",
+          icon: <FileText className="w-6 h-6" />,
+          color: "text-emerald-500 bg-emerald-500/10",
+          category: "工具",
+          action: () => setView("snippets"),
+        },
+      ];
+    }
+
+    // bk 前缀：网页书签
+    if (searchValue.startsWith("bk ") || searchValue === "bk") {
+      const keyword = searchValue.slice(3).trim();
+      return [
+        {
+          id: "bookmarks-enter",
+          title: keyword ? `搜索书签：${keyword}` : "打开网页书签",
+          description: "管理和搜索收藏的网页",
+          icon: <Globe className="w-6 h-6" />,
+          color: "text-blue-500 bg-blue-500/10",
+          category: "工具",
+          action: () => setView("bookmarks"),
         },
       ];
     }
@@ -682,8 +924,29 @@ function MainApp() {
       };
     });
 
-    return [...builtinResults, ...pluginResults];
-  }, [searchValue, config.model, handleDirectColorPicker]);
+    // 文件搜索结果混排（排在插件之后）
+    const fileItems: ResultItem[] = fileResults.map(fileResultToItem);
+
+    // 书签搜索结果混排（排在文件之后，最多显示 6 条）
+    const bmStore = useBookmarkStore.getState();
+    const bmMatches = searchValue.length >= 2
+      ? bmStore.searchBookmarks(searchValue).slice(0, 6)
+      : [];
+    const bookmarkItems: ResultItem[] = bmMatches.map((bm) => ({
+      id: `bm-${bm.id}`,
+      title: bm.title,
+      description: bm.url,
+      icon: <Globe className="w-6 h-6" />,
+      color: "text-blue-500 bg-blue-500/10",
+      category: "书签",
+      action: () => {
+        bmStore.markVisited(bm.id);
+        invoke("open_url", { url: bm.url });
+      },
+    }));
+
+    return [...builtinResults, ...pluginResults, ...fileItems, ...bookmarkItems];
+  }, [searchValue, config.model, handleDirectColorPicker, fileResults]);
 
   // 窗口大小管理
   useEffect(() => {

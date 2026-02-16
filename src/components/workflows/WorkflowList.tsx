@@ -193,6 +193,20 @@ export function WorkflowList({ onBack }: { onBack?: () => void }) {
                   {workflow.trigger.keyword && (
                     <span className="ml-2">关键词: <code className="bg-[var(--color-bg-hover)] px-1 rounded">{workflow.trigger.keyword}</code></span>
                   )}
+                  {workflow.trigger.type === 'cron' && (
+                    <span className="ml-2 text-amber-400">⏰ Cron: <code className="bg-amber-400/10 px-1 rounded">{workflow.trigger.cron}</code></span>
+                  )}
+                  {workflow.trigger.type === 'interval' && (
+                    <span className="ml-2 text-blue-400">🔄 每 {workflow.trigger.intervalSeconds}s</span>
+                  )}
+                  {workflow.trigger.type === 'once' && workflow.trigger.onceAt && (
+                    <span className="ml-2 text-green-400">📅 {new Date(workflow.trigger.onceAt).toLocaleString()}</span>
+                  )}
+                  {(workflow.trigger.type === 'cron' || workflow.trigger.type === 'interval' || workflow.trigger.type === 'once') && (
+                    <span className={`ml-1 px-1 rounded text-[10px] ${workflow.trigger.enabled !== false ? 'text-green-400 bg-green-400/10' : 'text-gray-400 bg-gray-400/10'}`}>
+                      {workflow.trigger.enabled !== false ? '已启用' : '已停用'}
+                    </span>
+                  )}
                 </div>
               </div>
             </div>

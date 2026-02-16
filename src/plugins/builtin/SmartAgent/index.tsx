@@ -50,7 +50,9 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
     const isComposingRef = useRef(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const [pendingImages, setPendingImages] = useState<string[]>([]);
-    const [pendingImagePreviews, setPendingImagePreviews] = useState<string[]>([]);
+    const [pendingImagePreviews, setPendingImagePreviews] = useState<string[]>(
+      [],
+    );
 
     // 危险操作确认对话框
     const [confirmDialog, setConfirmDialog] = useState<{
@@ -89,8 +91,9 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
     useEffect(() => {
       if (!ai) return;
       const allActions = registry.getAllActions();
-      const tools: AgentTool[] = allActions.map(({ pluginId, pluginName, action }) =>
-        pluginActionToTool(pluginId, pluginName, action, ai),
+      const tools: AgentTool[] = allActions.map(
+        ({ pluginId, pluginName, action }) =>
+          pluginActionToTool(pluginId, pluginName, action, ai),
       );
 
       tools.push({
@@ -110,7 +113,10 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
         },
         execute: async (params) => {
           try {
-            const expr = String(params.expression).replace(/[^0-9+\-*/().%\s]/g, "");
+            const expr = String(params.expression).replace(
+              /[^0-9+\-*/().%\s]/g,
+              "",
+            );
             if (!expr.trim()) return { error: "无效表达式" };
             const result = Function('"use strict"; return (' + expr + ")")();
             if (typeof result !== "number" || !isFinite(result))
@@ -118,6 +124,66 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
             return { expression: params.expression, result };
           } catch (e) {
             return { error: `计算失败: ${e}` };
+          }
+        },
+      });
+
+      // 添加提醒工具
+      tools.push({
+        name: "add_reminder",
+        description:
+          "添加定时提醒任务（如：10分钟后提醒我喝水，或者下午3点开会）",
+        parameters: {
+          message: { type: "string", description: "提醒内容" },
+          time: {
+            type: "string",
+            description:
+              "提醒时间（ISO 8601 格式字符串，例如 2024-01-01T12:00:00）",
+          },
+        },
+        execute: async (params) => {
+          try {
+            const { invoke } = await import("@tauri-apps/api/core");
+            const message = String(params.message);
+            const time = String(params.time);
+
+            if (!message || !time) return { error: "缺少参数" };
+
+            // 生成唯一 ID
+            const id = `reminder_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+
+            const workflow = {
+              id,
+              name: `提醒: ${message}`,
+              icon: "Bell",
+              description: "由 Agent 创建的定时提醒",
+              category: "reminders",
+              trigger: {
+                type: "once",
+                onceAt: time,
+                enabled: true,
+              },
+              steps: [
+                {
+                  id: `step_${Date.now()}`,
+                  name: "发送通知",
+                  type: "notification",
+                  config: { message },
+                },
+              ],
+              builtin: false,
+              created_at: Date.now(),
+            };
+
+            await invoke("workflow_create", { workflow });
+            await invoke("workflow_scheduler_reload", { workflowId: id });
+
+            return {
+              success: true,
+              message: `已设置提醒: "${message}" 于 ${new Date(time).toLocaleString()}`,
+            };
+          } catch (e) {
+            return { error: `设置提醒失败: ${e}` };
           }
         },
       });
@@ -159,31 +225,34 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       }
     }, []);
 
-    const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      if (!file || !file.type.startsWith("image/")) return;
-      const reader = new FileReader();
-      reader.onload = async () => {
-        const dataUrl = reader.result as string;
-        setPendingImagePreviews((prev) => [...prev, dataUrl]);
-        const base64 = dataUrl.split(",")[1];
-        const ext = file.type.split("/")[1] || "png";
-        const fileName = `agent_img_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.${ext}`;
-        try {
-          const { invoke } = await import("@tauri-apps/api/core");
-          const filePath = await invoke<string>("ai_save_chat_image", {
-            imageData: base64,
-            fileName,
-          });
-          setPendingImages((prev) => [...prev, filePath]);
-        } catch (err) {
-          console.error("保存图片失败:", err);
-          setPendingImagePreviews((prev) => prev.slice(0, -1));
-        }
-      };
-      reader.readAsDataURL(file);
-      e.target.value = "";
-    }, []);
+    const handleFileSelect = useCallback(
+      (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file || !file.type.startsWith("image/")) return;
+        const reader = new FileReader();
+        reader.onload = async () => {
+          const dataUrl = reader.result as string;
+          setPendingImagePreviews((prev) => [...prev, dataUrl]);
+          const base64 = dataUrl.split(",")[1];
+          const ext = file.type.split("/")[1] || "png";
+          const fileName = `agent_img_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.${ext}`;
+          try {
+            const { invoke } = await import("@tauri-apps/api/core");
+            const filePath = await invoke<string>("ai_save_chat_image", {
+              imageData: base64,
+              fileName,
+            });
+            setPendingImages((prev) => [...prev, filePath]);
+          } catch (err) {
+            console.error("保存图片失败:", err);
+            setPendingImagePreviews((prev) => prev.slice(0, -1));
+          }
+        };
+        reader.readAsDataURL(file);
+        e.target.value = "";
+      },
+      [],
+    );
 
     const removeImage = useCallback((index: number) => {
       setPendingImages((prev) => prev.filter((_, i) => i !== index));
@@ -216,7 +285,8 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
     }, []);
 
     const handleRun = useCallback(async () => {
-      if (!ai || (!input.trim() && pendingImages.length === 0) || running) return;
+      if (!ai || (!input.trim() && pendingImages.length === 0) || running)
+        return;
 
       let query = input.trim();
       const imagePaths = [...pendingImages];
@@ -234,7 +304,9 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       if (!sessionId) {
         sessionId = createSession(query);
         // createSession 已创建第一个 task，获取其 id
-        const newSession = useAgentStore.getState().sessions.find((s) => s.id === sessionId);
+        const newSession = useAgentStore
+          .getState()
+          .sessions.find((s) => s.id === sessionId);
         taskId = newSession?.tasks[0]?.id ?? "";
       } else {
         const session = getCurrentSession();
@@ -304,9 +376,13 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
             }
             collectedSteps.push(step);
           }
-          if (sessionId && taskId) updateTask(sessionId, taskId, { steps: [...collectedSteps] });
+          if (sessionId && taskId)
+            updateTask(sessionId, taskId, { steps: [...collectedSteps] });
           setTimeout(() => {
-            scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+            scrollRef.current?.scrollTo({
+              top: scrollRef.current.scrollHeight,
+              behavior: "smooth",
+            });
           }, 100);
         },
         historySteps,
@@ -314,7 +390,8 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
 
       try {
         const result = await agent.run(query, abortController.signal);
-        if (sessionId && taskId) updateTask(sessionId, taskId, { answer: result });
+        if (sessionId && taskId)
+          updateTask(sessionId, taskId, { answer: result });
       } catch (e) {
         const msg =
           (e as Error).message === "Aborted"
@@ -326,7 +403,18 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
         abortControllerRef.current = null;
         inputRef.current?.focus();
       }
-    }, [ai, input, running, availableTools, pendingImages, createSession, addTask, updateTask, currentSessionId, getCurrentSession]);
+    }, [
+      ai,
+      input,
+      running,
+      availableTools,
+      pendingImages,
+      createSession,
+      addTask,
+      updateTask,
+      currentSessionId,
+      getCurrentSession,
+    ]);
 
     handleRunRef.current = handleRun;
 
@@ -473,8 +561,12 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
             {tasks.length === 0 && !running && (
               <div className="text-center text-[var(--color-text-secondary)] py-12">
                 <Bot className="w-12 h-12 mx-auto mb-3 opacity-20" />
-                <p className="text-sm">输入问题或任务，Agent 会自主思考并调用工具</p>
-                <p className="text-xs mt-1 opacity-60">思考 → 行动 → 观察 → 回答</p>
+                <p className="text-sm">
+                  输入问题或任务，Agent 会自主思考并调用工具
+                </p>
+                <p className="text-xs mt-1 opacity-60">
+                  思考 → 行动 → 观察 → 回答
+                </p>
               </div>
             )}
 
@@ -502,8 +594,14 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
             onInputChange={setInput}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
-            onCompositionStart={() => { isComposingRef.current = true; }}
-            onCompositionEnd={() => { setTimeout(() => { isComposingRef.current = false; }, 200); }}
+            onCompositionStart={() => {
+              isComposingRef.current = true;
+            }}
+            onCompositionEnd={() => {
+              setTimeout(() => {
+                isComposingRef.current = false;
+              }, 200);
+            }}
             pendingImagePreviews={pendingImagePreviews}
             onFileSelect={handleFileSelect}
             onRemoveImage={removeImage}

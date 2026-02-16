@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import type { PluginInstance, PluginMatchResult } from '@/core/plugin-system/types'
 import { matchPlugins } from '@/core/plugin-system/command-matcher'
+import { registry } from '@/core/plugin-system/registry'
 
 interface PluginState {
   plugins: PluginInstance[]
@@ -27,6 +28,18 @@ export const usePluginStore = create<PluginState>((set, get) => ({
     try {
       const rawPlugins = await invoke<PluginInstance[]>('plugin_list')
       set({ plugins: rawPlugins, isLoading: false })
+
+      // 收集外部插件声明的 AI actions 并注册到 registry
+      const externalActions = rawPlugins
+        .filter((p) => p.enabled && p.manifest.mtools?.actions?.length)
+        .flatMap((p) =>
+          (p.manifest.mtools!.actions!).map((action) => ({
+            pluginId: p.id,
+            pluginName: p.manifest.pluginName,
+            action,
+          })),
+        )
+      registry.registerExternalActions(externalActions)
     } catch (e) {
       console.error('加载插件列表失败:', e)
       set({ isLoading: false })

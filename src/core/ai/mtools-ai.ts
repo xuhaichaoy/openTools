@@ -6,7 +6,7 @@
  * 无需自行管理 API Key 或模型选择。
  */
 
-import type { MToolsAI } from "@/core/plugin-system/plugin-interface";
+import type { MToolsAI, AIToolCall } from "@/core/plugin-system/plugin-interface";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useAIStore, type AIConfig } from "@/store/ai-store";
@@ -187,6 +187,92 @@ export function createMToolsAI(): MToolsAI {
         // fallback: 返回当前配置的模型
         return [{ id: config.model, name: config.model }];
       }
+    },
+
+    /**
+     * 带工具定义的流式对话 — Agent 专用
+     * 后端传递 tools 给 API，收到 tool_calls 时通知前端，不自动执行。
+     */
+    async streamWithTools(options) {
+      const config = getConfig();
+      const conversationId = `agent-${generateId()}`;
+      let fullContent = "";
+      let resolvedToolCalls: AIToolCall[] | null = null;
+
+      return new Promise(async (resolve, reject) => {
+        // 监听内容 chunk
+        const unlisten = await listen<{
+          conversation_id: string;
+          content: string;
+        }>("ai-stream-chunk", (event) => {
+          if (event.payload.conversation_id === conversationId) {
+            fullContent += event.payload.content;
+            options.onChunk(event.payload.content);
+          }
+        });
+
+        // 监听 Agent 专用 tool_calls 事件
+        const unlistenToolCalls = await listen<{
+          conversation_id: string;
+          tool_calls: AIToolCall[];
+        }>("ai-agent-tool-calls", (event) => {
+          if (event.payload.conversation_id === conversationId) {
+            resolvedToolCalls = event.payload.tool_calls;
+          }
+        });
+
+        // 监听完成
+        const unlistenDone = await listen<{ conversation_id: string }>(
+          "ai-stream-done",
+          (event) => {
+            if (event.payload.conversation_id === conversationId) {
+              cleanup();
+              if (resolvedToolCalls && resolvedToolCalls.length > 0) {
+                resolve({ type: "tool_calls", toolCalls: resolvedToolCalls });
+              } else {
+                options.onDone?.(fullContent);
+                resolve({ type: "content", content: fullContent });
+              }
+            }
+          },
+        );
+
+        // 监听错误
+        const unlistenError = await listen<{
+          conversation_id: string;
+          error: string;
+        }>("ai-stream-error", (event) => {
+          if (event.payload.conversation_id === conversationId) {
+            cleanup();
+            reject(new Error(event.payload.error));
+          }
+        });
+
+        const cleanup = () => {
+          unlisten();
+          unlistenToolCalls();
+          unlistenDone();
+          unlistenError();
+        };
+
+        try {
+          await invoke("ai_agent_stream", {
+            messages: options.messages.map((m) => ({
+              role: m.role,
+              content: m.content,
+              ...(m.tool_calls ? { tool_calls: m.tool_calls } : {}),
+              ...(m.tool_call_id ? { tool_call_id: m.tool_call_id } : {}),
+              ...(m.name ? { name: m.name } : {}),
+            })),
+            config,
+            tools: options.tools,
+            conversationId,
+          });
+        } catch (e) {
+          cleanup();
+          reject(e);
+        }
+      });
     },
   };
 }

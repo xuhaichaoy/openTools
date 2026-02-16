@@ -16,6 +16,10 @@ import {
   Workflow,
   BookOpen,
   ScanText,
+  Zap,
+  ClipboardList,
+  TextCursorInput,
+  Bookmark,
 } from "lucide-react";
 
 import { createElement } from "react";
@@ -80,6 +84,10 @@ const QRCodePlugin = lazy(() => import("./QRCode/index"));
 const ImageSearchPlugin = lazy(() => import("./ImageSearch/index"));
 const CloudSyncPlugin = lazy(() => import("./CloudSync/index"));
 const OCRPlugin = lazy(() => import("./OCR/index"));
+const SystemActionsPlugin = lazy(() => import("./SystemActions/index"));
+const ClipboardHistoryPlugin = lazy(() => import("./ClipboardHistory/index"));
+const SnippetsPlugin = lazy(() => import("./Snippets/index").then((m) => ({ default: m.Snippets })));
+const BookmarksPlugin = lazy(() => import("./Bookmarks/index"));
 
 // ── 所有内置插件定义（14 个） ──
 
@@ -525,5 +533,198 @@ export const builtinPlugins: MToolsPlugin[] = [
     keywords: ["同步", "sync", "云", "github", "gitee", "webdav", "备份"],
     viewId: "cloud-sync",
     render: (props) => createElement(CloudSyncPlugin, props),
+  },
+
+  // ── 系统快捷操作 ──
+  {
+    id: "system-actions",
+    name: "系统操作",
+    description: "锁屏、深色模式、清空回收站、休眠等系统级操作",
+    icon: createElement(Zap, { className: "w-6 h-6" }),
+    color: "text-amber-500 bg-amber-500/10",
+    category: "系统",
+    keywords: [
+      "系统", "锁屏", "休眠", "深色", "暗黑", "回收站", "wifi",
+      "截图", "静音", "桌面", "system", "lock", "sleep", "dark",
+    ],
+    viewId: "system-actions",
+    render: (props) => createElement(SystemActionsPlugin, props),
+    actions: [
+      {
+        name: "lock_screen",
+        description: "锁定屏幕",
+        execute: async () => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const cmd = navigator.platform.toLowerCase().includes("mac")
+            ? "pmset displaysleepnow"
+            : "rundll32.exe user32.dll,LockWorkStation";
+          return invoke("run_shell_command", { command: cmd });
+        },
+      },
+      {
+        name: "toggle_dark_mode",
+        description: "切换系统深色模式",
+        execute: async () => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const cmd = navigator.platform.toLowerCase().includes("mac")
+            ? `osascript -e 'tell app "System Events" to tell appearance preferences to set dark mode to not dark mode'`
+            : "reg add HKCU\\\\Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Themes\\\\Personalize /v AppsUseLightTheme /t REG_DWORD /d 0 /f";
+          return invoke("run_shell_command", { command: cmd });
+        },
+      },
+      {
+        name: "empty_trash",
+        description: "清空回收站",
+        execute: async () => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const cmd = navigator.platform.toLowerCase().includes("mac")
+            ? `osascript -e 'tell app "Finder" to empty the trash'`
+            : 'PowerShell.exe -Command "Clear-RecycleBin -Force"';
+          return invoke("run_shell_command", { command: cmd });
+        },
+      },
+    ],
+  },
+
+  // ── 剪贴板历史 ──
+  {
+    id: "clipboard-history",
+    name: "剪贴板",
+    description: "剪贴板历史管理，快速搜索与复用",
+    icon: createElement(ClipboardList, { className: "w-6 h-6" }),
+    color: "text-cyan-500 bg-cyan-500/10",
+    category: "工具",
+    keywords: [
+      "剪贴板", "clipboard", "复制", "粘贴", "历史", "cb",
+      "copy", "paste", "history",
+    ],
+    viewId: "clipboard-history",
+    render: (props) => createElement(ClipboardHistoryPlugin, props),
+    actions: [
+      {
+        name: "clipboard_search",
+        description: "搜索剪贴板历史记录",
+        parameters: {
+          keyword: { type: "string", description: "搜索关键词", required: true },
+        },
+        execute: async ({ keyword }) => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          return invoke("clipboard_history_list", {
+            search: keyword,
+            limit: 10,
+          });
+        },
+      },
+      {
+        name: "clipboard_latest",
+        description: "获取最近的剪贴板记录",
+        parameters: {
+          count: { type: "number", description: "获取条数（默认5）", required: false },
+        },
+        execute: async ({ count }) => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          return invoke("clipboard_history_list", {
+            search: null,
+            limit: (count as number) || 5,
+          });
+        },
+      },
+    ],
+  },
+
+  // ── 快捷短语 / 文本片段 ──
+  {
+    id: "snippets",
+    name: "快捷短语",
+    description: "文本片段管理，支持静态模板和 AI 动态生成",
+    icon: createElement(TextCursorInput, { className: "w-6 h-6" }),
+    color: "text-emerald-500 bg-emerald-500/10",
+    category: "工具",
+    keywords: [
+      "快捷短语", "文本片段", "snippets", "模板", "template",
+      "短语", "snippet", "sn", "快捷", "文本", "签名",
+    ],
+    viewId: "snippets",
+    render: (props) => createElement(SnippetsPlugin, props),
+    actions: [
+      {
+        name: "snippet_search",
+        description: "搜索快捷短语，返回匹配的片段列表",
+        parameters: {
+          query: { type: "string", description: "搜索关键词", required: true },
+        },
+        execute: async ({ query }) => {
+          const { useSnippetStore } = await import("@/store/snippet-store");
+          useSnippetStore.getState().loadSnippets();
+          return useSnippetStore.getState().searchSnippets(query as string);
+        },
+      },
+      {
+        name: "snippet_get_content",
+        description: "获取指定快捷短语的内容（静态片段直接返回，动态片段需要 AI 生成）",
+        parameters: {
+          keyword: { type: "string", description: "短语的触发关键词", required: true },
+        },
+        execute: async ({ keyword }, { ai }) => {
+          const { useSnippetStore } = await import("@/store/snippet-store");
+          useSnippetStore.getState().loadSnippets();
+          const snippet = useSnippetStore.getState().matchByKeyword(keyword as string);
+          if (!snippet) return { error: `未找到关键词为「${keyword}」的短语` };
+          if (snippet.isDynamic && snippet.dynamicPrompt) {
+            const result = await ai.chat({
+              messages: [
+                { role: "system", content: "根据提示词生成内容，直接输出，不要解释。" },
+                { role: "user", content: snippet.dynamicPrompt },
+              ],
+            });
+            return { title: snippet.title, content: result.content.trim(), dynamic: true };
+          }
+          return { title: snippet.title, content: snippet.content, dynamic: false };
+        },
+      },
+    ],
+  },
+
+  // ── 网页书签 ──
+  {
+    id: "bookmarks",
+    name: "网页书签",
+    description: "书签管理，支持从 Chrome/Firefox 导入",
+    icon: createElement(Bookmark, { className: "w-6 h-6" }),
+    color: "text-blue-500 bg-blue-500/10",
+    category: "工具",
+    keywords: [
+      "书签", "bookmark", "网址", "收藏", "链接", "url",
+      "bk", "网页", "导航", "chrome", "firefox",
+    ],
+    viewId: "bookmarks",
+    render: (props) => createElement(BookmarksPlugin, props),
+    actions: [
+      {
+        name: "bookmark_search",
+        description: "搜索网页书签，返回匹配的书签列表",
+        parameters: {
+          query: { type: "string", description: "搜索关键词", required: true },
+        },
+        execute: async ({ query }) => {
+          const { useBookmarkStore } = await import("@/store/bookmark-store");
+          useBookmarkStore.getState().loadBookmarks();
+          const results = useBookmarkStore.getState().searchBookmarks(query as string);
+          return results.map((b) => ({ title: b.title, url: b.url, category: b.category }));
+        },
+      },
+      {
+        name: "bookmark_open",
+        description: "打开指定书签的网址",
+        parameters: {
+          url: { type: "string", description: "要打开的网址", required: true },
+        },
+        execute: async ({ url }) => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          await invoke("open_url", { url });
+          return `已打开: ${url}`;
+        },
+      },
+    ],
   },
 ];

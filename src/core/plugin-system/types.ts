@@ -58,11 +58,27 @@ export interface PluginManifest {
   // mTools 扩展 — 工作流
   workflows?: PluginWorkflowDef[]  // 插件提供的工作流
 
+  // mTools 扩展 — AI 动作声明（外部插件可被 Agent 调用）
+  mtools?: {
+    actions?: ExternalPluginAction[]
+  }
+
   // 运行时
   pluginType?: 'ui' | 'system'  // ui=有界面, system=无界面
   development?: {
     main?: string        // 开发模式入口 URL
   }
+}
+
+/** 外部插件在 manifest 中声明的 AI 动作 */
+export interface ExternalPluginAction {
+  name: string
+  description: string
+  parameters?: Record<string, {
+    type: 'string' | 'number' | 'boolean' | 'object'
+    description?: string
+    required?: boolean
+  }>
 }
 
 /** 已加载的插件实例 */

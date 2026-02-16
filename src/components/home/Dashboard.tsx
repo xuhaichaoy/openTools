@@ -100,11 +100,11 @@ export function Dashboard({ onNavigate }: DashboardProps) {
   return (
     <div className="px-2 py-1 h-full overflow-y-auto custom-scrollbar">
       {/* 常用工具（按最近使用排序） */}
-      <div className="mb-8">
-        <h3 className="text-xs font-medium text-[var(--color-text-secondary)] mb-4 px-2">
+      <div className="mb-4">
+        <h3 className="text-xs font-medium text-[var(--color-text-secondary)] mb-2 px-2">
           {hasRecent ? "最近使用" : "常用工具"}
         </h3>
-        <div className="grid grid-cols-8 gap-x-2 gap-y-1 mt-5">
+        <div className="grid grid-cols-8 gap-x-2 gap-y-1 mt-2">
           {tools.map((tool) => (
             <button
               key={tool.id}
@@ -126,10 +126,10 @@ export function Dashboard({ onNavigate }: DashboardProps) {
 
       {/* 快捷指令 */}
       <div>
-        <h3 className="text-xs font-medium text-[var(--color-text-secondary)] mb-4 px-2">
+        <h3 className="text-xs font-medium text-[var(--color-text-secondary)] mb-2 px-2">
           快捷指令
         </h3>
-        <div className="grid grid-cols-8 gap-x-2 gap-y-1 mt-5">
+        <div className="grid grid-cols-8 gap-x-2 gap-y-1 mt-2">
           {quickActions.map((action) => (
             <button
               key={action.id}

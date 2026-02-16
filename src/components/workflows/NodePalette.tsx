@@ -10,6 +10,7 @@ const nodeGroups: { label: string; types: StepType[] }[] = [
   { label: '数据', types: ['clipboard_read', 'clipboard_write', 'file_read', 'file_write', 'http'] },
   { label: '逻辑', types: ['condition', 'transform', 'script'] },
   { label: '交互', types: ['user_input', 'notification'] },
+  { label: '插件', types: ['plugin_action'] },
 ]
 
 export function NodePalette({ onAddNode }: NodePaletteProps) {

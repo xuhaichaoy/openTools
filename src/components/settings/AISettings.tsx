@@ -122,6 +122,21 @@ export function AISettings() {
               已启用高级工具：执行命令、读写文件、列出目录、获取系统信息、打开网址、打开文件/目录、获取进程列表。其中执行命令、写入文件、打开路径为危险操作，执行前需要你确认。
             </div>
           )}
+
+          <label className="flex items-center justify-between cursor-pointer mt-3">
+            <div className="flex-1 pr-3">
+              <span className="text-xs text-[var(--color-text)]">对话时自动检索知识库</span>
+              <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
+                开启后，每次对话会自动从 RAG 知识库中检索相关内容并注入上下文，提升回答准确性。
+              </p>
+            </div>
+            <input
+              type="checkbox"
+              className="w-4 h-4 rounded accent-indigo-500"
+              checked={form.enable_rag_auto_search}
+              onChange={(e) => setForm({ ...form, enable_rag_auto_search: e.target.checked })}
+            />
+          </label>
         </div>
 
         {/* 自定义 System Prompt */}
