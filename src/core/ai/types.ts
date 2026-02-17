@@ -38,6 +38,27 @@ export interface AIConfig {
   enable_native_tools: boolean;
   source?: "own_key" | "team" | "platform";
   team_id?: string;
+  /** API 协议：openai 或 anthropic */
+  protocol?: "openai" | "anthropic";
+  /** 当前激活的自有 Key 配置 ID */
+  active_own_key_id?: string;
+}
+
+/** 自有 Key 模型配置项 */
+export interface OwnKeyModelConfig {
+  id: string;
+  /** 显示名称，如 "GPT-4o" */
+  name: string;
+  /** API 协议 */
+  protocol: "openai" | "anthropic";
+  /** API Base URL */
+  base_url: string;
+  /** API Key */
+  api_key: string;
+  /** 模型标识，如 "gpt-4o" */
+  model: string;
+  temperature: number;
+  max_tokens: number | null;
 }
 
 export interface PendingToolConfirm {

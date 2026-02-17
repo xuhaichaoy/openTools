@@ -207,6 +207,8 @@ pub fn run() {
             commands::ai::ai_chat_stream,
             commands::ai::ai_get_config,
             commands::ai::ai_set_config,
+            commands::ai::ai_get_own_keys,
+            commands::ai::ai_set_own_keys,
             commands::ai::ai_confirm_tool,
             commands::ai::ai_stop_stream,
             commands::ai::ai_save_chat_image,

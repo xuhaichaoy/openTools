@@ -247,8 +247,13 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
     const trimmed = input.trim();
     if ((!trimmed && pendingImages.length === 0) || isStreaming) return;
 
-    if (!config.api_key) {
+    const source = config.source || "own_key";
+    if (source === "own_key" && !config.api_key) {
       toast("warning", "请先在设置中配置 AI API Key");
+      return;
+    }
+    if (source === "team" && !config.team_id) {
+      toast("warning", "请先在设置中选择团队");
       return;
     }
 

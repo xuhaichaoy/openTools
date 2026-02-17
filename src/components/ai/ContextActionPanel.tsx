@@ -7,6 +7,7 @@ import {
 } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import { useAIStore } from '@/store/ai-store'
+import { getRoutedConfig } from '@/core/ai/router'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useDragWindow } from '@/hooks/useDragWindow'
@@ -105,7 +106,8 @@ export function ContextActionPanel({ selectedText, onBack }: ContextActionPanelP
     if (handled) return
 
     // AI 操作
-    if (!config.api_key) {
+    const source = config.source || 'own_key'
+    if (source === 'own_key' && !config.api_key) {
       setResult('❌ 请先在设置中配置 AI API Key')
       setActiveAction(action.id)
       return
@@ -122,7 +124,7 @@ export function ContextActionPanel({ selectedText, onBack }: ContextActionPanelP
     try {
       const response = await invoke<string>('ai_chat', {
         messages: [{ role: 'user', content: prompt }],
-        config,
+        config: getRoutedConfig(config),
       })
       setResult(response)
     } catch (e) {

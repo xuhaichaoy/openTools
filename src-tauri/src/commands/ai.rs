@@ -57,6 +57,12 @@ pub struct AIConfig {
     /// 团队模式时的团队 ID
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team_id: Option<String>,
+    /// API 协议：openai / anthropic
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    /// 当前激活的自有 Key 配置 ID
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_own_key_id: Option<String>,
 }
 
 fn default_true() -> bool { true }
@@ -75,8 +81,23 @@ impl Default for AIConfig {
             enable_native_tools: true,
             source: Some("own_key".to_string()),
             team_id: None,
+            protocol: None,
+            active_own_key_id: None,
         }
     }
+}
+
+/// 自有 Key 模型配置项
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct OwnKeyModelConfig {
+    pub id: String,
+    pub name: String,
+    pub protocol: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+    pub temperature: f32,
+    pub max_tokens: Option<u32>,
 }
 
 // ── 工具确认状态（用于危险工具执行前的用户确认） ──
@@ -1044,6 +1065,417 @@ fn build_api_request(
     req
 }
 
+// ── Anthropic 协议支持 ──
+
+/// 将 OpenAI 格式的工具定义转换为 Anthropic 格式
+fn convert_tools_to_anthropic(tools: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    tools
+        .iter()
+        .filter_map(|t| {
+            let func = t.get("function")?;
+            Some(serde_json::json!({
+                "name": func.get("name")?,
+                "description": func.get("description").unwrap_or(&serde_json::json!("")),
+                "input_schema": func.get("parameters").unwrap_or(&serde_json::json!({"type": "object", "properties": {}})),
+            }))
+        })
+        .collect()
+}
+
+/// 构建 Anthropic Messages API 请求体
+fn build_anthropic_request(
+    model: &str,
+    messages: &[ChatMessage],
+    system_prompt: &str,
+    temperature: f32,
+    max_tokens: Option<u32>,
+    tools: &[serde_json::Value],
+    stream: bool,
+) -> serde_json::Value {
+    // 过滤掉 system 消息（Anthropic 的 system 是顶层字段）
+    let api_messages: Vec<serde_json::Value> = messages
+        .iter()
+        .filter(|m| m.role != "system")
+        .map(|m| message_to_anthropic_json(m))
+        .collect();
+
+    let anthropic_tools = convert_tools_to_anthropic(tools);
+    let mt = max_tokens.unwrap_or(4096);
+
+    let mut req = serde_json::json!({
+        "model": model,
+        "max_tokens": mt,
+        "messages": api_messages,
+        "temperature": temperature,
+        "stream": stream,
+    });
+
+    if !system_prompt.is_empty() {
+        req["system"] = serde_json::json!(system_prompt);
+    }
+    if !anthropic_tools.is_empty() {
+        req["tools"] = serde_json::json!(anthropic_tools);
+    }
+    req
+}
+
+/// 将 ChatMessage 转为 Anthropic API 格式的 JSON
+fn message_to_anthropic_json(msg: &ChatMessage) -> serde_json::Value {
+    // 特殊标记：批量 tool_results（由 anthropic_stream_loop 生成）
+    if msg.tool_call_id.as_deref() == Some("__anthropic_tool_results__") {
+        if let Some(content) = &msg.content {
+            if let Ok(results) = serde_json::from_str::<Vec<serde_json::Value>>(content) {
+                return serde_json::json!({
+                    "role": "user",
+                    "content": results,
+                });
+            }
+        }
+    }
+
+    // 工具结果消息：转为 Anthropic 的 tool_result content block
+    if msg.role == "tool" {
+        return serde_json::json!({
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": msg.tool_call_id.as_deref().unwrap_or(""),
+                "content": msg.content.as_deref().unwrap_or(""),
+            }],
+        });
+    }
+
+    // assistant 消息带 tool_calls：转为 Anthropic 的 tool_use content blocks
+    if msg.role == "assistant" && msg.tool_calls.is_some() {
+        let mut content_blocks: Vec<serde_json::Value> = Vec::new();
+        if let Some(text) = &msg.content {
+            if !text.is_empty() {
+                content_blocks.push(serde_json::json!({
+                    "type": "text",
+                    "text": text,
+                }));
+            }
+        }
+        if let Some(tool_calls) = &msg.tool_calls {
+            for tc in tool_calls {
+                let input: serde_json::Value =
+                    serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::json!({}));
+                content_blocks.push(serde_json::json!({
+                    "type": "tool_use",
+                    "id": tc.id,
+                    "name": tc.function.name,
+                    "input": input,
+                }));
+            }
+        }
+        return serde_json::json!({
+            "role": "assistant",
+            "content": content_blocks,
+        });
+    }
+
+    // 普通用户/assistant 消息
+    let has_images = msg.images.as_ref().map_or(false, |imgs| !imgs.is_empty());
+    if has_images && msg.role == "user" {
+        let mut parts: Vec<serde_json::Value> = Vec::new();
+        if let Some(text) = &msg.content {
+            if !text.is_empty() {
+                parts.push(serde_json::json!({ "type": "text", "text": text }));
+            }
+        }
+        if let Some(images) = &msg.images {
+            for img_path in images {
+                if let Ok(bytes) = std::fs::read(img_path) {
+                    let ext = std::path::Path::new(img_path)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("png");
+                    let mime = match ext {
+                        "jpg" | "jpeg" => "image/jpeg",
+                        "gif" => "image/gif",
+                        "webp" => "image/webp",
+                        _ => "image/png",
+                    };
+                    use base64::Engine;
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                    parts.push(serde_json::json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": mime,
+                            "data": b64,
+                        }
+                    }));
+                }
+            }
+        }
+        serde_json::json!({ "role": "user", "content": parts })
+    } else {
+        serde_json::json!({
+            "role": msg.role,
+            "content": msg.content.as_deref().unwrap_or(""),
+        })
+    }
+}
+
+/// Anthropic 流式对话处理
+async fn anthropic_stream_loop(
+    app: &AppHandle,
+    client: &reqwest::Client,
+    config: &AIConfig,
+    conversation_id: &str,
+    system_prompt: &str,
+    mut full_messages: Vec<ChatMessage>,
+    tools: &[serde_json::Value],
+) -> Result<(), String> {
+    let cancellation = app.state::<StreamCancellation>();
+
+    for _round in 0..6 {
+        let request = build_anthropic_request(
+            &config.model,
+            &full_messages,
+            system_prompt,
+            config.temperature,
+            config.max_tokens,
+            tools,
+            true,
+        );
+
+        let url = format!("{}/v1/messages", config.base_url);
+        let is_team = config.source.as_deref() == Some("team") || config.source.as_deref() == Some("platform");
+
+        // 团队/平台模式：需要同时发 Authorization（给服务端 auth middleware）和 x-api-key
+        let mut req_builder = client
+            .post(&url)
+            .header("x-api-key", &config.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("Content-Type", "application/json");
+        if is_team {
+            req_builder = req_builder.header("Authorization", format!("Bearer {}", config.api_key));
+        }
+
+        // 团队模式：注入 team_id 到请求体
+        let final_request = if is_team {
+            if let Some(ref tid) = config.team_id {
+                let mut r = request.clone();
+                r["team_id"] = serde_json::json!(tid);
+                r
+            } else {
+                request.clone()
+            }
+        } else {
+            request.clone()
+        };
+
+        let response = req_builder
+            .json(&final_request)
+            .send()
+            .await
+            .map_err(|e| format!("请求失败: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            log::error!("[anthropic_stream] {} → HTTP {} body={}", url, status, &body[..body.len().min(200)]);
+            let _ = app.emit(
+                "ai-stream-error",
+                serde_json::json!({
+                    "conversation_id": conversation_id,
+                    "error": format!("Anthropic API 错误: {}", body),
+                }),
+            );
+            return Err(format!("Anthropic API 错误: {}", body));
+        }
+
+        use futures_util::StreamExt;
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+        let mut pending_tool_calls: Vec<ToolCall> = Vec::new();
+        let mut current_tool_id = String::new();
+        let mut current_tool_name = String::new();
+        let mut current_tool_input = String::new();
+        let mut has_tool_use = false;
+
+        while let Some(chunk) = stream.next().await {
+            if cancellation.is_cancelled() {
+                let _ = app.emit(
+                    "ai-stream-done",
+                    serde_json::json!({ "conversation_id": conversation_id }),
+                );
+                return Ok(());
+            }
+
+            match chunk {
+                Ok(bytes) => {
+                    buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+                    while let Some(pos) = buffer.find('\n') {
+                        let line = buffer[..pos].trim().to_string();
+                        buffer = buffer[pos + 1..].to_string();
+
+                        if !line.starts_with("data: ") {
+                            continue;
+                        }
+                        let data = &line[6..];
+
+                        let parsed: serde_json::Value = match serde_json::from_str(data) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+
+                        let event_type = parsed["type"].as_str().unwrap_or("");
+
+                        match event_type {
+                            "content_block_start" => {
+                                let block = &parsed["content_block"];
+                                if block["type"].as_str() == Some("tool_use") {
+                                    has_tool_use = true;
+                                    current_tool_id = block["id"].as_str().unwrap_or("").to_string();
+                                    current_tool_name = block["name"].as_str().unwrap_or("").to_string();
+                                    current_tool_input.clear();
+                                }
+                            }
+                            "content_block_delta" => {
+                                let delta = &parsed["delta"];
+                                match delta["type"].as_str() {
+                                    Some("text_delta") => {
+                                        if let Some(text) = delta["text"].as_str() {
+                                            let _ = app.emit(
+                                                "ai-stream-chunk",
+                                                serde_json::json!({
+                                                    "conversation_id": conversation_id,
+                                                    "content": text,
+                                                }),
+                                            );
+                                        }
+                                    }
+                                    Some("input_json_delta") => {
+                                        if let Some(json_str) = delta["partial_json"].as_str() {
+                                            current_tool_input.push_str(json_str);
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            "content_block_stop" => {
+                                if has_tool_use && !current_tool_id.is_empty() {
+                                    pending_tool_calls.push(ToolCall {
+                                        id: current_tool_id.clone(),
+                                        call_type: "function".to_string(),
+                                        function: FunctionCall {
+                                            name: current_tool_name.clone(),
+                                            arguments: current_tool_input.clone(),
+                                        },
+                                    });
+                                    current_tool_id.clear();
+                                    current_tool_name.clear();
+                                    current_tool_input.clear();
+                                }
+                            }
+                            "message_stop" => {
+                                // 处理完成
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = app.emit(
+                        "ai-stream-error",
+                        serde_json::json!({
+                            "conversation_id": conversation_id,
+                            "error": format!("流读取错误: {}", e),
+                        }),
+                    );
+                    return Err(format!("流读取错误: {}", e));
+                }
+            }
+        }
+
+        // 如果没有工具调用，结束
+        if pending_tool_calls.is_empty() {
+            let _ = app.emit(
+                "ai-stream-done",
+                serde_json::json!({ "conversation_id": conversation_id }),
+            );
+            return Ok(());
+        }
+
+        // 有工具调用：通知前端并执行
+        let _ = app.emit(
+            "ai-stream-tool-calls",
+            serde_json::json!({
+                "conversation_id": conversation_id,
+                "tool_calls": &pending_tool_calls,
+            }),
+        );
+
+        // 构建 assistant 消息（带 tool_use）和 tool_result 消息
+        let mut assistant_content: Vec<serde_json::Value> = Vec::new();
+        let mut tool_results: Vec<serde_json::Value> = Vec::new();
+
+        for tc in &pending_tool_calls {
+            let result = execute_tool(app, &tc.function.name, &tc.function.arguments).await;
+            let content = match result {
+                Ok(r) => r,
+                Err(e) => format!("工具执行失败: {}", e),
+            };
+
+            let _ = app.emit(
+                "ai-stream-tool-result",
+                serde_json::json!({
+                    "conversation_id": conversation_id,
+                    "tool_call_id": tc.id,
+                    "name": tc.function.name,
+                    "result": &content,
+                }),
+            );
+
+            let input: serde_json::Value =
+                serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::json!({}));
+            assistant_content.push(serde_json::json!({
+                "type": "tool_use",
+                "id": tc.id,
+                "name": tc.function.name,
+                "input": input,
+            }));
+            tool_results.push(serde_json::json!({
+                "type": "tool_result",
+                "tool_use_id": tc.id,
+                "content": content,
+            }));
+        }
+
+        // 追加到消息历史
+        full_messages.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(pending_tool_calls),
+            tool_call_id: None,
+            name: None,
+            images: None,
+        });
+        // tool_result 作为 user 消息（Anthropic 格式）
+        full_messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: Some(serde_json::to_string(&tool_results).unwrap_or_default()),
+            tool_calls: None,
+            tool_call_id: Some("__anthropic_tool_results__".to_string()),
+            name: None,
+            images: None,
+        });
+
+        // 继续下一轮
+    }
+
+    // 达到最大轮次
+    let _ = app.emit(
+        "ai-stream-done",
+        serde_json::json!({ "conversation_id": conversation_id }),
+    );
+    Ok(())
+}
+
 /// 保存聊天图片到应用数据目录，返回文件路径
 #[tauri::command]
 pub async fn ai_save_chat_image(
@@ -1100,9 +1532,14 @@ pub async fn ai_chat(
 ) -> Result<String, String> {
     let client = reqwest::Client::new();
 
-    let request = build_api_request(
+    let mut request = build_api_request(
         &config.model, &messages, config.temperature, config.max_tokens, &[], false,
     );
+
+    // 团队模式：注入 team_id 到请求体
+    if let Some(ref tid) = config.team_id {
+        request["team_id"] = serde_json::json!(tid);
+    }
 
     let response = client
         .post(format!("{}/chat/completions", config.base_url))
@@ -1174,6 +1611,18 @@ pub async fn ai_chat_stream(
         }
     }
 
+    // Anthropic 协议分支
+    let protocol = config.protocol.as_deref().unwrap_or("openai");
+    if protocol == "anthropic" {
+        let full_messages: Vec<ChatMessage> = messages;
+        return anthropic_stream_loop(
+            &app, &client, &config, &conversation_id,
+            &system_prompt, full_messages, &tools,
+        ).await;
+    }
+
+    // ── OpenAI 协议（默认） ──
+
     // 注入 system prompt
     let mut full_messages = vec![ChatMessage {
         role: "system".to_string(),
@@ -1185,12 +1634,21 @@ pub async fn ai_chat_stream(
     }];
     full_messages.extend(messages);
 
-    let request = build_api_request(
+    let mut request = build_api_request(
         &config.model, &full_messages, config.temperature, config.max_tokens, &tools, true,
     );
 
+    // 团队模式：注入 team_id 到请求体（服务端团队代理需要此字段）
+    if let Some(ref tid) = config.team_id {
+        request["team_id"] = serde_json::json!(tid);
+    }
+
+    let url = format!("{}/chat/completions", config.base_url);
+    log::info!("[ai_chat_stream] POST {} | source={:?} model={} team_id={:?}",
+        url, config.source, config.model, config.team_id);
+
     let response = client
-        .post(format!("{}/chat/completions", config.base_url))
+        .post(&url)
         .header("Authorization", format!("Bearer {}", config.api_key))
         .header("Content-Type", "application/json")
         .json(&request)
@@ -1199,7 +1657,9 @@ pub async fn ai_chat_stream(
         .map_err(|e| format!("请求失败: {}", e))?;
 
     if !response.status().is_success() {
+        let status = response.status();
         let body = response.text().await.unwrap_or_default();
+        log::error!("[ai_chat_stream] {} → HTTP {} body={}", url, status, &body[..body.len().min(200)]);
         let _ = app.emit(
             "ai-stream-error",
             serde_json::json!({
@@ -1300,9 +1760,13 @@ pub async fn ai_chat_stream(
                                 if cancellation.is_cancelled() {
                                     break;
                                 }
-                                let follow_request = build_api_request(
+                                let mut follow_request = build_api_request(
                                     &config.model, &full_messages, config.temperature, config.max_tokens, &tools, false,
                                 );
+                                // 团队模式：注入 team_id
+                                if let Some(ref tid) = config.team_id {
+                                    follow_request["team_id"] = serde_json::json!(tid);
+                                }
 
                                 match client
                                     .post(format!("{}/chat/completions", config.base_url))
@@ -1507,9 +1971,14 @@ pub async fn ai_agent_stream(
     let cancellation = app.state::<StreamCancellation>();
     cancellation.reset();
 
-    let request = build_api_request(
+    let mut request = build_api_request(
         &config.model, &messages, config.temperature, config.max_tokens, &tools, true,
     );
+
+    // 团队模式：注入 team_id 到请求体（服务端团队代理需要此字段）
+    if let Some(ref tid) = config.team_id {
+        request["team_id"] = serde_json::json!(tid);
+    }
 
     let response = client
         .post(format!("{}/chat/completions", config.base_url))
@@ -1673,6 +2142,32 @@ pub async fn ai_set_config(app: AppHandle, config: AIConfig) -> Result<(), Strin
     store.set(
         "ai_config",
         serde_json::to_value(&config).map_err(|e| e.to_string())?,
+    );
+    store.save().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 获取自有 Key 列表
+#[tauri::command]
+pub async fn ai_get_own_keys(app: AppHandle) -> Result<Vec<OwnKeyModelConfig>, String> {
+    use tauri_plugin_store::StoreExt;
+    let store = app.store("config.json").map_err(|e| e.to_string())?;
+
+    if let Some(val) = store.get("ai_own_keys") {
+        serde_json::from_value(val).map_err(|e| e.to_string())
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+/// 保存自有 Key 列表
+#[tauri::command]
+pub async fn ai_set_own_keys(app: AppHandle, keys: Vec<OwnKeyModelConfig>) -> Result<(), String> {
+    use tauri_plugin_store::StoreExt;
+    let store = app.store("config.json").map_err(|e| e.to_string())?;
+    store.set(
+        "ai_own_keys",
+        serde_json::to_value(&keys).map_err(|e| e.to_string())?,
     );
     store.save().map_err(|e| e.to_string())?;
     Ok(())

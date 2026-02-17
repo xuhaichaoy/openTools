@@ -314,7 +314,9 @@ function MainApp() {
 
   // 启动时加载 AI 配置、对话历史、工作流、插件和通用设置
   useEffect(() => {
-    useAIStore.getState().loadConfig();
+    useAIStore.getState().loadConfig().then(() => {
+      useAIStore.getState().loadOwnKeys();
+    });
     useAIStore.getState().loadHistory();
     useAgentStore.getState().loadHistory();
     useWorkflowStore.getState().loadWorkflows();

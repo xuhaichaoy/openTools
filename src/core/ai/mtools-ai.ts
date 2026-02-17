@@ -15,6 +15,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useAIStore } from "@/store/ai-store";
 import type { AIConfig } from "@/core/ai/types";
+import { getRoutedConfig } from "@/core/ai/router";
 
 const generateId = () =>
   Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
@@ -41,6 +42,7 @@ export function createMToolsAI(): MToolsAI {
         model: options.model || config.model,
         temperature: options.temperature ?? config.temperature,
       };
+      const routed = getRoutedConfig(effectiveConfig);
 
       return new Promise(async (resolve, reject) => {
         let content = "";
@@ -86,7 +88,7 @@ export function createMToolsAI(): MToolsAI {
               role: m.role,
               content: m.content,
             })),
-            config: effectiveConfig,
+            config: routed,
             conversationId,
           });
         } catch (e) {
@@ -102,6 +104,7 @@ export function createMToolsAI(): MToolsAI {
     async stream(options) {
       const config = getConfig();
       const conversationId = `sdk-${generateId()}`;
+      const routed = getRoutedConfig(config);
       let fullContent = "";
 
       return new Promise(async (resolve, reject) => {
@@ -148,7 +151,7 @@ export function createMToolsAI(): MToolsAI {
               role: m.role,
               content: m.content,
             })),
-            config,
+            config: routed,
             conversationId,
           });
         } catch (e) {
@@ -201,6 +204,7 @@ export function createMToolsAI(): MToolsAI {
     async streamWithTools(options) {
       const config = getConfig();
       const conversationId = `agent-${generateId()}`;
+      const routed = getRoutedConfig(config);
       let fullContent = "";
       let resolvedToolCalls: AIToolCall[] | null = null;
 
@@ -269,7 +273,7 @@ export function createMToolsAI(): MToolsAI {
               ...(m.tool_call_id ? { tool_call_id: m.tool_call_id } : {}),
               ...(m.name ? { name: m.name } : {}),
             })),
-            config,
+            config: routed,
             tools: options.tools,
             conversationId,
           });

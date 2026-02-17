@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { AIConfig } from "./types";
 import { getServerUrl } from "@/store/server-store";
+import { useAuthStore } from "@/store/auth-store";
 
 export type AISource = "own_key" | "team" | "platform";
 
@@ -12,6 +13,42 @@ export interface RouteOptions {
 }
 
 /**
+ * 根据 AI 来源，对 config 的 base_url / api_key 做路由修正。
+ * - own_key: 原样返回
+ * - platform: base_url → {serverUrl}/ai，api_key → 用户 auth token
+ * - team: base_url → {serverUrl}/ai/team，api_key → 用户 auth token
+ *
+ * 所有需要调用 Rust AI 命令的地方都应先用此函数处理 config。
+ */
+export function applyRouting(config: AIConfig, token?: string | null): AIConfig {
+  const source = config.source || "own_key";
+  const baseUrl = getServerUrl();
+
+  switch (source) {
+    case "platform": {
+      const routed = { ...config, base_url: `${baseUrl}/ai`, api_key: token || "" };
+      console.log("[AI Router] platform →", routed.base_url, "model=", config.model);
+      return routed;
+    }
+    case "team": {
+      const routed = { ...config, base_url: `${baseUrl}/ai/team`, api_key: token || "" };
+      console.log("[AI Router] team →", routed.base_url, "model=", config.model, "team_id=", config.team_id, "serverUrl=", baseUrl);
+      return routed;
+    }
+    default:
+      return config;
+  }
+}
+
+/**
+ * 快捷版 applyRouting —— 自动从 authStore 取 token
+ */
+export function getRoutedConfig(config: AIConfig): AIConfig {
+  const { token } = useAuthStore.getState();
+  return applyRouting(config, token);
+}
+
+/**
  * 根据 AI 来源配置路由请求
  * - own_key: 直接使用用户配置的 API Key
  * - platform: 通过 mTools 服务器代理（消耗能量）
@@ -19,52 +56,11 @@ export interface RouteOptions {
  */
 export async function routeAIRequest(options: RouteOptions) {
   const { messages, config, conversationId, token } = options;
-  const source = config.source || "own_key";
-  const baseUrl = getServerUrl();
+  const routed = applyRouting(config, token);
 
-  switch (source) {
-    case "own_key":
-      return invoke("ai_chat_stream", {
-        messages,
-        config,
-        conversationId,
-      });
-
-    case "platform": {
-      // base_url 设为 {serverUrl}/ai，Tauri 命令自动追加 /chat/completions
-      // 服务端通过 Authorization header 验证身份并计费
-      const platformConfig: AIConfig = {
-        ...config,
-        base_url: `${baseUrl}/ai`,
-        api_key: token || "",
-      };
-      return invoke("ai_chat_stream", {
-        messages,
-        config: platformConfig,
-        conversationId,
-      });
-    }
-
-    case "team": {
-      // base_url 设为 {serverUrl}/ai/team，Tauri 命令自动追加 /chat/completions
-      // 服务端从 team_ai_configs 读取 Key 并转发
-      const teamConfig: AIConfig = {
-        ...config,
-        base_url: `${baseUrl}/ai/team`,
-        api_key: token || "",
-      };
-      return invoke("ai_chat_stream", {
-        messages,
-        config: teamConfig,
-        conversationId,
-      });
-    }
-
-    default:
-      return invoke("ai_chat_stream", {
-        messages,
-        config,
-        conversationId,
-      });
-  }
+  return invoke("ai_chat_stream", {
+    messages,
+    config: routed,
+    conversationId,
+  });
 }

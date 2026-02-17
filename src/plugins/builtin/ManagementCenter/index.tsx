@@ -32,6 +32,7 @@ import { MyDataTab } from "./components/MyDataTab";
 import { EnergyLogsTab } from "./components/EnergyLogsTab";
 import { ServerConfigTab } from "./components/ServerConfigTab";
 import { CredentialSettings } from "@/components/data-forge/CredentialSettings";
+import { useDragWindow } from "@/hooks/useDragWindow";
 
 const BRAND = "#F28F36";
 
@@ -50,6 +51,7 @@ type TabId =
 
 export default function ManagementCenter({ onBack }: MToolsPluginProps) {
   const [activeTab, setActiveTab] = useState<TabId>("account");
+  const { onMouseDown } = useDragWindow();
 
   const navItems: { id: TabId; icon: any; label: string; group: string }[] = [
     { id: "account", icon: User, label: "我的账号", group: "个人中心" },
@@ -65,15 +67,20 @@ export default function ManagementCenter({ onBack }: MToolsPluginProps) {
   const groups = Array.from(new Set(navItems.map((item) => item.group)));
 
   return (
-    <div className="flex h-full bg-[var(--color-bg)] text-[var(--color-text)]">
+    <div className="flex flex-col h-full bg-[var(--color-bg)] text-[var(--color-text)]">
+      {/* 可拖拽顶栏 */}
+      <div
+        className="h-11 flex items-center px-3 border-b border-[var(--color-border)] cursor-grab active:cursor-grabbing shrink-0"
+        onMouseDown={onMouseDown}
+      >
+        <h1 className="text-xs font-semibold text-[var(--color-text-secondary)]">
+          管理中心
+        </h1>
+      </div>
+
+      <div className="flex flex-1 overflow-hidden">
       {/* Sidebar */}
       <div className="w-[160px] border-r border-[var(--color-border)] flex flex-col pt-3 shrink-0">
-        <div className="px-3 mb-4">
-          <h1 className="text-xs font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
-            管理中心
-          </h1>
-        </div>
-
         <nav className="flex-1 px-1.5 space-y-4 overflow-y-auto">
           {groups.map((group) => (
             <div key={group}>
@@ -140,6 +147,7 @@ export default function ManagementCenter({ onBack }: MToolsPluginProps) {
             <PlaceholderTab title="全局快捷键设置" />
           )}
         </div>
+      </div>
       </div>
     </div>
   );

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import { AIConfig, ChatMessage } from "@/core/ai/types";
 import { handleError } from "@/core/errors";
+import { getRoutedConfig } from "@/core/ai/router";
 
 export function useAiCompletion(onAccept?: (text: string) => void) {
   const [completion, setCompletion] = useState("");
@@ -46,7 +47,7 @@ Continuation:`;
 
       const result = await invoke<string>("ai_chat", {
         messages,
-        config: completionConfig,
+        config: getRoutedConfig(completionConfig),
       });
 
       if (!controller.signal.aborted && result) {

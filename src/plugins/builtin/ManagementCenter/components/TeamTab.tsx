@@ -584,13 +584,36 @@ function AIConfigSection({
     }
   };
 
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
   const handleDelete = async (configId: string) => {
-    if (!confirm("确定要删除此配置吗？")) return;
+    if (deletingId === configId) {
+      try {
+        await api.delete(`/teams/${team.id}/ai-config/${configId}`);
+        setConfigs(configs.filter((c) => c.id !== configId));
+      } catch (err) {
+        handleError(err, { context: "删除团队 AI 配置" });
+      } finally {
+        setDeletingId(null);
+      }
+    } else {
+      setDeletingId(configId);
+      setTimeout(() => setDeletingId((prev) => (prev === configId ? null : prev)), 3000);
+    }
+  };
+
+  const handleToggleActive = async (configId: string, currentActive: boolean) => {
     try {
-      await api.delete(`/teams/${team.id}/ai-config/${configId}`);
-      setConfigs(configs.filter((c) => c.id !== configId));
+      await api.patch(`/teams/${team.id}/ai-config/${configId}`, {
+        is_active: !currentActive,
+      });
+      setConfigs(
+        configs.map((c) =>
+          c.id === configId ? { ...c, is_active: !currentActive } : c,
+        ),
+      );
     } catch (err) {
-      handleError(err, { context: "删除团队 AI 配置" });
+      handleError(err, { context: "切换 AI 配置状态" });
     }
   };
 
@@ -645,11 +668,31 @@ function AIConfigSection({
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
-                  <span
-                    className={`text-[10px] px-2 py-0.5 rounded-full ${c.is_active ? "bg-emerald-500/10 text-emerald-500" : "bg-gray-500/10 text-gray-500"}`}
-                  >
-                    {c.is_active ? "已启用" : "已禁用"}
-                  </span>
+                  {isOwnerOrAdmin ? (
+                    <button
+                      onClick={() => handleToggleActive(c.id, c.is_active)}
+                      className="relative w-8 h-[18px] rounded-full transition-colors shrink-0"
+                      title={c.is_active ? "点击停用" : "点击启用"}
+                      style={{
+                        background: c.is_active
+                          ? "#10b981"
+                          : "var(--color-bg-secondary)",
+                        border: c.is_active
+                          ? "none"
+                          : "1px solid var(--color-border)",
+                      }}
+                    >
+                      <div
+                        className={`absolute top-[2px] w-[14px] h-[14px] rounded-full bg-white shadow transition-transform ${c.is_active ? "translate-x-[15px]" : "translate-x-[2px]"}`}
+                      />
+                    </button>
+                  ) : (
+                    <span
+                      className={`text-[10px] px-2 py-0.5 rounded-full ${c.is_active ? "bg-emerald-500/10 text-emerald-500" : "bg-gray-500/10 text-gray-500"}`}
+                    >
+                      {c.is_active ? "已启用" : "已禁用"}
+                    </span>
+                  )}
                   {isOwnerOrAdmin && (
                     <>
                       <button
@@ -661,9 +704,14 @@ function AIConfigSection({
                       </button>
                       <button
                         onClick={() => handleDelete(c.id)}
-                        className="p-1 text-[var(--color-text-secondary)] hover:text-red-500 transition-colors"
+                        className={`p-1 transition-colors ${deletingId === c.id ? "text-red-500" : "text-[var(--color-text-secondary)] hover:text-red-500"}`}
+                        title={deletingId === c.id ? "再次点击确认删除" : "删除"}
                       >
-                        <Trash2 className="w-3.5 h-3.5" />
+                        {deletingId === c.id ? (
+                          <span className="text-xs font-medium">确认?</span>
+                        ) : (
+                          <Trash2 className="w-3.5 h-3.5" />
+                        )}
                       </button>
                     </>
                   )}
@@ -679,7 +727,7 @@ function AIConfigSection({
               {form.id ? "编辑配置" : "添加新配置"}
             </h4>
             <div className="grid grid-cols-2 gap-2">
-              <input
+              {/* <input
                 type="text"
                 placeholder="配置别名 (如 核心 Key)"
                 value={form.config_name}
@@ -687,7 +735,7 @@ function AIConfigSection({
                   setForm({ ...form, config_name: e.target.value })
                 }
                 className="bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-1.5 px-2.5 text-xs outline-none focus:ring-2 focus:ring-[#F28F36]/20"
-              />
+              /> */}
               <select
                 value={form.protocol}
                 onChange={(e) => {
@@ -710,7 +758,7 @@ function AIConfigSection({
             <div className="grid grid-cols-1 gap-2">
               <input
                 type="text"
-                placeholder="限定模型名称 (如 claude-3-5-sonnet，留空代表全型号可用)"
+                placeholder="限定模型名称 (如 claude-3-5-sonnet)"
                 value={form.model_name}
                 onChange={(e) =>
                   setForm({ ...form, model_name: e.target.value })

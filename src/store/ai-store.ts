@@ -29,6 +29,7 @@ import type {
   Conversation,
   AIConfig,
   PendingToolConfirm,
+  OwnKeyModelConfig,
 } from "@/core/ai/types";
 
 export type {
@@ -37,6 +38,7 @@ export type {
   Conversation,
   AIConfig,
   PendingToolConfirm,
+  OwnKeyModelConfig,
 };
 
 interface AIState {
@@ -47,9 +49,19 @@ interface AIState {
   historyLoaded: boolean;
   pendingToolConfirm: PendingToolConfirm | null;
 
+  /** 自有 Key 模型列表 */
+  ownKeys: OwnKeyModelConfig[];
+
   setConfig: (config: AIConfig) => void;
   loadConfig: () => Promise<void>;
   saveConfig: (config: AIConfig) => Promise<void>;
+
+  /** 加载自有 Key 列表（含存量迁移） */
+  loadOwnKeys: () => Promise<void>;
+  /** 保存自有 Key 列表 */
+  saveOwnKeys: (keys: OwnKeyModelConfig[]) => Promise<void>;
+  /** 选中某个自有 Key 模型，将其配置写入 config */
+  selectOwnKeyModel: (id: string) => void;
 
   createConversation: () => string;
   getCurrentConversation: () => Conversation | null;
@@ -89,6 +101,7 @@ export const useAIStore = create<AIState>((set, get) => ({
   isStreaming: false,
   historyLoaded: false,
   pendingToolConfirm: null,
+  ownKeys: [],
 
   setConfig: (config) => set({ config }),
 
@@ -108,6 +121,71 @@ export const useAIStore = create<AIState>((set, get) => ({
     } catch (e) {
       handleError(e, { context: "保存 AI 配置" });
     }
+  },
+
+  loadOwnKeys: async () => {
+    try {
+      let keys = await invoke<OwnKeyModelConfig[]>("ai_get_own_keys");
+
+      // 存量迁移：如果 ownKeys 为空但 ai_config 有 api_key，自动创建第一条
+      if (keys.length === 0) {
+        const { config } = get();
+        if (config.api_key && config.source !== "team" && config.source !== "platform") {
+          const migrated: OwnKeyModelConfig = {
+            id: generateChatId(),
+            name: config.model || "Default",
+            protocol: (config.protocol as "openai" | "anthropic") || "openai",
+            base_url: config.base_url || DEFAULT_AI_BASE_URL,
+            api_key: config.api_key,
+            model: config.model || DEFAULT_AI_MODEL,
+            temperature: config.temperature ?? DEFAULT_AI_TEMPERATURE,
+            max_tokens: config.max_tokens ?? null,
+          };
+          keys = [migrated];
+          await invoke("ai_set_own_keys", { keys });
+          // 将 active_own_key_id 指向迁移的 key
+          const newConfig = { ...config, active_own_key_id: migrated.id };
+          await invoke("ai_set_config", { config: newConfig });
+          set({ config: newConfig });
+        }
+      }
+
+      set({ ownKeys: keys });
+    } catch (e) {
+      handleError(e, { context: "加载自有 Key 列表", silent: true });
+    }
+  },
+
+  saveOwnKeys: async (keys) => {
+    try {
+      await invoke("ai_set_own_keys", { keys });
+      set({ ownKeys: keys });
+    } catch (e) {
+      handleError(e, { context: "保存自有 Key 列表" });
+    }
+  },
+
+  selectOwnKeyModel: (id) => {
+    const { ownKeys, config } = get();
+    const key = ownKeys.find((k) => k.id === id);
+    if (!key) return;
+
+    const newConfig: AIConfig = {
+      ...config,
+      source: "own_key",
+      protocol: key.protocol,
+      base_url: key.base_url,
+      api_key: key.api_key,
+      model: key.model,
+      temperature: key.temperature,
+      max_tokens: key.max_tokens,
+      active_own_key_id: id,
+    };
+
+    set({ config: newConfig });
+    invoke("ai_set_config", { config: newConfig }).catch((e) =>
+      handleError(e, { context: "保存 AI 配置" }),
+    );
   },
 
   loadHistory: async () => {
