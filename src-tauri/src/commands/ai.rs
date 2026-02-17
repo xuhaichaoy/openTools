@@ -1275,16 +1275,28 @@ async fn anthropic_stream_loop(
 
         if !response.status().is_success() {
             let status = response.status();
+            let status_code = status.as_u16();
             let body = response.text().await.unwrap_or_default();
-            log::error!("[anthropic_stream] {} → HTTP {} body={}", url, status, &body[..body.len().min(200)]);
+            let error_detail = if body.is_empty() {
+                format!("HTTP {} (无响应体)", status_code)
+            } else {
+                // 尝试提取 Anthropic JSON 错误中的 message 字段
+                let readable = serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|v| v["error"]["message"].as_str().map(|s| s.to_string()))
+                    .unwrap_or_else(|| body[..body.len().min(300)].to_string());
+                format!("HTTP {} — {}", status_code, readable)
+            };
+            log::error!("[anthropic_stream] {} → {}", url, error_detail);
+            let error_msg = format!("Anthropic API 错误: {}", error_detail);
             let _ = app.emit(
                 "ai-stream-error",
                 serde_json::json!({
                     "conversation_id": conversation_id,
-                    "error": format!("Anthropic API 错误: {}", body),
+                    "error": &error_msg,
                 }),
             );
-            return Err(format!("Anthropic API 错误: {}", body));
+            return Err(error_msg);
         }
 
         use futures_util::StreamExt;
@@ -1531,39 +1543,111 @@ pub async fn ai_chat(
     config: AIConfig,
 ) -> Result<String, String> {
     let client = reqwest::Client::new();
+    let protocol = config.protocol.as_deref().unwrap_or("openai");
+    let is_team = config.source.as_deref() == Some("team") || config.source.as_deref() == Some("platform");
 
-    let mut request = build_api_request(
-        &config.model, &messages, config.temperature, config.max_tokens, &[], false,
-    );
+    if protocol == "anthropic" {
+        // ── Anthropic Messages API ──
+        // 提取 system prompt（从 messages 中的 system 角色消息）
+        let system_prompt: String = messages
+            .iter()
+            .filter(|m| m.role == "system")
+            .filter_map(|m| m.content.as_deref())
+            .collect::<Vec<_>>()
+            .join("\n");
 
-    // 团队模式：注入 team_id 到请求体
-    if let Some(ref tid) = config.team_id {
-        request["team_id"] = serde_json::json!(tid);
+        let request = build_anthropic_request(
+            &config.model,
+            &messages,
+            &system_prompt,
+            config.temperature,
+            config.max_tokens,
+            &[],   // 非流式不传工具
+            false,  // stream = false
+        );
+
+        let url = format!("{}/v1/messages", config.base_url);
+        let mut req_builder = client
+            .post(&url)
+            .header("x-api-key", &config.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("Content-Type", "application/json");
+        if is_team {
+            req_builder = req_builder.header("Authorization", format!("Bearer {}", config.api_key));
+        }
+
+        // 团队模式：注入 team_id 到请求体
+        let final_request = if let Some(ref tid) = config.team_id {
+            let mut r = request.clone();
+            r["team_id"] = serde_json::json!(tid);
+            r
+        } else {
+            request
+        };
+
+        let response = req_builder
+            .json(&final_request)
+            .send()
+            .await
+            .map_err(|e| format!("请求失败: {}", e))?;
+
+        let status = response.status();
+        let body = response.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+
+        if !status.is_success() {
+            return Err(format!("Anthropic API 错误 (HTTP {}): {}", status.as_u16(), body));
+        }
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body).map_err(|e| format!("解析响应失败: {}", e))?;
+
+        // Anthropic 响应格式：content[].text
+        if let Some(content_arr) = parsed["content"].as_array() {
+            let text_parts: Vec<&str> = content_arr
+                .iter()
+                .filter(|block| block["type"].as_str() == Some("text"))
+                .filter_map(|block| block["text"].as_str())
+                .collect();
+            if !text_parts.is_empty() {
+                return Ok(text_parts.join(""));
+            }
+        }
+        Err("Anthropic 无回复内容".to_string())
+    } else {
+        // ── OpenAI 协议（默认） ──
+        let mut request = build_api_request(
+            &config.model, &messages, config.temperature, config.max_tokens, &[], false,
+        );
+
+        // 团队模式：注入 team_id 到请求体
+        if let Some(ref tid) = config.team_id {
+            request["team_id"] = serde_json::json!(tid);
+        }
+
+        let response = client
+            .post(format!("{}/chat/completions", config.base_url))
+            .header("Authorization", format!("Bearer {}", config.api_key))
+            .header("Content-Type", "application/json")
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| format!("请求失败: {}", e))?;
+
+        let status = response.status();
+        let body = response.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+
+        if !status.is_success() {
+            return Err(format!("API 错误 (HTTP {}): {}", status.as_u16(), body));
+        }
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body).map_err(|e| format!("解析响应失败: {}", e))?;
+
+        parsed["choices"][0]["message"]["content"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| "无回复内容".to_string())
     }
-
-    let response = client
-        .post(format!("{}/chat/completions", config.base_url))
-        .header("Authorization", format!("Bearer {}", config.api_key))
-        .header("Content-Type", "application/json")
-        .json(&request)
-        .send()
-        .await
-        .map_err(|e| format!("请求失败: {}", e))?;
-
-    let status = response.status();
-    let body = response.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
-
-    if !status.is_success() {
-        return Err(format!("API 错误 ({}): {}", status, body));
-    }
-
-    let parsed: serde_json::Value =
-        serde_json::from_str(&body).map_err(|e| format!("解析响应失败: {}", e))?;
-
-    parsed["choices"][0]["message"]["content"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| "无回复内容".to_string())
 }
 
 /// 流式 AI 对话（支持 Function Calling + 多轮工具调用）
