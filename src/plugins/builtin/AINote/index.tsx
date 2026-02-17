@@ -21,6 +21,7 @@ import {
   emitPluginEvent,
   PluginEventTypes,
 } from "@/core/plugin-system/event-bus";
+import { handleError } from "@/core/errors";
 import type { MToolsAI } from "@/core/plugin-system/plugin-interface";
 
 interface AINotePluginProps {
@@ -47,7 +48,7 @@ const AINotePlugin: React.FC<AINotePluginProps> = ({ onBack, ai }) => {
         const all = await marksDb.getAll();
         setMarks(all.filter((m) => !m.archived));
       } catch (e) {
-        console.error("Failed to load marks:", e);
+        handleError(e, { context: "加载 AI 笔记录入内容" });
       } finally {
         setLoading(false);
       }
@@ -133,7 +134,7 @@ const AINotePlugin: React.FC<AINotePluginProps> = ({ onBack, ai }) => {
         await marksDb.update(id, { usedInNote: true });
       }
     } catch (e) {
-      console.error("Save failed:", e);
+      handleError(e, { context: "保存 AI 笔记到文件" });
     }
   }, [generatedNote, selectedIds]);
 

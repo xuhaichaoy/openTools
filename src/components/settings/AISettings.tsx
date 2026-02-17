@@ -125,6 +125,21 @@ export function AISettings() {
 
           <label className="flex items-center justify-between cursor-pointer mt-3">
             <div className="flex-1 pr-3">
+              <span className="text-xs text-[var(--color-text)]">本机原生应用工具</span>
+              <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
+                开启后 AI 可调用日历、提醒事项、备忘录、邮件、快捷指令、打开应用等本机能力。
+              </p>
+            </div>
+            <input
+              type="checkbox"
+              className="w-4 h-4 rounded accent-indigo-500"
+              checked={form.enable_native_tools}
+              onChange={(e) => setForm({ ...form, enable_native_tools: e.target.checked })}
+            />
+          </label>
+
+          <label className="flex items-center justify-between cursor-pointer mt-3">
+            <div className="flex-1 pr-3">
               <span className="text-xs text-[var(--color-text)]">对话时自动检索知识库</span>
               <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
                 开启后，每次对话会自动从 RAG 知识库中检索相关内容并注入上下文，提升回答准确性。

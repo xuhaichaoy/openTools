@@ -1,34 +1,22 @@
 /**
- * 数据库层 — 基于 Tauri Store 的轻量级持久化
+ * 数据库层 — 基于 Rust Collection 命令的轻量级持久化
  *
  * 为不需要 SQLite 的场景提供 JSON 文件存储，
  * 同时为 Marks、Tags 等结构化数据提供统一的 CRUD 接口。
  *
- * 使用 tauri-plugin-fs 进行文件读写，数据以 JSON 格式存储在 AppData 目录。
+ * 所有文件 I/O 统一通过 Rust invoke() 完成，Rust 侧使用 RwLock 避免并发冲突。
  */
 
-import {
-  readTextFile,
-  writeTextFile,
-  mkdir,
-  exists,
-} from "@tauri-apps/plugin-fs";
-import { BaseDirectory } from "@tauri-apps/plugin-fs";
-
-const DB_DIR = "mtools-db";
-
-/** 确保数据库目录存在 */
-async function ensureDbDir(): Promise<void> {
-  if (!(await exists(DB_DIR, { baseDir: BaseDirectory.AppData }))) {
-    await mkdir(DB_DIR, { baseDir: BaseDirectory.AppData, recursive: true });
-  }
-}
+import { invoke } from "@tauri-apps/api/core";
+import { handleError } from "@/core/errors";
 
 /** 同步元数据接口 — 可选，由 SyncableCollection 使用 */
 export interface SyncMeta {
   _version?: number;
   _dirty?: boolean;
   _syncedAt?: number;
+  /** 软删除标记（SyncableCollection.softDelete 使用） */
+  deleted?: boolean;
 }
 
 /** 通用 JSON 集合存储 */
@@ -40,35 +28,28 @@ export class JsonCollection<T extends { id: string }> {
     this.name = name;
   }
 
-  private get filePath(): string {
-    return `${DB_DIR}/${this.name}.json`;
-  }
-
   /** 加载所有数据 */
   async getAll(): Promise<T[]> {
     if (this.cache) return this.cache;
-    await ensureDbDir();
     try {
-      const raw = await readTextFile(this.filePath, {
-        baseDir: BaseDirectory.AppData,
-      });
+      const raw = await invoke<string>("collection_get_all", { name: this.name });
       this.cache = JSON.parse(raw) as T[];
       return this.cache;
     } catch (e) {
-      console.error(`[JsonCollection] Failed to load ${this.name}:`, e);
+      handleError(e, { context: `加载数据集 ${this.name}`, silent: true });
       this.cache = [];
       return [];
     }
   }
 
-  /** 保存所有数据 */
+  /** 保存所有数据（内部使用，覆盖整个集合） */
   private async saveAll(items: T[]): Promise<void> {
-    await ensureDbDir();
     this.cache = items;
-    await writeTextFile(this.filePath, JSON.stringify(items, null, 2), {
-      baseDir: BaseDirectory.AppData,
+    await invoke("collection_set_all", {
+      name: this.name,
+      items: JSON.stringify(items),
     }).catch((e) =>
-      console.error(`[JsonCollection] Failed to save ${this.name}:`, e),
+      handleError(e, { context: `保存数据集 ${this.name}` }),
     );
   }
 
@@ -80,30 +61,76 @@ export class JsonCollection<T extends { id: string }> {
 
   /** 新增一条 */
   async create(item: T): Promise<T> {
-    const all = await this.getAll();
-    all.unshift(item); // 新增的放最前
-    await this.saveAll(all);
+    try {
+      await invoke("collection_create", {
+        name: this.name,
+        item: JSON.stringify(item),
+      });
+      // 更新缓存（插入头部，与 Rust 行为一致）
+      if (this.cache) {
+        this.cache.unshift(item);
+      } else {
+        this.cache = [item];
+      }
+    } catch (e) {
+      handleError(e, { context: `创建数据 ${this.name}` });
+      // 回退到全量写入
+      const all = await this.getAll();
+      all.unshift(item);
+      await this.saveAll(all);
+    }
     return item;
   }
 
   /** 更新一条 */
   async update(id: string, partial: Partial<T>): Promise<T | undefined> {
-    const all = await this.getAll();
-    const idx = all.findIndex((item) => item.id === id);
-    if (idx === -1) return undefined;
-    all[idx] = { ...all[idx], ...partial };
-    await this.saveAll(all);
-    return all[idx];
+    try {
+      const raw = await invoke<string>("collection_update", {
+        name: this.name,
+        id,
+        partial: JSON.stringify(partial),
+      });
+      const updated = JSON.parse(raw) as T;
+      // 更新缓存
+      if (this.cache) {
+        const idx = this.cache.findIndex((item) => item.id === id);
+        if (idx !== -1) this.cache[idx] = updated;
+      }
+      return updated;
+    } catch (e) {
+      handleError(e, { context: `更新数据 ${this.name}` });
+      // 回退到缓存内操作 + 全量写入
+      const all = await this.getAll();
+      const idx = all.findIndex((item) => item.id === id);
+      if (idx === -1) return undefined;
+      all[idx] = { ...all[idx], ...partial };
+      await this.saveAll(all);
+      return all[idx];
+    }
   }
 
   /** 删除一条 */
   async delete(id: string): Promise<boolean> {
-    const all = await this.getAll();
-    const idx = all.findIndex((item) => item.id === id);
-    if (idx === -1) return false;
-    all.splice(idx, 1);
-    await this.saveAll(all);
-    return true;
+    try {
+      const deleted = await invoke<boolean>("collection_delete", {
+        name: this.name,
+        id,
+      });
+      // 更新缓存
+      if (deleted && this.cache) {
+        this.cache = this.cache.filter((item) => item.id !== id);
+      }
+      return deleted;
+    } catch (e) {
+      handleError(e, { context: `删除数据 ${this.name}` });
+      // 回退
+      const all = await this.getAll();
+      const idx = all.findIndex((item) => item.id === id);
+      if (idx === -1) return false;
+      all.splice(idx, 1);
+      await this.saveAll(all);
+      return true;
+    }
   }
 
   /** 批量删除 */
@@ -179,7 +206,7 @@ export class SyncableCollection<
       deleted: true,
       _version: Date.now(),
       _dirty: true,
-    } as unknown as Partial<T>);
+    } as Partial<T>);
   }
 
   /** 获取所有 dirty 条目（待推送） */

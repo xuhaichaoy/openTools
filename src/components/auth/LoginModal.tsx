@@ -3,15 +3,19 @@ import { X, Phone, Mail, Github, Chrome, Loader2 } from "lucide-react";
 import { api } from "@/core/api/client";
 import { useAuthStore } from "@/store/auth-store";
 
+const BRAND = "#F28F36";
+
 export function LoginModal() {
   const [isOpen, setIsOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<"phone" | "email">("phone");
+  const [isRegistering, setIsRegistering] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
 
   // Form states
   const [phone, setPhone] = useState("");
   const [code, setCode] = useState("");
   const [email, setEmail] = useState("");
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
 
   const [countdown, setCountdown] = useState(0);
@@ -51,13 +55,21 @@ export function LoginModal() {
       if (activeTab === "phone") {
         res = await api.post("/auth/sms/verify", { phone, code });
       } else {
-        res = await api.post("/auth/email/login", { email, password });
+        if (isRegistering) {
+          res = await api.post("/auth/email/register", {
+            email,
+            password,
+            username: username || undefined,
+          });
+        } else {
+          res = await api.post("/auth/email/login", { email, password });
+        }
       }
 
       login(res.user, res.access_token, res.refresh_token);
       setIsOpen(false);
     } catch (err: any) {
-      setErrorMsg(err.message || "登录失败");
+      setErrorMsg(err.message || (isRegistering ? "注册失败" : "登录失败"));
     } finally {
       setIsLoading(false);
     }
@@ -71,13 +83,13 @@ export function LoginModal() {
       onClick={() => setIsOpen(false)}
     >
       <div
-        className="bg-[var(--color-bg)] w-[400px] rounded-2xl shadow-2xl border border-[var(--color-border)] overflow-hidden animate-in zoom-in-95 duration-200"
+        className="bg-[var(--color-bg)] w-[380px] rounded-2xl shadow-2xl border border-[var(--color-border)] overflow-hidden animate-in zoom-in-95 duration-200"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-border)]">
-          <h2 className="text-xl font-bold text-[var(--color-text)]">
-            登录 / 注册
+        <div className="flex items-center justify-between px-5 py-3 border-b border-[var(--color-border)]">
+          <h2 className="text-lg font-bold text-[var(--color-text)]">
+            {isRegistering ? "创建账号" : "登录 / 注册"}
           </h2>
           <button
             onClick={() => setIsOpen(false)}
@@ -88,37 +100,41 @@ export function LoginModal() {
         </div>
 
         {/* Tabs */}
-        <div className="flex p-1 gap-1 bg-[var(--color-bg-secondary)] mx-6 mt-6 rounded-lg">
-          <button
-            onClick={() => setActiveTab("phone")}
-            className={`flex-1 flex items-center justify-center gap-2 py-2 text-sm font-medium rounded-md transition-all ${
-              activeTab === "phone"
-                ? "bg-[var(--color-bg)] text-[var(--color-text)] shadow-sm"
-                : "text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
-            }`}
-          >
-            <Phone className="w-4 h-4" />
-            手机号
-          </button>
-          <button
-            onClick={() => setActiveTab("email")}
-            className={`flex-1 flex items-center justify-center gap-2 py-2 text-sm font-medium rounded-md transition-all ${
-              activeTab === "email"
-                ? "bg-[var(--color-bg)] text-[var(--color-text)] shadow-sm"
-                : "text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
-            }`}
-          >
-            <Mail className="w-4 h-4" />
-            邮箱
-          </button>
-        </div>
+        {!isRegistering && (
+          <div className="flex p-1 gap-1 bg-[var(--color-bg-secondary)] mx-5 mt-4 rounded-lg">
+            <button
+              onClick={() => setActiveTab("phone")}
+              className={`flex-1 flex items-center justify-center gap-2 py-1.5 text-xs font-medium rounded-md transition-all ${
+                activeTab === "phone"
+                  ? "bg-[var(--color-bg)] text-[var(--color-text)] shadow-sm"
+                  : "text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+              }`}
+              style={activeTab === "phone" ? { color: BRAND } : {}}
+            >
+              <Phone className="w-3.5 h-4" />
+              手机号
+            </button>
+            <button
+              onClick={() => setActiveTab("email")}
+              className={`flex-1 flex items-center justify-center gap-2 py-1.5 text-xs font-medium rounded-md transition-all ${
+                activeTab === "email"
+                  ? "bg-[var(--color-bg)] text-[var(--color-text)] shadow-sm"
+                  : "text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+              }`}
+              style={activeTab === "email" ? { color: BRAND } : {}}
+            >
+              <Mail className="w-3.5 h-4" />
+              邮箱
+            </button>
+          </div>
+        )}
 
         {/* Form Content */}
-        <div className="p-6">
+        <div className="p-5">
           {activeTab === "phone" ? (
-            <div className="space-y-4">
-              <div className="space-y-2">
-                <label className="text-xs font-medium text-[var(--color-text-secondary)] uppercase">
+            <div className="space-y-3">
+              <div className="space-y-1.5">
+                <label className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
                   手机号
                 </label>
                 <div className="relative">
@@ -130,12 +146,18 @@ export function LoginModal() {
                     value={phone}
                     onChange={(e) => setPhone(e.target.value)}
                     placeholder="请输入手机号"
-                    className="w-full bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-2 pl-14 pr-4 outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all text-sm"
+                    className="w-full bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-2 pl-14 pr-4 outline-none focus:ring-2 transition-all text-sm"
+                    style={
+                      {
+                        "--tw-ring-color": `${BRAND}20`,
+                        focusBorderColor: BRAND,
+                      } as any
+                    }
                   />
                 </div>
               </div>
-              <div className="space-y-2">
-                <label className="text-xs font-medium text-[var(--color-text-secondary)] uppercase">
+              <div className="space-y-1.5">
+                <label className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
                   验证码
                 </label>
                 <div className="flex gap-2">
@@ -144,12 +166,14 @@ export function LoginModal() {
                     value={code}
                     onChange={(e) => setCode(e.target.value)}
                     placeholder="6 位验证码"
-                    className="flex-1 bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-2 px-4 outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all text-sm"
+                    className="flex-1 bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-2 px-4 outline-none focus:ring-2 transition-all text-sm"
+                    style={{ "--tw-ring-color": `${BRAND}20` } as any}
                   />
                   <button
                     onClick={handleSendCode}
                     disabled={countdown > 0 || !phone}
-                    className="px-4 py-2 bg-indigo-500 hover:bg-indigo-600 text-white text-xs font-medium rounded-lg transition-colors whitespace-nowrap disabled:opacity-50 min-w-[90px]"
+                    className="px-3 py-2 text-white text-xs font-medium rounded-lg transition-colors whitespace-nowrap disabled:opacity-50 min-w-[85px]"
+                    style={{ backgroundColor: BRAND }}
                   >
                     {countdown > 0 ? `${countdown}s` : "获取验证码"}
                   </button>
@@ -157,9 +181,24 @@ export function LoginModal() {
               </div>
             </div>
           ) : (
-            <div className="space-y-4">
-              <div className="space-y-2">
-                <label className="text-xs font-medium text-[var(--color-text-secondary)] uppercase">
+            <div className="space-y-3">
+              {isRegistering && (
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
+                    昵称
+                  </label>
+                  <input
+                    type="text"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    placeholder="你的昵称"
+                    className="w-full bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-2 px-4 outline-none focus:ring-2 transition-all text-sm"
+                    style={{ "--tw-ring-color": `${BRAND}20` } as any}
+                  />
+                </div>
+              )}
+              <div className="space-y-1.5">
+                <label className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
                   邮箱地址
                 </label>
                 <input
@@ -167,11 +206,12 @@ export function LoginModal() {
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="name@example.com"
-                  className="w-full bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-2 px-4 outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all text-sm"
+                  className="w-full bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-2 px-4 outline-none focus:ring-2 transition-all text-sm"
+                  style={{ "--tw-ring-color": `${BRAND}20` } as any}
                 />
               </div>
-              <div className="space-y-2">
-                <label className="text-xs font-medium text-[var(--color-text-secondary)] uppercase">
+              <div className="space-y-1.5">
+                <label className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
                   密码
                 </label>
                 <input
@@ -179,15 +219,30 @@ export function LoginModal() {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="输入密码"
-                  className="w-full bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-2 px-4 outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all text-sm"
+                  className="w-full bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-2 px-4 outline-none focus:ring-2 transition-all text-sm"
+                  style={{ "--tw-ring-color": `${BRAND}20` } as any}
                 />
+              </div>
+
+              <div className="flex justify-end">
+                <button
+                  onClick={() => setIsRegistering(!isRegistering)}
+                  className="text-[10px] font-medium transition-colors"
+                  style={{ color: BRAND }}
+                >
+                  {isRegistering ? "已有账号？去登录" : "没有账号？去注册"}
+                </button>
               </div>
             </div>
           )}
 
           {errorMsg && (
-            <div className="mt-3 text-xs text-red-500 bg-red-500/10 rounded-lg px-3 py-2">
-              {errorMsg}
+            <div className="mt-2 text-xs text-red-500 bg-red-500/10 rounded-lg px-3 py-1.5">
+              {errorMsg === "Unauthorized" &&
+              activeTab === "email" &&
+              !isRegistering
+                ? "账号或密码错误，请注册新账号"
+                : errorMsg}
             </div>
           )}
 
@@ -197,16 +252,24 @@ export function LoginModal() {
               isLoading ||
               (activeTab === "phone" ? !phone || !code : !email || !password)
             }
-            className="w-full mt-6 bg-indigo-500 hover:bg-indigo-600 text-white font-bold py-3 rounded-lg shadow-lg shadow-indigo-500/20 transition-all transform active:scale-[0.98] flex items-center justify-center gap-2"
+            className="w-full mt-4 text-white font-bold py-2.5 rounded-lg shadow-lg transition-all transform active:scale-[0.98] flex items-center justify-center gap-2 text-sm"
+            style={{
+              backgroundColor: BRAND,
+              boxShadow: `${BRAND}33 0px 8px 16px`,
+            }}
           >
             {isLoading && <Loader2 className="w-4 h-4 animate-spin" />}
-            {activeTab === "phone" ? "进入 51ToolBox" : "登录"}
+            {isRegistering
+              ? "立即注册"
+              : activeTab === "phone"
+                ? "进入 51ToolBox"
+                : "登录"}
           </button>
         </div>
 
         {/* OAuth Section */}
-        <div className="px-6 pb-8">
-          <div className="relative flex items-center gap-4 py-2">
+        <div className="px-5 pb-6">
+          <div className="relative flex items-center gap-4 py-1">
             <div className="flex-1 h-px bg-[var(--color-border)]"></div>
             <span className="text-[10px] text-[var(--color-text-secondary)] uppercase font-bold tracking-wider">
               其他登录方式
@@ -214,12 +277,12 @@ export function LoginModal() {
             <div className="flex-1 h-px bg-[var(--color-border)]"></div>
           </div>
 
-          <div className="flex justify-center gap-4 mt-4">
-            <button className="p-3 rounded-full bg-[var(--color-bg-secondary)] border border-[var(--color-border)] hover:bg-[var(--color-bg-tertiary)] transition-colors group">
-              <Github className="w-5 h-5 text-[var(--color-text)] group-hover:scale-110 transition-transform" />
+          <div className="flex justify-center gap-3 mt-3">
+            <button className="p-2.5 rounded-full bg-[var(--color-bg-secondary)] border border-[var(--color-border)] hover:bg-[var(--color-bg-tertiary)] transition-colors group">
+              <Github className="w-4 h-4 text-[var(--color-text)] group-hover:scale-110 transition-transform" />
             </button>
-            <button className="p-3 rounded-full bg-[var(--color-bg-secondary)] border border-[var(--color-border)] hover:bg-[var(--color-bg-tertiary)] transition-colors group">
-              <Chrome className="w-5 h-5 text-[var(--color-text)] group-hover:scale-110 transition-transform" />
+            <button className="p-2.5 rounded-full bg-[var(--color-bg-secondary)] border border-[var(--color-border)] hover:bg-[var(--color-bg-tertiary)] transition-colors group">
+              <Chrome className="w-4 h-4 text-[var(--color-text)] group-hover:scale-110 transition-transform" />
             </button>
           </div>
         </div>

@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import type { AgentStep } from "@/plugins/builtin/SmartAgent/core/react-agent";
+import { handleError } from "@/core/errors";
 import {
   MAX_CONVERSATIONS,
   PERSIST_DEBOUNCE_MS,
@@ -117,7 +118,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         set({ historyLoaded: true });
       }
     } catch (e) {
-      console.error("加载 Agent 历史失败:", e);
+      handleError(e, { context: "加载Agent历史" });
       set({ historyLoaded: true });
     }
   },
@@ -141,7 +142,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       _lastPersistedHash = hash;
       await invoke("save_agent_history", { sessions: json });
     } catch (e) {
-      console.error("保存 Agent 历史失败:", e);
+      handleError(e, { context: "保存Agent历史", silent: true });
     }
   },
 

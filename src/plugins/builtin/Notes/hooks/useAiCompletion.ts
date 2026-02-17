@@ -2,6 +2,7 @@ import { useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 import { AIConfig, ChatMessage } from "@/core/ai/types";
+import { handleError } from "@/core/errors";
 
 export function useAiCompletion(onAccept?: (text: string) => void) {
   const [completion, setCompletion] = useState("");
@@ -61,7 +62,7 @@ Continuation:`;
         }
       }
     } catch (error) {
-      console.error("AI Completion failed:", error);
+      handleError(error, { context: "AI 续写" });
     } finally {
       if (abortControllerRef.current === controller) {
         setIsLoading(false);

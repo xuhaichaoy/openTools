@@ -1,0 +1,340 @@
+/**
+ * AIChatService — AI 对话流式监听与消息处理逻辑
+ *
+ * 从 ai-store 中抽取：
+ * - 6 个事件监听器的注册/清理
+ * - 消息裁剪逻辑（regenerate / editAndResend）
+ * - 防抖持久化
+ * - 流式请求发起
+ */
+
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import {
+  MAX_CONVERSATIONS,
+  MAX_MESSAGES_PER_CONVERSATION,
+  PERSIST_DEBOUNCE_MS,
+} from "@/core/constants";
+import { useAuthStore } from "@/store/auth-store";
+import { routeAIRequest } from "@/core/ai/router";
+import { handleError } from "@/core/errors";
+import type {
+  ToolCallInfo,
+  ChatMessage,
+  Conversation,
+  AIConfig,
+  PendingToolConfirm,
+} from "@/core/ai/types";
+
+// ── 类型 ──
+
+export interface StreamCallbacks {
+  /** 更新当前 assistant 消息 */
+  updateAssistant: (updater: (m: ChatMessage) => ChatMessage) => void;
+  /** 设置 Store 状态 */
+  setState: (partial: {
+    isStreaming?: boolean;
+    pendingToolConfirm?: PendingToolConfirm | null;
+  }) => void;
+  /** 触发防抖持久化 */
+  onPersist: () => void;
+}
+
+// ── ID 生成器 ──
+
+export function generateChatId(): string {
+  return Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
+}
+
+// ── 防抖持久化 ──
+
+let _persistTimer: ReturnType<typeof setTimeout> | null = null;
+let _lastPersistedHash = "";
+
+export function debouncedPersist(persistFn: () => void) {
+  if (_persistTimer) clearTimeout(_persistTimer);
+  _persistTimer = setTimeout(() => {
+    _persistTimer = null;
+    persistFn();
+  }, PERSIST_DEBOUNCE_MS);
+}
+
+// ── 持久化逻辑 ──
+
+export async function persistConversations(conversations: Conversation[]): Promise<void> {
+  try {
+    const trimmed = conversations
+      .slice(0, MAX_CONVERSATIONS)
+      .map((c) => ({
+        ...c,
+        messages: c.messages.slice(-MAX_MESSAGES_PER_CONVERSATION).map((m) => ({
+          ...m,
+          streaming: false,
+        })),
+      }));
+    const json = JSON.stringify(trimmed);
+    const hash =
+      json.length +
+      ":" +
+      (json.charCodeAt(0) || 0) +
+      ":" +
+      (json.charCodeAt(json.length - 1) || 0);
+    if (hash === _lastPersistedHash && json.length < 100000) {
+      return;
+    }
+    _lastPersistedHash = hash;
+    await invoke("save_chat_history", { conversations: json });
+  } catch (e) {
+    handleError(e, { context: "保存对话历史", silent: true });
+  }
+}
+
+export async function loadConversationHistory(): Promise<Conversation[]> {
+  try {
+    const json = await invoke<string>("load_chat_history");
+    return JSON.parse(json) as Conversation[];
+  } catch (e) {
+    handleError(e, { context: "加载对话历史", silent: true });
+    return [];
+  }
+}
+
+// ── 消息裁剪 ──
+
+/**
+ * 为 regenerate 准备消息列表：移除尾部 assistant 消息和最后一条 user 消息
+ * @returns 裁剪后的消息列表和被移除的 user 消息内容
+ */
+export function prepareRegenerateMessages(
+  messages: ChatMessage[],
+): { keptMessages: ChatMessage[]; lastUserContent: string | null } {
+  const copy = [...messages];
+  while (copy.length > 0 && copy[copy.length - 1].role === "assistant") {
+    copy.pop();
+  }
+  const lastUserMsg =
+    copy.length > 0 && copy[copy.length - 1].role === "user"
+      ? copy.pop()
+      : null;
+  return {
+    keptMessages: copy,
+    lastUserContent: lastUserMsg?.content ?? null,
+  };
+}
+
+/**
+ * 为 editAndResend 准备消息列表：截断到指定消息之前
+ */
+export function prepareEditMessages(
+  messages: ChatMessage[],
+  messageId: string,
+): ChatMessage[] | null {
+  const msgIndex = messages.findIndex((m) => m.id === messageId);
+  if (msgIndex === -1) return null;
+  return messages.slice(0, msgIndex);
+}
+
+// ── <think> 标签过滤器 ──
+
+/**
+ * 流式 chunk 中剥离 `<think>...</think>` 标签及其内容。
+ * 支持跨 chunk 边界的标签匹配。
+ */
+export class ThinkTagFilter {
+  private inThink = false;
+  private buffer = "";
+
+  /** 处理一个 chunk，返回过滤后的可展示文本 */
+  process(chunk: string): string {
+    this.buffer += chunk;
+    let output = "";
+
+    while (this.buffer.length > 0) {
+      if (this.inThink) {
+        const endIdx = this.buffer.indexOf("</think>");
+        if (endIdx !== -1) {
+          this.inThink = false;
+          this.buffer = this.buffer.slice(endIdx + 8); // skip "</think>"
+        } else {
+          // 仍在 think 块内，保留可能的 partial "</think>" 尾部
+          if (this.buffer.length > 8) {
+            this.buffer = this.buffer.slice(-8);
+          }
+          break;
+        }
+      } else {
+        const startIdx = this.buffer.indexOf("<think>");
+        if (startIdx !== -1) {
+          output += this.buffer.slice(0, startIdx);
+          this.inThink = true;
+          this.buffer = this.buffer.slice(startIdx + 7); // skip "<think>"
+        } else {
+          // 检查尾部是否有不完整的 "<think>" 开头
+          let safeEnd = this.buffer.length;
+          for (let i = 1; i < Math.min(7, this.buffer.length + 1); i++) {
+            if ("<think>".startsWith(this.buffer.slice(-i))) {
+              safeEnd = this.buffer.length - i;
+              break;
+            }
+          }
+          output += this.buffer.slice(0, safeEnd);
+          this.buffer = this.buffer.slice(safeEnd);
+          break;
+        }
+      }
+    }
+
+    return output;
+  }
+
+  /** 流结束时刷出剩余缓冲 */
+  flush(): string {
+    const remaining = this.inThink ? "" : this.buffer;
+    this.buffer = "";
+    this.inThink = false;
+    return remaining;
+  }
+}
+
+// ── 流式监听 ──
+
+/**
+ * 注册所有流式事件监听器，并发起 AI 请求。
+ * 返回 cleanup 函数用于手动清理。
+ */
+export async function startStreamingChat(opts: {
+  conversationId: string;
+  assistantMessageId: string;
+  apiMessages: Array<{ role: string; content: string; images?: string[] }>;
+  config: AIConfig;
+  callbacks: StreamCallbacks;
+}): Promise<() => void> {
+  const { conversationId, assistantMessageId, apiMessages, config, callbacks } = opts;
+  const { updateAssistant, setState, onPersist } = callbacks;
+
+  // <think> 标签过滤器（DeepSeek 等模型的思考过程）
+  const thinkFilter = new ThinkTagFilter();
+
+  // 监听流式 chunks
+  const unlisten = await listen<{ conversation_id: string; content: string }>(
+    "ai-stream-chunk",
+    (event) => {
+      if (event.payload.conversation_id === conversationId) {
+        const filtered = thinkFilter.process(event.payload.content);
+        if (filtered) {
+          updateAssistant((m) => ({
+            ...m,
+            content: m.content + filtered,
+          }));
+        }
+      }
+    },
+  );
+
+  // 监听工具调用
+  const unlistenToolCalls = await listen<{
+    conversation_id: string;
+    tool_calls: ToolCallInfo[];
+  }>("ai-stream-tool-calls", (event) => {
+    if (event.payload.conversation_id === conversationId) {
+      const newCalls = event.payload.tool_calls.map((tc: any) => ({
+        id: tc.id,
+        name: tc.function.name,
+        arguments: tc.function.arguments,
+      }));
+      updateAssistant((m) => ({
+        ...m,
+        content: m.content || "正在调用工具...",
+        toolCalls: [...(m.toolCalls || []), ...newCalls],
+      }));
+    }
+  });
+
+  // 监听工具结果
+  const unlistenToolResult = await listen<{
+    conversation_id: string;
+    tool_call_id: string;
+    name: string;
+    result: string;
+  }>("ai-stream-tool-result", (event) => {
+    if (event.payload.conversation_id === conversationId) {
+      updateAssistant((m) => ({
+        ...m,
+        toolCalls: m.toolCalls?.map((tc) =>
+          tc.id === event.payload.tool_call_id
+            ? { ...tc, result: event.payload.result }
+            : tc,
+        ),
+      }));
+    }
+  });
+
+  // 监听工具确认请求
+  const unlistenToolConfirm = await listen<{
+    name: string;
+    arguments: string;
+  }>("ai-tool-confirm-request", (event) => {
+    setState({ pendingToolConfirm: event.payload });
+  });
+
+  const cleanup = () => {
+    unlisten();
+    unlistenToolCalls();
+    unlistenToolResult();
+    unlistenToolConfirm();
+    unlistenDone();
+    unlistenError();
+  };
+
+  // 监听完成
+  const unlistenDone = await listen<{ conversation_id: string }>(
+    "ai-stream-done",
+    (event) => {
+      if (event.payload.conversation_id === conversationId) {
+        // 刷出 think 过滤器残留缓冲
+        const remaining = thinkFilter.flush();
+        updateAssistant((m) => ({
+          ...m,
+          content: remaining ? m.content + remaining : m.content,
+          streaming: false,
+        }));
+        setState({ isStreaming: false });
+        cleanup();
+        onPersist();
+      }
+    },
+  );
+
+  // 监听错误
+  const unlistenError = await listen<{
+    conversation_id: string;
+    error: string;
+  }>("ai-stream-error", (event) => {
+    if (event.payload.conversation_id === conversationId) {
+      updateAssistant((m) => ({
+        ...m,
+        content: `❌ ${event.payload.error}`,
+        streaming: false,
+      }));
+      setState({ isStreaming: false });
+      cleanup();
+    }
+  });
+
+  // 发起 AI 请求
+  try {
+    const { token } = useAuthStore.getState();
+    await routeAIRequest({
+      messages: apiMessages,
+      config,
+      conversationId,
+      token,
+    });
+  } catch (e) {
+    handleError(e, { context: "AI 对话" });
+    setState({ isStreaming: false });
+    cleanup();
+  }
+
+  return cleanup;
+}

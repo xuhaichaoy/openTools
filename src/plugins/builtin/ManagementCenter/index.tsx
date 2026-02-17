@@ -22,6 +22,7 @@ import {
   Info,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
+import { handleError } from "@/core/errors";
 import { useAuthStore } from "@/store/auth-store";
 import { api } from "@/core/api/client";
 import type { MToolsPluginProps } from "@/core/plugin-system/plugin-interface";
@@ -158,7 +159,7 @@ function AccountTab({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
         const res = await api.get<{ balance: number }>("/ai/energy");
         setEnergy(res.balance);
       } catch (err) {
-        console.error("Failed to fetch energy:", err);
+        handleError(err, { context: "获取 AI 能量" });
       } finally {
         setLoading(false);
       }
@@ -459,7 +460,7 @@ function GeneralSettingsTab() {
     const next = { ...settings, [key]: value };
     setSettings(next);
     invoke("save_general_settings", { settings: JSON.stringify(next) }).catch(
-      (e) => console.error("保存设置失败:", e),
+      (e) => handleError(e, { context: "保存通用设置" }),
     );
     if (key === "theme") {
       document.documentElement.setAttribute("data-theme", value as string);

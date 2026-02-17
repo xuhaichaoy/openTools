@@ -3,6 +3,8 @@
  * 识别内容类型并推荐对应的快捷操作
  */
 
+import { handleError } from '@/core/errors'
+
 export type ContentType =
   | 'url'
   | 'json'
@@ -53,7 +55,8 @@ function looksLikeJSON(text: string): boolean {
     try {
       JSON.parse(trimmed)
       return true
-    } catch {
+    } catch (e) {
+      handleError(e, { context: 'JSON格式检测', silent: true })
       return false
     }
   }

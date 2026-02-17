@@ -1,8 +1,9 @@
 import { useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { handleError } from "@/core/errors";
 import { useAuthStore } from "@/store/auth-store";
-import { bookmarksDb } from "@/store/bookmark-store";
-import { snippetsDb } from "@/store/snippet-store";
+import { useBookmarkStore, bookmarksDb } from "@/store/bookmark-store";
+import { useSnippetStore, snippetsDb } from "@/store/snippet-store";
 import { useWorkflowStore } from "@/store/workflow-store";
 import { useAIStore } from "@/store/ai-store";
 import { marksDb, tagsDb } from "@/core/database/marks";
@@ -53,13 +54,19 @@ export function SyncManager() {
           db: tagsDb,
         });
 
+        // 刷新 Zustand Store，确保 UI 拿到同步后的最新数据
+        const freshBookmarks = await bookmarksDb.getAll();
+        useBookmarkStore.setState({ bookmarks: freshBookmarks });
+        const freshSnippets = await snippetsDb.getAll();
+        useSnippetStore.setState({ snippets: freshSnippets });
+
         // 5. 同步工作流（自定义工作流，通过 Tauri 后端持久化）
         await syncWorkflows();
 
         // 6. 同步 AI 配置
         await syncAIConfig();
       } catch (err) {
-        console.error("[Sync] Error:", err);
+        handleError(err, { context: "数据同步" });
       } finally {
         isSyncing.current = false;
       }
@@ -102,8 +109,8 @@ async function syncWorkflows() {
         if (localIdx >= 0) {
           try {
             await invoke("workflow_delete", { id: cloudItem.data_id });
-          } catch {
-            /* 可能已不存在 */
+          } catch (e) {
+            handleError(e, { context: "删除工作流", silent: true });
           }
         }
       } else if (localIdx >= 0) {
@@ -113,7 +120,7 @@ async function syncWorkflows() {
           try {
             await invoke("workflow_update", { workflow: cloudWorkflow });
           } catch (e) {
-            console.error("[Sync] Update workflow failed:", e);
+            handleError(e, { context: "同步更新工作流", silent: true });
           }
         }
       } else {
@@ -121,7 +128,7 @@ async function syncWorkflows() {
         try {
           await invoke("workflow_create", { workflow: cloudWorkflow });
         } catch (e) {
-          console.error("[Sync] Create workflow failed:", e);
+          handleError(e, { context: "同步创建工作流", silent: true });
         }
       }
     }
@@ -182,6 +189,8 @@ async function syncAIConfig() {
           cloudConfig.enable_advanced_tools ?? config.enable_advanced_tools,
         enable_rag_auto_search:
           cloudConfig.enable_rag_auto_search ?? config.enable_rag_auto_search,
+        enable_native_tools:
+          cloudConfig.enable_native_tools ?? config.enable_native_tools,
         source: cloudConfig.source ?? config.source,
         _syncVersion: cloudItem.version,
       };
@@ -198,6 +207,7 @@ async function syncAIConfig() {
     system_prompt: config.system_prompt,
     enable_advanced_tools: config.enable_advanced_tools,
     enable_rag_auto_search: config.enable_rag_auto_search,
+    enable_native_tools: config.enable_native_tools,
     source: config.source,
   };
 

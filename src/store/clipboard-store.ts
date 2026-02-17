@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { handleError } from "@/core/errors";
 
 export interface ClipboardEntry {
   id: number;
@@ -42,7 +43,7 @@ export const useClipboardStore = create<ClipboardState>((set, get) => ({
       });
       set({ entries });
     } catch (e) {
-      console.error("clipboard load error:", e);
+      handleError(e, { context: "加载剪贴板历史", silent: true });
     } finally {
       set({ loading: false });
     }
@@ -53,7 +54,7 @@ export const useClipboardStore = create<ClipboardState>((set, get) => ({
       await invoke("clipboard_history_delete", { id });
       set((s) => ({ entries: s.entries.filter((e) => e.id !== id) }));
     } catch (e) {
-      console.error("clipboard delete error:", e);
+      handleError(e, { context: "删除剪贴板记录" });
     }
   },
 
@@ -62,7 +63,7 @@ export const useClipboardStore = create<ClipboardState>((set, get) => ({
       await invoke("clipboard_history_clear");
       set({ entries: [] });
     } catch (e) {
-      console.error("clipboard clear error:", e);
+      handleError(e, { context: "清空剪贴板" });
     }
   },
 
@@ -70,7 +71,7 @@ export const useClipboardStore = create<ClipboardState>((set, get) => ({
     try {
       await invoke("clipboard_history_write", { content });
     } catch (e) {
-      console.error("clipboard write error:", e);
+      handleError(e, { context: "写入剪贴板", silent: true });
     }
   },
 }));

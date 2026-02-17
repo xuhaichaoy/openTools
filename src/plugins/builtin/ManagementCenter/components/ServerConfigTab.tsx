@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Server, Check, AlertCircle, Loader2 } from "lucide-react";
 import { useServerStore } from "@/store/server-store";
+import { handleError } from "@/core/errors";
 
 const BRAND = "#F28F36";
 
@@ -18,7 +19,8 @@ export function ServerConfigTab() {
       const url = inputUrl.replace(/\/+$/, "");
       const res = await fetch(`${url}/health`, { method: "GET" });
       setTestResult(res.ok ? "ok" : "fail");
-    } catch {
+    } catch (e) {
+      handleError(e, { context: "测试服务器连接" });
       setTestResult("fail");
     } finally {
       setTesting(false);

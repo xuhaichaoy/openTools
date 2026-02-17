@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { Zap, Loader2, ArrowDown, ArrowUp } from "lucide-react";
 import { api } from "@/core/api/client";
+import { handleError } from "@/core/errors";
 
 const BRAND = "#F28F36";
 
@@ -34,7 +35,7 @@ export function EnergyLogsTab() {
       });
       setLogs(res.logs || []);
     } catch (err) {
-      console.error("Failed to fetch energy logs:", err);
+      handleError(err, { context: "获取能量流水" });
     } finally {
       setLoading(false);
     }

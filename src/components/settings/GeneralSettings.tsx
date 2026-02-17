@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { Monitor, Keyboard, Info, Loader2, Sun, Moon } from "lucide-react";
+import { handleError } from "@/core/errors";
 import { invoke } from "@tauri-apps/api/core";
 
 interface AppSettings {
@@ -33,7 +34,7 @@ async function saveSettings(settings: AppSettings): Promise<void> {
       settings: JSON.stringify(settings),
     });
   } catch (e) {
-    console.error("保存设置失败:", e);
+    handleError(e, { context: "保存通用设置" });
   }
 }
 

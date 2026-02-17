@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import type { Workflow, WorkflowExecution } from '@/core/workflows/types'
+import { handleError } from '@/core/errors'
 import { builtinWorkflows } from '@/core/workflows/builtin-workflows'
 import type { PluginInstance } from '@/core/plugin-system/types'
 
@@ -55,7 +56,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       const allWorkflows = [...builtinWorkflows, ...pluginWorkflows, ...customWorkflows]
       set({ workflows: allWorkflows, isLoading: false })
     } catch (e) {
-      console.error('加载工作流失败:', e)
+      handleError(e, { context: '加载工作流' })
       set({ workflows: [...builtinWorkflows], isLoading: false })
     }
   },
@@ -74,7 +75,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       invoke('workflow_scheduler_reload', { workflowId: workflow.id }).catch(() => {})
       return workflow
     } catch (e) {
-      console.error('创建工作流失败:', e)
+      handleError(e, { context: '创建工作流' })
       throw e
     }
   },
@@ -89,7 +90,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       // 通知调度器重新加载此工作流（触发器可能变更）
       invoke('workflow_scheduler_reload', { workflowId: workflow.id }).catch(() => {})
     } catch (e) {
-      console.error('更新工作流失败:', e)
+      handleError(e, { context: '更新工作流' })
       throw e
     }
   },
@@ -105,7 +106,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       // 通知调度器移除此工作流的定时任务
       invoke('workflow_scheduler_reload', { workflowId: id }).catch(() => {})
     } catch (e) {
-      console.error('删除工作流失败:', e)
+      handleError(e, { context: '删除工作流' })
       throw e
     }
   },

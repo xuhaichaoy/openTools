@@ -1,7 +1,7 @@
 import { useState, lazy, Suspense } from "react";
 import { ArrowLeft, PenLine, Sparkles, FileText } from "lucide-react";
 import { useDragWindow } from "@/hooks/useDragWindow";
-import type { MToolsAI } from "@/core/plugin-system/plugin-interface";
+import type { PluginContext } from "@/core/plugin-system/context";
 
 const QuickCapturePlugin = lazy(
   () => import("@/plugins/builtin/QuickCapture/index"),
@@ -19,11 +19,12 @@ type TabId = (typeof tabs)[number]["id"];
 
 export function NoteHub({
   onBack,
-  ai,
+  context,
 }: {
   onBack: () => void;
-  ai?: MToolsAI;
+  context: PluginContext;
 }) {
+  const { ai } = context;
   const [activeTab, setActiveTab] = useState<TabId>("capture");
   const { onMouseDown } = useDragWindow();
 

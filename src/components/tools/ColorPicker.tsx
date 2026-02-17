@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { ArrowLeft } from "lucide-react";
+import { handleError } from "@/core/errors";
 import { useDragWindow } from "@/hooks/useDragWindow";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -159,7 +160,7 @@ export function ColorPicker({ onBack }: { onBack: () => void }) {
       const result = await invoke<string>("plugin_start_color_picker");
       if (result) setColorFromHex(result);
     } catch (e) {
-      console.error("取色失败:", e);
+      handleError(e, { context: "屏幕取色" });
     } finally {
       setPicking(false);
     }

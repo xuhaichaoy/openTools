@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback, createContext, useContext } from 'react'
+import { useState, useEffect, useCallback, createContext, useContext, useRef } from 'react'
 import { CheckCircle, XCircle, AlertTriangle, Info, X } from 'lucide-react'
+import { registerToast } from '@/core/errors'
 
 type ToastType = 'success' | 'error' | 'warning' | 'info'
 
@@ -43,6 +44,15 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     const id = Math.random().toString(36).slice(2)
     setToasts((prev) => [...prev, { id, type, message, duration }])
   }, [])
+
+  // 注册全局 toast 到错误处理模块（只注册一次）
+  const registered = useRef(false)
+  useEffect(() => {
+    if (!registered.current) {
+      registerToast(addToast)
+      registered.current = true
+    }
+  }, [addToast])
 
   const removeToast = useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id))

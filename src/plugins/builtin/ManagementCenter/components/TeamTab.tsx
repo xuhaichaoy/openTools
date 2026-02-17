@@ -16,10 +16,12 @@ import {
   Check,
   X,
   FileText,
+  Settings,
   GitBranch,
   ExternalLink,
 } from "lucide-react";
 import { api } from "@/core/api/client";
+import { handleError } from "@/core/errors";
 import { useAuthStore } from "@/store/auth-store";
 
 const BRAND = "#F28F36";
@@ -65,7 +67,7 @@ export function TeamTab() {
         const res = await api.get<Team[]>("/teams");
         setTeams(res);
       } catch (err) {
-        console.error("Failed to fetch teams:", err);
+        handleError(err, { context: "获取团队列表" });
       } finally {
         setLoading(false);
       }
@@ -81,7 +83,7 @@ export function TeamTab() {
       setNewTeamName("");
       setShowCreate(false);
     } catch (err) {
-      console.error("Failed to create team:", err);
+      handleError(err, { context: "创建团队" });
     }
   };
 
@@ -90,7 +92,7 @@ export function TeamTab() {
       const res = await api.get<TeamMember[]>(`/teams/${teamId}/members`);
       setMembers(res);
     } catch (err) {
-      console.error("Failed to fetch members:", err);
+      handleError(err, { context: "获取团队成员" });
     }
   }, []);
 
@@ -155,7 +157,9 @@ export function TeamTab() {
                 <div>
                   <h3 className="font-semibold text-xs">{team.name}</h3>
                   <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
-                    {team.owner_id === useAuthStore.getState().user?.id ? "我创建的" : "已加入"}
+                    {team.owner_id === useAuthStore.getState().user?.id
+                      ? "我创建的"
+                      : "已加入"}
                   </p>
                 </div>
               </div>
@@ -170,7 +174,9 @@ export function TeamTab() {
       {showCreate && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
           <div className="bg-[var(--color-bg)] w-[340px] rounded-xl p-5 border border-[var(--color-border)] shadow-xl">
-            <h3 className="text-sm font-semibold mb-4 text-center">创建新团队</h3>
+            <h3 className="text-sm font-semibold mb-4 text-center">
+              创建新团队
+            </h3>
             <div className="space-y-3">
               <div>
                 <label className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
@@ -292,10 +298,7 @@ function TeamDetail({
       )}
 
       {teamSection === "resources" && (
-        <SharedResourcesSection
-          team={team}
-          isOwnerOrAdmin={!!isOwnerOrAdmin}
-        />
+        <SharedResourcesSection team={team} isOwnerOrAdmin={!!isOwnerOrAdmin} />
       )}
 
       {teamSection === "usage" && (
@@ -353,7 +356,7 @@ function MembersSection({
       await api.delete(`/teams/${team.id}/members/${memberId}`);
       onMembersChange();
     } catch (err) {
-      console.error("Failed to remove member:", err);
+      handleError(err, { context: "移除团队成员" });
     }
   };
 
@@ -364,7 +367,7 @@ function MembersSection({
       });
       onMembersChange();
     } catch (err) {
-      console.error("Failed to change role:", err);
+      handleError(err, { context: "修改成员角色" });
     }
   };
 
@@ -412,16 +415,10 @@ function MembersSection({
               disabled={!inviteEmail.trim() || inviting}
               className="px-4 py-2 rounded-lg bg-[#F28F36] text-white text-sm font-bold disabled:opacity-40 transition-all"
             >
-              {inviting ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              ) : (
-                "邀请"
-              )}
+              {inviting ? <Loader2 className="w-4 h-4 animate-spin" /> : "邀请"}
             </button>
           </div>
-          {inviteError && (
-            <p className="text-xs text-red-500">{inviteError}</p>
-          )}
+          {inviteError && <p className="text-xs text-red-500">{inviteError}</p>}
           {inviteSuccess && (
             <p className="text-xs text-emerald-500 flex items-center gap-1">
               <Check className="w-3 h-3" />
@@ -500,12 +497,14 @@ function MembersSection({
 // ── AI 配置 ──
 
 interface AiConfigItem {
-  model_name: string;
-  display_name: string;
-  provider: string;
+  id: string;
+  config_name: string;
+  model_name: string | null;
+  provider?: string;
+  protocol: string;
   base_url: string;
-  api_key_encrypted: string;
-  enabled: boolean;
+  member_token_limit: number;
+  is_active: boolean;
 }
 
 function AIConfigSection({
@@ -518,11 +517,13 @@ function AIConfigSection({
   const [configs, setConfigs] = useState<AiConfigItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [form, setForm] = useState({
+    id: undefined as string | undefined,
+    config_name: "",
     model_name: "",
-    display_name: "",
-    provider: "openai",
+    protocol: "openai",
     base_url: "https://api.openai.com/v1",
     api_key: "",
+    member_token_limit: 0,
   });
   const [saving, setSaving] = useState(false);
 
@@ -541,7 +542,7 @@ function AIConfigSection({
           setConfigs(res.models || []);
         }
       } catch (err) {
-        console.error(err);
+        handleError(err, { context: "获取团队 AI 配置" });
       } finally {
         setLoading(false);
       }
@@ -550,22 +551,26 @@ function AIConfigSection({
   }, [team.id, isOwnerOrAdmin]);
 
   const handleSave = async () => {
-    if (!form.model_name || !form.api_key) return;
+    if (!form.api_key && !form.id) return; // New one must have key, old one can be empty
     setSaving(true);
     try {
       await api.put(`/teams/${team.id}/ai-config`, {
-        model_name: form.model_name,
-        display_name: form.display_name || form.model_name,
-        provider: form.provider,
+        id: form.id,
+        config_name: form.config_name || form.model_name || "未命名",
+        model_name: form.model_name || null,
+        protocol: form.protocol,
         base_url: form.base_url,
         api_key: form.api_key,
+        member_token_limit: form.member_token_limit,
       });
       setForm({
+        id: undefined,
+        config_name: "",
         model_name: "",
-        display_name: "",
-        provider: "openai",
+        protocol: "openai",
         base_url: "https://api.openai.com/v1",
         api_key: "",
+        member_token_limit: 0,
       });
       // Refresh
       const res = await api.get<{ configs: AiConfigItem[] }>(
@@ -573,10 +578,32 @@ function AIConfigSection({
       );
       setConfigs(res.configs || []);
     } catch (err) {
-      console.error(err);
+      handleError(err, { context: "保存团队 AI 配置" });
     } finally {
       setSaving(false);
     }
+  };
+
+  const handleDelete = async (configId: string) => {
+    if (!confirm("确定要删除此配置吗？")) return;
+    try {
+      await api.delete(`/teams/${team.id}/ai-config/${configId}`);
+      setConfigs(configs.filter((c) => c.id !== configId));
+    } catch (err) {
+      handleError(err, { context: "删除团队 AI 配置" });
+    }
+  };
+
+  const handleEdit = (c: AiConfigItem) => {
+    setForm({
+      id: c.id,
+      config_name: c.config_name,
+      model_name: c.model_name || "",
+      protocol: c.protocol,
+      base_url: c.base_url,
+      api_key: "", // Keys are not returned
+      member_token_limit: c.member_token_limit,
+    });
   };
 
   if (loading) {
@@ -602,23 +629,45 @@ function AIConfigSection({
         {configs.length > 0 && (
           <div className="divide-y divide-[var(--color-border)]">
             {configs.map((c, i) => (
-              <div key={i} className="flex items-center justify-between py-2.5">
+              <div
+                key={c.id || i}
+                className="flex items-center justify-between py-2.5"
+              >
                 <div className="flex items-center gap-2.5">
                   <Cpu className="w-3.5 h-3.5 text-[#F28F36]" />
                   <div>
-                    <div className="text-xs font-medium">
-                      {c.display_name || c.model_name}
-                    </div>
+                    <div className="text-xs font-medium">{c.config_name}</div>
                     <div className="text-[10px] text-[var(--color-text-secondary)]">
-                      {c.provider} · {c.model_name}
+                      {c.protocol} · {c.model_name || "全型号"}
+                      {c.member_token_limit > 0 &&
+                        ` · 每人限额 ${c.member_token_limit}`}
                     </div>
                   </div>
                 </div>
-                <span
-                  className={`text-[10px] px-2 py-0.5 rounded-full ${c.enabled ? "bg-emerald-500/10 text-emerald-500" : "bg-gray-500/10 text-gray-500"}`}
-                >
-                  {c.enabled ? "已启用" : "已禁用"}
-                </span>
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`text-[10px] px-2 py-0.5 rounded-full ${c.is_active ? "bg-emerald-500/10 text-emerald-500" : "bg-gray-500/10 text-gray-500"}`}
+                  >
+                    {c.is_active ? "已启用" : "已禁用"}
+                  </span>
+                  {isOwnerOrAdmin && (
+                    <>
+                      <button
+                        onClick={() => handleEdit(c)}
+                        title="编辑"
+                        className="p-1 text-[var(--color-text-secondary)] hover:text-[#F28F36] transition-colors"
+                      >
+                        <Settings className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        onClick={() => handleDelete(c.id)}
+                        className="p-1 text-[var(--color-text-secondary)] hover:text-red-500 transition-colors"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </>
+                  )}
+                </div>
               </div>
             ))}
           </div>
@@ -627,24 +676,44 @@ function AIConfigSection({
         {isOwnerOrAdmin && (
           <div className="pt-3 border-t border-[var(--color-border)] space-y-2">
             <h4 className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
-              添加新模型
+              {form.id ? "编辑配置" : "添加新配置"}
             </h4>
             <div className="grid grid-cols-2 gap-2">
               <input
                 type="text"
-                placeholder="模型名称 (如 gpt-4o)"
-                value={form.model_name}
+                placeholder="配置别名 (如 核心 Key)"
+                value={form.config_name}
                 onChange={(e) =>
-                  setForm({ ...form, model_name: e.target.value })
+                  setForm({ ...form, config_name: e.target.value })
                 }
                 className="bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-1.5 px-2.5 text-xs outline-none focus:ring-2 focus:ring-[#F28F36]/20"
               />
+              <select
+                value={form.protocol}
+                onChange={(e) => {
+                  const protocol = e.target.value;
+                  setForm({
+                    ...form,
+                    protocol,
+                    base_url:
+                      protocol === "anthropic"
+                        ? "https://api.anthropic.com"
+                        : "https://api.openai.com/v1",
+                  });
+                }}
+                className="bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-1.5 px-2.5 text-xs outline-none focus:ring-2 focus:ring-[#F28F36]/20"
+              >
+                <option value="openai">OpenAI 兼容</option>
+                <option value="anthropic">Anthropic</option>
+              </select>
+            </div>
+            <div className="grid grid-cols-1 gap-2">
               <input
                 type="text"
-                placeholder="显示名称 (如 GPT-4o)"
-                value={form.display_name}
+                placeholder="限定模型名称 (如 claude-3-5-sonnet，留空代表全型号可用)"
+                value={form.model_name}
                 onChange={(e) =>
-                  setForm({ ...form, display_name: e.target.value })
+                  setForm({ ...form, model_name: e.target.value })
                 }
                 className="bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-1.5 px-2.5 text-xs outline-none focus:ring-2 focus:ring-[#F28F36]/20"
               />
@@ -658,11 +727,28 @@ function AIConfigSection({
             />
             <input
               type="password"
-              placeholder="API Key"
+              placeholder={form.id ? "留空表示不修改 API Key" : "API Key"}
               value={form.api_key}
               onChange={(e) => setForm({ ...form, api_key: e.target.value })}
               className="w-full bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-1.5 px-2.5 text-xs outline-none focus:ring-2 focus:ring-[#F28F36]/20"
             />
+            <div className="flex items-center gap-2 bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-1.5 px-2.5">
+              <label className="text-[10px] font-semibold text-[var(--color-text-secondary)] whitespace-nowrap">
+                每人每日额度
+              </label>
+              <input
+                type="number"
+                placeholder="0 为不限制"
+                value={form.member_token_limit || ""}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    member_token_limit: parseInt(e.target.value) || 0,
+                  })
+                }
+                className="w-full bg-transparent text-xs outline-none"
+              />
+            </div>
             <button
               onClick={handleSave}
               disabled={!form.model_name || !form.api_key || saving}
@@ -697,7 +783,7 @@ function SharedResourcesSection({
       );
       setResources(res.resources || []);
     } catch (err) {
-      console.error(err);
+      handleError(err, { context: "获取团队共享资源" });
     } finally {
       setLoading(false);
     }
@@ -713,7 +799,7 @@ function SharedResourcesSection({
       await api.delete(`/teams/${team.id}/resources/${resourceId}`);
       await fetchResources();
     } catch (err) {
-      console.error(err);
+      handleError(err, { context: "取消共享资源" });
     }
   };
 
@@ -832,7 +918,7 @@ function TeamUsageStats({ teamId }: { teamId: string }) {
         );
         setUsage(res.usage || []);
       } catch (err) {
-        console.error("Failed to fetch usage:", err);
+        handleError(err, { context: "获取团队用量统计" });
       } finally {
         setLoading(false);
       }
@@ -906,9 +992,7 @@ function TeamUsageStats({ teamId }: { teamId: string }) {
               <div className="text-right text-xs text-[var(--color-text-secondary)]">
                 <div>{row.request_count || 0} 次请求</div>
                 <div>
-                  {tokens >= 1000
-                    ? `${(tokens / 1000).toFixed(1)}K`
-                    : tokens}{" "}
+                  {tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}K` : tokens}{" "}
                   tokens
                 </div>
               </div>

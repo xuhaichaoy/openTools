@@ -322,6 +322,11 @@ pub fn run() {
             commands::native_apps::native_shortcuts_run,
             commands::native_apps::native_app_open,
             commands::native_apps::native_app_list_interactive,
+            commands::collection::collection_get_all,
+            commands::collection::collection_create,
+            commands::collection::collection_update,
+            commands::collection::collection_delete,
+            commands::collection::collection_set_all,
         ])
         .setup(|app| {
             let suppress_hide = Arc::new(AtomicUsize::new(0));

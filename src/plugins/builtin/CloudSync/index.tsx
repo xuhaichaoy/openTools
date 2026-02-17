@@ -14,7 +14,7 @@ import {
   AlertCircle,
   Zap,
 } from "lucide-react";
-import type { PluginStorage } from "@/core/plugin-system/storage";
+import type { PluginContext } from "@/core/plugin-system/context";
 import { useAuthStore } from "@/store/auth-store";
 import { useBookmarkStore } from "@/store/bookmark-store";
 import { useSnippetStore } from "@/store/snippet-store";
@@ -84,13 +84,14 @@ const defaultConfig: SyncConfig = {
 
 interface CloudSyncPluginProps {
   onBack?: () => void;
-  storage?: PluginStorage;
+  context?: PluginContext;
 }
 
 const CloudSyncPlugin: React.FC<CloudSyncPluginProps> = ({
   onBack,
-  storage,
+  context,
 }) => {
+  const storage = context?.storage;
   const [config, setConfig] = useState<SyncConfig>(defaultConfig);
   const [connected, setConnected] = useState(false);
   const [syncing, setSyncing] = useState(false);

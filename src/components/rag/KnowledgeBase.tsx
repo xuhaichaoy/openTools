@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { ArrowLeft, Upload, Trash2, RefreshCw, Search, BookOpen, HardDrive, FileText, AlertCircle, CheckCircle, Loader2, Share2 } from 'lucide-react'
+import { handleError } from '@/core/errors'
 import { useRAGStore } from '@/store/rag-store'
 import { useAuthStore } from '@/store/auth-store'
 import { useTeamStore } from '@/store/team-store'
@@ -35,7 +36,7 @@ export function KnowledgeBase({ onBack }: { onBack?: () => void }) {
     try {
       await shareResource(activeTeamId, 'knowledge_doc', docId, docName)
     } catch (e) {
-      console.error('分享失败:', e)
+      handleError(e, { context: '分享到团队' })
     } finally {
       setSharingDocId(null)
     }
@@ -58,7 +59,7 @@ export function KnowledgeBase({ onBack }: { onBack?: () => void }) {
         }
       }
     } catch (e) {
-      console.error('导入失败:', e)
+      handleError(e, { context: '导入文档' })
     }
   }
 

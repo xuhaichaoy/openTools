@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { handleError, ErrorLevel } from "@/core/errors";
 import { listen } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
 import {
@@ -168,7 +169,7 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
                 await writeFile(filePath, data);
               }
             } catch (err) {
-              console.error("保存截图失败:", err);
+              handleError(err, { context: "保存截图" });
             }
             break;
           }
@@ -269,7 +270,7 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
       const list = await invoke<WindowInfo[]>("list_windows_xcap");
       setWindows(list);
     } catch (e) {
-      console.warn("Native list_windows_xcap failed, trying helper...", e);
+      handleError(e, { context: "获取窗口列表", level: ErrorLevel.Warning, silent: true });
       try {
         const list = (await callHelper("list_windows")) as WindowInfo[];
         setWindows(list);
@@ -319,7 +320,7 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
       const res = await invoke("start_capture", { monitorId: selectedMonitor });
       console.log("start_capture 返回成功:", res);
     } catch (e) {
-      console.error("start_capture 失败:", e);
+      handleError(e, { context: "区域截图" });
       setError(String(e));
     }
   };
@@ -336,7 +337,7 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
       setResultPath(path);
       setStep("preview");
     } catch (e) {
-      console.warn("Native capture failed, trying helper...", e);
+      handleError(e, { context: "窗口截图", level: ErrorLevel.Warning, silent: true });
       try {
         const result = (await callHelper("capture_window", {
           window_id: windowId,

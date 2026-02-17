@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Eye, EyeOff, Save, Check, ShieldCheck, Terminal } from 'lucide-react'
+import { handleError } from '@/core/errors'
 import { invoke } from '@tauri-apps/api/core'
 
 interface CredentialItem {
@@ -26,7 +27,7 @@ export function CredentialSettings() {
       const creds = await invoke<CredentialItem[]>('dataforge_get_credentials')
       setCredentials(creds)
     } catch (e) {
-      console.error('加载凭证失败:', e)
+      handleError(e, { context: '加载凭证' })
     }
   }
 
@@ -51,7 +52,7 @@ export function CredentialSettings() {
       setEditValues((prev) => ({ ...prev, [key]: '' }))
       loadCredentials()
     } catch (e) {
-      console.error('保存凭证失败:', e)
+      handleError(e, { context: '保存凭证' })
     }
   }
 

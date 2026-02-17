@@ -1,5 +1,13 @@
 import { useAIStore } from "@/store/ai-store";
-import { Zap, Shield, Key, ShieldAlert, MessageSquare, BookOpen } from "lucide-react";
+import {
+  Zap,
+  Shield,
+  Key,
+  ShieldAlert,
+  MessageSquare,
+  BookOpen,
+  Smartphone,
+} from "lucide-react";
 
 const BRAND = "#F28F36";
 
@@ -159,7 +167,10 @@ export function AIModelTab() {
                 max="2"
                 value={config.temperature}
                 onChange={(e) =>
-                  setConfig({ ...config, temperature: parseFloat(e.target.value) || 0.7 })
+                  setConfig({
+                    ...config,
+                    temperature: parseFloat(e.target.value) || 0.7,
+                  })
                 }
                 onBlur={() => saveConfig(config)}
                 className="mt-1 w-full bg-[var(--color-bg-secondary)] border-0 rounded-lg px-3 py-2 text-xs focus:ring-2 transition-all text-[var(--color-text)]"
@@ -174,7 +185,10 @@ export function AIModelTab() {
                 type="number"
                 value={config.max_tokens || ""}
                 onChange={(e) =>
-                  setConfig({ ...config, max_tokens: parseInt(e.target.value) || null })
+                  setConfig({
+                    ...config,
+                    max_tokens: parseInt(e.target.value) || null,
+                  })
                 }
                 onBlur={() => saveConfig(config)}
                 placeholder="不限制"
@@ -214,17 +228,28 @@ export function AIModelTab() {
 
         <label className="flex items-center justify-between cursor-pointer">
           <div className="flex-1 pr-3">
-            <span className="text-xs text-[var(--color-text)]">启用高级工具</span>
+            <span className="text-xs text-[var(--color-text)]">
+              启用高级工具
+            </span>
             <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
-              开启后 AI 可执行 shell 命令、读写本地文件、获取系统信息等。危险操作会弹窗确认。
+              开启后 AI 可执行 shell
+              命令、读写本地文件、获取系统信息等。危险操作会弹窗确认。
             </p>
           </div>
           <button
-            onClick={() => updateAndSave({ enable_advanced_tools: !config.enable_advanced_tools })}
+            onClick={() =>
+              updateAndSave({
+                enable_advanced_tools: !config.enable_advanced_tools,
+              })
+            }
             className="relative w-8 h-[18px] rounded-full transition-colors shrink-0"
             style={{
-              background: config.enable_advanced_tools ? "#f59e0b" : "var(--color-bg-secondary)",
-              border: config.enable_advanced_tools ? "none" : "1px solid var(--color-border)",
+              background: config.enable_advanced_tools
+                ? "#f59e0b"
+                : "var(--color-bg-secondary)",
+              border: config.enable_advanced_tools
+                ? "none"
+                : "1px solid var(--color-border)",
             }}
           >
             <div
@@ -242,19 +267,64 @@ export function AIModelTab() {
         <label className="flex items-center justify-between cursor-pointer">
           <div className="flex-1 pr-3">
             <div className="flex items-center gap-1.5">
-              <BookOpen className="w-3 h-3 text-indigo-400" />
-              <span className="text-xs text-[var(--color-text)]">对话时自动检索知识库</span>
+              <Smartphone className="w-3 h-3 text-emerald-400" />
+              <span className="text-xs text-[var(--color-text)]">
+                本机原生应用工具
+              </span>
             </div>
             <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
-              开启后，每次对话会自动从 RAG 知识库中检索相关内容并注入上下文，提升回答准确性。
+              开启后 AI 可调用日历、提醒事项、备忘录、邮件、快捷指令、打开应用等本机能力。
             </p>
           </div>
           <button
-            onClick={() => updateAndSave({ enable_rag_auto_search: !config.enable_rag_auto_search })}
+            onClick={() =>
+              updateAndSave({
+                enable_native_tools: !config.enable_native_tools,
+              })
+            }
             className="relative w-8 h-[18px] rounded-full transition-colors shrink-0"
             style={{
-              background: config.enable_rag_auto_search ? BRAND : "var(--color-bg-secondary)",
-              border: config.enable_rag_auto_search ? "none" : "1px solid var(--color-border)",
+              background: config.enable_native_tools
+                ? BRAND
+                : "var(--color-bg-secondary)",
+              border: config.enable_native_tools
+                ? "none"
+                : "1px solid var(--color-border)",
+            }}
+          >
+            <div
+              className={`absolute top-[2px] w-[14px] h-[14px] rounded-full bg-white shadow transition-transform ${config.enable_native_tools ? "translate-x-[15px]" : "translate-x-[2px]"}`}
+            />
+          </button>
+        </label>
+
+        <label className="flex items-center justify-between cursor-pointer">
+          <div className="flex-1 pr-3">
+            <div className="flex items-center gap-1.5">
+              <BookOpen className="w-3 h-3 text-indigo-400" />
+              <span className="text-xs text-[var(--color-text)]">
+                对话时自动检索知识库
+              </span>
+            </div>
+            <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
+              开启后，每次对话会自动从 RAG
+              知识库中检索相关内容并注入上下文，提升回答准确性。
+            </p>
+          </div>
+          <button
+            onClick={() =>
+              updateAndSave({
+                enable_rag_auto_search: !config.enable_rag_auto_search,
+              })
+            }
+            className="relative w-8 h-[18px] rounded-full transition-colors shrink-0"
+            style={{
+              background: config.enable_rag_auto_search
+                ? BRAND
+                : "var(--color-bg-secondary)",
+              border: config.enable_rag_auto_search
+                ? "none"
+                : "1px solid var(--color-border)",
             }}
           >
             <div

@@ -6,6 +6,7 @@ import React, {
   useRef,
 } from "react";
 import { createPortal } from "react-dom";
+import { handleError } from "@/core/errors";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 // @ts-ignore
@@ -156,7 +157,7 @@ export function ScreenshotSelector() {
 
   // 窗口就绪信号 & 获取初始数据（处理 reload 情况）
   useEffect(() => {
-    invoke("screenshot_window_ready").catch(console.error);
+    invoke("screenshot_window_ready").catch((e) => handleError(e, { context: "截图窗口就绪", silent: true }));
     invoke<ScreenshotData>("get_last_screenshot")
       .then((data) => {
         if (data) {
@@ -165,7 +166,7 @@ export function ScreenshotSelector() {
         }
       })
       .catch((err) => {
-        console.error("Failed to load last screenshot:", err);
+        handleError(err, { context: "加载上次截图数据", silent: true });
       });
   }, []);
 
@@ -204,7 +205,7 @@ export function ScreenshotSelector() {
           copyToClipboard: action === "copy",
         });
       } catch (err) {
-        console.error("Finish capture failed:", err);
+        handleError(err, { context: "完成截图" });
       }
     },
     [screenshotData],
@@ -224,7 +225,7 @@ export function ScreenshotSelector() {
   );
 
   const onCancel = useCallback(() => {
-    invoke("cancel_capture").catch(console.error);
+    invoke("cancel_capture").catch((e) => handleError(e, { context: "取消截图", silent: true }));
   }, []);
 
   const onOk = useCallback(

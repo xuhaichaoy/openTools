@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { persist, createJSONStorage, type StateStorage } from "zustand/middleware";
 import { load } from "@tauri-apps/plugin-store";
+import { handleError } from "@/core/errors";
 
 const DEFAULT_SERVER_URL = "http://localhost:3000";
 
@@ -23,7 +24,8 @@ const tauriStorage: StateStorage = {
     try {
       const store = await getStore();
       return (await store.get<string>(name)) ?? null;
-    } catch {
+    } catch (e) {
+      handleError(e, { context: "读取服务器配置", silent: true });
       return null;
     }
   },
@@ -33,7 +35,7 @@ const tauriStorage: StateStorage = {
       await store.set(name, value);
       await store.save();
     } catch (e) {
-      console.error("[ServerStore] 保存失败:", e);
+      handleError(e, { context: "保存服务器配置", silent: true });
     }
   },
   removeItem: async (name: string): Promise<void> => {
@@ -42,7 +44,7 @@ const tauriStorage: StateStorage = {
       await store.delete(name);
       await store.save();
     } catch (e) {
-      console.error("[ServerStore] 删除失败:", e);
+      handleError(e, { context: "删除服务器配置", silent: true });
     }
   },
 };

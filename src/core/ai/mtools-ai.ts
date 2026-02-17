@@ -10,6 +10,7 @@ import type {
   MToolsAI,
   AIToolCall,
 } from "@/core/plugin-system/plugin-interface";
+import { handleError, ErrorLevel } from "@/core/errors";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useAIStore } from "@/store/ai-store";
@@ -169,7 +170,7 @@ export function createMToolsAI(): MToolsAI {
         });
         return result;
       } catch (e) {
-        console.warn("[mtools.ai] embedding 调用失败，返回空向量:", e);
+        handleError(e, { context: "mtools.ai embedding", silent: true });
         return [];
       }
     },

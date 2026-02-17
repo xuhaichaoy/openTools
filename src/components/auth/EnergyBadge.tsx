@@ -1,14 +1,16 @@
-import { useState, useEffect } from "react";
+import { useEffect } from "react";
 import { Zap } from "lucide-react";
 import { useAuthStore } from "@/store/auth-store";
+import { handleError } from "@/core/errors";
 import { api } from "@/core/api/client";
 
 /**
  * 显示在搜索栏/工具栏的 AI 能量余额小组件
+ *
+ * 能量值统一由 AuthStore 管理，组件只做展示，避免 local state 与 store 不一致。
  */
 export function EnergyBadge() {
   const { isLoggedIn, user, updateEnergy } = useAuthStore();
-  const [energy, setEnergy] = useState(user?.energy || 0);
 
   useEffect(() => {
     if (!isLoggedIn) return;
@@ -16,10 +18,9 @@ export function EnergyBadge() {
     const fetchEnergy = async () => {
       try {
         const res = await api.get<{ balance: number }>("/ai/energy");
-        setEnergy(res.balance);
         updateEnergy(res.balance);
-      } catch {
-        // silently fail
+      } catch (e) {
+        handleError(e, { context: "获取能量余额", silent: true });
       }
     };
 
@@ -33,7 +34,7 @@ export function EnergyBadge() {
   return (
     <div className="flex items-center gap-1 px-2 py-1 rounded-full bg-indigo-500/10 text-indigo-500 text-xs font-bold">
       <Zap className="w-3 h-3" />
-      {energy}
+      {user?.energy || 0}
     </div>
   );
 }

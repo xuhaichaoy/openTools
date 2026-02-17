@@ -1,5 +1,6 @@
 import { useRef, useEffect, useCallback, useState } from "react";
 import { Search, Bot, X, User } from "lucide-react";
+import { handleError } from "@/core/errors";
 import { useAppStore } from "@/store/app-store";
 import { useAuthStore } from "@/store/auth-store";
 import { invoke } from "@tauri-apps/api/core";
@@ -133,7 +134,7 @@ export function SearchBar({
             // 粘贴图片通常意味着要用 AI 搜索
             if (mode !== "ai") setMode("ai");
           } catch (err) {
-            console.error("搜索框保存图片失败:", err);
+            handleError(err, { context: "搜索框保存图片" });
           }
         };
         reader.readAsDataURL(blob);

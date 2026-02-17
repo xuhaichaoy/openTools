@@ -11,7 +11,8 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useSnippetStore, type Snippet } from "@/store/snippet-store";
 import { invoke } from "@tauri-apps/api/core";
-import type { MToolsAI } from "@/core/plugin-system/plugin-interface";
+import type { PluginContext } from "@/core/plugin-system/context";
+import { handleError } from "@/core/errors";
 import {
   Plus,
   Search,
@@ -29,10 +30,11 @@ import {
 
 interface SnippetsProps {
   onBack: () => void;
-  ai: MToolsAI;
+  context: PluginContext;
 }
 
-export function Snippets({ onBack, ai }: SnippetsProps) {
+export function Snippets({ onBack, context }: SnippetsProps) {
+  const { ai } = context;
   const {
     snippets,
     loaded,
@@ -128,7 +130,7 @@ export function Snippets({ onBack, ai }: SnippetsProps) {
           });
           text = result.content.trim();
         } catch (e) {
-          console.error("AI 生成失败:", e);
+          handleError(e, { context: "AI 动态片段生成" });
           text = `[生成失败: ${e}]`;
         } finally {
           setGeneratingId(null);
@@ -142,7 +144,7 @@ export function Snippets({ onBack, ai }: SnippetsProps) {
         setCopyFeedback(snippet.id);
         setTimeout(() => setCopyFeedback(null), 1500);
       } catch (e) {
-        console.error("复制失败:", e);
+        handleError(e, { context: "复制快捷短语到剪贴板" });
       }
     },
     [ai, markUsed],

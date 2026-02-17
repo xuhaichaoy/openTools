@@ -20,6 +20,7 @@ import {
   emitPluginEvent,
   PluginEventTypes,
 } from "@/core/plugin-system/event-bus";
+import { handleError } from "@/core/errors";
 import type { MarkType } from "@/core/database/marks";
 
 const TYPE_ICONS: Record<MarkType, React.ReactNode> = {
@@ -93,7 +94,7 @@ const QuickCapturePlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
       setInputTags([]);
       inputRef.current?.focus();
     } catch (error) {
-      console.error("[QuickCapture] Failed to add mark:", error);
+      handleError(error, { context: "快速录入添加记录" });
     }
   }, [inputType, inputContent, inputTags, addMark]);
 

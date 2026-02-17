@@ -13,7 +13,7 @@ import {
   onPluginEvent,
   PluginEventTypes,
 } from "@/core/plugin-system/event-bus";
-import type { MToolsAI } from "@/core/plugin-system/plugin-interface";
+import type { PluginContext } from "@/core/plugin-system/context";
 
 interface SearchEngine {
   id: string;
@@ -57,13 +57,14 @@ const ENGINES: SearchEngine[] = [
 
 interface ImageSearchPluginProps {
   onBack?: () => void;
-  ai?: MToolsAI;
+  context?: PluginContext;
 }
 
 const ImageSearchPlugin: React.FC<ImageSearchPluginProps> = ({
   onBack,
-  ai,
+  context,
 }) => {
+  const ai = context?.ai;
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [imageBase64, setImageBase64] = useState<string | null>(null);
   const [aiResult, setAiResult] = useState<string | null>(null);

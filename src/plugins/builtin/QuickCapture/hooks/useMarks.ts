@@ -12,6 +12,7 @@ import {
   type MarkType,
   type Tag,
 } from "@/core/database/marks";
+import { handleError } from "@/core/errors";
 
 export function useMarks() {
   const [marks, setMarks] = useState<Mark[]>([]);
@@ -35,7 +36,7 @@ export function useMarks() {
       const allTags = await getAllTags();
       setTags(allTags);
     } catch (e) {
-      console.error("Failed to load marks:", e);
+      handleError(e, { context: "加载快速录入记录" });
     } finally {
       setLoading(false);
     }

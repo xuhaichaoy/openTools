@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from 'react'
 import { ArrowLeft, Puzzle, Play, AppWindow, FolderOpen, Code, RefreshCw, ExternalLink, Loader2, ToggleLeft, ToggleRight, X, Plus, Package } from 'lucide-react'
+import { handleError } from '@/core/errors'
 import { usePluginStore } from '@/store/plugin-store'
 import { useAppStore } from '@/store/app-store'
 import { registry } from '@/core/plugin-system/registry'
@@ -53,8 +54,8 @@ export function PluginMarket({ onBack }: { onBack: () => void }) {
         addDevLog(`✓ 插件列表已刷新，共 ${count} 个插件`)
       }
     } catch (e) {
+      handleError(e, { context: '选择插件目录' })
       addDevLog(`✗ 加载失败: ${e}`)
-      console.error('选择目录失败:', e)
     }
   }
 

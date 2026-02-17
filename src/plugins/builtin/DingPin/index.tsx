@@ -15,6 +15,7 @@ import {
   onPluginEvent,
   PluginEventTypes,
 } from "@/core/plugin-system/event-bus";
+import { handleError } from "@/core/errors";
 
 interface DingInfo {
   id: string;
@@ -36,7 +37,7 @@ const DingPinPlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
       const list = await invoke<DingInfo[]>("ding_list");
       setDingList(list);
     } catch (e) {
-      console.error("Failed to load ding list:", e);
+      handleError(e, { context: "加载贴图列表" });
     }
   }, []);
 
@@ -60,7 +61,7 @@ const DingPinPlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
         });
         await loadDingList();
       } catch (e) {
-        console.error("Failed to create ding:", e);
+        handleError(e, { context: "创建屏幕贴图" });
       } finally {
         setLoading(false);
       }
@@ -107,8 +108,8 @@ const DingPinPlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
           }
         }
       }
-    } catch {
-      // ignore
+    } catch (e) {
+      handleError(e, { context: "从剪贴板粘贴贴图", silent: true });
     }
   }, [createDing]);
 
@@ -118,7 +119,7 @@ const DingPinPlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
         await invoke("ding_close", { dingId: id });
         await loadDingList();
       } catch (e) {
-        console.error("Close ding failed:", e);
+        handleError(e, { context: "关闭贴图" });
       }
     },
     [loadDingList],
@@ -129,7 +130,7 @@ const DingPinPlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
       await invoke("ding_close_all");
       setDingList([]);
     } catch (e) {
-      console.error("Close all ding failed:", e);
+      handleError(e, { context: "关闭全部贴图" });
     }
   }, []);
 
@@ -142,7 +143,7 @@ const DingPinPlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
         });
         await loadDingList();
       } catch (e) {
-        console.error("Set opacity failed:", e);
+        handleError(e, { context: "设置贴图透明度" });
       }
     },
     [loadDingList],

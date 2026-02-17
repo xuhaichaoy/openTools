@@ -34,6 +34,8 @@ export interface AIConfig {
   enable_advanced_tools: boolean;
   system_prompt: string;
   enable_rag_auto_search: boolean;
+  /** 启用本机原生应用工具（日历、提醒事项、备忘录、邮件、快捷指令等） */
+  enable_native_tools: boolean;
   source?: "own_key" | "team" | "platform";
   team_id?: string;
 }

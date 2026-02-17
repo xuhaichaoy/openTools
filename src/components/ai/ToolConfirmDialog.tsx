@@ -1,5 +1,6 @@
 import { ShieldAlert, Check, X } from 'lucide-react'
 import { useAIStore } from '@/store/ai-store'
+import { handleError } from '@/core/errors'
 
 const TOOL_LABELS: Record<string, string> = {
   run_shell_command: '执行命令',
@@ -19,7 +20,9 @@ export function ToolConfirmDialog() {
   try {
     const parsed = JSON.parse(pendingToolConfirm.arguments)
     argsDisplay = JSON.stringify(parsed, null, 2)
-  } catch {}
+  } catch (e) {
+    handleError(e, { context: '解析工具参数', silent: true })
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">

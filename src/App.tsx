@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, Suspense, useRef } from "react";
+import { useState, useCallback, useEffect, useMemo, Suspense, useRef } from "react";
 import { SearchBar } from "@/components/search/SearchBar";
 import { ResultList, type ResultItem } from "@/components/search/ResultList";
 import { ScreenshotSelector } from "@/components/tools/ScreenshotSelector";
@@ -46,6 +46,7 @@ import { registry } from "@/core/plugin-system/registry";
 import { builtinPlugins } from "@/plugins/builtin";
 import { getMToolsAI } from "@/core/ai/mtools-ai";
 import { ScopedStorage } from "@/core/plugin-system/storage";
+import { createPluginContext } from "@/core/plugin-system/context";
 
 // 初始化：注册所有内置插件
 registry.registerAll(builtinPlugins);
@@ -58,6 +59,7 @@ import {
   WINDOW_HEIGHT_EXPANDED,
   WINDOW_HEIGHT_CHAT,
 } from "@/core/constants";
+import { handleError, ErrorLevel } from "@/core/errors";
 
 // 独立窗口模式检测：截图选区窗口
 const specialView = (window as any).__SCREENSHOT_MODE__ ? "screenshot" : null;
@@ -160,8 +162,10 @@ function App() {
 
 /** 主应用组件 — 所有 hooks 在此无条件调用，符合 Rules of Hooks */
 function MainApp() {
-  // view 可以是 ShellView 或任意插件的 viewId
-  const [view, setView] = useState<string>("main");
+  // viewStack 视图栈（app-store 管理，支持多层返回）
+  const view = useAppStore((s) => s.viewStack[s.viewStack.length - 1] ?? 'main');
+  const { mode, searchValue, setWindowExpanded, reset, pushView, popView, resetToMain } = useAppStore();
+
   const [contextText, setContextText] = useState("");
   const [embedTarget, setEmbedTarget] = useState<{
     pluginId: string;
@@ -182,7 +186,6 @@ function MainApp() {
     source: null,
     origin: null,
   });
-  const { mode, searchValue, setWindowExpanded, reset } = useAppStore();
   const { config } = useAIStore();
   const lastCaptureHandledRef =
     (window as any).__LAST_CAPTURE_HANDLED_REF__ ||
@@ -192,7 +195,7 @@ function MainApp() {
     try {
       await invoke<string>("plugin_start_color_picker");
     } catch (e) {
-      console.error("取色失败:", e);
+      handleError(e, { context: "取色" });
     }
   }, []);
 
@@ -273,7 +276,7 @@ function MainApp() {
           });
           setFileResults(results);
         } catch (e) {
-          console.warn("文件搜索失败:", e);
+          handleError(e, { context: "文件搜索", level: ErrorLevel.Warning });
           setFileResults([]);
         }
       }, 300);
@@ -291,7 +294,7 @@ function MainApp() {
           });
           setAppResults(results);
         } catch (e) {
-          console.warn("应用搜索失败:", e);
+          handleError(e, { context: "应用搜索", level: ErrorLevel.Warning });
           setAppResults([]);
         }
       }, 200);
@@ -320,7 +323,7 @@ function MainApp() {
 
     // 启动定时工作流调度器
     invoke("workflow_scheduler_start").catch((e) =>
-      console.warn("定时调度启动失败:", e),
+      handleError(e, { context: "定时调度启动", level: ErrorLevel.Warning }),
     );
 
     // 监听定时工作流触发事件
@@ -343,7 +346,7 @@ function MainApp() {
           document.documentElement.setAttribute("data-theme", settings.theme);
         }
       })
-      .catch((e) => console.error("Failed to load settings:", e));
+      .catch((e) => handleError(e, { context: "加载通用设置" }));
 
     return () => {
       unlistenScheduled?.();
@@ -375,7 +378,7 @@ function MainApp() {
       const req = useAppStore.getState().consumeEmbed();
       if (req) {
         setEmbedTarget(req);
-        setView("plugin-embed");
+        pushView("plugin-embed");
       }
     }
   }, [pendingEmbed]);
@@ -386,7 +389,7 @@ function MainApp() {
     if (pendingNavigate) {
       const viewId = useAppStore.getState().consumeNavigate();
       if (viewId) {
-        setView(viewId);
+        pushView(viewId);
       }
     }
   }, [pendingNavigate]);
@@ -396,7 +399,7 @@ function MainApp() {
     let unlisten: (() => void) | undefined;
     listen<{ text: string }>("context-action", (event) => {
       setContextText(event.payload.text);
-      setView("context-action");
+      pushView("context-action");
       invoke("resize_window", { height: WINDOW_HEIGHT_EXPANDED });
     }).then((fn) => {
       unlisten = fn;
@@ -427,8 +430,8 @@ function MainApp() {
         let parsedParams: Record<string, unknown> = {};
         try {
           parsedParams = JSON.parse(params);
-        } catch {
-          /* 忽略无效 JSON */
+        } catch (e) {
+          handleError(e, { context: "解析工作流参数", silent: true });
         }
         // 执行 action
         const result = await found.action.execute(parsedParams, {
@@ -504,7 +507,7 @@ function MainApp() {
             height,
           });
         } catch (err) {
-          console.error("全局贴图失败:", err);
+          handleError(err, { context: "全局贴图" });
         }
         return;
       }
@@ -516,7 +519,7 @@ function MainApp() {
             return;
           }
           (window as any).__PENDING_OCR_IMAGE__ = imageBase64;
-          setView("ocr");
+          pushView("ocr");
           // 先切到 OCR 页，再投喂截图事件；插件端也会从全局变量兜底读取
           setTimeout(() => {
             emitPluginEvent(
@@ -528,7 +531,7 @@ function MainApp() {
             );
           }, 80);
         } catch (err) {
-          console.error("全局 OCR 处理失败:", err);
+          handleError(err, { context: "全局OCR处理" });
         }
       }
     }).then((fn) => {
@@ -557,7 +560,7 @@ function MainApp() {
           bc.postMessage({ type: "screen-color-picked", color: hex });
         }
       } catch (err) {
-        console.error("[mTools] 取色失败:", err);
+        handleError(err, { context: "取色" });
       }
     };
     return () => bc.close();
@@ -629,7 +632,9 @@ function MainApp() {
               },
               targetOrigin,
             );
-          } catch (_) {}
+          } catch (_) {
+            // iframe 可能已卸载，忽略 postMessage 发送失败
+          }
         };
 
         if (!SAFE_COMMANDS.has(cmd)) {
@@ -822,7 +827,7 @@ function MainApp() {
           category: "AI",
           action: () => {
             useAIStore.getState().sendMessage(searchValue.slice(3));
-            setView("ai-center");
+            pushView("ai-center");
           },
         },
       ];
@@ -902,7 +907,7 @@ function MainApp() {
                 .sendMessage(
                   `请执行以下 shell 命令并解释结果：\`${cmd.trim()}\``,
                 );
-              setView("ai-center");
+              pushView("ai-center");
             }
           },
         },
@@ -919,7 +924,7 @@ function MainApp() {
           icon: <ClipboardList className="w-6 h-6" />,
           color: "text-cyan-500 bg-cyan-500/10",
           category: "工具",
-          action: () => setView("clipboard-history"),
+          action: () => pushView("clipboard-history"),
         },
       ];
     }
@@ -934,7 +939,7 @@ function MainApp() {
           icon: <Database className="w-6 h-6" />,
           color: "text-purple-500 bg-purple-500/10",
           category: "数据",
-          action: () => setView("data-forge"),
+          action: () => pushView("data-forge"),
         },
       ];
     }
@@ -970,7 +975,7 @@ function MainApp() {
           icon: <FileText className="w-6 h-6" />,
           color: "text-emerald-500 bg-emerald-500/10",
           category: "工具",
-          action: () => setView("snippets"),
+          action: () => pushView("snippets"),
         },
       ];
     }
@@ -986,7 +991,7 @@ function MainApp() {
           icon: <Globe className="w-6 h-6" />,
           color: "text-blue-500 bg-blue-500/10",
           category: "工具",
-          action: () => setView("bookmarks"),
+          action: () => pushView("bookmarks"),
         },
       ];
     }
@@ -1005,7 +1010,7 @@ function MainApp() {
           category: "工作流",
           action: () => {
             workflowStore.executeWorkflow(matchedWorkflow.id);
-            setView("workflows");
+            pushView("workflows");
           },
         },
       ];
@@ -1021,7 +1026,7 @@ function MainApp() {
         icon: plugin.icon,
         color: plugin.color,
         category: plugin.category,
-        action: () => setView(plugin.viewId),
+        action: () => pushView(plugin.viewId),
       }));
 
     // 搜索外部插件（uTools/Rubick 兼容）
@@ -1042,7 +1047,7 @@ function MainApp() {
         action: isColorPicker
           ? handleDirectColorPicker
           : isScreenCapture
-            ? () => setView("screen-capture")
+            ? () => pushView("screen-capture")
             : () => usePluginStore.getState().openPlugin(pr.plugin.id, code),
       };
     });
@@ -1147,7 +1152,7 @@ function MainApp() {
 
         if (finalQuery || (images && images.length > 0)) {
           useAIStore.getState().sendMessage(finalQuery, images);
-          setView("ai-center");
+          pushView("ai-center");
         }
         return;
       }
@@ -1161,7 +1166,7 @@ function MainApp() {
             .sendMessage(`请执行以下 shell 命令并解释结果：\`${cmd}\``);
         }
         useAppStore.getState().setAiInitialMode("agent");
-        setView("ai-center");
+        pushView("ai-center");
         return;
       }
 
@@ -1175,22 +1180,49 @@ function MainApp() {
     [getFilteredResults],
   );
 
-  // ESC 返回主界面
+  // ESC 返回上一级，连按回到主界面
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape" && view !== "main") {
-        setView("main");
+        popView();
         reset();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [view, reset]);
+  }, [view, reset, popView]);
 
   const filteredResults = getFilteredResults();
 
   // 当前激活的插件（通过 viewId 查找 registry）
   const activePlugin = registry.getByViewId(view);
+  const prevPluginRef = useRef<typeof activePlugin>(null);
+
+  // 缓存 PluginContext — 同一插件只创建一次，render 和 onActivate 共用
+  const pluginContext = useMemo(
+    () =>
+      activePlugin
+        ? createPluginContext(getMToolsAI(), new ScopedStorage(activePlugin.id))
+        : null,
+    [activePlugin?.id],
+  );
+
+  // 插件生命周期钩子
+  useEffect(() => {
+    const prevPlugin = prevPluginRef.current;
+
+    // 切出上一个插件
+    if (prevPlugin && prevPlugin !== activePlugin) {
+      prevPlugin.onDeactivate?.();
+    }
+
+    // 切入新插件
+    if (activePlugin && activePlugin !== prevPlugin && pluginContext) {
+      activePlugin.onActivate?.(pluginContext);
+    }
+
+    prevPluginRef.current = activePlugin;
+  }, [activePlugin, pluginContext]);
 
   return (
     <div className="w-full h-full flex flex-col bg-[var(--color-bg)] text-[var(--color-text)] overflow-hidden rounded-xl border border-[var(--color-border)] shadow-2xl">
@@ -1209,14 +1241,14 @@ function MainApp() {
                 <ResultList items={filteredResults} />
               </div>
             ) : (
-              <Dashboard onNavigate={(v) => setView(v)} />
+              <Dashboard onNavigate={(v) => pushView(v)} />
             )}
           </div>
         </>
       )}
 
       {/* 注册中心的插件 — 统一渲染（含合并后的 AI 助手） */}
-      {activePlugin && activePlugin.viewId !== "home" && (
+      {activePlugin && activePlugin.viewId !== "home" && pluginContext && (
         <Suspense
           fallback={
             <div className="h-full flex items-center justify-center text-[var(--color-text-secondary)]">
@@ -1226,13 +1258,12 @@ function MainApp() {
         >
           <PluginErrorBoundary
             pluginId={activePlugin.id}
-            onReset={() => setView("main")}
+            onReset={() => resetToMain()}
           >
             <div className="h-full">
               {activePlugin.render({
-                onBack: () => setView("main"),
-                ai: getMToolsAI(),
-                storage: new ScopedStorage(activePlugin.id),
+                onBack: () => popView(),
+                context: pluginContext,
               })}
             </div>
           </PluginErrorBoundary>
@@ -1241,7 +1272,7 @@ function MainApp() {
 
       {/* 全部功能页 — 特殊处理 */}
       {view === "home" && (
-        <Home onNavigate={(v) => setView(v)} onBack={() => setView("main")} />
+        <Home onNavigate={(v) => pushView(v)} onBack={() => popView()} />
       )}
 
       {/* 外部插件嵌入 */}
@@ -1250,7 +1281,7 @@ function MainApp() {
           <PluginErrorBoundary
             pluginId={embedTarget.pluginId}
             onReset={() => {
-              setView("main");
+              resetToMain();
               setEmbedTarget(null);
             }}
           >
@@ -1260,7 +1291,7 @@ function MainApp() {
               bridgeToken={embedBridgeToken}
               title={embedTarget.title}
               onBack={() => {
-                setView("main");
+                popView();
                 setEmbedTarget(null);
               }}
             />
@@ -1273,7 +1304,7 @@ function MainApp() {
         <div className="h-full">
           <ContextActionPanel
             selectedText={contextText}
-            onBack={() => setView("main")}
+            onBack={() => popView()}
           />
         </div>
       )}

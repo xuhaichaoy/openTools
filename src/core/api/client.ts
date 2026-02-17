@@ -1,5 +1,6 @@
 import { useAuthStore } from "@/store/auth-store";
 import { getServerUrl } from "@/store/server-store";
+import { handleError } from "@/core/errors";
 
 interface RequestOptions extends RequestInit {
   params?: Record<string, string | number | undefined>;
@@ -35,7 +36,8 @@ async function tryRefreshToken(): Promise<boolean> {
         data.refresh_token,
       );
       return true;
-    } catch {
+    } catch (e) {
+      handleError(e, { context: "刷新Token", silent: true });
       return false;
     } finally {
       isRefreshing = false;

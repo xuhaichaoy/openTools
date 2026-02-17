@@ -4,6 +4,7 @@ import { listen } from '@tauri-apps/api/event'
 import type { KnowledgeDoc, RetrievalResult, RAGConfig, RAGStats } from '@/core/rag/types'
 import { DEFAULT_RAG_CONFIG } from '@/core/rag/types'
 import { useTeamStore, type SharedResource } from '@/store/team-store'
+import { handleError } from '@/core/errors'
 
 interface RAGState {
   // 状态
@@ -44,7 +45,7 @@ export const useRAGStore = create<RAGState>((set, get) => ({
       const docs = await invoke<KnowledgeDoc[]>('rag_list_docs')
       set({ docs })
     } catch (e) {
-      console.error('加载知识库文档失败:', e)
+      handleError(e, { context: '加载知识库文档' })
     }
     set({ isLoading: false })
   },
@@ -56,7 +57,7 @@ export const useRAGStore = create<RAGState>((set, get) => ({
       await get().loadDocs()
       await get().loadStats()
     } catch (e) {
-      console.error('导入文档失败:', e)
+      handleError(e, { context: '导入文档' })
       throw e
     }
     set({ isIndexing: false })
@@ -68,7 +69,7 @@ export const useRAGStore = create<RAGState>((set, get) => ({
       set({ docs: get().docs.filter((d) => d.id !== docId) })
       await get().loadStats()
     } catch (e) {
-      console.error('删除文档失败:', e)
+      handleError(e, { context: '删除文档' })
     }
   },
 
@@ -78,7 +79,7 @@ export const useRAGStore = create<RAGState>((set, get) => ({
       await invoke('rag_reindex_doc', { docId })
       await get().loadDocs()
     } catch (e) {
-      console.error('重建索引失败:', e)
+      handleError(e, { context: '重建索引' })
     }
     set({ isIndexing: false })
   },
@@ -93,7 +94,7 @@ export const useRAGStore = create<RAGState>((set, get) => ({
       set({ searchResults: results })
       return results
     } catch (e) {
-      console.error('检索失败:', e)
+      handleError(e, { context: '检索知识库' })
       return []
     }
   },
@@ -104,7 +105,7 @@ export const useRAGStore = create<RAGState>((set, get) => ({
     try {
       await invoke('rag_set_config', { config: newConfig })
     } catch (e) {
-      console.error('保存 RAG 配置失败:', e)
+      handleError(e, { context: '保存 RAG 配置' })
     }
   },
 
@@ -113,7 +114,7 @@ export const useRAGStore = create<RAGState>((set, get) => ({
       const stats = await invoke<RAGStats>('rag_get_stats')
       set({ stats })
     } catch (e) {
-      console.error('加载统计失败:', e)
+      handleError(e, { context: '加载 RAG 统计' })
     }
   },
 
@@ -130,7 +131,7 @@ export const useRAGStore = create<RAGState>((set, get) => ({
       const resources = await teamStore.listSharedResources(activeTeamId, 'knowledge_doc')
       set({ teamDocs: resources })
     } catch (e) {
-      console.error('加载团队知识库文档失败:', e)
+      handleError(e, { context: '加载团队知识库文档' })
       set({ teamDocs: [] })
     }
   },

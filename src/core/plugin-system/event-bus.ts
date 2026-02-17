@@ -39,6 +39,15 @@ export const PluginEventTypes = {
 
 type EventHandler<T = unknown> = (event: PluginEvent<T>) => void;
 
+/** 复用的发送通道单例，避免每次 emit 都创建/销毁 BroadcastChannel */
+let _emitChannel: BroadcastChannel | null = null;
+function getEmitChannel(): BroadcastChannel {
+  if (!_emitChannel) {
+    _emitChannel = new BroadcastChannel(CHANNEL_NAME);
+  }
+  return _emitChannel;
+}
+
 /**
  * 发送插件事件（fire-and-forget）
  */
@@ -47,15 +56,13 @@ export function emitPluginEvent<T = unknown>(
   source: string,
   payload: T,
 ): void {
-  const bc = new BroadcastChannel(CHANNEL_NAME);
   const event: PluginEvent<T> = {
     type,
     source,
     payload,
     timestamp: Date.now(),
   };
-  bc.postMessage(event);
-  bc.close();
+  getEmitChannel().postMessage(event);
 }
 
 /**

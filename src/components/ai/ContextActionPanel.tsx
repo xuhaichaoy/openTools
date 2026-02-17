@@ -1,4 +1,5 @@
 import { useState, useMemo } from 'react'
+import { handleError } from '@/core/errors'
 import {
   Languages, Sparkles, BookOpen, MessageSquare, Copy, Check, ArrowLeft,
   Loader2, ExternalLink, Braces, Bug, FileText, FolderOpen, Clock,
@@ -70,7 +71,8 @@ export function ContextActionPanel({ selectedText, onBack }: ContextActionPanelP
           const parsed = JSON.parse(selectedText.trim())
           setResult('```json\n' + JSON.stringify(parsed, null, 2) + '\n```')
           setActiveAction(action.id)
-        } catch {
+        } catch (e) {
+          handleError(e, { context: 'JSON格式校验', silent: true })
           setResult('❌ JSON 格式无效')
           setActiveAction(action.id)
         }

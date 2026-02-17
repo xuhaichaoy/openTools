@@ -17,6 +17,7 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
 import { useAIStore } from "@/store/ai-store";
 import { useToast } from "@/components/ui/Toast";
+import { handleError } from "@/core/errors";
 import { ModelSelector } from "./ModelSelector";
 import { MessageBubble } from "./MessageBubble";
 import { ConversationList } from "./ConversationList";
@@ -236,7 +237,7 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
         toast("success", "对话已导出");
       }
     } catch (e) {
-      console.error("导出失败:", e);
+      handleError(e, { context: "导出对话", silent: true });
       toast("warning", "导出失败");
     }
   };
@@ -289,7 +290,7 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
             });
             setPendingImages((prev) => [...prev, filePath]);
           } catch (err) {
-            console.error("保存图片失败:", err);
+            handleError(err, { context: "保存聊天图片", silent: true });
             toast("warning", "图片保存失败");
             // 恢复预览
             setPendingImagePreviews((prev) => prev.slice(0, -1));

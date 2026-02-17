@@ -9,6 +9,7 @@
  * - 文本 ReAct（降级）：当模型不支持 Function Calling 时，回退到文本格式解析
  */
 
+import { handleError, ErrorLevel } from "@/core/errors";
 import type {
   MToolsAI,
   AIToolDefinition,
@@ -739,10 +740,10 @@ Final Answer: [最终回答]
 
         // FC 调用失败 或 模型不兼容 FC → 降级到文本 ReAct 模式
         if (this.fcAvailable === null || isFCIncompatible) {
-          console.warn(
-            "[ReActAgent] Function Calling 失败，降级为文本 ReAct 模式:",
-            errMsg,
-          );
+          handleError(e, {
+            context: "ReAct Agent Function Calling 降级为文本模式",
+            level: ErrorLevel.Warning,
+          });
           this.fcAvailable = false;
           this.steps = [];
           this.addStep({

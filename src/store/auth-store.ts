@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { persist, createJSONStorage, type StateStorage } from "zustand/middleware";
 import { load } from "@tauri-apps/plugin-store";
+import { handleError } from "@/core/errors";
 
 export interface User {
   id: string;
@@ -42,7 +43,8 @@ const tauriStorage: StateStorage = {
       const store = await getStore();
       const value = await store.get<string>(name);
       return value ?? null;
-    } catch {
+    } catch (e) {
+      handleError(e, { context: "读取认证数据", silent: true });
       return null;
     }
   },
@@ -52,7 +54,7 @@ const tauriStorage: StateStorage = {
       await store.set(name, value);
       await store.save();
     } catch (e) {
-      console.error("[AuthStore] 保存失败:", e);
+      handleError(e, { context: "保存认证数据", silent: true });
     }
   },
   removeItem: async (name: string): Promise<void> => {
@@ -61,7 +63,7 @@ const tauriStorage: StateStorage = {
       await store.delete(name);
       await store.save();
     } catch (e) {
-      console.error("[AuthStore] 删除失败:", e);
+      handleError(e, { context: "删除认证数据", silent: true });
     }
   },
 };

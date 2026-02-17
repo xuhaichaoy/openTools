@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import type { PluginInstance, PluginMatchResult } from '@/core/plugin-system/types'
+import { handleError } from '@/core/errors'
 import { matchPlugins } from '@/core/plugin-system/command-matcher'
 import { registry } from '@/core/plugin-system/registry'
 
@@ -41,7 +42,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
         )
       registry.registerExternalActions(externalActions)
     } catch (e) {
-      console.error('加载插件列表失败:', e)
+      handleError(e, { context: '加载插件列表' })
       set({ isLoading: false })
     }
   },
@@ -55,7 +56,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
     try {
       await invoke('plugin_open', { pluginId, featureCode })
     } catch (e) {
-      console.error('打开插件失败:', e)
+      handleError(e, { context: '打开插件' })
     }
   },
 
@@ -63,7 +64,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
     try {
       await invoke('plugin_close', { pluginId, featureCode })
     } catch (e) {
-      console.error('关闭插件失败:', e)
+      handleError(e, { context: '关闭插件' })
     }
   },
 
@@ -75,7 +76,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
         devDirs: [...new Set([...state.devDirs, dirPath])],
       }))
     } catch (e) {
-      console.error('添加开发者目录失败:', e)
+      handleError(e, { context: '添加开发者目录' })
     }
   },
 
@@ -87,7 +88,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
         devDirs: state.devDirs.filter((d) => d !== dirPath),
       }))
     } catch (e) {
-      console.error('移除开发者目录失败:', e)
+      handleError(e, { context: '移除开发者目录' })
     }
   },
 
@@ -96,7 +97,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
       const rawPlugins = await invoke<PluginInstance[]>('plugin_set_enabled', { pluginId, enabled })
       set({ plugins: rawPlugins })
     } catch (e) {
-      console.error('设置插件状态失败:', e)
+      handleError(e, { context: '设置插件状态' })
     }
   },
 }))

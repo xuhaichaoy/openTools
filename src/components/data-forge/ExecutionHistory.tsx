@@ -1,5 +1,6 @@
 import { CheckCircle, XCircle, Clock, FileText, RotateCcw, Database } from 'lucide-react'
 import { useDataForgeStore } from '@/store/data-forge-store'
+import { handleError } from '@/core/errors'
 import { invoke } from '@tauri-apps/api/core'
 
 export function ExecutionHistory() {
@@ -9,7 +10,7 @@ export function ExecutionHistory() {
     try {
       await invoke('open_file_location', { filePath })
     } catch (e) {
-      console.error('打开文件位置失败:', e)
+      handleError(e, { context: '打开文件位置' })
     }
   }
 

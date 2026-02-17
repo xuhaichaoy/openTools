@@ -1,5 +1,6 @@
 import { Wrench, CheckCircle, Loader2, ChevronDown, ChevronRight } from 'lucide-react'
 import { useState } from 'react'
+import { handleError } from '@/core/errors'
 import type { ToolCallInfo } from '@/store/ai-store'
 
 const TOOL_LABELS: Record<string, string> = {
@@ -40,7 +41,9 @@ function ToolCallItem({ toolCall }: { toolCall: ToolCallInfo }) {
     argsDisplay = Object.entries(parsed)
       .map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`)
       .join(', ')
-  } catch {}
+  } catch (e) {
+    handleError(e, { context: '解析工具参数', silent: true })
+  }
 
   return (
     <div className="rounded-lg bg-[var(--color-code-bg)] border border-[var(--color-border)] overflow-hidden">

@@ -7,6 +7,7 @@
 
 import { create } from "zustand";
 import { api } from "@/core/api/client";
+import { handleError } from "@/core/errors";
 
 export interface Team {
   id: string;
@@ -67,7 +68,8 @@ export const useTeamStore = create<TeamState>((set, get) => ({
       if (teams.length > 0 && !get().activeTeamId) {
         set({ activeTeamId: teams[0].id });
       }
-    } catch {
+    } catch (e) {
+      handleError(e, { context: "加载团队列表" });
       set({ teams: [], loaded: true });
     }
   },

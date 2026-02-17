@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { handleError } from "@/core/errors";
 import { Circle, Square, Pause, Play } from "lucide-react";
 
 interface RecorderFloatProps {
@@ -34,7 +35,7 @@ export function RecorderFloat({ format, onStopped }: RecorderFloatProps) {
       });
       setIsPaused(!isPaused);
     } catch (e) {
-      console.error("暂停失败:", e);
+      handleError(e, { context: "暂停录制" });
     }
   };
 
@@ -45,7 +46,7 @@ export function RecorderFloat({ format, onStopped }: RecorderFloatProps) {
         params: {},
       });
     } catch (e) {
-      console.error("停止失败:", e);
+      handleError(e, { context: "停止录制" });
     }
   };
 

@@ -5,6 +5,7 @@ import { useSnippetStore } from "@/store/snippet-store";
 import { useWorkflowStore } from "@/store/workflow-store";
 import { useAuthStore } from "@/store/auth-store";
 import { marksDb } from "@/core/database/marks";
+import { handleError } from "@/core/errors";
 
 const BRAND = "#F28F36";
 
@@ -54,7 +55,7 @@ export function MyDataTab() {
         },
       ]);
     } catch (err) {
-      console.error("Failed to load stats:", err);
+      handleError(err, { context: "加载我的数据统计" });
     } finally {
       setLoading(false);
     }

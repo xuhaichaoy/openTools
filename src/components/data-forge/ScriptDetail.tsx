@@ -1,5 +1,6 @@
 import { useRef } from 'react'
 import { Play, Loader2, Clock, Tag, FileCode, ChevronLeft } from 'lucide-react'
+import { handleError } from '@/core/errors'
 import { useDataForgeStore } from '@/store/data-forge-store'
 import { ParamForm } from './ParamForm'
 import { ExecutionPanel } from './ExecutionPanel'
@@ -106,7 +107,7 @@ export function ScriptDetail() {
             errorMsg={currentExecution.error}
             onRetry={() => handleRun(paramValuesRef.current)}
             onOpenFile={async (filePath) => {
-              try { await invoke('open_file_location', { filePath }) } catch (e) { console.error('打开文件失败:', e) }
+              try { await invoke('open_file_location', { filePath }) } catch (e) { handleError(e, { context: '打开文件' }) }
             }}
           />
         </div>

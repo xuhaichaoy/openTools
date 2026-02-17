@@ -15,7 +15,7 @@ import { ModelSelector } from "@/components/ai/ModelSelector";
 import { useAIStore } from "@/store/ai-store";
 import { useAgentStore } from "@/store/agent-store";
 import { useAppStore } from "@/store/app-store";
-import type { MToolsAI } from "@/core/plugin-system/plugin-interface";
+import type { PluginContext } from "@/core/plugin-system/context";
 import type { ChatViewHandle } from "@/components/ai/ChatView";
 import type { SmartAgentHandle } from "@/plugins/builtin/SmartAgent/index";
 
@@ -33,11 +33,12 @@ const AGENT_KEYWORDS = /(?:执行|运行|打开|创建|删除|文件|目录|命�
 
 export function AICenter({
   onBack,
-  ai,
+  context,
 }: {
   onBack: () => void;
-  ai?: MToolsAI;
+  context: PluginContext;
 }) {
+  const { ai } = context;
   // 从 app-store 消费一次性的初始模式
   const [mode, setMode] = useState<AIMode>(() =>
     useAppStore.getState().consumeAiInitialMode(),

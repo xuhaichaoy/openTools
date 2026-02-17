@@ -11,6 +11,7 @@ import {
 } from "@tauri-apps/plugin-fs";
 import { appDataDir } from "@tauri-apps/api/path";
 import { FileText, Save, Plus, Trash2, FolderOpen } from "lucide-react";
+import { handleError, ErrorLevel } from "@/core/errors";
 import "./style.css";
 
 const Notes: React.FC = () => {
@@ -51,7 +52,7 @@ const Notes: React.FC = () => {
         .map((e) => e.name);
       setFiles(mdFiles);
     } catch (error) {
-      console.error("Failed to load files:", error);
+      handleError(error, { context: "加载笔记文件列表" });
     }
   };
 
@@ -119,14 +120,14 @@ const Notes: React.FC = () => {
       });
       vditorInstanceRef.current = instance;
     } catch (e) {
-      console.error("Failed to initialize Vditor:", e);
+      handleError(e, { context: "初始化 Vditor 编辑器" });
     }
 
     return () => {
       try {
         instance?.destroy();
       } catch (e) {
-        console.warn("Error destroying Vditor:", e);
+        handleError(e, { context: "销毁 Vditor 实例", level: ErrorLevel.Warning });
       }
       vditorInstanceRef.current = null;
       setVditor(undefined);
@@ -147,7 +148,7 @@ const Notes: React.FC = () => {
       });
       instance.setValue(content);
     } catch (error) {
-      console.error("Failed to read file:", error);
+      handleError(error, { context: "读取笔记文件" });
       instance.setValue("# Error loading file");
     }
   };
@@ -161,7 +162,7 @@ const Notes: React.FC = () => {
       await loadFiles();
       setCurrentFile(fileName);
     } catch (error) {
-      console.error("Failed to create file:", error);
+      handleError(error, { context: "创建笔记文件" });
     }
   };
 
@@ -175,7 +176,7 @@ const Notes: React.FC = () => {
       // Maybe show a toast
       console.log("Saved");
     } catch (error) {
-      console.error("Failed to save file:", error);
+      handleError(error, { context: "保存笔记文件" });
     }
   };
 
@@ -198,7 +199,7 @@ const Notes: React.FC = () => {
         vditor?.setValue("");
       }
     } catch (error) {
-      console.error("Failed to delete file:", error);
+      handleError(error, { context: "删除笔记文件" });
     }
   };
 

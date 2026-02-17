@@ -16,3 +16,4 @@ pub mod mtools_sync;
 pub mod clipboard;
 pub mod file_search;
 pub mod native_apps;
+pub mod collection;

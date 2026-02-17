@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { ArrowLeft, Plus, Play, Pencil, Trash2, RefreshCw, Loader2, Share2, Download } from 'lucide-react'
+import { handleError } from '@/core/errors'
 import { useWorkflowStore } from '@/store/workflow-store'
 import { useAuthStore } from '@/store/auth-store'
 import { useTeamStore, type SharedResource } from '@/store/team-store'
@@ -39,7 +40,8 @@ export function WorkflowList({ onBack }: { onBack?: () => void }) {
       await createWorkflow(data)
       toast('success', '工作流创建成功')
       setMode('list')
-    } catch {
+    } catch (e) {
+      handleError(e, { context: '工作流创建', silent: true })
       toast('warning', '创建失败')
     }
   }
@@ -51,7 +53,8 @@ export function WorkflowList({ onBack }: { onBack?: () => void }) {
       toast('success', '工作流已更新')
       setMode('list')
       setEditingWorkflow(null)
-    } catch {
+    } catch (e) {
+      handleError(e, { context: '工作流更新', silent: true })
       toast('warning', '更新失败')
     }
   }
@@ -61,7 +64,8 @@ export function WorkflowList({ onBack }: { onBack?: () => void }) {
     try {
       await deleteWorkflow(workflow.id)
       toast('success', '工作流已删除')
-    } catch {
+    } catch (e) {
+      handleError(e, { context: '工作流删除', silent: true })
       toast('warning', '删除失败')
     }
   }
@@ -70,6 +74,7 @@ export function WorkflowList({ onBack }: { onBack?: () => void }) {
     try {
       await executeWorkflow(workflow.id)
     } catch (e) {
+      handleError(e, { context: '工作流执行', silent: true })
       toast('warning', `执行失败: ${e}`)
     }
   }
@@ -81,8 +86,8 @@ export function WorkflowList({ onBack }: { onBack?: () => void }) {
       await shareResource(activeTeamId, 'workflow', workflow.id, workflow.name)
       toast('success', `已分享「${workflow.name}」到团队`)
     } catch (e) {
+      handleError(e, { context: '分享工作流到团队', silent: true })
       toast('warning', '分享失败')
-      console.error('Share workflow failed:', e)
     } finally {
       setSharingId(null)
     }
@@ -95,8 +100,8 @@ export function WorkflowList({ onBack }: { onBack?: () => void }) {
       setTeamTemplates(resources)
       setMode('team-templates')
     } catch (e) {
+      handleError(e, { context: '获取团队工作流模板', silent: true })
       toast('warning', '获取团队模板失败')
-      console.error('Load team templates failed:', e)
     }
   }
 
@@ -117,8 +122,8 @@ export function WorkflowList({ onBack }: { onBack?: () => void }) {
       await createWorkflow(newWorkflow)
       toast('success', `已导入「${template.resource_name}」`)
     } catch (e) {
+      handleError(e, { context: '导入团队模板', silent: true })
       toast('warning', '导入失败')
-      console.error('Import template failed:', e)
     } finally {
       setImportingId(null)
     }

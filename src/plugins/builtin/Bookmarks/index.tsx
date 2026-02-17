@@ -12,6 +12,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useBookmarkStore, type Bookmark } from "@/store/bookmark-store";
 import { invoke } from "@tauri-apps/api/core";
+import { handleError } from "@/core/errors";
 import {
   Plus,
   Search,
@@ -117,7 +118,9 @@ export default function BookmarksPlugin({ onBack }: { onBack: () => void }) {
   const handleOpen = useCallback(
     (bm: Bookmark) => {
       markVisited(bm.id);
-      invoke("open_url", { url: bm.url }).catch(console.error);
+      invoke("open_url", { url: bm.url }).catch((e) =>
+        handleError(e, { context: "打开书签" }),
+      );
     },
     [markVisited],
   );

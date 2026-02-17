@@ -5,6 +5,7 @@ import type {
   PluginMatchResult,
 } from "./types";
 import { pinyinScore } from "@/utils/pinyin-search";
+import { handleError } from "@/core/errors";
 
 /**
  * 匹配文本（支持拼音），返回是否匹配
@@ -44,8 +45,8 @@ function matchCommand(
           if (regex.test(input)) {
             return { matched: true, score: 90 };
           }
-        } catch {
-          // 正则无效，忽略
+        } catch (e) {
+          handleError(e, { context: "正则匹配", silent: true });
         }
       }
       // 也检查 label

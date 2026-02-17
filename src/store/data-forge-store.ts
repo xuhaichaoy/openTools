@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import type { ScriptMeta, ScriptCategory, ExecutionRecord, ExecutionStatus } from '@/core/data-forge/types'
+import { handleError } from '@/core/errors'
 import { multiFieldPinyinScore } from '@/utils/pinyin-search'
 
 interface DataForgeState {
@@ -48,7 +49,7 @@ export const useDataForgeStore = create<DataForgeState>((set, get) => ({
       const allScripts = categories.flatMap(c => c.scripts)
       set({ categories, allScripts, isLoading: false })
     } catch (e) {
-      console.error('加载脚本列表失败:', e)
+      handleError(e, { context: '加载脚本列表' })
       set({ isLoading: false })
     }
   },
@@ -115,7 +116,7 @@ export const useDataForgeStore = create<DataForgeState>((set, get) => ({
         }))
       }
     } catch (e) {
-      console.error('执行脚本失败:', e)
+      handleError(e, { context: '执行脚本' })
       unlistenDone() // 清理监听
       set({
         currentExecution: {
@@ -144,7 +145,7 @@ export const useDataForgeStore = create<DataForgeState>((set, get) => ({
       const history = await invoke<ExecutionRecord[]>('dataforge_get_history')
       set({ executionHistory: history })
     } catch (e) {
-      console.error('加载执行历史失败:', e)
+      handleError(e, { context: '加载执行历史', silent: true })
     }
   },
 
