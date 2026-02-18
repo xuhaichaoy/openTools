@@ -38,6 +38,24 @@ export interface PluginWorkflowDef {
   }[]
 }
 
+/**
+ * 外部插件可声明的权限
+ *
+ * - clipboard: 读写剪贴板
+ * - network:   发起 HTTP 请求
+ * - filesystem: 读写本地文件
+ * - shell:     执行 Shell 命令
+ * - notification: 系统通知
+ * - system:    系统级操作（锁屏等）
+ */
+export type PluginPermission =
+  | 'clipboard'
+  | 'network'
+  | 'filesystem'
+  | 'shell'
+  | 'notification'
+  | 'system'
+
 /** 插件清单 — 统一格式 (兼容 uTools plugin.json + Rubick package.json + mTools 扩展) */
 export interface PluginManifest {
   // 基础信息
@@ -61,6 +79,8 @@ export interface PluginManifest {
   // mTools 扩展 — AI 动作声明（外部插件可被 Agent 调用）
   mtools?: {
     actions?: ExternalPluginAction[]
+    /** 插件声明需要的权限（未声明的权限将被拒绝） */
+    permissions?: PluginPermission[]
   }
 
   // 运行时

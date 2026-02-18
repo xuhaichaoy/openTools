@@ -100,6 +100,17 @@ export interface MToolsPlugin {
   color: string;
   /** 分类 */
   category: "工具" | "AI" | "数据" | "系统";
+  /**
+   * 层级：core 为核心能力（不可禁用），extension 为可选扩展
+   * @default "extension"
+   */
+  tier?: "core" | "extension";
+  /**
+   * 是否出现在搜索结果中。
+   * 设为 false 的插件仍可通过 viewId 导航，但不会被用户搜索命中。
+   * @default true
+   */
+  searchable?: boolean;
   /** 搜索关键词（含别名、拼音触发词等） */
   keywords: string[];
   /** 视图标识 — 用于路由（与旧 View 类型兼容） */

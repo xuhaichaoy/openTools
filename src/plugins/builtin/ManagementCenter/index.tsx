@@ -5,7 +5,6 @@ import {
   Users,
   Settings,
   Cpu,
-  Keyboard,
   ChevronRight,
   LogOut,
   Server,
@@ -15,7 +14,6 @@ import {
   X,
   CreditCard,
   Smartphone,
-  Receipt,
   ShieldCheck,
   Sun,
   Moon,
@@ -30,6 +28,8 @@ import { AIModelTab } from "./components/AIModelTab";
 import { TeamTab } from "./components/TeamTab";
 import { MyDataTab } from "./components/MyDataTab";
 import { EnergyLogsTab } from "./components/EnergyLogsTab";
+import { AvatarPicker } from "@/components/common/AvatarPicker";
+import { resolveAvatarUrl } from "@/utils/avatar";
 import { ServerConfigTab } from "./components/ServerConfigTab";
 import { CredentialSettings } from "@/components/data-forge/CredentialSettings";
 import { useDragWindow } from "@/hooks/useDragWindow";
@@ -61,7 +61,7 @@ export default function ManagementCenter({ onBack }: MToolsPluginProps) {
     { id: "ai-model", icon: Cpu, label: "AI 模型", group: "偏好设置" },
     { id: "credentials", icon: ShieldCheck, label: "凭证管理", group: "偏好设置" },
     { id: "server", icon: Server, label: "服务器地址", group: "偏好设置" },
-    { id: "shortcuts", icon: Keyboard, label: "快捷方式", group: "偏好设置" },
+    // "shortcuts" (快捷方式) 暂未实现，隐藏入口直到完成
   ];
 
   const groups = Array.from(new Set(navItems.map((item) => item.group)));
@@ -192,7 +192,7 @@ function AccountTab({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
         >
           {user?.avatar_url ? (
             <img
-              src={user.avatar_url}
+              src={resolveAvatarUrl(user.avatar_url)}
               alt=""
               className="w-full h-full object-cover"
             />
@@ -283,16 +283,7 @@ function AccountTab({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
           icon={Zap}
           onClick={() => onNavigate("energy-logs")}
         />
-        <ActionItem
-          label="支付记录"
-          icon={Receipt}
-          onClick={() => onNavigate("payment-records")}
-        />
-        <ActionItem
-          label="设备管理"
-          icon={Smartphone}
-          onClick={() => onNavigate("devices")}
-        />
+        {/* "支付记录" 和 "设备管理" 功能未上线，暂时隐藏入口 */}
         <button
           onClick={logout}
           className="w-full flex items-center gap-2 px-4 py-2.5 hover:bg-red-500/5 transition-colors"
@@ -347,7 +338,7 @@ function EditProfileModal({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-      <div className="bg-[var(--color-bg)] w-[360px] rounded-xl p-5 border border-[var(--color-border)] shadow-xl">
+      <div className="bg-[var(--color-bg)] w-[420px] max-h-[85vh] overflow-y-auto rounded-xl p-5 border border-[var(--color-border)] shadow-xl">
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-sm font-semibold">修改资料</h3>
           <button
@@ -359,6 +350,8 @@ function EditProfileModal({ onClose }: { onClose: () => void }) {
         </div>
 
         <div className="space-y-3">
+          <AvatarPicker value={avatarUrl} onChange={setAvatarUrl} />
+
           <div>
             <label className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
               昵称
@@ -372,32 +365,6 @@ function EditProfileModal({ onClose }: { onClose: () => void }) {
               style={{ "--tw-ring-color": `${BRAND}40` } as any}
             />
           </div>
-
-          <div>
-            <label className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
-              头像 URL（可选）
-            </label>
-            <input
-              type="url"
-              value={avatarUrl}
-              onChange={(e) => setAvatarUrl(e.target.value)}
-              placeholder="https://..."
-              className="mt-1 w-full bg-[var(--color-bg-secondary)] border-0 rounded-lg px-3 py-2 text-xs focus:ring-2 transition-all text-[var(--color-text)]"
-            />
-          </div>
-
-          {avatarUrl && (
-            <div className="flex justify-center">
-              <img
-                src={avatarUrl}
-                alt="预览"
-                className="w-12 h-12 rounded-lg object-cover border border-[var(--color-border)]"
-                onError={(e) => {
-                  (e.target as HTMLImageElement).style.display = "none";
-                }}
-              />
-            </div>
-          )}
 
           {error && (
             <p className="text-[10px] text-red-500 text-center">{error}</p>

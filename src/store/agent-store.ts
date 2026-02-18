@@ -2,10 +2,8 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import type { AgentStep } from "@/plugins/builtin/SmartAgent/core/react-agent";
 import { handleError } from "@/core/errors";
-import {
-  MAX_CONVERSATIONS,
-  PERSIST_DEBOUNCE_MS,
-} from "@/core/constants";
+import { MAX_CONVERSATIONS } from "@/core/constants";
+import { createDebouncedPersister } from "@/core/storage";
 
 /** 单个任务（一次用户提问 + Agent 执行流程） */
 export interface AgentTask {
@@ -77,7 +75,6 @@ function migrateSession(raw: Record<string, unknown>): AgentSession {
   };
 }
 
-let _persistTimer: ReturnType<typeof setTimeout> | null = null;
 let _lastPersistedHash = 0;
 
 /** DJB2 哈希算法 —— 简单高效的字符串哈希 */
@@ -89,13 +86,11 @@ function djb2Hash(str: string): number {
   return hash;
 }
 
-function debouncedPersist() {
-  if (_persistTimer) clearTimeout(_persistTimer);
-  _persistTimer = setTimeout(() => {
-    _persistTimer = null;
-    useAgentStore.getState().persistHistory();
-  }, PERSIST_DEBOUNCE_MS);
-}
+// 使用统一的防抖持久化工具
+const _agentPersister = createDebouncedPersister(() => {
+  useAgentStore.getState().persistHistory();
+});
+const debouncedPersist = () => _agentPersister.trigger();
 
 export const useAgentStore = create<AgentState>((set, get) => ({
   sessions: [],

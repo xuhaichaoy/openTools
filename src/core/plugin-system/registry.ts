@@ -59,13 +59,23 @@ class PluginRegistry {
     return this.getAll().filter((p) => p.category === category);
   }
 
+  /** 按层级获取（core / extension） */
+  getByTier(tier: "core" | "extension"): MToolsPlugin[] {
+    return this.getAll().filter((p) => (p.tier ?? "extension") === tier);
+  }
+
+  /** 获取可搜索的插件（排除 searchable: false） */
+  getSearchable(): MToolsPlugin[] {
+    return this.getAll().filter((p) => p.searchable !== false);
+  }
+
   /**
    * 搜索插件（拼音 + 多字段模糊匹配）
-   * 返回按相关性排序的结果
+   * 返回按相关性排序的结果（排除 searchable: false 的插件）
    */
   search(keyword: string): { plugin: MToolsPlugin; score: number }[] {
     if (!keyword) return [];
-    return this.getAll()
+    return this.getSearchable()
       .map((plugin) => ({
         plugin,
         score: multiFieldPinyinScore(

@@ -26,12 +26,12 @@ export function applyRouting(config: AIConfig, token?: string | null): AIConfig 
 
   switch (source) {
     case "platform": {
-      const routed = { ...config, base_url: `${baseUrl}/ai`, api_key: token || "" };
+      const routed = { ...config, base_url: `${baseUrl}/v1/ai`, api_key: token || "" };
       console.log("[AI Router] platform →", routed.base_url, "model=", config.model);
       return routed;
     }
     case "team": {
-      const routed = { ...config, base_url: `${baseUrl}/ai/team`, api_key: token || "" };
+      const routed = { ...config, base_url: `${baseUrl}/v1/ai/team`, api_key: token || "" };
       console.log("[AI Router] team →", routed.base_url, "model=", config.model, "team_id=", config.team_id, "serverUrl=", baseUrl);
       return routed;
     }

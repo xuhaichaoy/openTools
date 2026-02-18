@@ -6,6 +6,7 @@ import { useAuthStore } from "@/store/auth-store";
 import { invoke } from "@tauri-apps/api/core";
 import { ModeIndicator, detectMode } from "./ModeIndicator";
 import { useDragWindow } from "@/hooks/useDragWindow";
+import { resolveAvatarUrl } from "@/utils/avatar";
 
 const MODE_CONFIG = {
   search: { icon: Search, label: "搜索插件或应用...", color: "text-gray-400" },
@@ -280,7 +281,7 @@ function UserAvatar() {
     >
       {isLoggedIn && user?.avatar_url ? (
         <img
-          src={user.avatar_url}
+          src={resolveAvatarUrl(user.avatar_url)}
           alt={user.username}
           className="w-full h-full object-cover"
         />

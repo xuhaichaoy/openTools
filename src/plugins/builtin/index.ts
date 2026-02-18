@@ -94,6 +94,7 @@ export const builtinPlugins: MToolsPlugin[] = [
   // ── 开发工具箱（JSON + 时间戳 + Base64）──
   {
     id: "dev-toolbox",
+    tier: "extension",
     name: "开发工具箱",
     description: "JSON 格式化、时间戳转换、Base64 编解码",
     icon: createElement(Wrench, { className: "w-6 h-6" }),
@@ -217,6 +218,7 @@ export const builtinPlugins: MToolsPlugin[] = [
   // ── 截图（融合工具栏：OCR / 贴图 / 编辑 / 保存 / 复制）──
   {
     id: "screen-capture",
+    tier: "core",
     name: "截图",
     description: "截图录屏，选区后直接 OCR / 贴图 / 编辑 / 保存 / 复制",
     icon: createElement(Camera, { className: "w-6 h-6" }),
@@ -253,6 +255,7 @@ export const builtinPlugins: MToolsPlugin[] = [
   // ── OCR（独立结果页）──
   {
     id: "ocr",
+    tier: "core",
     name: "OCR",
     description: "图片文字识别（支持截图直达）",
     icon: createElement(ScanText, { className: "w-6 h-6" }),
@@ -266,6 +269,7 @@ export const builtinPlugins: MToolsPlugin[] = [
   // ── 翻译（独立）──
   {
     id: "screen-translate",
+    tier: "core",
     name: "翻译",
     description: "屏幕翻译、实时翻译、多语言",
     icon: createElement(Languages, { className: "w-6 h-6" }),
@@ -286,6 +290,7 @@ export const builtinPlugins: MToolsPlugin[] = [
   // ── 笔记中心（速记 + AI 笔记 + Markdown 编辑）──
   {
     id: "note-hub",
+    tier: "extension",
     name: "笔记中心",
     description: "速记录入、AI 生成笔记、Markdown 编辑器",
     icon: createElement(FileText, { className: "w-6 h-6" }),
@@ -329,6 +334,7 @@ export const builtinPlugins: MToolsPlugin[] = [
   // ── AI 助手（Ask / Agent 双模式）──
   {
     id: "ai-center",
+    tier: "core",
     name: "AI 助手",
     description: "AI 对话、智能 Agent（支持文件操作和 Shell）",
     icon: createElement(Bot, { className: "w-6 h-6" }),
@@ -337,78 +343,14 @@ export const builtinPlugins: MToolsPlugin[] = [
     keywords: ["ai", "对话", "chat", "助手", "agent", "智能", "react", "自动"],
     viewId: "ai-center",
     render: (props) => createElement(AICenter, props),
-    actions: [
-      {
-        name: "read_file",
-        description: "读取本地文本文件的内容",
-        parameters: {
-          path: {
-            type: "string",
-            description: "文件的绝对路径",
-            required: true,
-          },
-        },
-        execute: async ({ path }) => {
-          const { invoke } = await import("@tauri-apps/api/core");
-          return invoke("read_text_file", { path });
-        },
-      },
-      {
-        name: "write_file",
-        description: "将内容写入本地文本文件",
-        parameters: {
-          path: {
-            type: "string",
-            description: "文件的绝对路径",
-            required: true,
-          },
-          content: {
-            type: "string",
-            description: "要写入的文本内容",
-            required: true,
-          },
-        },
-        execute: async ({ path, content }) => {
-          const { invoke } = await import("@tauri-apps/api/core");
-          return invoke("write_text_file", { path, content });
-        },
-      },
-      {
-        name: "list_dir",
-        description: "列出目录下的文件和文件夹",
-        parameters: {
-          path: {
-            type: "string",
-            description: "目录的绝对路径",
-            required: true,
-          },
-        },
-        execute: async ({ path }) => {
-          const { invoke } = await import("@tauri-apps/api/core");
-          return invoke("list_directory", { path });
-        },
-      },
-      {
-        name: "shell",
-        description: "执行 Shell 命令并返回输出结果",
-        parameters: {
-          command: {
-            type: "string",
-            description: "要执行的 Shell 命令",
-            required: true,
-          },
-        },
-        execute: async ({ command }) => {
-          const { invoke } = await import("@tauri-apps/api/core");
-          return invoke("run_shell_command", { command });
-        },
-      },
-    ],
+    // 文件/Shell 等工具已由 Rust 后端 AI 工具系统统一提供（Ask 模式自动调用）
+    // 此处不再注册重复的前端 PluginAction
   },
 
   // ── 工作流（独立）──
   {
     id: "workflows",
+    tier: "extension",
     name: "工作流",
     description: "AI 驱动的自动化工作流",
     icon: createElement(Workflow, { className: "w-6 h-6" }),
@@ -422,6 +364,7 @@ export const builtinPlugins: MToolsPlugin[] = [
   // ── 知识库（独立）──
   {
     id: "knowledge-base",
+    tier: "extension",
     name: "知识库",
     description: "文档导入、RAG 检索增强",
     icon: createElement(BookOpen, { className: "w-6 h-6" }),
@@ -436,6 +379,7 @@ export const builtinPlugins: MToolsPlugin[] = [
 
   {
     id: "color",
+    tier: "extension",
     name: "颜色",
     description: "屏幕取色、调色板、HEX/RGB/HSL",
     icon: createElement(Pipette, { className: "w-6 h-6" }),
@@ -447,6 +391,7 @@ export const builtinPlugins: MToolsPlugin[] = [
   },
   {
     id: "qr-code",
+    tier: "extension",
     name: "二维码",
     description: "二维码/条形码识别与生成",
     icon: createElement(QrCode, { className: "w-6 h-6" }),
@@ -458,6 +403,7 @@ export const builtinPlugins: MToolsPlugin[] = [
   },
   {
     id: "data-forge",
+    tier: "extension",
     name: "数据工坊",
     description: "AI 驱动的数据导入导出平台",
     icon: createElement(Database, { className: "w-6 h-6" }),
@@ -469,6 +415,7 @@ export const builtinPlugins: MToolsPlugin[] = [
   },
   {
     id: "image-search",
+    tier: "extension",
     name: "以图搜图",
     description: "反向图片搜索 + AI 图片理解",
     icon: createElement(Search, { className: "w-6 h-6" }),
@@ -481,6 +428,7 @@ export const builtinPlugins: MToolsPlugin[] = [
   // 「设置」已合并到「管理中心」，不再单独注册
   {
     id: "plugins",
+    tier: "core",
     name: "插件",
     description: "兼容 uTools / Rubick 格式",
     icon: createElement(Puzzle, { className: "w-6 h-6" }),
@@ -492,6 +440,7 @@ export const builtinPlugins: MToolsPlugin[] = [
   },
   {
     id: "cloud-sync",
+    tier: "extension",
     name: "云同步",
     description: "GitHub/Gitee/GitLab/WebDAV 同步",
     icon: createElement(Cloud, { className: "w-6 h-6" }),
@@ -505,6 +454,7 @@ export const builtinPlugins: MToolsPlugin[] = [
   // ── 系统快捷操作 ──
   {
     id: "system-actions",
+    tier: "core",
     name: "系统操作",
     description: "锁屏、深色模式、清空回收站、休眠等系统级操作",
     icon: createElement(Zap, { className: "w-6 h-6" }),
@@ -568,6 +518,7 @@ export const builtinPlugins: MToolsPlugin[] = [
   // ── 剪贴板历史 ──
   {
     id: "clipboard-history",
+    tier: "core",
     name: "剪贴板",
     description: "剪贴板历史管理，快速搜索与复用",
     icon: createElement(ClipboardList, { className: "w-6 h-6" }),
@@ -629,6 +580,7 @@ export const builtinPlugins: MToolsPlugin[] = [
   // ── 快捷短语 / 文本片段 ──
   {
     id: "snippets",
+    tier: "extension",
     name: "快捷短语",
     description: "文本片段管理，支持静态模板和 AI 动态生成",
     icon: createElement(TextCursorInput, { className: "w-6 h-6" }),
@@ -709,6 +661,7 @@ export const builtinPlugins: MToolsPlugin[] = [
   // ── 网页书签 ──
   {
     id: "bookmarks",
+    tier: "extension",
     name: "网页书签",
     description: "书签管理，支持从 Chrome/Firefox 导入",
     icon: createElement(Bookmark, { className: "w-6 h-6" }),
@@ -765,6 +718,8 @@ export const builtinPlugins: MToolsPlugin[] = [
   },
   {
     id: "management-center",
+    tier: "core",
+    searchable: false,
     name: "管理中心",
     description: "账号、数据同步及团队管理",
     icon: createElement(User, { className: "w-6 h-6" }),

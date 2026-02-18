@@ -20,19 +20,26 @@ impl CollectionLocks {
         }
     }
 
-    fn get_lock(&self, name: &str) -> std::sync::Arc<RwLock<()>> {
+    fn get_lock(&self, name: &str) -> Result<std::sync::Arc<RwLock<()>>, String> {
         // 先尝试读锁快速路径
         {
-            let map = self.locks.read().unwrap();
+            let map = self
+                .locks
+                .read()
+                .map_err(|e| format!("锁中毒: {}", e))?;
             if let Some(lock) = map.get(name) {
-                return lock.clone();
+                return Ok(lock.clone());
             }
         }
         // 写锁路径：创建新锁
-        let mut map = self.locks.write().unwrap();
-        map.entry(name.to_string())
+        let mut map = self
+            .locks
+            .write()
+            .map_err(|e| format!("锁中毒: {}", e))?;
+        Ok(map
+            .entry(name.to_string())
             .or_insert_with(|| std::sync::Arc::new(RwLock::new(())))
-            .clone()
+            .clone())
     }
 }
 
@@ -76,7 +83,7 @@ fn write_collection(path: &PathBuf, data: &str) -> Result<(), String> {
 #[tauri::command]
 pub async fn collection_get_all(app: AppHandle, name: String) -> Result<String, String> {
     let path = get_collection_path(&app, &name)?;
-    let lock = COLLECTION_LOCKS.get_lock(&name);
+    let lock = COLLECTION_LOCKS.get_lock(&name)?;
     let _guard = lock.read().map_err(|e| format!("获取读锁失败: {}", e))?;
     read_collection(&path)
 }
@@ -89,7 +96,7 @@ pub async fn collection_create(
     item: String,
 ) -> Result<String, String> {
     let path = get_collection_path(&app, &name)?;
-    let lock = COLLECTION_LOCKS.get_lock(&name);
+    let lock = COLLECTION_LOCKS.get_lock(&name)?;
     let _guard = lock.write().map_err(|e| format!("获取写锁失败: {}", e))?;
 
     let raw = read_collection(&path)?;
@@ -118,7 +125,7 @@ pub async fn collection_update(
     partial: String,
 ) -> Result<String, String> {
     let path = get_collection_path(&app, &name)?;
-    let lock = COLLECTION_LOCKS.get_lock(&name);
+    let lock = COLLECTION_LOCKS.get_lock(&name)?;
     let _guard = lock.write().map_err(|e| format!("获取写锁失败: {}", e))?;
 
     let raw = read_collection(&path)?;
@@ -157,7 +164,7 @@ pub async fn collection_delete(
     id: String,
 ) -> Result<bool, String> {
     let path = get_collection_path(&app, &name)?;
-    let lock = COLLECTION_LOCKS.get_lock(&name);
+    let lock = COLLECTION_LOCKS.get_lock(&name)?;
     let _guard = lock.write().map_err(|e| format!("获取写锁失败: {}", e))?;
 
     let raw = read_collection(&path)?;
@@ -185,7 +192,7 @@ pub async fn collection_set_all(
     items: String,
 ) -> Result<(), String> {
     let path = get_collection_path(&app, &name)?;
-    let lock = COLLECTION_LOCKS.get_lock(&name);
+    let lock = COLLECTION_LOCKS.get_lock(&name)?;
     let _guard = lock.write().map_err(|e| format!("获取写锁失败: {}", e))?;
 
     // 验证是合法的 JSON 数组，并格式化后写入

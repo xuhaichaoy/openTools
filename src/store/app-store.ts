@@ -1,28 +1,10 @@
 import { create } from 'zustand'
-import { handleError } from '@/core/errors'
+import { persist } from 'zustand/middleware'
+import { tauriPersistStorage } from '@/core/storage'
 
 export type AppMode = 'search' | 'ai'
 
-const RECENT_TOOLS_KEY = 'mtools_recent_tools'
 const MAX_RECENT_TOOLS = 20
-
-function loadRecentTools(): string[] {
-  try {
-    const raw = localStorage.getItem(RECENT_TOOLS_KEY)
-    return raw ? JSON.parse(raw) : []
-  } catch (e) {
-    handleError(e, { context: '加载最近使用工具', silent: true })
-    return []
-  }
-}
-
-function saveRecentTools(tools: string[]) {
-  try {
-    localStorage.setItem(RECENT_TOOLS_KEY, JSON.stringify(tools))
-  } catch (e) {
-    handleError(e, { context: '保存最近使用工具', silent: true })
-  }
-}
 
 export type AIInitialMode = 'ask' | 'agent'
 
@@ -30,6 +12,11 @@ export interface EmbedRequest {
   pluginId: string
   featureCode: string
   title?: string
+}
+
+export interface ViewEntry {
+  viewId: string
+  params?: Record<string, unknown>
 }
 
 export interface AppState {
@@ -47,7 +34,7 @@ export interface AppState {
   pendingNavigate: string | null
 
   /** 视图栈（支持多层返回） */
-  viewStack: string[]
+  viewStack: ViewEntry[]
 
   setMode: (mode: AppMode) => void
   setSearchValue: (value: string) => void
@@ -72,28 +59,32 @@ export interface AppState {
   // ── 视图栈导航 ──
   /** 当前视图（栈顶） */
   currentView: () => string
-  /** 压入新视图 */
-  pushView: (viewId: string) => void
+  /** 当前视图的完整条目（含 params） */
+  currentViewEntry: () => ViewEntry
+  /** 压入新视图（可附带参数） */
+  pushView: (viewId: string, params?: Record<string, unknown>) => void
   /** 返回上一级 */
   popView: () => void
   /** 替换当前视图（不增加栈深度） */
-  replaceView: (viewId: string) => void
+  replaceView: (viewId: string, params?: Record<string, unknown>) => void
   /** 回到主界面（清空栈） */
   resetToMain: () => void
 }
 
 const DEFAULT_VIEW = 'main'
 
-export const useAppStore = create<AppState>((set, get) => ({
+export const useAppStore = create<AppState>()(
+  persist(
+    (set, get) => ({
   mode: 'search',
   searchValue: '',
   selectedIndex: 0,
   windowExpanded: false,
-  recentTools: loadRecentTools(),
+  recentTools: [] as string[],
   aiInitialMode: 'ask' as AIInitialMode,
   pendingEmbed: null as EmbedRequest | null,
   pendingNavigate: null as string | null,
-  viewStack: [DEFAULT_VIEW],
+  viewStack: [{ viewId: DEFAULT_VIEW }] as ViewEntry[],
 
   setMode: (mode) => set({ mode }),
   setSearchValue: (value) => {
@@ -108,7 +99,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   addRecentTool: (viewId) => set((state) => {
     const filtered = state.recentTools.filter((id) => id !== viewId)
     const updated = [viewId, ...filtered].slice(0, MAX_RECENT_TOOLS)
-    saveRecentTools(updated)
     return { recentTools: updated }
   }),
   setAiInitialMode: (mode) => set({ aiInitialMode: mode }),
@@ -129,24 +119,39 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (current) set({ pendingNavigate: null })
     return current
   },
-  reset: () => set({ mode: 'search', searchValue: '', selectedIndex: 0, windowExpanded: false, viewStack: [DEFAULT_VIEW] }),
+  reset: () => set({ mode: 'search', searchValue: '', selectedIndex: 0, windowExpanded: false, viewStack: [{ viewId: DEFAULT_VIEW }] }),
 
   // ── 视图栈导航 ──
   currentView: () => {
     const stack = get().viewStack
-    return stack[stack.length - 1] ?? DEFAULT_VIEW
+    const top = stack[stack.length - 1]
+    return top?.viewId ?? DEFAULT_VIEW
   },
-  pushView: (viewId) => set((state) => {
-    if (state.viewStack[state.viewStack.length - 1] === viewId) return state
-    return { viewStack: [...state.viewStack, viewId] }
+  currentViewEntry: () => {
+    const stack = get().viewStack
+    return stack[stack.length - 1] ?? { viewId: DEFAULT_VIEW }
+  },
+  pushView: (viewId, params) => set((state) => {
+    const top = state.viewStack[state.viewStack.length - 1]
+    if (top?.viewId === viewId) return state
+    return { viewStack: [...state.viewStack, { viewId, params }] }
   }),
   popView: () => set((state) => {
     if (state.viewStack.length <= 1) return state
     return { viewStack: state.viewStack.slice(0, -1) }
   }),
-  replaceView: (viewId) => set((state) => {
-    if (state.viewStack.length <= 1) return { viewStack: [viewId] }
-    return { viewStack: [...state.viewStack.slice(0, -1), viewId] }
+  replaceView: (viewId, params) => set((state) => {
+    if (state.viewStack.length <= 1) return { viewStack: [{ viewId, params }] }
+    return { viewStack: [...state.viewStack.slice(0, -1), { viewId, params }] }
   }),
-  resetToMain: () => set({ viewStack: [DEFAULT_VIEW] }),
-}))
+  resetToMain: () => set({ viewStack: [{ viewId: DEFAULT_VIEW }] }),
+    }),
+    {
+      name: "mtools-app",
+      storage: tauriPersistStorage("app-settings.json", "应用设置"),
+      partialize: (state) => ({
+        recentTools: state.recentTools,
+      }),
+    },
+  ),
+)

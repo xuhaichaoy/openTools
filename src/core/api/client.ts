@@ -21,7 +21,7 @@ async function tryRefreshToken(): Promise<boolean> {
       if (!refreshToken) return false;
 
       const baseUrl = getServerUrl();
-      const res = await fetch(`${baseUrl}/auth/refresh`, {
+      const res = await fetch(`${baseUrl}/v1/auth/refresh`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ refresh_token: refreshToken }),
@@ -56,7 +56,7 @@ async function request<T>(
   const { params, headers, skipAuth, ...rest } = options;
 
   const baseUrl = getServerUrl();
-  let url = `${baseUrl}${path}`;
+  let url = `${baseUrl}/v1${path}`;
   if (params) {
     const searchParams = new URLSearchParams();
     Object.entries(params).forEach(([key, value]) => {
@@ -65,9 +65,11 @@ async function request<T>(
     url += `?${searchParams.toString()}`;
   }
 
-  const defaultHeaders: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
+  const defaultHeaders: Record<string, string> = {};
+  const isFormData = rest.body instanceof FormData;
+  if (!isFormData) {
+    defaultHeaders["Content-Type"] = "application/json";
+  }
 
   if (token && !skipAuth) {
     defaultHeaders["Authorization"] = `Bearer ${token}`;
@@ -116,4 +118,6 @@ export const api = {
   patch: <T>(path: string, body?: any) =>
     request<T>(path, { method: "PATCH", body: JSON.stringify(body) }),
   delete: <T>(path: string) => request<T>(path, { method: "DELETE" }),
+  upload: <T>(path: string, formData: FormData) =>
+    request<T>(path, { method: "POST", body: formData }),
 };

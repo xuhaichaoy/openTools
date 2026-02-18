@@ -1,7 +1,6 @@
 import { create } from "zustand";
-import { persist, createJSONStorage, type StateStorage } from "zustand/middleware";
-import { load } from "@tauri-apps/plugin-store";
-import { handleError } from "@/core/errors";
+import { persist } from "zustand/middleware";
+import { tauriPersistStorage } from "@/core/storage";
 
 export interface User {
   id: string;
@@ -26,47 +25,6 @@ interface AuthState {
   logout: () => void;
   updateEnergy: (energy: number) => void;
 }
-
-// Tauri Store 实例缓存
-let storePromise: ReturnType<typeof load> | null = null;
-function getStore() {
-  if (!storePromise) {
-    storePromise = load("auth.json", { autoSave: true });
-  }
-  return storePromise;
-}
-
-// 基于 tauri-plugin-store 的安全存储适配器
-const tauriStorage: StateStorage = {
-  getItem: async (name: string): Promise<string | null> => {
-    try {
-      const store = await getStore();
-      const value = await store.get<string>(name);
-      return value ?? null;
-    } catch (e) {
-      handleError(e, { context: "读取认证数据", silent: true });
-      return null;
-    }
-  },
-  setItem: async (name: string, value: string): Promise<void> => {
-    try {
-      const store = await getStore();
-      await store.set(name, value);
-      await store.save();
-    } catch (e) {
-      handleError(e, { context: "保存认证数据", silent: true });
-    }
-  },
-  removeItem: async (name: string): Promise<void> => {
-    try {
-      const store = await getStore();
-      await store.delete(name);
-      await store.save();
-    } catch (e) {
-      handleError(e, { context: "删除认证数据", silent: true });
-    }
-  },
-};
 
 export const useAuthStore = create<AuthState>()(
   persist(
@@ -103,7 +61,7 @@ export const useAuthStore = create<AuthState>()(
     }),
     {
       name: "mtools-auth",
-      storage: createJSONStorage(() => tauriStorage),
+      storage: tauriPersistStorage("auth.json", "认证数据"),
     },
   ),
 );

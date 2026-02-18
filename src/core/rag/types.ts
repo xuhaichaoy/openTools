@@ -8,6 +8,9 @@ export type DocFormat = 'txt' | 'md' | 'pdf' | 'json' | 'csv' | 'html'
 /** 文档状态 */
 export type DocStatus = 'pending' | 'processing' | 'indexed' | 'error'
 
+/** 文档来源类型 */
+export type DocSourceType = 'local' | 'personal' | 'team'
+
 /** 文档元数据 */
 export interface KnowledgeDoc {
   id: string
@@ -22,6 +25,8 @@ export interface KnowledgeDoc {
   updatedAt: number
   errorMsg?: string       // 处理失败时的错误信息
   tags?: string[]         // 用户自定义标签
+  sourceType: DocSourceType  // 文档来源
+  sourceId?: string          // 来源 ID（团队文档时为 team_id）
 }
 
 /** 文档分块 */
@@ -53,6 +58,8 @@ export interface RAGConfig {
   scoreThreshold: number      // 最低相似度阈值, 默认 0.3
   embeddingModel: string      // Embedding 模型名, 默认 text-embedding-3-small
   embeddingDimension: number  // 向量维度, 默认 1536
+  embeddingBaseUrl?: string   // Embedding API 地址（留空则复用 AI 设置的 base_url）
+  embeddingApiKey?: string    // Embedding API Key（留空则复用 AI 设置的 api_key）
 }
 
 /** 知识库统计 */
@@ -70,4 +77,6 @@ export const DEFAULT_RAG_CONFIG: RAGConfig = {
   scoreThreshold: 0.3,
   embeddingModel: 'text-embedding-3-small',
   embeddingDimension: 1536,
+  embeddingBaseUrl: '',
+  embeddingApiKey: '',
 }

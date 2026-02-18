@@ -18,13 +18,9 @@ import { useAgentStore } from "@/store/agent-store";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, emit } from "@tauri-apps/api/event";
 import {
-  Bot,
   Globe,
   Puzzle,
-  Terminal,
-  Database,
   Workflow as WorkflowIcon,
-  ClipboardList,
   File,
   Folder,
   FileImage,
@@ -36,10 +32,6 @@ import {
   AppWindow,
   Rocket,
 } from "lucide-react";
-import {
-  emitPluginEvent,
-  PluginEventTypes,
-} from "@/core/plugin-system/event-bus";
 
 // 插件注册中心
 import { registry } from "@/core/plugin-system/registry";
@@ -48,108 +40,33 @@ import { getMToolsAI } from "@/core/ai/mtools-ai";
 import { ScopedStorage } from "@/core/plugin-system/storage";
 import { createPluginContext } from "@/core/plugin-system/context";
 
+// Shell hooks
+import { useFileSearch } from "@/shell/useFileSearch";
+import { useAppSearch } from "@/shell/useAppSearch";
+import { usePluginEmbed } from "@/shell/usePluginEmbed";
+import { commandRouter } from "@/shell/CommandRouter";
+import "@/shell/commands";
+import { useScreenshotHandler } from "@/shell/useScreenshotHandler";
+import { formatFileSize } from "@/shell/ResultBuilder";
+import { updateWindowSize } from "@/shell/WindowSizeManager";
+
+import { handleError, ErrorLevel } from "@/core/errors";
+import {
+  emitPluginEvent,
+  PluginEventTypes,
+} from "@/core/plugin-system/event-bus";
+import { WINDOW_HEIGHT_EXPANDED } from "@/core/constants";
+
 // 初始化：注册所有内置插件
 registry.registerAll(builtinPlugins);
 
 // 核心壳保留的特殊视图（不走插件注册）
 type ShellView = "main" | "plugin-embed" | "context-action" | "home";
 
-import {
-  WINDOW_HEIGHT_COLLAPSED,
-  WINDOW_HEIGHT_EXPANDED,
-  WINDOW_HEIGHT_CHAT,
-} from "@/core/constants";
-import { handleError, ErrorLevel } from "@/core/errors";
-
 // 独立窗口模式检测：截图选区窗口
-const specialView = (window as any).__SCREENSHOT_MODE__ ? "screenshot" : null;
-
-function createBridgeToken(): string {
-  const bytes = new Uint8Array(16);
-  if (globalThis.crypto?.getRandomValues) {
-    globalThis.crypto.getRandomValues(bytes);
-    return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-  }
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-}
-
-function formatFileSize(bytes: number): string {
-  if (bytes === 0) return "";
-  const units = ["B", "KB", "MB", "GB"];
-  const i = Math.min(
-    Math.floor(Math.log(bytes) / Math.log(1024)),
-    units.length - 1,
-  );
-  const size = bytes / Math.pow(1024, i);
-  return `${size < 10 ? size.toFixed(1) : Math.round(size)} ${units[i]}`;
-}
-
-function isAllowedEmbedOrigin(origin: string): boolean {
-  // srcDoc + sandbox 场景常见 "null"，同源嵌入允许当前 origin
-  return origin === "null" || origin === window.location.origin;
-}
-
-function toPostMessageTargetOrigin(origin: string | null): string {
-  if (origin && origin !== "null") return origin;
-  return "*";
-}
-
-function getAllowedEmbedCommands(pluginId: string): Set<string> {
-  const plugin = usePluginStore
-    .getState()
-    .plugins.find((p) => p.id === pluginId && p.enabled);
-  if (!plugin) return new Set<string>();
-
-  const base = new Set<string>([
-    "plugin_api_call",
-    "open_url",
-    "plugin_start_color_picker",
-  ]);
-  // 预留：未来可按 manifest/capabilities 做更细粒度扩展
-  return base;
-}
-
-function isAllowedPluginApiMethod(method: unknown): method is string {
-  if (typeof method !== "string") return false;
-  const allowed = new Set<string>([
-    "hideMainWindow",
-    "showMainWindow",
-    "setExpendHeight",
-    "copyText",
-    "showNotification",
-    "shellOpenExternal",
-    "shellOpenPath",
-    "shellShowItemInFolder",
-    "getPath",
-    "copyImage",
-    "setSubInput",
-    "removeSubInput",
-    "redirect",
-    "dbStorage.setItem",
-    "dbStorage.getItem",
-    "dbStorage.removeItem",
-    "outPlugin",
-  ]);
-  return allowed.has(method);
-}
-
-function isValidPluginApiCallArgs(args: Record<string, unknown>): args is {
-  pluginId: string;
-  method: string;
-  args: string;
-  callId: number;
-} {
-  return (
-    typeof args.pluginId === "string" &&
-    typeof args.method === "string" &&
-    typeof args.args === "string" &&
-    typeof args.callId === "number" &&
-    Number.isFinite(args.callId)
-  );
-}
+const specialView = window.__SCREENSHOT_MODE__ ? "screenshot" : null;
 
 function App() {
-  // 截图选区窗口使用独立组件，避免加载主应用逻辑
   if (specialView === "screenshot") {
     return (
       <div className="w-full h-full" style={{ background: "#000" }}>
@@ -162,34 +79,20 @@ function App() {
 
 /** 主应用组件 — 所有 hooks 在此无条件调用，符合 Rules of Hooks */
 function MainApp() {
-  // viewStack 视图栈（app-store 管理，支持多层返回）
-  const view = useAppStore((s) => s.viewStack[s.viewStack.length - 1] ?? 'main');
+  const view = useAppStore((s) => {
+    const top = s.viewStack[s.viewStack.length - 1];
+    return typeof top === 'string' ? top : top?.viewId ?? 'main';
+  });
   const { mode, searchValue, setWindowExpanded, reset, pushView, popView, resetToMain } = useAppStore();
 
   const [contextText, setContextText] = useState("");
-  const [embedTarget, setEmbedTarget] = useState<{
-    pluginId: string;
-    featureCode: string;
-    title?: string;
-  } | null>(null);
-  const [embedBridgeToken, setEmbedBridgeToken] = useState<string | null>(null);
-  const embedSecurityRef = useRef<{
-    view: string;
-    pluginId: string | null;
-    token: string | null;
-    source: Window | null;
-    origin: string | null;
-  }>({
-    view: "main",
-    pluginId: null,
-    token: null,
-    source: null,
-    origin: null,
-  });
   const { config } = useAIStore();
-  const lastCaptureHandledRef =
-    (window as any).__LAST_CAPTURE_HANDLED_REF__ ||
-    ((window as any).__LAST_CAPTURE_HANDLED_REF__ = { key: "", ts: 0 });
+
+  // ── 提取的 Hooks ──
+  const fileResults = useFileSearch(searchValue);
+  const appResults = useAppSearch(searchValue);
+  const { embedTarget, setEmbedTarget, embedBridgeToken } = usePluginEmbed(view, pushView);
+  useScreenshotHandler(pushView);
 
   const handleDirectColorPicker = useCallback(async () => {
     try {
@@ -199,123 +102,12 @@ function MainApp() {
     }
   }, []);
 
-  // ── 文件搜索（异步 + 防抖） ──
-  interface FileSearchResult {
-    name: string;
-    path: string;
-    is_dir: boolean;
-    size: number;
-    modified: string | null;
-    file_type: string;
-  }
-  const [fileResults, setFileResults] = useState<FileSearchResult[]>([]);
-  const fileSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // ── 应用搜索（异步 + 防抖） ──
-  interface AppSearchResult {
-    name: string;
-    path: string;
-  }
-  const [appResults, setAppResults] = useState<AppSearchResult[]>([]);
-  const appSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    // 清理上一次定时器
-    if (fileSearchTimerRef.current) {
-      clearTimeout(fileSearchTimerRef.current);
-      fileSearchTimerRef.current = null;
-    }
-    if (appSearchTimerRef.current) {
-      clearTimeout(appSearchTimerRef.current);
-      appSearchTimerRef.current = null;
-    }
-
-    const trimmed = searchValue.trim();
-
-    // 仅在有 >= 2 字符的查询词时触发文件搜索（f 前缀 或 普通搜索）
-    const isFilePrefix = trimmed.startsWith("f ");
-    const isAppPrefix = trimmed.startsWith("app ");
-    const query = isFilePrefix
-      ? trimmed.slice(2).trim()
-      : isAppPrefix
-        ? trimmed.slice(4).trim()
-        : trimmed;
-
-    // 前缀模式（bd/gg/bing/ai/cb/data/）不搜文件/应用
-    const prefixModes = [
-      "ai ",
-      "bd ",
-      "gg ",
-      "bing ",
-      "/ ",
-      "cb",
-      "data ",
-      "sn ",
-      "bk ",
-    ];
-    const isPrefix = prefixModes.some(
-      (p) => trimmed.startsWith(p) || trimmed === p.trim(),
-    );
-    if (
-      !query ||
-      query.length < 2 ||
-      (isPrefix && !isFilePrefix && !isAppPrefix)
-    ) {
-      setFileResults([]);
-      setAppResults([]);
-      return;
-    }
-
-    // 300ms 防抖 — 文件搜索
-    if (!isAppPrefix) {
-      fileSearchTimerRef.current = setTimeout(async () => {
-        try {
-          const results = await invoke<FileSearchResult[]>("file_search", {
-            query,
-            maxResults: isFilePrefix ? 24 : 8,
-          });
-          setFileResults(results);
-        } catch (e) {
-          handleError(e, { context: "文件搜索", level: ErrorLevel.Warning });
-          setFileResults([]);
-        }
-      }, 300);
-    } else {
-      setFileResults([]);
-    }
-
-    // 200ms 防抖 — 应用搜索（比文件稍快，优先展示）
-    if (!isFilePrefix) {
-      appSearchTimerRef.current = setTimeout(async () => {
-        try {
-          const results = await invoke<AppSearchResult[]>("app_search", {
-            query,
-            maxResults: isAppPrefix ? 20 : 5,
-          });
-          setAppResults(results);
-        } catch (e) {
-          handleError(e, { context: "应用搜索", level: ErrorLevel.Warning });
-          setAppResults([]);
-        }
-      }, 200);
-    } else {
-      setAppResults([]);
-    }
-
-    return () => {
-      if (fileSearchTimerRef.current) {
-        clearTimeout(fileSearchTimerRef.current);
-      }
-      if (appSearchTimerRef.current) {
-        clearTimeout(appSearchTimerRef.current);
-      }
-    };
-  }, [searchValue]);
-
   // 启动时加载 AI 配置、对话历史、工作流、插件和通用设置
   useEffect(() => {
+    let cancelled = false;
+
     useAIStore.getState().loadConfig().then(() => {
-      useAIStore.getState().loadOwnKeys();
+      if (!cancelled) useAIStore.getState().loadOwnKeys();
     });
     useAIStore.getState().loadHistory();
     useAgentStore.getState().loadHistory();
@@ -323,16 +115,15 @@ function MainApp() {
     usePluginStore.getState().loadPlugins();
     useBookmarkStore.getState().loadBookmarks();
 
-    // 启动定时工作流调度器
     invoke("workflow_scheduler_start").catch((e) =>
       handleError(e, { context: "定时调度启动", level: ErrorLevel.Warning }),
     );
 
-    // 监听定时工作流触发事件
     let unlistenScheduled: (() => void) | undefined;
     listen<{ workflowId: string; workflowName: string }>(
       "workflow-scheduled-trigger",
       (event) => {
+        if (cancelled) return;
         const { workflowId } = event.payload;
         useWorkflowStore.getState().executeWorkflow(workflowId);
       },
@@ -340,9 +131,9 @@ function MainApp() {
       unlistenScheduled = fn;
     });
 
-    // 加载主题设置
     invoke<string>("load_general_settings")
       .then((json) => {
+        if (cancelled) return;
         const settings = JSON.parse(json);
         if (settings.theme) {
           document.documentElement.setAttribute("data-theme", settings.theme);
@@ -351,41 +142,12 @@ function MainApp() {
       .catch((e) => handleError(e, { context: "加载通用设置" }));
 
     return () => {
+      cancelled = true;
       unlistenScheduled?.();
     };
   }, []);
 
-  useEffect(() => {
-    if (view === "plugin-embed" && embedTarget) {
-      setEmbedBridgeToken(createBridgeToken());
-    } else {
-      setEmbedBridgeToken(null);
-    }
-  }, [view, embedTarget?.pluginId, embedTarget?.featureCode]);
-
-  useEffect(() => {
-    embedSecurityRef.current = {
-      view,
-      pluginId: embedTarget?.pluginId ?? null,
-      token: embedBridgeToken,
-      source: null,
-      origin: null,
-    };
-  }, [view, embedTarget?.pluginId, embedBridgeToken]);
-
-  // 监听 app-store 的嵌入请求（来自 PluginMarket 等）
-  const pendingEmbed = useAppStore((s) => s.pendingEmbed);
-  useEffect(() => {
-    if (pendingEmbed) {
-      const req = useAppStore.getState().consumeEmbed();
-      if (req) {
-        setEmbedTarget(req);
-        pushView("plugin-embed");
-      }
-    }
-  }, [pendingEmbed]);
-
-  // 监听 app-store 的导航请求（来自 PluginMarket 内置插件点击等）
+  // 监听 app-store 导航请求
   const pendingNavigate = useAppStore((s) => s.pendingNavigate);
   useEffect(() => {
     if (pendingNavigate) {
@@ -420,7 +182,6 @@ function MainApp() {
     }>("workflow-plugin-action", async (event) => {
       const { requestId, pluginId, actionName, params } = event.payload;
       try {
-        // 查找注册表中的 action
         const allActions = registry.getAllActions();
         const found = allActions.find(
           (a) => a.pluginId === pluginId && a.action.name === actionName,
@@ -428,18 +189,15 @@ function MainApp() {
         if (!found) {
           throw new Error(`找不到插件动作: ${pluginId}/${actionName}`);
         }
-        // 解析参数
         let parsedParams: Record<string, unknown> = {};
         try {
           parsedParams = JSON.parse(params);
         } catch (e) {
           handleError(e, { context: "解析工作流参数", silent: true });
         }
-        // 执行 action
         const result = await found.action.execute(parsedParams, {
           ai: getMToolsAI(),
         });
-        // 返回结果给后端
         await emit("workflow-plugin-action-result", {
           requestId,
           result: typeof result === "string" ? result : JSON.stringify(result),
@@ -456,101 +214,7 @@ function MainApp() {
     return () => unlisten?.();
   }, []);
 
-  // 全局监听截图完成事件，保证 OCR/贴图在任意页面都生效
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    let disposed = false;
-    listen<{
-      path?: string;
-      action?: string;
-      imageBase64?: string;
-      imageWidth?: number;
-      imageHeight?: number;
-    }>("capture-done", async (e) => {
-      const {
-        path: capPath,
-        action,
-        imageBase64,
-        imageWidth,
-        imageHeight,
-      } = e.payload || {};
-      if (!capPath) return;
-
-      // 去重：StrictMode/重复监听/重复事件时，短时间内同 key 只处理一次
-      const key = `${action || "copy"}|${capPath}`;
-      const now = Date.now();
-      if (
-        lastCaptureHandledRef.key === key &&
-        now - lastCaptureHandledRef.ts < 1200
-      ) {
-        return;
-      }
-      lastCaptureHandledRef.key = key;
-      lastCaptureHandledRef.ts = now;
-
-      if (action === "pin") {
-        try {
-          if (!imageBase64) {
-            console.warn("pin 缺少 imageBase64，跳过");
-            return;
-          }
-          const srcW = Math.max(1, imageWidth || 300);
-          const srcH = Math.max(1, imageHeight || 300);
-          const maxW = 560;
-          const maxH = 420;
-          const scale = Math.min(maxW / srcW, maxH / srcH, 1);
-          const width = Math.round(srcW * scale);
-          const height = Math.round(srcH * scale);
-          await invoke("ding_create", {
-            imageBase64,
-            x: 100.0,
-            y: 100.0,
-            width,
-            height,
-          });
-        } catch (err) {
-          handleError(err, { context: "全局贴图" });
-        }
-        return;
-      }
-
-      if (action === "ocr") {
-        try {
-          if (!imageBase64) {
-            console.warn("ocr 缺少 imageBase64，跳过");
-            return;
-          }
-          (window as any).__PENDING_OCR_IMAGE__ = imageBase64;
-          pushView("ocr");
-          // 先切到 OCR 页，再投喂截图事件；插件端也会从全局变量兜底读取
-          setTimeout(() => {
-            emitPluginEvent(
-              PluginEventTypes.SCREENSHOT_CAPTURED,
-              "screen-capture",
-              {
-                imageBase64,
-              },
-            );
-          }, 80);
-        } catch (err) {
-          handleError(err, { context: "全局OCR处理" });
-        }
-      }
-    }).then((fn) => {
-      if (disposed) {
-        fn();
-        return;
-      }
-      unlisten = fn;
-    });
-
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, []);
-
-  // 插件窗口通过 BroadcastChannel 请求屏幕取色（不依赖插件窗口的 __TAURI__）
+  // 插件窗口 BroadcastChannel 取色
   useEffect(() => {
     const CH = "mtools-screen-pick";
     const bc = new BroadcastChannel(CH);
@@ -566,184 +230,6 @@ function MainApp() {
       }
     };
     return () => bc.close();
-  }, []);
-
-  // iframe 嵌入插件：子页通过 postMessage 请求 invoke / AI，主窗口代为调用并回传结果
-  useEffect(() => {
-    const handler = async (e: MessageEvent) => {
-      const d = e.data;
-      if (!d || !e.source) return;
-      const source = e.source as Window;
-      const type = d.type as string | undefined;
-      const isBridgeMessage =
-        type === "mtools-embed-invoke" ||
-        type === "mtools-ai-chat" ||
-        type === "mtools-ai-stream";
-
-      if (isBridgeMessage) {
-        const origin = typeof e.origin === "string" ? e.origin : "";
-        if (!isAllowedEmbedOrigin(origin)) {
-          console.warn(
-            `[Security] Blocked bridge message from origin: ${origin}`,
-          );
-          return;
-        }
-        const sec = embedSecurityRef.current;
-        if (
-          sec.view !== "plugin-embed" ||
-          !sec.pluginId ||
-          !sec.token ||
-          d.pluginId !== sec.pluginId ||
-          d.token !== sec.token
-        ) {
-          console.warn("[Security] Blocked unauthorized embed bridge message");
-          return;
-        }
-        // 绑定 source：首条合法消息建立会话来源，后续必须同一窗口
-        if (!sec.source) {
-          sec.source = source;
-          sec.origin = origin;
-        } else if (sec.source !== source) {
-          console.warn("[Security] Blocked bridge message from unknown source");
-          return;
-        }
-      }
-
-      // ── 标准 invoke 桥 ──
-      if (d.type === "mtools-embed-invoke") {
-        const id = d.id as string;
-        const cmd = d.cmd as string;
-        const token = d.token as string;
-        const args = (d.args as Record<string, unknown>) ?? {};
-
-        const sec = embedSecurityRef.current;
-        const SAFE_COMMANDS = getAllowedEmbedCommands(sec.pluginId || "");
-
-        const send = (result: unknown, error?: string) => {
-          try {
-            const targetOrigin = toPostMessageTargetOrigin(
-              embedSecurityRef.current.origin,
-            );
-            source.postMessage(
-              {
-                type: "mtools-embed-result",
-                id,
-                token,
-                result: error === undefined ? result : undefined,
-                error,
-              },
-              targetOrigin,
-            );
-          } catch (_) {
-            // iframe 可能已卸载，忽略 postMessage 发送失败
-          }
-        };
-
-        if (!SAFE_COMMANDS.has(cmd)) {
-          console.warn(`[Security] Blocked unauthorized invoke: ${cmd}`);
-          send(
-            undefined,
-            `Permission denied: Command '${cmd}' is not allowed.`,
-          );
-          return;
-        }
-
-        // 进一步约束 plugin_api_call：插件身份与可调用方法都要匹配
-        if (cmd === "plugin_api_call") {
-          if (!isValidPluginApiCallArgs(args)) {
-            send(undefined, "Invalid plugin_api_call args payload.");
-            return;
-          }
-          if (args.pluginId !== sec.pluginId) {
-            send(undefined, "Permission denied: plugin identity mismatch.");
-            return;
-          }
-          if (!isAllowedPluginApiMethod(args.method)) {
-            send(
-              undefined,
-              "Permission denied: plugin API method is not allowed.",
-            );
-            return;
-          }
-        }
-
-        try {
-          const result = await invoke(cmd, args);
-          send(result);
-        } catch (err) {
-          send(undefined, String(err));
-        }
-        return;
-      }
-
-      // ── AI chat（单轮，等完整结果）──
-      if (d.type === "mtools-ai-chat") {
-        const ai = getMToolsAI();
-        const token = d.token as string;
-        try {
-          const targetOrigin = toPostMessageTargetOrigin(
-            embedSecurityRef.current.origin,
-          );
-          const result = await ai.chat({
-            messages: d.messages,
-            model: d.model,
-            temperature: d.temperature,
-          });
-          source.postMessage(
-            {
-              type: "mtools-ai-result",
-              id: d.id,
-              token,
-              content: result.content,
-            },
-            targetOrigin,
-          );
-        } catch (err) {
-          const targetOrigin = toPostMessageTargetOrigin(
-            embedSecurityRef.current.origin,
-          );
-          source.postMessage(
-            { type: "mtools-ai-result", id: d.id, token, error: String(err) },
-            targetOrigin,
-          );
-        }
-        return;
-      }
-
-      // ── AI stream（流式，逐 chunk 推送）──
-      if (d.type === "mtools-ai-stream") {
-        const ai = getMToolsAI();
-        const token = d.token as string;
-        const targetOrigin = toPostMessageTargetOrigin(
-          embedSecurityRef.current.origin,
-        );
-        try {
-          await ai.stream({
-            messages: d.messages,
-            onChunk: (chunk) => {
-              source.postMessage(
-                { type: "mtools-ai-chunk", id: d.id, token, chunk },
-                targetOrigin,
-              );
-            },
-            onDone: (content) => {
-              source.postMessage(
-                { type: "mtools-ai-done", id: d.id, token, content },
-                targetOrigin,
-              );
-            },
-          });
-        } catch (err) {
-          source.postMessage(
-            { type: "mtools-ai-error", id: d.id, token, error: String(err) },
-            targetOrigin,
-          );
-        }
-        return;
-      }
-    };
-    window.addEventListener("message", handler);
-    return () => window.removeEventListener("message", handler);
   }, []);
 
   // ── 文件搜索结果 → ResultItem 转换 ──
@@ -796,7 +282,7 @@ function MainApp() {
   }, []);
 
   const fileResultToItem = useCallback(
-    (f: FileSearchResult): ResultItem => {
+    (f: { name: string; path: string; is_dir: boolean; size: number; modified: string | null; file_type: string }): ResultItem => {
       const sizeStr = f.is_dir ? "文件夹" : formatFileSize(f.size);
       return {
         id: `file-${f.path}`,
@@ -814,144 +300,21 @@ function MainApp() {
   );
 
   // ── 统一搜索 ──
+  const commandCtx = useMemo(() => ({ pushView }), [pushView]);
+
   const getFilteredResults = useCallback((): ResultItem[] => {
     if (!searchValue) return [];
 
-    // 前缀模式处理
-    if (searchValue.startsWith("ai ")) {
-      return [
-        {
-          id: "ai-enter",
-          title: `问 AI：${searchValue.slice(3)}`,
-          description: "按 Enter 开始对话",
-          icon: <Bot className="w-6 h-6" />,
-          color: "text-indigo-500 bg-indigo-500/10",
-          category: "AI",
-          action: () => {
-            useAIStore.getState().sendMessage(searchValue.slice(3));
-            pushView("ai-center");
-          },
-        },
-      ];
-    }
+    // 1) 前缀命令：通过 CommandRouter 分发
+    const cmdResults = commandRouter.match(searchValue, commandCtx);
+    if (cmdResults !== null) return cmdResults;
 
-    if (searchValue.startsWith("bd ")) {
-      const query = searchValue.slice(3);
-      return [
-        {
-          id: "baidu-search",
-          title: `百度：${query}`,
-          description: "https://www.baidu.com",
-          icon: <Globe className="w-6 h-6" />,
-          color: "text-blue-500 bg-blue-500/10",
-          category: "搜索",
-          action: () => {
-            invoke("open_url", {
-              url: `https://www.baidu.com/s?wd=${encodeURIComponent(query)}`,
-            });
-          },
-        },
-      ];
-    }
-
-    if (searchValue.startsWith("gg ")) {
-      const query = searchValue.slice(3);
-      return [
-        {
-          id: "google-search",
-          title: `Google：${query}`,
-          description: "https://www.google.com",
-          icon: <Globe className="w-6 h-6" />,
-          color: "text-green-500 bg-green-500/10",
-          category: "搜索",
-          action: () => {
-            invoke("open_url", {
-              url: `https://www.google.com/search?q=${encodeURIComponent(query)}`,
-            });
-          },
-        },
-      ];
-    }
-
-    if (searchValue.startsWith("bing ")) {
-      const query = searchValue.slice(5);
-      return [
-        {
-          id: "bing-search",
-          title: `必应：${query}`,
-          description: "https://www.bing.com",
-          icon: <Globe className="w-6 h-6" />,
-          color: "text-teal-500 bg-teal-500/10",
-          category: "搜索",
-          action: () => {
-            invoke("open_url", {
-              url: `https://www.bing.com/search?q=${encodeURIComponent(query)}`,
-            });
-          },
-        },
-      ];
-    }
-
-    if (searchValue.startsWith("/ ")) {
-      const cmd = searchValue.slice(2);
-      return [
-        {
-          id: "shell-enter",
-          title: `Shell：${cmd || "..."}`,
-          description: "AI Agent 执行 shell 命令并返回结果",
-          icon: <Terminal className="w-6 h-6" />,
-          color: "text-orange-500 bg-orange-500/10",
-          category: "Agent",
-          action: () => {
-            if (cmd.trim()) {
-              useAIStore
-                .getState()
-                .sendMessage(
-                  `请执行以下 shell 命令并解释结果：\`${cmd.trim()}\``,
-                );
-              pushView("ai-center");
-            }
-          },
-        },
-      ];
-    }
-
-    if (searchValue.startsWith("cb ") || searchValue === "cb") {
-      const keyword = searchValue.slice(3).trim();
-      return [
-        {
-          id: "clipboard-history-enter",
-          title: keyword ? `剪贴板搜索：${keyword}` : "打开剪贴板历史",
-          description: "查看和搜索剪贴板记录",
-          icon: <ClipboardList className="w-6 h-6" />,
-          color: "text-cyan-500 bg-cyan-500/10",
-          category: "工具",
-          action: () => pushView("clipboard-history"),
-        },
-      ];
-    }
-
-    if (searchValue.startsWith("data ")) {
-      const query = searchValue.slice(5);
-      return [
-        {
-          id: "data-forge-enter",
-          title: `数据工坊：${query || "打开"}`,
-          description: "搜索数据脚本或用 AI 描述数据需求",
-          icon: <Database className="w-6 h-6" />,
-          color: "text-purple-500 bg-purple-500/10",
-          category: "数据",
-          action: () => pushView("data-forge"),
-        },
-      ];
-    }
-
-    // f 前缀：仅搜索文件
+    // 2) 文件搜索（特殊前缀，需要 hook 数据）
     if (searchValue.startsWith("f ")) {
       return fileResults.map(fileResultToItem);
     }
 
-    // app 前缀：仅搜索本地应用
+    // 3) 应用搜索（特殊前缀，需要 hook 数据）
     if (searchValue.startsWith("app ")) {
       return appResults.map((a) => ({
         id: `app-${a.path}`,
@@ -960,65 +323,18 @@ function MainApp() {
         icon: <Rocket className="w-6 h-6" />,
         color: "text-green-500 bg-green-500/10",
         category: "应用",
-        action: () => {
-          invoke("file_open", { path: a.path });
-        },
+        action: () => { invoke("file_open", { path: a.path }); },
       }));
     }
 
-    // sn 前缀：快捷短语
-    if (searchValue.startsWith("sn ") || searchValue === "sn") {
-      const keyword = searchValue.slice(3).trim();
-      return [
-        {
-          id: "snippets-enter",
-          title: keyword ? `搜索短语：${keyword}` : "打开快捷短语",
-          description: "管理和使用文本片段",
-          icon: <FileText className="w-6 h-6" />,
-          color: "text-emerald-500 bg-emerald-500/10",
-          category: "工具",
-          action: () => pushView("snippets"),
-        },
-      ];
-    }
-
-    // bk 前缀：网页书签
-    if (searchValue.startsWith("bk ") || searchValue === "bk") {
-      const keyword = searchValue.slice(3).trim();
-      return [
-        {
-          id: "bookmarks-enter",
-          title: keyword ? `搜索书签：${keyword}` : "打开网页书签",
-          description: "管理和搜索收藏的网页",
-          icon: <Globe className="w-6 h-6" />,
-          color: "text-blue-500 bg-blue-500/10",
-          category: "工具",
-          action: () => pushView("bookmarks"),
-        },
-      ];
-    }
-
-    // 搜索工作流 — 关键词匹配触发
+    // 4) 搜索工作流
     const workflowStore = useWorkflowStore.getState();
     const matchedWorkflow = workflowStore.matchByKeyword(searchValue);
     if (matchedWorkflow) {
-      return [
-        {
-          id: `wf-${matchedWorkflow.id}`,
-          title: `${matchedWorkflow.icon} 运行: ${matchedWorkflow.name}`,
-          description: matchedWorkflow.description,
-          icon: <WorkflowIcon className="w-6 h-6" />,
-          color: "text-teal-500 bg-teal-500/10",
-          category: "工作流",
-          action: () => {
-            workflowStore.executeWorkflow(matchedWorkflow.id);
-            pushView("workflows");
-          },
-        },
-      ];
+      return [{ id: `wf-${matchedWorkflow.id}`, title: `${matchedWorkflow.icon} 运行: ${matchedWorkflow.name}`, description: matchedWorkflow.description, icon: <WorkflowIcon className="w-6 h-6" />, color: "text-teal-500 bg-teal-500/10", category: "工作流", action: () => { workflowStore.executeWorkflow(matchedWorkflow.id); pushView("workflows"); } }];
     }
 
-    // 搜索内置插件（通过 registry）
+    // 5) 搜索内置插件
     const builtinResults: ResultItem[] = registry
       .search(searchValue)
       .map(({ plugin }) => ({
@@ -1031,7 +347,7 @@ function MainApp() {
         action: () => pushView(plugin.viewId),
       }));
 
-    // 搜索外部插件（uTools/Rubick 兼容）
+    // 6) 搜索外部插件
     const pluginMatches = usePluginStore.getState().matchInput(searchValue);
     const BUILTIN_COLOR_PICKER = "color-picker";
     const BUILTIN_SCREEN_CAPTURE = "screen-capture";
@@ -1054,7 +370,7 @@ function MainApp() {
       };
     });
 
-    // 本地应用搜索结果混排（排在插件之后，文件之前）
+    // 7) 本地应用混排
     const appItems: ResultItem[] = appResults.map((a) => ({
       id: `app-${a.path}`,
       title: a.name,
@@ -1062,15 +378,12 @@ function MainApp() {
       icon: <Rocket className="w-6 h-6" />,
       color: "text-green-500 bg-green-500/10",
       category: "应用",
-      action: () => {
-        invoke("file_open", { path: a.path });
-      },
+      action: () => { invoke("file_open", { path: a.path }); },
     }));
 
-    // 文件搜索结果混排（排在应用之后）
     const fileItems: ResultItem[] = fileResults.map(fileResultToItem);
 
-    // 书签搜索结果混排（排在文件之后，最多显示 6 条）
+    // 8) 书签搜索混排
     const bmStore = useBookmarkStore.getState();
     const bmMatches =
       searchValue.length >= 2
@@ -1098,7 +411,7 @@ function MainApp() {
     ];
   }, [
     searchValue,
-    config.model,
+    commandCtx,
     handleDirectColorPicker,
     fileResults,
     appResults,
@@ -1106,39 +419,7 @@ function MainApp() {
 
   // 窗口大小管理
   useEffect(() => {
-    const BASE_HEIGHT = 80; // 搜索框 + padding
-    const GRID_COLS = 8;
-    const ROW_HEIGHT = 110; // 每行网格高度（图标 + 文字 + padding）
-
-    if (view === "main") {
-      if (!searchValue) {
-        // Dashboard 模式：固定高度
-        invoke("resize_window", { height: WINDOW_HEIGHT_EXPANDED });
-        setWindowExpanded(true);
-      } else {
-        // 搜索模式：按网格行数计算高度
-        const results = getFilteredResults();
-        if (results.length > 0) {
-          const rows = Math.ceil(results.length / GRID_COLS);
-          const contentHeight = rows * ROW_HEIGHT;
-          const height = Math.min(
-            BASE_HEIGHT + contentHeight + 16,
-            WINDOW_HEIGHT_EXPANDED,
-          );
-          invoke("resize_window", { height });
-          setWindowExpanded(true);
-        } else {
-          invoke("resize_window", { height: WINDOW_HEIGHT_COLLAPSED });
-          setWindowExpanded(false);
-        }
-      }
-    } else if (view === "ai-center") {
-      invoke("resize_window", { height: WINDOW_HEIGHT_CHAT });
-      setWindowExpanded(true);
-    } else {
-      invoke("resize_window", { height: WINDOW_HEIGHT_EXPANDED });
-      setWindowExpanded(true);
-    }
+    updateWindowSize(view, searchValue, getFilteredResults, setWindowExpanded);
   }, [view, mode, searchValue, getFilteredResults]);
 
   const handleSubmit = useCallback(
@@ -1159,7 +440,6 @@ function MainApp() {
         return;
       }
 
-      // / 前缀 → AI Agent 模式（直接进入 Agent Tab）
       if (value.startsWith("/ ")) {
         const cmd = value.slice(2).trim();
         if (cmd) {
@@ -1172,7 +452,6 @@ function MainApp() {
         return;
       }
 
-      // 执行选中项
       const results = getFilteredResults();
       const { selectedIndex } = useAppStore.getState();
       if (results[selectedIndex]?.action) {
@@ -1182,7 +461,7 @@ function MainApp() {
     [getFilteredResults],
   );
 
-  // ESC 返回上一级，连按回到主界面
+  // ESC 返回上一级
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape" && view !== "main") {
@@ -1196,11 +475,10 @@ function MainApp() {
 
   const filteredResults = getFilteredResults();
 
-  // 当前激活的插件（通过 viewId 查找 registry）
+  // 当前激活的插件
   const activePlugin = registry.getByViewId(view);
   const prevPluginRef = useRef<typeof activePlugin>(null);
 
-  // 缓存 PluginContext — 同一插件只创建一次，render 和 onActivate 共用
   const pluginContext = useMemo(
     () =>
       activePlugin
@@ -1212,17 +490,12 @@ function MainApp() {
   // 插件生命周期钩子
   useEffect(() => {
     const prevPlugin = prevPluginRef.current;
-
-    // 切出上一个插件
     if (prevPlugin && prevPlugin !== activePlugin) {
       prevPlugin.onDeactivate?.();
     }
-
-    // 切入新插件
     if (activePlugin && activePlugin !== prevPlugin && pluginContext) {
       activePlugin.onActivate?.(pluginContext);
     }
-
     prevPluginRef.current = activePlugin;
   }, [activePlugin, pluginContext]);
 
@@ -1249,7 +522,6 @@ function MainApp() {
         </>
       )}
 
-      {/* 注册中心的插件 — 统一渲染（含合并后的 AI 助手） */}
       {activePlugin && activePlugin.viewId !== "home" && pluginContext && (
         <Suspense
           fallback={
@@ -1272,12 +544,10 @@ function MainApp() {
         </Suspense>
       )}
 
-      {/* 全部功能页 — 特殊处理 */}
       {view === "home" && (
         <Home onNavigate={(v) => pushView(v)} onBack={() => popView()} />
       )}
 
-      {/* 外部插件嵌入 */}
       {view === "plugin-embed" && embedTarget && embedBridgeToken && (
         <div className="h-full">
           <PluginErrorBoundary
@@ -1301,7 +571,6 @@ function MainApp() {
         </div>
       )}
 
-      {/* 上下文操作面板 */}
       {view === "context-action" && (
         <div className="h-full">
           <ContextActionPanel

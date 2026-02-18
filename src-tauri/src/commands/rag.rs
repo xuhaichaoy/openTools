@@ -21,6 +21,14 @@ pub struct KnowledgeDoc {
     pub error_msg: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default = "default_source_local")]
+    pub source_type: String,
+    #[serde(default)]
+    pub source_id: Option<String>,
+}
+
+fn default_source_local() -> String {
+    "local".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -61,6 +69,10 @@ pub struct RAGConfig {
     pub score_threshold: f32,
     pub embedding_model: String,
     pub embedding_dimension: usize,
+    #[serde(default)]
+    pub embedding_base_url: Option<String>,
+    #[serde(default)]
+    pub embedding_api_key: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -81,6 +93,8 @@ impl Default for RAGConfig {
             score_threshold: 0.3,
             embedding_model: "text-embedding-3-small".to_string(),
             embedding_dimension: 1536,
+            embedding_base_url: None,
+            embedding_api_key: None,
         }
     }
 }
@@ -189,27 +203,39 @@ fn chunk_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
 
 /// 调用 Embedding API 获取向量
 async fn get_embeddings(app: &AppHandle, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
-    // 从 AI 配置中读取 API 信息（与 ai.rs 统一使用 config.json -> ai_config）
+    let rag_config = load_rag_config(app);
+
+    // 优先使用 RAG 独立配置的 Embedding API，回退到通用 AI 配置
     use tauri_plugin_store::StoreExt;
     let store = app.store("config.json").map_err(|e| e.to_string())?;
-
     let ai_config = store.get("ai_config");
-    let base_url = ai_config.as_ref()
-        .and_then(|v| v.get("base_url"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("https://api.openai.com/v1")
+
+    let base_url = rag_config.embedding_base_url
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            ai_config.as_ref()
+                .and_then(|v| v.get("base_url"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("https://api.openai.com/v1")
+        })
         .to_string();
-    let api_key = ai_config.as_ref()
-        .and_then(|v| v.get("api_key"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
+
+    let raw_api_key = rag_config.embedding_api_key
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            ai_config.as_ref()
+                .and_then(|v| v.get("api_key"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+        })
         .to_string();
+    let api_key = crate::crypto::maybe_decrypt(&raw_api_key);
 
     if api_key.is_empty() {
-        return Err("请先配置 AI API Key".to_string());
+        return Err("请先配置 Embedding API Key（在知识库设置或 AI 设置中）".to_string());
     }
-
-    let rag_config = load_rag_config(app);
 
     let url = format!("{}/embeddings", base_url.trim_end_matches('/'));
 
@@ -393,7 +419,6 @@ pub async fn rag_import_doc(
     let doc_id = format!("doc_{}", now);
     let config = load_rag_config(&app);
 
-    // 创建文档记录
     let mut doc = KnowledgeDoc {
         id: doc_id.clone(),
         name,
@@ -407,6 +432,8 @@ pub async fn rag_import_doc(
         updated_at: now,
         error_msg: None,
         tags,
+        source_type: "local".to_string(),
+        source_id: None,
     };
 
     // 保存初始状态
@@ -493,6 +520,144 @@ pub async fn rag_import_doc(
     save_vectors_for_doc(&app, &doc_id, &all_embeddings);
 
     // 更新文档状态
+    doc.status = "indexed".to_string();
+    doc.chunk_count = chunks.len();
+    doc.token_count = total_tokens;
+    doc.updated_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let mut docs = load_docs_index(&app);
+    if let Some(d) = docs.iter_mut().find(|d| d.id == doc_id) {
+        *d = doc.clone();
+    }
+    save_docs_index(&app, &docs);
+
+    let _ = app.emit("rag-index-progress", serde_json::json!({
+        "docId": &doc_id,
+        "status": "indexed",
+    }));
+
+    Ok(doc)
+}
+
+/// 从内容字符串直接导入到知识库（用于云端文档下载后导入）
+#[tauri::command]
+pub async fn rag_import_from_content(
+    app: AppHandle,
+    name: String,
+    content: String,
+    format: String,
+    tags: Vec<String>,
+    source_type: Option<String>,
+    source_id: Option<String>,
+) -> Result<KnowledgeDoc, String> {
+    let size = content.len() as u64;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let doc_id = format!("doc_{}", now);
+    let config = load_rag_config(&app);
+
+    let src_type = source_type.unwrap_or_else(|| "local".to_string());
+
+    let mut doc = KnowledgeDoc {
+        id: doc_id.clone(),
+        name: name.clone(),
+        path: format!("cloud://{}", name),
+        format,
+        size,
+        status: "processing".to_string(),
+        chunk_count: 0,
+        token_count: 0,
+        created_at: now,
+        updated_at: now,
+        error_msg: None,
+        tags,
+        source_type: src_type,
+        source_id,
+    };
+
+    let mut docs = load_docs_index(&app);
+    docs.push(doc.clone());
+    save_docs_index(&app, &docs);
+
+    use tauri::Emitter;
+    let _ = app.emit("rag-index-progress", serde_json::json!({
+        "docId": &doc_id,
+        "status": "processing",
+    }));
+
+    let text_chunks = chunk_text(&content, config.chunk_size, config.chunk_overlap);
+
+    let mut chunks: Vec<DocChunk> = text_chunks
+        .iter()
+        .enumerate()
+        .map(|(i, text)| DocChunk {
+            id: format!("{}_{}", doc_id, i),
+            doc_id: doc_id.clone(),
+            content: text.clone(),
+            index: i,
+            token_count: estimate_tokens(text),
+            metadata: ChunkMetadata {
+                source: name.clone(),
+                page: None,
+                heading: None,
+            },
+            embedding: Vec::new(),
+        })
+        .collect();
+
+    let batch_size = 20;
+    let mut all_embeddings: Vec<Vec<f32>> = Vec::new();
+
+    for batch_start in (0..text_chunks.len()).step_by(batch_size) {
+        let batch_end = (batch_start + batch_size).min(text_chunks.len());
+        let batch: Vec<String> = text_chunks[batch_start..batch_end].to_vec();
+
+        match get_embeddings(&app, &batch).await {
+            Ok(embeddings) => {
+                all_embeddings.extend(embeddings);
+            }
+            Err(e) => {
+                doc.status = "error".to_string();
+                doc.error_msg = Some(e.clone());
+                doc.updated_at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+
+                let mut docs = load_docs_index(&app);
+                if let Some(d) = docs.iter_mut().find(|d| d.id == doc_id) {
+                    *d = doc.clone();
+                }
+                save_docs_index(&app, &docs);
+
+                let _ = app.emit("rag-index-progress", serde_json::json!({
+                    "docId": &doc_id,
+                    "status": "error",
+                    "error": &e,
+                }));
+
+                return Err(e);
+            }
+        }
+    }
+
+    for (i, emb) in all_embeddings.iter().enumerate() {
+        if i < chunks.len() {
+            chunks[i].embedding = emb.clone();
+        }
+    }
+
+    let total_tokens: usize = chunks.iter().map(|c| c.token_count).sum();
+
+    save_chunks_for_doc(&app, &doc_id, &chunks);
+    save_vectors_for_doc(&app, &doc_id, &all_embeddings);
+
     doc.status = "indexed".to_string();
     doc.chunk_count = chunks.len();
     doc.token_count = total_tokens;

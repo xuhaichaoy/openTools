@@ -15,13 +15,13 @@ export type GateResult = {
 };
 
 /**
- * 功能门控：检查当前用户是否有权使用指定功能
+ * 根据登录状态和用户信息计算功能门控结果
  */
-export function checkFeatureAccess(feature: Feature): GateResult {
-  const { isLoggedIn, user } = useAuthStore.getState();
-  const plan = user?.plan || "free";
-  const energy = user?.energy || 0;
-
+function computeGateResult(
+  feature: Feature,
+  isLoggedIn: boolean,
+  energy: number,
+): GateResult {
   switch (feature) {
     case "cloud_sync":
       if (!isLoggedIn) {
@@ -58,7 +58,6 @@ export function checkFeatureAccess(feature: Feature): GateResult {
           action: "login",
         };
       }
-      // 团队 AI 不需要个人能量，但需要登录
       return { allowed: true };
 
     case "team_features":
@@ -82,7 +81,6 @@ export function checkFeatureAccess(feature: Feature): GateResult {
       return { allowed: true };
 
     case "advanced_tools":
-      // 高级工具（数据工坊等）不需要登录即可使用
       return { allowed: true };
 
     default:
@@ -91,11 +89,20 @@ export function checkFeatureAccess(feature: Feature): GateResult {
 }
 
 /**
- * React Hook 版本的功能门控
+ * 功能门控：检查当前用户是否有权使用指定功能（非响应式，用于事件回调等非组件场景）
+ */
+export function checkFeatureAccess(feature: Feature): GateResult {
+  const { isLoggedIn, user } = useAuthStore.getState();
+  return computeGateResult(feature, isLoggedIn, user?.energy || 0);
+}
+
+/**
+ * React Hook 版本的功能门控（响应式，登录状态变化时自动重渲染）
  */
 export function useFeatureGate(feature: Feature): GateResult {
-  // 直接从 store 读取（hook 上下文）
-  return checkFeatureAccess(feature);
+  const isLoggedIn = useAuthStore((s) => s.isLoggedIn);
+  const energy = useAuthStore((s) => s.user?.energy || 0);
+  return computeGateResult(feature, isLoggedIn, energy);
 }
 
 /**
@@ -107,10 +114,18 @@ export function triggerGateAction(action: "login" | "upgrade" | "recharge") {
       window.dispatchEvent(new CustomEvent("open-login-modal"));
       break;
     case "upgrade":
-      // TODO: 打开升级/订阅页面
+      window.dispatchEvent(
+        new CustomEvent("show-toast", {
+          detail: { message: "订阅升级功能即将上线", type: "info" },
+        }),
+      );
       break;
     case "recharge":
-      // TODO: 打开能量购买页面
+      window.dispatchEvent(
+        new CustomEvent("show-toast", {
+          detail: { message: "能量充值功能即将上线", type: "info" },
+        }),
+      );
       break;
   }
 }

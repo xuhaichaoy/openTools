@@ -23,6 +23,8 @@ import {
 import { api } from "@/core/api/client";
 import { handleError } from "@/core/errors";
 import { useAuthStore } from "@/store/auth-store";
+import { maskApiKey } from "@/utils/mask";
+import { EmbeddingConfigSection } from "./AIModelTab";
 
 const BRAND = "#F28F36";
 
@@ -505,6 +507,7 @@ interface AiConfigItem {
   base_url: string;
   member_token_limit: number;
   is_active: boolean;
+  masked_key?: string;
 }
 
 function AIConfigSection({
@@ -662,6 +665,9 @@ function AIConfigSection({
                     <div className="text-xs font-medium">{c.config_name}</div>
                     <div className="text-[10px] text-[var(--color-text-secondary)]">
                       {c.protocol} · {c.model_name || "全型号"}
+                      {c.masked_key && (
+                        <span className="ml-1.5 opacity-50">{c.masked_key}</span>
+                      )}
                       {c.member_token_limit > 0 &&
                         ` · 每人限额 ${c.member_token_limit}`}
                     </div>
@@ -775,7 +781,11 @@ function AIConfigSection({
             />
             <input
               type="password"
-              placeholder={form.id ? "留空表示不修改 API Key" : "API Key"}
+              placeholder={
+                form.id
+                  ? `留空不修改 (${configs.find((c) => c.id === form.id)?.masked_key || "****"})`
+                  : "API Key"
+              }
               value={form.api_key}
               onChange={(e) => setForm({ ...form, api_key: e.target.value })}
               className="w-full bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-1.5 px-2.5 text-xs outline-none focus:ring-2 focus:ring-[#F28F36]/20"
@@ -799,7 +809,7 @@ function AIConfigSection({
             </div>
             <button
               onClick={handleSave}
-              disabled={!form.model_name || !form.api_key || saving}
+              disabled={!form.model_name || (!form.id && !form.api_key) || saving}
               className="w-full py-1.5 rounded-lg bg-[#F28F36] text-white text-xs font-semibold disabled:opacity-40 transition-all flex items-center justify-center gap-1.5"
             >
               {saving && <Loader2 className="w-3 h-3 animate-spin" />}
@@ -808,6 +818,9 @@ function AIConfigSection({
           </div>
         )}
       </div>
+
+      {/* Embedding API 配置（本地知识库向量化） */}
+      <EmbeddingConfigSection />
     </div>
   );
 }

@@ -1,4 +1,6 @@
 mod commands;
+pub mod crypto;
+pub mod error;
 
 use tauri::{
     Manager,
@@ -13,6 +15,20 @@ use std::path::PathBuf;
 
 fn is_subpath_of(path: &std::path::Path, root: &std::path::Path) -> bool {
     path.starts_with(root)
+}
+
+/// 构建 URI scheme 错误响应，避免到处写 unwrap
+fn http_error_response(status: u16, body: &[u8]) -> tauri::http::Response<Vec<u8>> {
+    tauri::http::Response::builder()
+        .status(status)
+        .header("Content-Type", "text/plain")
+        .body(body.to_vec())
+        .unwrap_or_else(|_| {
+            tauri::http::Response::builder()
+                .status(500)
+                .body(b"Internal Error".to_vec())
+                .expect("fallback response must succeed")
+        })
 }
 
 fn allowed_mtplugin_roots(app: &tauri::AppHandle) -> Vec<PathBuf> {
@@ -69,7 +85,6 @@ fn show_window(window: &tauri::WebviewWindow, suppress: &Arc<AtomicUsize>) {
     let s = suppress.clone();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(1500));
-        // CAS: 只有当当前值仍等于 gen 时，才将其重置为 0
         let _ = s.compare_exchange(gen, 0, Ordering::SeqCst, Ordering::SeqCst);
     });
 }
@@ -133,44 +148,24 @@ pub fn run() {
             let canonical = match file_path.canonicalize() {
                 Ok(p) => p,
                 Err(_) => {
-                    return tauri::http::Response::builder()
-                        .status(404)
-                        .header("Content-Type", "text/plain")
-                        .body(b"Not Found".to_vec())
-                        .unwrap();
+                    return http_error_response(404, b"Not Found");
                 }
             };
             // 阻止 .. 路径遍历：解码后的路径不应包含 ".."
             if decoded.contains("..") {
-                return tauri::http::Response::builder()
-                    .status(403)
-                    .header("Content-Type", "text/plain")
-                    .body(b"Forbidden: path traversal".to_vec())
-                    .unwrap();
+                return http_error_response(403, b"Forbidden: path traversal");
             }
 
             if !canonical.exists() {
-                return tauri::http::Response::builder()
-                    .status(404)
-                    .header("Content-Type", "text/plain")
-                    .body(b"Not Found".to_vec())
-                    .unwrap();
+                return http_error_response(404, b"Not Found");
             }
             // 仅允许访问白名单根目录，避免任意文件读取
             if !is_allowed_mtplugin_path(&app.app_handle(), &canonical) {
-                return tauri::http::Response::builder()
-                    .status(403)
-                    .header("Content-Type", "text/plain")
-                    .body(b"Forbidden: path not allowed".to_vec())
-                    .unwrap();
+                return http_error_response(403, b"Forbidden: path not allowed");
             }
             // 仅允许读取文件，不允许目录
             if !canonical.is_file() {
-                return tauri::http::Response::builder()
-                    .status(403)
-                    .header("Content-Type", "text/plain")
-                    .body(b"Forbidden: file only".to_vec())
-                    .unwrap();
+                return http_error_response(403, b"Forbidden: file only");
             }
 
             let content = std::fs::read(&canonical).unwrap_or_default();
@@ -200,9 +195,10 @@ pub fn run() {
                 .header("Cache-Control", "no-store, no-cache, must-revalidate")
                 .header("Pragma", "no-cache")
                 .body(content)
-                .unwrap()
+                .unwrap_or_else(|_| http_error_response(500, b"Response build error"))
         })
         .invoke_handler(tauri::generate_handler![
+            // ── AI ──
             commands::ai::ai_chat,
             commands::ai::ai_chat_stream,
             commands::ai::ai_get_config,
@@ -212,12 +208,17 @@ pub fn run() {
             commands::ai::ai_confirm_tool,
             commands::ai::ai_stop_stream,
             commands::ai::ai_save_chat_image,
+            commands::ai::ai_embedding,
+            commands::ai::ai_list_models,
+            commands::ai::agent::ai_agent_stream,
+            // ── Window ──
             commands::window::toggle_main_window,
             commands::window::resize_window,
             commands::window::hide_window,
             commands::window::show_window_cmd,
             commands::window::start_drag,
             commands::window::stop_drag,
+            // ── System / File ──
             commands::system::run_python_script,
             commands::system::get_python_path,
             commands::system::read_file_base64,
@@ -235,59 +236,67 @@ pub fn run() {
             commands::system::write_text_file,
             commands::system::list_directory,
             commands::system::run_shell_command,
+            // ── File Search ──
+            commands::file_search::file_search,
+            commands::file_search::file_open,
+            commands::file_search::file_show_in_folder,
+            commands::file_search::app_search,
+            // ── Plugin ──
+            commands::plugin::lifecycle::plugin_list,
+            commands::plugin::lifecycle::plugin_add_dev_dir,
+            commands::plugin::lifecycle::plugin_remove_dev_dir,
+            commands::plugin::lifecycle::plugin_set_enabled,
+            commands::plugin::api_bridge::plugin_open,
+            commands::plugin::api_bridge::plugin_close,
+            commands::plugin::api_bridge::plugin_api_call,
+            commands::plugin::api_bridge::plugin_get_embed_html,
+            commands::plugin::plugin_start_color_picker,
+            commands::plugin::plugin_get_pixel_at,
+            // ── Workflow ──
+            commands::workflow::workflow_list,
+            commands::workflow::workflow_create,
+            commands::workflow::workflow_update,
+            commands::workflow::workflow_delete,
+            commands::workflow::engine::workflow_execute,
+            commands::workflow::scheduler::workflow_scheduler_start,
+            commands::workflow::scheduler::workflow_scheduler_stop,
+            commands::workflow::scheduler::workflow_scheduler_reload,
+            commands::workflow::scheduler::workflow_scheduler_status,
+            // ── Screen Capture ──
+            commands::screen_capture::capture::screen_capture_check,
+            commands::screen_capture::capture::screen_capture_download,
+            commands::screen_capture::capture::screen_capture_call,
+            commands::screen_capture::recording::init_screenshot_window,
+            commands::screen_capture::recording::screenshot_window_ready,
+            commands::screen_capture::recording::show_screenshot_window,
+            commands::screen_capture::recording::start_capture,
+            commands::screen_capture::recording::finish_capture,
+            commands::screen_capture::recording::cancel_capture,
+            commands::screen_capture::recording::get_last_screenshot,
+            commands::screen_capture::image_utils::capture_all_windows,
+            commands::screen_capture::image_utils::list_windows_xcap,
+            commands::screen_capture::image_utils::capture_window_xcap_by_id,
+            // ── OCR ──
+            commands::ocr::ocr_detect,
+            commands::ocr::ocr_detect_advanced,
+            commands::ocr::ocr_list_models,
+            // ── RAG ──
+            commands::rag::rag_list_docs,
+            commands::rag::rag_import_doc,
+            commands::rag::rag_import_from_content,
+            commands::rag::rag_remove_doc,
+            commands::rag::rag_reindex_doc,
+            commands::rag::rag_search,
+            commands::rag::rag_get_stats,
+            commands::rag::rag_set_config,
+            // ── DataForge ──
             commands::data_forge::dataforge_get_scripts,
             commands::data_forge::dataforge_search_scripts,
             commands::data_forge::dataforge_run_script,
             commands::data_forge::dataforge_get_history,
             commands::data_forge::dataforge_save_credential,
             commands::data_forge::dataforge_get_credentials,
-            commands::plugin::plugin_list,
-            commands::plugin::plugin_open,
-            commands::plugin::plugin_get_embed_html,
-            commands::plugin::plugin_close,
-            commands::plugin::plugin_api_call,
-            commands::plugin::plugin_add_dev_dir,
-            commands::plugin::plugin_remove_dev_dir,
-            commands::plugin::plugin_set_enabled,
-            commands::plugin::plugin_start_color_picker,
-            commands::plugin::plugin_get_pixel_at,
-            commands::rag::rag_list_docs,
-            commands::rag::rag_import_doc,
-            commands::rag::rag_remove_doc,
-            commands::rag::rag_reindex_doc,
-            commands::rag::rag_search,
-            commands::rag::rag_get_stats,
-            commands::rag::rag_set_config,
-            commands::workflow::workflow_list,
-            commands::workflow::workflow_create,
-            commands::workflow::workflow_update,
-            commands::workflow::workflow_delete,
-            commands::workflow::workflow_execute,
-            commands::workflow::workflow_scheduler_start,
-            commands::workflow::workflow_scheduler_stop,
-            commands::workflow::workflow_scheduler_reload,
-            commands::workflow::workflow_scheduler_status,
-            commands::screen_capture::screen_capture_check,
-            commands::screen_capture::screen_capture_download,
-            commands::screen_capture::screen_capture_call,
-            commands::screen_capture::init_screenshot_window,
-            commands::screen_capture::screenshot_window_ready,
-            commands::screen_capture::show_screenshot_window,
-            commands::screen_capture::start_capture,
-            commands::screen_capture::finish_capture,
-            commands::screen_capture::cancel_capture,
-            commands::screen_capture::get_last_screenshot,
-            commands::screen_capture::capture_all_windows,
-            commands::screen_capture::list_windows_xcap,
-            commands::screen_capture::capture_window_xcap_by_id,
-            commands::webdav::webdav_test,
-            commands::webdav::webdav_create_dir,
-            commands::ocr::ocr_detect,
-            commands::ocr::ocr_detect_advanced,
-            commands::ocr::ocr_list_models,
-            commands::mcp::start_mcp_stdio_server,
-            commands::mcp::stop_mcp_server,
-            commands::mcp::send_mcp_message,
+            // ── Ding (置顶贴图) ──
             commands::ding::ding_create,
             commands::ding::ding_close,
             commands::ding::ding_start_drag,
@@ -295,22 +304,31 @@ pub fn run() {
             commands::ding::ding_set_opacity,
             commands::ding::ding_list,
             commands::ding::ding_close_all,
-            commands::translate::translate_text,
+            // ── Clipboard ──
+            commands::clipboard::clipboard_history_list,
+            commands::clipboard::clipboard_history_clear,
+            commands::clipboard::clipboard_history_delete,
+            commands::clipboard::clipboard_history_write,
+            // ── Cloud Sync ──
+            commands::webdav::webdav_test,
+            commands::webdav::webdav_create_dir,
             commands::git_sync::git_sync_push,
             commands::git_sync::git_sync_pull,
             commands::git_sync::git_sync_status,
             commands::mtools_sync::mtools_sync_test,
             commands::mtools_sync::mtools_sync_push,
             commands::mtools_sync::mtools_sync_pull,
-            commands::clipboard::clipboard_history_list,
-            commands::clipboard::clipboard_history_clear,
-            commands::clipboard::clipboard_history_delete,
-            commands::clipboard::clipboard_history_write,
-            commands::ai::ai_agent_stream,
-            commands::file_search::file_search,
-            commands::file_search::file_open,
-            commands::file_search::file_show_in_folder,
-            commands::file_search::app_search,
+            // ── MCP / Translate / Collection ──
+            commands::mcp::start_mcp_stdio_server,
+            commands::mcp::stop_mcp_server,
+            commands::mcp::send_mcp_message,
+            commands::translate::translate_text,
+            commands::collection::collection_get_all,
+            commands::collection::collection_create,
+            commands::collection::collection_update,
+            commands::collection::collection_delete,
+            commands::collection::collection_set_all,
+            // ── Native Apps ──
             commands::native_apps::native_calendar_list,
             commands::native_apps::native_calendar_create_event,
             commands::native_apps::native_calendar_list_events,
@@ -324,11 +342,6 @@ pub fn run() {
             commands::native_apps::native_shortcuts_run,
             commands::native_apps::native_app_open,
             commands::native_apps::native_app_list_interactive,
-            commands::collection::collection_get_all,
-            commands::collection::collection_create,
-            commands::collection::collection_update,
-            commands::collection::collection_delete,
-            commands::collection::collection_set_all,
         ])
         .setup(|app| {
             let suppress_hide = Arc::new(AtomicUsize::new(0));

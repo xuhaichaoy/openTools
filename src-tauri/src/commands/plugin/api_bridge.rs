@@ -1,324 +1,12 @@
-use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+//! 插件 API 桥接 — plugin_api_call / 嵌入 HTML / utools shim 生成
+
 use std::path::PathBuf;
-use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
-// ── 类型定义 ──
+use super::lifecycle::get_cached_plugins;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[allow(dead_code)]
-pub struct PluginCommand {
-    #[serde(rename = "type", default)]
-    pub cmd_type: Option<String>,
-    #[serde(default)]
-    pub label: Option<String>,
-    #[serde(rename = "match", default)]
-    pub match_pattern: Option<String>,
-}
+// ── 插件窗口管理 ──
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct PluginFeature {
-    pub code: String,
-    #[serde(default)]
-    pub explain: String,
-    #[serde(default)]
-    pub cmds: Vec<serde_json::Value>, // 可以是 string 或 PluginCommand 对象
-    #[serde(default)]
-    pub icon: Option<String>,
-    #[serde(default)]
-    pub platform: Option<Vec<String>>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct PluginManifest {
-    #[serde(alias = "name")]
-    pub plugin_name: String,
-    #[serde(default)]
-    pub description: String,
-    #[serde(default = "default_version")]
-    pub version: String,
-    #[serde(default)]
-    pub author: Option<String>,
-    #[serde(default)]
-    pub homepage: Option<String>,
-    #[serde(default)]
-    pub logo: Option<String>,
-    #[serde(default)]
-    pub main: Option<String>,
-    #[serde(default)]
-    pub preload: Option<String>,
-    #[serde(default)]
-    pub features: Vec<PluginFeature>,
-    #[serde(default)]
-    pub plugin_type: Option<String>,
-    #[serde(default)]
-    pub development: Option<serde_json::Value>,
-    // mTools 扩展 — 插件可携带工作流
-    #[serde(default)]
-    pub workflows: Option<Vec<serde_json::Value>>,
-}
-
-fn default_version() -> String {
-    "0.0.0".to_string()
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct PluginInfo {
-    pub id: String,
-    pub manifest: PluginManifest,
-    pub dir_path: String,
-    pub enabled: bool,
-    pub is_builtin: bool,
-}
-
-// ── 插件缓存 & 开发者目录 ──
-
-pub struct PluginCache {
-    pub plugins: Vec<PluginInfo>,
-    pub dev_dirs: HashSet<String>,
-    pub disabled_ids: HashSet<String>,
-}
-
-impl PluginCache {
-    pub fn new() -> Self {
-        Self {
-            plugins: Vec::new(),
-            dev_dirs: HashSet::new(),
-            disabled_ids: HashSet::new(),
-        }
-    }
-}
-
-// ── 插件扫描 ──
-
-fn get_plugins_dir(app: &AppHandle) -> PathBuf {
-    let resource_dir = app.path().resource_dir().unwrap_or_default();
-    let plugins_dir = resource_dir.join("plugins");
-    if plugins_dir.exists() {
-        return plugins_dir;
-    }
-    std::env::current_dir().unwrap_or_default().join("plugins")
-}
-
-fn scan_plugin_dir(dir: &PathBuf) -> Option<(PluginManifest, String)> {
-    // 优先检查 plugin.json (uTools 格式)
-    let plugin_json = dir.join("plugin.json");
-    if plugin_json.exists() {
-        if let Ok(content) = std::fs::read_to_string(&plugin_json) {
-            if let Ok(manifest) = serde_json::from_str::<PluginManifest>(&content) {
-                return Some((manifest, "plugin.json".to_string()));
-            }
-        }
-    }
-
-    // 再检查 package.json (Rubick 格式)
-    let package_json = dir.join("package.json");
-    if package_json.exists() {
-        if let Ok(content) = std::fs::read_to_string(&package_json) {
-            if let Ok(manifest) = serde_json::from_str::<PluginManifest>(&content) {
-                // 只有有 features 字段的才认为是插件
-                if !manifest.features.is_empty() {
-                    return Some((manifest, "package.json".to_string()));
-                }
-            }
-        }
-    }
-
-    None
-}
-
-/// 从单个目录生成稳定的插件 ID（目录名 + 插件名组合）
-fn make_plugin_id(dir: &PathBuf, manifest: &PluginManifest) -> String {
-    let dir_name = dir
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let name_part = manifest
-        .plugin_name
-        .to_lowercase()
-        .replace(' ', "-")
-        .replace(['/', '\\', '.'], "");
-    if dir_name.is_empty() || dir_name == name_part {
-        name_part
-    } else {
-        format!("{}-{}", dir_name, name_part)
-    }
-}
-
-/// 扫描一组目录，返回去重后的插件列表
-fn scan_dirs(dirs: &[PathBuf], disabled_ids: &HashSet<String>) -> Vec<PluginInfo> {
-    let mut plugins = Vec::new();
-    let mut seen_ids = HashSet::new();
-
-    for base_dir in dirs {
-        if !base_dir.exists() {
-            continue;
-        }
-
-        // 先检查 base_dir 本身是否就是一个插件目录
-        if let Some((manifest, _)) = scan_plugin_dir(base_dir) {
-            let id = make_plugin_id(base_dir, &manifest);
-            if seen_ids.insert(id.clone()) {
-                plugins.push(PluginInfo {
-                    enabled: !disabled_ids.contains(&id),
-                    id,
-                    is_builtin: false,
-                    manifest,
-                    dir_path: base_dir.to_string_lossy().to_string(),
-                });
-            }
-            continue;
-        }
-
-        // 否则遍历子目录
-        if let Ok(entries) = std::fs::read_dir(base_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if !path.is_dir() {
-                    continue;
-                }
-
-                if let Some((manifest, _)) = scan_plugin_dir(&path) {
-                    let id = make_plugin_id(&path, &manifest);
-                    if seen_ids.insert(id.clone()) {
-                        let is_builtin = path
-                            .file_name()
-                            .map(|n| n.to_string_lossy().starts_with("builtin-"))
-                            .unwrap_or(false);
-
-                        plugins.push(PluginInfo {
-                            enabled: !disabled_ids.contains(&id),
-                            id,
-                            manifest,
-                            dir_path: path.to_string_lossy().to_string(),
-                            is_builtin,
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    plugins
-}
-
-/// 重新扫描并更新缓存，返回最新列表
-fn refresh_plugin_cache(app: &AppHandle) -> Vec<PluginInfo> {
-    let cache = app.state::<Mutex<PluginCache>>();
-    let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
-
-    // 首次调用时从持久化存储恢复 dev_dirs 和 disabled_ids
-    if cache.dev_dirs.is_empty() && cache.plugins.is_empty() {
-        use tauri_plugin_store::StoreExt;
-        if let Ok(store) = app.store("plugin-settings.json") {
-            if let Some(dirs) = store.get("devDirs") {
-                if let Some(arr) = dirs.as_array() {
-                    for v in arr {
-                        if let Some(s) = v.as_str() {
-                            cache.dev_dirs.insert(s.to_string());
-                        }
-                    }
-                }
-            }
-            if let Some(disabled) = store.get("disabledIds") {
-                if let Some(arr) = disabled.as_array() {
-                    for v in arr {
-                        if let Some(s) = v.as_str() {
-                            cache.disabled_ids.insert(s.to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let mut dirs = vec![get_plugins_dir(app)];
-    for dev_dir in &cache.dev_dirs {
-        dirs.push(PathBuf::from(dev_dir));
-    }
-
-    cache.plugins = scan_dirs(&dirs, &cache.disabled_ids);
-    cache.plugins.clone()
-}
-
-/// 从缓存获取插件列表（不重新扫描）
-fn get_cached_plugins(app: &AppHandle) -> Vec<PluginInfo> {
-    let cache = app.state::<Mutex<PluginCache>>();
-    let cache = cache.lock().unwrap_or_else(|e| e.into_inner());
-    if cache.plugins.is_empty() {
-        drop(cache);
-        return refresh_plugin_cache(app);
-    }
-    cache.plugins.clone()
-}
-
-/// 将 dev_dirs 和 disabled_ids 持久化到 Tauri Store
-fn persist_plugin_settings(app: &AppHandle, cache: &PluginCache) {
-    use tauri_plugin_store::StoreExt;
-    if let Ok(store) = app.store("plugin-settings.json") {
-        let dirs_vec: Vec<&String> = cache.dev_dirs.iter().collect();
-        store.set("devDirs", serde_json::to_value(&dirs_vec).unwrap_or_default());
-        let disabled_vec: Vec<&String> = cache.disabled_ids.iter().collect();
-        store.set("disabledIds", serde_json::to_value(&disabled_vec).unwrap_or_default());
-    }
-}
-
-// ── Tauri Commands ──
-
-/// 获取所有已安装的插件（刷新扫描）
-#[tauri::command]
-pub async fn plugin_list(app: AppHandle) -> Result<Vec<PluginInfo>, String> {
-    Ok(refresh_plugin_cache(&app))
-}
-
-/// 添加开发者插件目录
-#[tauri::command]
-pub async fn plugin_add_dev_dir(app: AppHandle, dir_path: String) -> Result<Vec<PluginInfo>, String> {
-    {
-        let cache = app.state::<Mutex<PluginCache>>();
-        let mut cache = cache.lock().map_err(|e| format!("Lock poisoned: {}", e))?;
-        cache.dev_dirs.insert(dir_path);
-        // 持久化到 Store
-        persist_plugin_settings(&app, &cache);
-    }
-    Ok(refresh_plugin_cache(&app))
-}
-
-/// 移除开发者插件目录
-#[tauri::command]
-pub async fn plugin_remove_dev_dir(app: AppHandle, dir_path: String) -> Result<Vec<PluginInfo>, String> {
-    {
-        let cache = app.state::<Mutex<PluginCache>>();
-        let mut cache = cache.lock().map_err(|e| format!("Lock poisoned: {}", e))?;
-        cache.dev_dirs.remove(&dir_path);
-        persist_plugin_settings(&app, &cache);
-    }
-    Ok(refresh_plugin_cache(&app))
-}
-
-/// 启用/禁用插件
-#[tauri::command]
-pub async fn plugin_set_enabled(app: AppHandle, plugin_id: String, enabled: bool) -> Result<Vec<PluginInfo>, String> {
-    {
-        let cache = app.state::<Mutex<PluginCache>>();
-        let mut cache = cache.lock().map_err(|e| format!("Lock poisoned: {}", e))?;
-        if enabled {
-            cache.disabled_ids.remove(&plugin_id);
-        } else {
-            cache.disabled_ids.insert(plugin_id);
-        }
-        persist_plugin_settings(&app, &cache);
-    }
-    Ok(refresh_plugin_cache(&app))
-}
-
-/// 在新窗口中打开插件
-/// 关键：使用 WebviewUrl::App 加载（保证 __TAURI__ IPC 可用），
-/// 然后通过 initialization_script + document.write() 替换文档为插件 HTML。
-/// window 对象不变，__TAURI__ 和 utools 依然存活。
 #[tauri::command]
 pub async fn plugin_open(
     app: AppHandle,
@@ -344,21 +32,16 @@ pub async fn plugin_open(
 
     let window_label = format!("plugin-{}-{}", plugin_id, feature_code);
 
-    // 如果窗口已存在，直接显示
     if let Some(window) = app.get_webview_window(&window_label) {
         let _ = window.show();
         let _ = window.set_focus();
         return Ok(());
     }
 
-    let title = format!(
-        "{} - {}",
-        plugin.manifest.plugin_name, feature.explain
-    );
-
+    let title = format!("{} - {}", plugin.manifest.plugin_name, feature.explain);
     let shim_script = generate_utools_shim(&plugin_id);
 
-    // 开发模式：直接加载开发服务器 URL（开发服务器通常与 app 同源，IPC 可用）
+    // 开发模式
     if let Some(dev) = &plugin.manifest.development {
         if let Some(main_url) = dev.get("main").and_then(|v| v.as_str()) {
             let url = WebviewUrl::External(
@@ -377,7 +60,6 @@ pub async fn plugin_open(
         }
     }
 
-    // 读取插件 HTML 文件
     let main_file = plugin
         .manifest
         .main
@@ -390,18 +72,15 @@ pub async fn plugin_open(
     let html_content = std::fs::read_to_string(&main_path)
         .map_err(|e| format!("读取插件文件失败: {}", e))?;
 
-    // 为相对路径资源添加 <base> 标签，指向 mtplugin:// 协议
     let base_url = format!(
         "mtplugin://localhost{}/",
         plugin.dir_path.replace('\\', "/")
     );
     let html_with_base = inject_base_tag(&html_content, &base_url);
 
-    // JSON 序列化 HTML → 安全的 JS 字符串字面量
     let json_html =
         serde_json::to_string(&html_with_base).map_err(|e| e.to_string())?;
 
-    // 注入脚本：用 document.write 替换文档；延迟一帧执行确保 Tauri IPC 已注入
     let inject_script = format!(
         r#"(function(){{
 if(window.__mtools_injected)return;
@@ -424,7 +103,6 @@ setTimeout(__run,0);
         code = feature_code,
     );
 
-    // 使用 App 自身 origin 创建窗口 → IPC 桥自动注入
     let window = WebviewWindowBuilder::new(
         &app,
         &window_label,
@@ -438,7 +116,6 @@ setTimeout(__run,0);
     .build()
     .map_err(|e| format!("创建窗口失败: {}", e))?;
 
-    // preload 脚本延迟注入（等文档替换完成）
     if let Some(preload) = &plugin.manifest.preload {
         let preload_path = PathBuf::from(&plugin.dir_path).join(preload);
         if preload_path.exists() {
@@ -455,7 +132,6 @@ setTimeout(__run,0);
     Ok(())
 }
 
-/// 关闭插件窗口
 #[tauri::command]
 pub async fn plugin_close(app: AppHandle, plugin_id: String, feature_code: String) -> Result<(), String> {
     let window_label = format!("plugin-{}-{}", plugin_id, feature_code);
@@ -465,7 +141,8 @@ pub async fn plugin_close(app: AppHandle, plugin_id: String, feature_code: Strin
     Ok(())
 }
 
-/// 处理插件内 utools API 调用
+// ── plugin_api_call ──
+
 #[tauri::command]
 pub async fn plugin_api_call(
     app: AppHandle,
@@ -474,11 +151,10 @@ pub async fn plugin_api_call(
     args: String,
     call_id: u64,
 ) -> Result<String, String> {
-    let _ = call_id; // 保留以备异步场景使用
+    let _ = call_id;
     let args: serde_json::Value =
         serde_json::from_str(&args).map_err(|e| format!("无效参数 JSON: {}", e))?;
 
-    // 后端兜底：插件必须存在且已启用
     let plugins = get_cached_plugins(&app);
     let plugin = plugins
         .iter()
@@ -490,25 +166,18 @@ pub async fn plugin_api_call(
 
     match method.as_str() {
         "hideMainWindow" => {
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.hide();
-            }
+            if let Some(w) = app.get_webview_window("main") { let _ = w.hide(); }
             Ok("null".to_string())
         }
         "showMainWindow" => {
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.show();
-                let _ = w.set_focus();
-            }
+            if let Some(w) = app.get_webview_window("main") { let _ = w.show(); let _ = w.set_focus(); }
             Ok("null".to_string())
         }
         "setExpendHeight" => {
             let height = args.get("height").and_then(|v| v.as_f64()).unwrap_or(600.0);
-            // 找到对应插件窗口并调整高度
             for (label, window) in app.webview_windows() {
                 if label.starts_with(&format!("plugin-{}", plugin_id)) {
                     let size = window.inner_size().map_err(|e| e.to_string())?;
-                    // height 参数来自 JS 侧逻辑像素，需乘以 scale_factor 转物理像素
                     let scale = window.scale_factor().unwrap_or(1.0);
                     let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize {
                         width: size.width,
@@ -528,12 +197,7 @@ pub async fn plugin_api_call(
         "showNotification" => {
             let body = args.get("body").and_then(|v| v.as_str()).unwrap_or("");
             use tauri_plugin_notification::NotificationExt;
-            app.notification()
-                .builder()
-                .title("mTools")
-                .body(body)
-                .show()
-                .map_err(|e| e.to_string())?;
+            app.notification().builder().title("mTools").body(body).show().map_err(|e| e.to_string())?;
             Ok("null".to_string())
         }
         "shellOpenExternal" => {
@@ -578,12 +242,10 @@ pub async fn plugin_api_call(
             }
         }
         "copyImage" => {
-            // 将 base64 图片写入临时文件，然后写入系统剪贴板
             let base64_data = args.get("base64").and_then(|v| v.as_str()).unwrap_or("");
             if base64_data.is_empty() {
                 return Err("base64 数据为空".to_string());
             }
-            // 去除可能的 data:image/xxx;base64, 前缀
             let pure_b64 = if let Some(pos) = base64_data.find(",") {
                 &base64_data[pos + 1..]
             } else {
@@ -593,27 +255,21 @@ pub async fn plugin_api_call(
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(pure_b64)
                 .map_err(|e| format!("base64 解码失败: {}", e))?;
-            // 写入临时 PNG 文件
             let tmp_dir = std::env::temp_dir();
             let tmp_path = tmp_dir.join(format!("mtools_copyimg_{}.png", std::process::id()));
             std::fs::write(&tmp_path, &bytes).map_err(|e| format!("写入临时图片失败: {}", e))?;
-            // 通过事件通知前端将图片写入剪贴板（利用已有的 clipboard 插件）
             let _ = app.emit("plugin-copy-image", serde_json::json!({ "path": tmp_path.to_string_lossy() }));
             Ok("true".to_string())
         }
         "screenCapture" => {
-            // 触发截图，截图完成后通过事件回传给插件
             let _ = app.emit("plugin-screen-capture", serde_json::json!({ "pluginId": plugin_id }));
             Ok("null".to_string())
         }
         "setSubInput" => {
-            // 通知主窗口显示子输入框
             let placeholder = args.get("placeholder").and_then(|v| v.as_str()).unwrap_or("");
             let is_focus = args.get("isFocus").and_then(|v| v.as_bool()).unwrap_or(true);
             let _ = app.emit("plugin-set-sub-input", serde_json::json!({
-                "pluginId": plugin_id,
-                "placeholder": placeholder,
-                "isFocus": is_focus,
+                "pluginId": plugin_id, "placeholder": placeholder, "isFocus": is_focus,
             }));
             Ok("null".to_string())
         }
@@ -622,18 +278,14 @@ pub async fn plugin_api_call(
             Ok("null".to_string())
         }
         "redirect" => {
-            // 关闭当前插件，打开目标 feature
             let label = args.get("label").and_then(|v| v.as_str()).unwrap_or("");
             let payload = args.get("payload").cloned().unwrap_or(serde_json::Value::Null);
             let _ = app.emit("plugin-redirect", serde_json::json!({
-                "pluginId": plugin_id,
-                "label": label,
-                "payload": payload,
+                "pluginId": plugin_id, "label": label, "payload": payload,
             }));
             Ok("null".to_string())
         }
         "getFeatures" => {
-            // 返回当前插件的 features 列表
             let plugins = get_cached_plugins(&app);
             if let Some(plugin) = plugins.iter().find(|p| p.id == plugin_id) {
                 let features_json = serde_json::to_string(&plugin.manifest.features)
@@ -669,7 +321,6 @@ pub async fn plugin_api_call(
             Ok("null".to_string())
         }
         "outPlugin" => {
-            // 关闭插件窗口
             for (label, window) in app.webview_windows() {
                 if label.starts_with(&format!("plugin-{}", plugin_id)) {
                     let _ = window.close();
@@ -684,195 +335,88 @@ pub async fn plugin_api_call(
     }
 }
 
-// ── 屏幕取色（直接按坐标取像素，不截全屏） ──
+// ── iframe 嵌入 HTML ──
 
-/// 按屏幕坐标取单点颜色，返回 "#RRGGBB"
 #[tauri::command]
-pub async fn plugin_get_pixel_at(x: i32, y: i32) -> Result<String, String> {
-    get_pixel_at_screen(x, y)
+pub async fn plugin_get_embed_html(
+    app: AppHandle,
+    plugin_id: String,
+    feature_code: String,
+    bridge_token: String,
+) -> Result<String, String> {
+    let plugins = get_cached_plugins(&app);
+    let plugin = plugins
+        .iter()
+        .find(|p| p.id == plugin_id)
+        .ok_or_else(|| format!("插件 {} 不存在", plugin_id))?;
+    if !plugin.enabled {
+        return Err(format!("插件 {} 已被禁用", plugin_id));
+    }
+    let _feature = plugin
+        .manifest
+        .features
+        .iter()
+        .find(|f| f.code == feature_code)
+        .ok_or_else(|| format!("功能 {} 不存在", feature_code))?;
+
+    let main_file = plugin.manifest.main.as_deref().ok_or("插件缺少 main 入口")?;
+    let main_path = PathBuf::from(&plugin.dir_path).join(main_file);
+    if !main_path.exists() {
+        return Err(format!("插件入口文件不存在: {}", main_path.display()));
+    }
+    let html_content = std::fs::read_to_string(&main_path)
+        .map_err(|e| format!("读取插件文件失败: {}", e))?;
+
+    let base_url = format!("mtplugin://localhost{}/", plugin.dir_path.replace('\\', "/"));
+    let html_with_base = inject_base_tag(&html_content, &base_url);
+    let bridge = generate_embed_bridge(&plugin_id, &bridge_token);
+    let html_with_bridge = inject_embed_bridge(&html_with_base, &bridge);
+    Ok(html_with_bridge)
 }
 
-#[cfg(target_os = "macos")]
-fn get_pixel_at_screen(sx: i32, sy: i32) -> Result<String, String> {
-    let path = std::env::temp_dir().join("mtools_pixel.png");
-    let status = std::process::Command::new("screencapture")
-        .args(["-x", "-R", &format!("{},{},1,1", sx, sy), path.to_str().unwrap()])
-        .status()
-        .map_err(|e| format!("screencapture 失败: {}", e))?;
-    if !status.success() {
-        return Err("截取像素失败，请检查屏幕录制权限".to_string());
-    }
-    let buf = std::fs::read(&path).map_err(|e| e.to_string())?;
-    let img = image::load_from_memory(&buf).map_err(|e| e.to_string())?;
-    let rgb = img.to_rgb8();
-    let p = rgb.get_pixel(0, 0);
-    let (r, g, b) = (p[0], p[1], p[2]);
-    let _ = std::fs::remove_file(&path);
-    Ok(format!("#{:02X}{:02X}{:02X}", r, g, b))
-}
+// ── HTML 工具函数 ──
 
-#[cfg(target_os = "windows")]
-fn get_pixel_at_screen(sx: i32, sy: i32) -> Result<String, String> {
-    use windows::Win32::Foundation::COLORREF;
-    use windows::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC, SRCCOPY};
-    use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
-    unsafe {
-        let hwnd = GetDesktopWindow();
-        let hdc = GetDC(hwnd).map_err(|e| format!("GetDC 失败: {}", e))?;
-        let color = GetPixel(hdc, sx, sy);
-        let _ = ReleaseDC(hwnd, hdc);
-        if color.0 == 0xFFFFFFFF {
-            return Err("GetPixel 无效".to_string());
-        }
-        let r = (color.0 & 0xFF) as u8;
-        let g = ((color.0 >> 8) & 0xFF) as u8;
-        let b = ((color.0 >> 16) & 0xFF) as u8;
-        Ok(format!("#{:02X}{:02X}{:02X}", r, g, b))
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn get_pixel_at_screen(_x: i32, _y: i32) -> Result<String, String> {
-    Err("Linux 暂不支持直接取色，请使用截图模式".to_string())
-}
-
-/// 启动屏幕取色 — 直接取色，不截屏；取到色值后由后端写入剪贴板（避免前端 clipboard 权限问题）
-/// macOS: 调用系统 NSColorSampler（自带放大镜，无需屏幕录制权限）
-/// Windows: 前端用 EyeDropper API
-#[tauri::command]
-pub async fn plugin_start_color_picker(app: AppHandle) -> Result<String, String> {
-    #[cfg(target_os = "macos")]
-    {
-        // 隐藏主窗口
-        if let Some(win) = app.get_webview_window("main") {
-            let _ = win.hide();
-        }
-
-        let result = macos_native_color_pick().await;
-
-        // 恢复主窗口
-        if let Some(win) = app.get_webview_window("main") {
-            let _ = win.show();
-            let _ = win.set_focus();
-        }
-
-        let hex = result?;
-        if !hex.is_empty() {
-            use tauri_plugin_clipboard_manager::ClipboardExt;
-            let _ = app.clipboard().write_text(hex.clone());
-        }
-        return Ok(hex);
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let _ = app;
-        return Err("Windows 请使用 EyeDropper 取色".to_string());
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let _ = app;
-        return Err("Linux 暂不支持直接取色".to_string());
-    }
-}
-
-/// macOS: 编译并运行 NSColorSampler 小程序，直接取色（不截屏）
-#[cfg(target_os = "macos")]
-async fn macos_native_color_pick() -> Result<String, String> {
-    let cache_dir = std::env::temp_dir();
-    let binary_path = cache_dir.join("mtools_color_sampler");
-    let source_path = cache_dir.join("mtools_color_sampler.m");
-
-    if !binary_path.exists() {
-        let objc_code = include_str!("picker_macos.m");
-        std::fs::write(&source_path, objc_code)
-            .map_err(|e| format!("写入源文件失败: {}", e))?;
-
-        let compile = tokio::process::Command::new("/usr/bin/clang")
-            .args([
-                "-framework", "Cocoa",
-                "-o", binary_path.to_str().unwrap(),
-                source_path.to_str().unwrap(),
-            ])
-            .output()
-            .await
-            .map_err(|e| format!("clang 编译失败: {}", e))?;
-
-        let _ = std::fs::remove_file(&source_path);
-
-        if !compile.status.success() {
-            let _ = std::fs::remove_file(&binary_path);
-            let msg = format!("编译取色程序失败: {}",
-                String::from_utf8_lossy(&compile.stderr).trim());
-            log::error!("{}", msg);
-            return Err(msg);
-        }
-    }
-
-    let output = tokio::process::Command::new(binary_path.to_str().unwrap())
-        .output()
-        .await
-        .map_err(|e| {
-            let msg = format!("启动取色器失败: {}", e);
-            log::error!("{}", msg);
-            msg
-        })?;
-
-    let hex = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if hex.starts_with('#') && hex.len() == 7 {
-        Ok(hex)
-    } else if hex.is_empty() {
-        Ok(String::new())
-    } else {
-        let msg = format!(
-            "取色返回异常 stdout={:?} stderr={}",
-            hex,
-            if stderr.is_empty() { "(空)" } else { stderr.as_str() }
-        );
-        log::error!("{}", msg);
-        Err(msg)
-    }
-}
-
-
-
-// ── 工具函数 ──
-
-/// 在 HTML 的 <head> 标签后注入 <base> 标签，使相对路径资源指向插件目录
-fn inject_base_tag(html: &str, base_url: &str) -> String {
+pub(super) fn inject_base_tag(html: &str, base_url: &str) -> String {
     let base_tag = format!("<base href=\"{}\">", base_url);
     let lower = html.to_lowercase();
     if let Some(pos) = lower.find("<head>") {
         let insert_pos = pos + 6;
-        format!(
-            "{}{}{}",
-            &html[..insert_pos],
-            base_tag,
-            &html[insert_pos..]
-        )
+        format!("{}{}{}", &html[..insert_pos], base_tag, &html[insert_pos..])
     } else if let Some(pos) = lower.find("<html>") {
         let insert_pos = pos + 6;
-        format!(
-            "{}<head>{}</head>{}",
-            &html[..insert_pos],
-            base_tag,
-            &html[insert_pos..]
-        )
+        format!("{}<head>{}</head>{}", &html[..insert_pos], base_tag, &html[insert_pos..])
     } else {
         format!("<head>{}</head>{}", base_tag, html)
     }
 }
 
+fn inject_embed_bridge(html: &str, bridge_script: &str) -> String {
+    let script_tag = format!("<script>{}</script>", bridge_script);
+    let lower = html.to_lowercase();
+    if let Some(pos) = lower.find("<head>") {
+        let insert_pos = pos + 6;
+        format!("{}{}{}", &html[..insert_pos], script_tag, &html[insert_pos..])
+    } else if let Some(pos) = lower.find("<html>") {
+        let insert_pos = pos + 6;
+        format!("{}<head>{}</head>{}", &html[..insert_pos], script_tag, &html[insert_pos..])
+    } else {
+        format!("<head>{}</head>{}", script_tag, html)
+    }
+}
 
-// ── utools API Shim 生成 (Rust 侧) ──
+fn escape_js_string(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('\'', "\\'")
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+}
 
-fn generate_utools_shim(plugin_id: &str) -> String {
+// ── Shim 生成 ──
+
+pub(super) fn generate_utools_shim(plugin_id: &str) -> String {
     format!(r#"
 (function() {{
   'use strict';
-  // Security: Capture the invoke function and strictly remove the global API
   const coreInvoke = window.__TAURI__?.core?.invoke;
   if (coreInvoke) {{
       delete window.__TAURI__;
@@ -903,7 +447,6 @@ fn generate_utools_shim(plugin_id: &str) -> String {
       }});
     }});
   }}
-
 
   const utools = {{
     hideMainWindow() {{ __invoke('hideMainWindow'); }},
@@ -963,75 +506,6 @@ fn generate_utools_shim(plugin_id: &str) -> String {
 "#, plugin_id = plugin_id)
 }
 
-/// 获取用于 iframe 嵌入的插件 HTML（带 postMessage 桥，无新窗口）
-#[tauri::command]
-pub async fn plugin_get_embed_html(
-    app: AppHandle,
-    plugin_id: String,
-    feature_code: String,
-    bridge_token: String,
-) -> Result<String, String> {
-    let plugins = get_cached_plugins(&app);
-    let plugin = plugins
-        .iter()
-        .find(|p| p.id == plugin_id)
-        .ok_or_else(|| format!("插件 {} 不存在", plugin_id))?;
-    if !plugin.enabled {
-        return Err(format!("插件 {} 已被禁用", plugin_id));
-    }
-    let _feature = plugin
-        .manifest
-        .features
-        .iter()
-        .find(|f| f.code == feature_code)
-        .ok_or_else(|| format!("功能 {} 不存在", feature_code))?;
-
-    let main_file = plugin
-        .manifest
-        .main
-        .as_deref()
-        .ok_or("插件缺少 main 入口")?;
-    let main_path = PathBuf::from(&plugin.dir_path).join(main_file);
-    if !main_path.exists() {
-        return Err(format!("插件入口文件不存在: {}", main_path.display()));
-    }
-    let html_content = std::fs::read_to_string(&main_path)
-        .map_err(|e| format!("读取插件文件失败: {}", e))?;
-
-    let base_url = format!(
-        "mtplugin://localhost{}/",
-        plugin.dir_path.replace('\\', "/")
-    );
-    let html_with_base = inject_base_tag(&html_content, &base_url);
-    let bridge = generate_embed_bridge(&plugin_id, &bridge_token);
-    let html_with_bridge = inject_embed_bridge(&html_with_base, &bridge);
-    Ok(html_with_bridge)
-}
-
-/// 在 <head> 开头注入 iframe 用 postMessage 桥脚本
-fn inject_embed_bridge(html: &str, bridge_script: &str) -> String {
-    let script_tag = format!("<script>{}</script>", bridge_script);
-    let lower = html.to_lowercase();
-    if let Some(pos) = lower.find("<head>") {
-        let insert_pos = pos + 6;
-        format!("{}{}{}", &html[..insert_pos], script_tag, &html[insert_pos..])
-    } else if let Some(pos) = lower.find("<html>") {
-        let insert_pos = pos + 6;
-        format!("{}<head>{}</head>{}", &html[..insert_pos], script_tag, &html[insert_pos..])
-    } else {
-        format!("<head>{}</head>{}", script_tag, html)
-    }
-}
-
-/// 转义 plugin_id 用于注入到 JS 字符串，避免破坏脚本
-fn escape_js_string(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('\'', "\\'")
-        .replace('<', "\\u003c")
-        .replace('>', "\\u003e")
-}
-
-/// iframe 内使用的 __TAURI__ 桥：通过 postMessage 让父窗口代为 invoke
 fn generate_embed_bridge(plugin_id: &str, bridge_token: &str) -> String {
     let plugin_id_esc = escape_js_string(plugin_id);
     let bridge_token_esc = escape_js_string(bridge_token);
@@ -1100,7 +574,6 @@ fn generate_embed_bridge(plugin_id: &str, bridge_token: &str) -> String {
     outPlugin: function() {{ return __apiInvoke('outPlugin'); }}
   }};
 
-  // ── mtools.ai SDK（供外部插件调用 AI 能力）──
   var __aiReqId = 0;
   window.mtools = {{
     ai: {{
@@ -1147,14 +620,13 @@ fn generate_embed_bridge(plugin_id: &str, bridge_token: &str) -> String {
 "#, plugin_id_esc = plugin_id_esc, bridge_token_esc = bridge_token_esc)
 }
 
-fn generate_plugin_enter_script(code: &str, cmd_type: &str, payload: Option<&str>) -> String {
+pub(super) fn generate_plugin_enter_script(code: &str, cmd_type: &str, payload: Option<&str>) -> String {
     let payload_js = match payload {
         Some(p) => format!("'{}'", p.replace('\'', "\\'")),
         None => "undefined".to_string(),
     };
     format!(r#"
 (function() {{
-  // 延迟触发，确保插件 onPluginEnter 已注册
   setTimeout(function() {{
     if (window.__utoolsOnEnterCallback) {{
       window.__utoolsOnEnterCallback({{

@@ -1,9 +1,11 @@
 import { useState, useEffect } from "react";
 import { useAIStore } from "@/store/ai-store";
+import { useRAGStore } from "@/store/rag-store";
 import type { OwnKeyModelConfig } from "@/core/ai/types";
 import { useTeamStore } from "@/store/team-store";
 import { api } from "@/core/api/client";
 import { handleError } from "@/core/errors";
+import { maskApiKey } from "@/utils/mask";
 import {
   Zap,
   Shield,
@@ -20,6 +22,10 @@ import {
   ChevronDown,
   Loader2,
   Users,
+  Database,
+  Eye,
+  EyeOff,
+  Save,
 } from "lucide-react";
 
 const BRAND = "#F28F36";
@@ -197,6 +203,11 @@ export function AIModelTab() {
         </div>
       )}
 
+       {/* Embedding API 配置 */}
+       {config.source === "own_key" && (
+        <EmbeddingConfigSection />
+      )}
+
       {/* 高级工具 */}
       <div className="bg-[var(--color-bg)] rounded-xl p-4 border border-[var(--color-border)] space-y-3">
         <div className="flex items-center gap-2">
@@ -301,6 +312,98 @@ export function AIModelTab() {
   );
 }
 
+// ── Embedding API 配置（知识库向量化专用） ──
+
+export function EmbeddingConfigSection() {
+  const { config: ragConfig, updateConfig } = useRAGStore();
+  const [embBaseUrl, setEmbBaseUrl] = useState(ragConfig.embeddingBaseUrl || "");
+  const [embApiKey, setEmbApiKey] = useState(ragConfig.embeddingApiKey || "");
+  const [embModel, setEmbModel] = useState(ragConfig.embeddingModel || "text-embedding-3-small");
+  const [showKey, setShowKey] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    setEmbBaseUrl(ragConfig.embeddingBaseUrl || "");
+    setEmbApiKey(ragConfig.embeddingApiKey || "");
+    setEmbModel(ragConfig.embeddingModel || "text-embedding-3-small");
+  }, [ragConfig.embeddingBaseUrl, ragConfig.embeddingApiKey, ragConfig.embeddingModel]);
+
+  const handleSave = async () => {
+    await updateConfig({
+      embeddingBaseUrl: embBaseUrl,
+      embeddingApiKey: embApiKey,
+      embeddingModel: embModel,
+    });
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  return (
+    <div className="bg-[var(--color-bg)] rounded-xl p-4 border border-[var(--color-border)] space-y-3">
+      <div className="flex items-center gap-2">
+        <Database className="w-3.5 h-3.5 text-emerald-400" />
+        <span className="text-xs font-semibold">Embedding API 配置</span>
+      </div>
+      <p className="text-[10px] text-[var(--color-text-secondary)]">
+        知识库导入需要调用 Embedding API 生成向量。若你的聊天 API 提供商不支持 /embeddings 端点，可在此单独配置。留空则复用上方 AI 模型的地址和密钥。
+      </p>
+
+      <div>
+        <label className="text-[10px] text-[var(--color-text-secondary)]">Embedding API 地址</label>
+        <input
+          type="text"
+          className="w-full mt-1 bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-1.5 px-2.5 text-xs outline-none focus:ring-2 focus:ring-emerald-400/20"
+          placeholder="https://api.openai.com/v1（留空复用 AI 设置）"
+          value={embBaseUrl}
+          onChange={(e) => { setEmbBaseUrl(e.target.value); setSaved(false); }}
+        />
+      </div>
+
+      <div>
+        <label className="text-[10px] text-[var(--color-text-secondary)]">Embedding API Key</label>
+        <div className="relative mt-1">
+          <input
+            type={showKey ? "text" : "password"}
+            className="w-full bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-1.5 px-2.5 pr-8 text-xs outline-none focus:ring-2 focus:ring-emerald-400/20"
+            placeholder="sk-...（留空复用 AI 设置）"
+            value={embApiKey}
+            onChange={(e) => { setEmbApiKey(e.target.value); setSaved(false); }}
+          />
+          <button
+            onClick={() => setShowKey(!showKey)}
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+          >
+            {showKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+          </button>
+        </div>
+      </div>
+
+      <div>
+        <label className="text-[10px] text-[var(--color-text-secondary)]">Embedding 模型</label>
+        <input
+          type="text"
+          className="w-full mt-1 bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-1.5 px-2.5 text-xs outline-none focus:ring-2 focus:ring-emerald-400/20"
+          placeholder="text-embedding-3-small"
+          value={embModel}
+          onChange={(e) => { setEmbModel(e.target.value); setSaved(false); }}
+        />
+      </div>
+
+      <button
+        onClick={handleSave}
+        className="flex items-center gap-1.5 text-xs px-4 py-1.5 rounded-lg transition-colors font-semibold"
+        style={{
+          background: saved ? "#10b98120" : "#10b98115",
+          color: saved ? "#10b981" : "#34d399",
+        }}
+      >
+        {saved ? <Check className="w-3 h-3" /> : <Save className="w-3 h-3" />}
+        {saved ? "已保存" : "保存 Embedding 配置"}
+      </button>
+    </div>
+  );
+}
+
 // ── 自有 Key 配置区域 ──
 
 function OwnKeySection({
@@ -341,20 +444,25 @@ function OwnKeySection({
   };
 
   const handleSave = async () => {
-    if (!form.model || !form.api_key) return;
+    const isEditing = !!form.id;
+    if (!form.model || (!isEditing && !form.api_key)) return;
+
+    const existingKey = isEditing
+      ? ownKeys.find((k) => k.id === form.id)?.api_key || ""
+      : "";
     const entry: OwnKeyModelConfig = {
       id: form.id || genId(),
       name: form.name || form.model,
       protocol: form.protocol,
       base_url: form.base_url,
-      api_key: form.api_key,
+      api_key: form.api_key || existingKey,
       model: form.model,
       temperature: form.temperature,
       max_tokens: form.max_tokens,
     };
 
     let newKeys: OwnKeyModelConfig[];
-    if (form.id) {
+    if (isEditing) {
       newKeys = ownKeys.map((k) => (k.id === form.id ? entry : k));
     } else {
       newKeys = [...ownKeys, entry];
@@ -373,7 +481,7 @@ function OwnKeySection({
       name: k.name,
       protocol: k.protocol,
       base_url: k.base_url,
-      api_key: k.api_key,
+      api_key: "",
       model: k.model,
       temperature: k.temperature,
       max_tokens: k.max_tokens,
@@ -441,6 +549,9 @@ function OwnKeySection({
                         {k.protocol === "anthropic" ? "Anthropic" : "OpenAI"}
                       </span>
                       {k.model}
+                      {k.api_key && (
+                        <span className="ml-1.5 opacity-50">{maskApiKey(k.api_key)}</span>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -520,7 +631,11 @@ function OwnKeySection({
           />
           <input
             type="password"
-            placeholder="API Key *"
+            placeholder={
+              form.id
+                ? `留空不修改 (${maskApiKey(ownKeys.find((k) => k.id === form.id)?.api_key || "")})`
+                : "API Key *"
+            }
             value={form.api_key}
             onChange={(e) => setForm({ ...form, api_key: e.target.value })}
             className="w-full bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-1.5 px-2.5 text-xs outline-none focus:ring-2 focus:ring-[#F28F36]/20"
@@ -556,7 +671,7 @@ function OwnKeySection({
           <div className="flex gap-2">
             <button
               onClick={handleSave}
-              disabled={!form.model || !form.api_key}
+              disabled={!form.model || (!form.id && !form.api_key)}
               className="flex-1 py-1.5 rounded-lg bg-[#F28F36] text-white text-xs font-semibold disabled:opacity-40 transition-all"
             >
               {form.id ? "更新配置" : "保存配置"}

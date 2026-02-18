@@ -48,6 +48,11 @@ percent-encoding = "2.3"
 ort = { version = "2.0.0-rc.9", features = ["load-dynamic"] }
 ndarray = "0.16"
 sysinfo = "0.30"
+thiserror = "2"
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+rand = "0.9"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = ["Win32_Graphics_Gdi", "Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }

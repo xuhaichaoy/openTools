@@ -22,6 +22,10 @@ import { useWorkflowStore } from "@/store/workflow-store";
 import { marksDb, tagsDb } from "@/core/database/marks";
 import { getServerUrl } from "@/store/server-store";
 
+function getServerUrlV1(): string {
+  return `${getServerUrl()}/v1`;
+}
+
 interface SyncProvider {
   id: string;
   name: string;
@@ -200,7 +204,7 @@ const CloudSyncPlugin: React.FC<CloudSyncPluginProps> = ({
         const bookmarks = useBookmarkStore.getState().bookmarks;
         await invoke("mtools_sync_push", {
           token,
-          baseUrl: getServerUrl(),
+          baseUrl: getServerUrlV1(),
           request: {
             data_type: "bookmarks",
             items: bookmarks.map((b) => ({
@@ -216,7 +220,7 @@ const CloudSyncPlugin: React.FC<CloudSyncPluginProps> = ({
         const snippets = useSnippetStore.getState().snippets;
         await invoke("mtools_sync_push", {
           token,
-          baseUrl: getServerUrl(),
+          baseUrl: getServerUrlV1(),
           request: {
             data_type: "snippets",
             items: snippets.map((s) => ({
@@ -232,7 +236,7 @@ const CloudSyncPlugin: React.FC<CloudSyncPluginProps> = ({
         const workflows = useWorkflowStore.getState().workflows.filter(w => !w.builtin);
         await invoke("mtools_sync_push", {
           token,
-          baseUrl: getServerUrl(),
+          baseUrl: getServerUrlV1(),
           request: {
             data_type: "workflows",
             items: workflows.map((w) => ({
@@ -248,7 +252,7 @@ const CloudSyncPlugin: React.FC<CloudSyncPluginProps> = ({
         const marks = await marksDb.getAll();
         await invoke("mtools_sync_push", {
           token,
-          baseUrl: getServerUrl(),
+          baseUrl: getServerUrlV1(),
           request: {
             data_type: "marks",
             items: marks.map((m) => ({
@@ -264,7 +268,7 @@ const CloudSyncPlugin: React.FC<CloudSyncPluginProps> = ({
         const tags = await tagsDb.getAll();
         await invoke("mtools_sync_push", {
           token,
-          baseUrl: getServerUrl(),
+          baseUrl: getServerUrlV1(),
           request: {
             data_type: "tags",
             items: tags.map((t) => ({
@@ -304,7 +308,7 @@ const CloudSyncPlugin: React.FC<CloudSyncPluginProps> = ({
         // 1. 拉取书签
         const bookmarkResp = await invoke<any>("mtools_sync_pull", {
           token,
-          baseUrl: getServerUrl(),
+          baseUrl: getServerUrlV1(),
           dataType: "bookmarks",
         });
         if (bookmarkResp.items && bookmarkResp.items.length > 0) {
@@ -316,7 +320,7 @@ const CloudSyncPlugin: React.FC<CloudSyncPluginProps> = ({
         // 2. 拉取代码片段
         const snippetResp = await invoke<any>("mtools_sync_pull", {
           token,
-          baseUrl: getServerUrl(),
+          baseUrl: getServerUrlV1(),
           dataType: "snippets",
         });
         if (snippetResp.items && snippetResp.items.length > 0) {
@@ -328,7 +332,7 @@ const CloudSyncPlugin: React.FC<CloudSyncPluginProps> = ({
         // 3. 拉取工作流
         const workflowResp = await invoke<any>("mtools_sync_pull", {
           token,
-          baseUrl: getServerUrl(),
+          baseUrl: getServerUrlV1(),
           dataType: "workflows",
         });
         if (workflowResp.items && workflowResp.items.length > 0) {
@@ -341,7 +345,7 @@ const CloudSyncPlugin: React.FC<CloudSyncPluginProps> = ({
         // 4. 拉取 Marks
         const marksResp = await invoke<any>("mtools_sync_pull", {
           token,
-          baseUrl: getServerUrl(),
+          baseUrl: getServerUrlV1(),
           dataType: "marks",
         });
         if (marksResp.items && marksResp.items.length > 0) {
@@ -358,7 +362,7 @@ const CloudSyncPlugin: React.FC<CloudSyncPluginProps> = ({
         // 5. 拉取 Tags
         const tagsResp = await invoke<any>("mtools_sync_pull", {
           token,
-          baseUrl: getServerUrl(),
+          baseUrl: getServerUrlV1(),
           dataType: "tags",
         });
         if (tagsResp.items && tagsResp.items.length > 0) {

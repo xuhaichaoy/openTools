@@ -41,6 +41,10 @@ export type {
   OwnKeyModelConfig,
 };
 
+// Agent Store 作为 AI 的子模式，从此处统一导出
+export { useAgentStore } from "./agent-store";
+export type { AgentTask, AgentSession } from "./agent-store";
+
 interface AIState {
   config: AIConfig;
   conversations: Conversation[];
@@ -386,9 +390,14 @@ export const useAIStore = create<AIState>((set, get) => ({
         ...(m.images && m.images.length > 0 ? { images: m.images } : {}),
       }));
 
+    if (!conversationId) {
+      handleError(new Error("Failed to create conversation"), { context: "AI" });
+      return;
+    }
+
     // 委托 Service 处理流式监听
     await startStreamingChat({
-      conversationId: conversationId!,
+      conversationId,
       assistantMessageId: assistantMessage.id,
       apiMessages,
       config: state.config,

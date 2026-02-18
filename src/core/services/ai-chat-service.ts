@@ -13,8 +13,8 @@ import { listen } from "@tauri-apps/api/event";
 import {
   MAX_CONVERSATIONS,
   MAX_MESSAGES_PER_CONVERSATION,
-  PERSIST_DEBOUNCE_MS,
 } from "@/core/constants";
+import { createDebouncedPersister } from "@/core/storage";
 import { useAuthStore } from "@/store/auth-store";
 import { routeAIRequest } from "@/core/ai/router";
 import { handleError } from "@/core/errors";
@@ -46,17 +46,20 @@ export function generateChatId(): string {
   return Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
 }
 
-// ── 防抖持久化 ──
+// ── 防抖持久化（使用统一工具） ──
 
-let _persistTimer: ReturnType<typeof setTimeout> | null = null;
 let _lastPersistedHash = "";
+let _debouncedPersistCb: (() => void) | null = null;
+const _chatPersister = createDebouncedPersister(() => {
+  _debouncedPersistCb?.();
+});
 
+/**
+ * 防抖触发持久化（向后兼容旧签名）
+ */
 export function debouncedPersist(persistFn: () => void) {
-  if (_persistTimer) clearTimeout(_persistTimer);
-  _persistTimer = setTimeout(() => {
-    _persistTimer = null;
-    persistFn();
-  }, PERSIST_DEBOUNCE_MS);
+  _debouncedPersistCb = persistFn;
+  _chatPersister.trigger();
 }
 
 // ── 持久化逻辑 ──
