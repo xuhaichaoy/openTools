@@ -6,7 +6,7 @@
  */
 
 import { create } from "zustand";
-import { api } from "@/core/api/client";
+import { api, assertResponseShape } from "@/core/api/client";
 import { handleError } from "@/core/errors";
 
 export interface Team {
@@ -55,6 +55,32 @@ export interface SharedResource {
   username: string;
 }
 
+function isSharedResource(input: unknown): input is SharedResource {
+  if (!input || typeof input !== "object") return false;
+  const item = input as Record<string, unknown>;
+  return (
+    typeof item.id === "string" &&
+    typeof item.team_id === "string" &&
+    typeof item.user_id === "string" &&
+    typeof item.resource_type === "string" &&
+    typeof item.resource_id === "string" &&
+    (typeof item.resource_name === "string" || item.resource_name === null) &&
+    typeof item.shared_at === "string" &&
+    typeof item.username === "string"
+  );
+}
+
+function isSharedResourceResponse(
+  input: unknown,
+): input is { resources: SharedResource[] } {
+  if (!input || typeof input !== "object") return false;
+  const value = input as Record<string, unknown>;
+  return (
+    Array.isArray(value.resources) &&
+    value.resources.every((item) => isSharedResource(item))
+  );
+}
+
 export const useTeamStore = create<TeamState>((set, get) => ({
   teams: [],
   activeTeamId: null,
@@ -96,7 +122,15 @@ export const useTeamStore = create<TeamState>((set, get) => ({
   },
 
   async listSharedResources(teamId, filterType) {
-    const all = await api.get<SharedResource[]>(`/teams/${teamId}/resources`);
+    const path = `/teams/${teamId}/resources`;
+    const payload = await api.get<unknown>(path);
+    const { resources } = assertResponseShape(
+      payload,
+      isSharedResourceResponse,
+      path,
+      "团队资源接口返回结构不正确",
+    );
+    const all = resources;
     if (filterType) {
       return all.filter((r) => r.resource_type === filterType);
     }

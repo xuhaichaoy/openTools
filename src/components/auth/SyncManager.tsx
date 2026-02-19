@@ -15,6 +15,7 @@ import {
   setLastSyncVersion,
 } from "@/core/sync/engine";
 import type { Workflow } from "@/core/workflows/types";
+import { mergeCloudAIConfig, type AIConfigWithVersion } from "./sync-ai-config";
 
 const SYNC_INTERVAL_MS = 60_000;
 
@@ -179,21 +180,12 @@ async function syncAIConfig() {
     if (cloudItem && cloudItem.version > localVersion) {
       // 云端配置更新 → 合并到本地（保留本地 api_key，不同步密钥）
       const cloudConfig = cloudItem.content;
-      const merged = {
-        ...config,
-        model: cloudConfig.model ?? config.model,
-        temperature: cloudConfig.temperature ?? config.temperature,
-        max_tokens: cloudConfig.max_tokens ?? config.max_tokens,
-        system_prompt: cloudConfig.system_prompt ?? config.system_prompt,
-        enable_advanced_tools:
-          cloudConfig.enable_advanced_tools ?? config.enable_advanced_tools,
-        enable_rag_auto_search:
-          cloudConfig.enable_rag_auto_search ?? config.enable_rag_auto_search,
-        enable_native_tools:
-          cloudConfig.enable_native_tools ?? config.enable_native_tools,
-        source: cloudConfig.source ?? config.source,
-        _syncVersion: cloudItem.version,
-      };
+      const merged = mergeCloudAIConfig(
+        config as AIConfigWithVersion,
+        cloudConfig,
+        cloudItem.version,
+      );
+
       useAIStore.getState().setConfig(merged);
       await useAIStore.getState().saveConfig(merged);
     }
@@ -209,6 +201,9 @@ async function syncAIConfig() {
     enable_rag_auto_search: config.enable_rag_auto_search,
     enable_native_tools: config.enable_native_tools,
     source: config.source,
+    team_id: config.team_id,
+    team_config_id: config.team_config_id,
+    active_own_key_id: config.active_own_key_id,
   };
 
   await pushData(dataType, [

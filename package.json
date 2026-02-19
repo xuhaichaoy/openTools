@@ -12,7 +12,8 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "quality:check": "bash ./scripts/quality-check.sh"
   },
   "dependencies": {
     "@dagrejs/dagre": "^2.0.4",

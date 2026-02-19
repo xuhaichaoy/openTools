@@ -142,7 +142,7 @@ const CloudSyncPlugin: React.FC<CloudSyncPluginProps> = ({
           path: config.webdavPath || "/",
         });
         setConnected(ok);
-      } else {
+      } else if (config.provider !== "mtools") {
         const status = await invoke<{
           provider: string;
           connected: boolean;
@@ -155,7 +155,7 @@ const CloudSyncPlugin: React.FC<CloudSyncPluginProps> = ({
         if (!status.connected) {
           setError("连接失败，请检查 Token 和仓库名");
         }
-      } else if (config.provider === "mtools") {
+      } else {
         const { token } = useAuthStore.getState();
         if (!token) {
           setError("请先登录账号");

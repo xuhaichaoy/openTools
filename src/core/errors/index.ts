@@ -2,23 +2,27 @@
  * 统一错误处理模块
  *
  * 所有错误走统一管道：分级处理 + 日志记录 + 可选用户通知。
- * 取代散落在各处的 console.error / 空 catch。
  */
 
 // ── 错误分级 ──
 
-export enum ErrorLevel {
+export const ErrorLevel = {
   /** 应用不可用，需要重启 */
-  Fatal = "fatal",
+  Fatal: "fatal",
   /** 操作失败，可重试 */
-  Recoverable = "error",
+  Recoverable: "error",
   /** 非阻塞性问题，仅提示 */
-  Warning = "warning",
-}
+  Warning: "warning",
+} as const;
+
+export type ErrorLevel = (typeof ErrorLevel)[keyof typeof ErrorLevel];
 
 // ── Toast 回调（由 main.tsx 初始化注入，避免循环依赖） ──
 
-type ToastFn = (type: "success" | "error" | "warning" | "info", message: string) => void;
+type ToastFn = (
+  type: "success" | "error" | "warning" | "info",
+  message: string,
+) => void;
 
 let _toastFn: ToastFn | null = null;
 
@@ -38,6 +42,21 @@ export interface HandleErrorOptions {
   silent?: boolean;
 }
 
+const CODE_MESSAGE_MAP: Record<string, string> = {
+  TEAM_QUOTA_EXCEEDED: "本月额度已用尽",
+  TEAM_MODEL_UNAVAILABLE: "团队模型不可用",
+  NO_ACTIVE_TEAM_MODEL: "团队暂无可用模型",
+  TEAM_ID_REQUIRED: "缺少团队信息，请先选择团队",
+  INVALID_RESPONSE_SHAPE: "服务返回结构异常",
+  NETWORK_ERROR: "网络异常，请检查网络连接",
+};
+
+interface ErrorMeta {
+  message: string;
+  code?: string;
+  details?: unknown;
+}
+
 /**
  * 统一错误处理入口
  *
@@ -49,26 +68,27 @@ export function handleError(error: unknown, options?: HandleErrorOptions): void 
   const context = options?.context;
   const silent = options?.silent ?? false;
 
-  // 1. 提取错误信息
-  const message = extractMessage(error);
+  const meta = extractErrorMeta(error);
+  const baseMessage =
+    (meta.code && CODE_MESSAGE_MAP[meta.code]) || meta.message || "未知错误";
+  const displayMsg = context ? `${context}：${baseMessage}` : baseMessage;
   const prefix = context ? `[${context}]` : "[Error]";
 
-  // 2. 日志记录（始终记录）
+  // 1. 日志记录（始终记录）
   switch (level) {
     case ErrorLevel.Fatal:
-      console.error(`🔴 ${prefix}`, error);
+      console.error(`${prefix}`, error);
       break;
     case ErrorLevel.Recoverable:
-      console.error(`🟡 ${prefix}`, error);
+      console.error(`${prefix}`, error);
       break;
     case ErrorLevel.Warning:
-      console.warn(`⚠️ ${prefix}`, error);
+      console.warn(`${prefix}`, error);
       break;
   }
 
-  // 3. 用户通知（非 silent 时）
+  // 2. 用户通知（非 silent 时）
   if (!silent && _toastFn) {
-    const displayMsg = context ? `${context}失败` : message;
     switch (level) {
       case ErrorLevel.Fatal:
         _toastFn("error", `${displayMsg}，请重启应用`);
@@ -125,12 +145,32 @@ export async function withErrorHandlerThrow<T>(
 
 // ── 内部工具 ──
 
-function extractMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === "string") return error;
+function extractErrorMeta(error: unknown): ErrorMeta {
+  if (error && typeof error === "object") {
+    const code =
+      typeof (error as any).code === "string" ? (error as any).code : undefined;
+    const message =
+      typeof (error as any).message === "string"
+        ? (error as any).message
+        : typeof (error as any).error === "string"
+          ? (error as any).error
+          : undefined;
+    const details = (error as any).details;
+
+    if (message) {
+      return { message, code, details };
+    }
+  }
+
+  if (error instanceof Error) {
+    return { message: error.message };
+  }
+  if (typeof error === "string") {
+    return { message: error };
+  }
   try {
-    return JSON.stringify(error);
+    return { message: JSON.stringify(error) };
   } catch {
-    return "未知错误";
+    return { message: "未知错误" };
   }
 }

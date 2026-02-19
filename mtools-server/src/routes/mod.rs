@@ -1,20 +1,22 @@
-pub mod auth;
-pub mod users;
-pub mod sync;
 pub mod ai;
-pub mod teams;
+pub mod auth;
 pub mod kb;
 pub mod stubs;
+pub mod sync;
+pub mod team_quota_common;
+pub mod team_quota_routes;
+pub mod teams;
+pub mod users;
 
-use axum::{extract::State, routing::get, Json, Router, middleware};
-use std::sync::Arc;
-use tower_http::cors::{CorsLayer, Any, AllowOrigin};
-use tower_http::services::ServeDir;
-use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
-use http::{Method, HeaderValue};
-pub use auth::AppState;
-use crate::middleware::auth_middleware;
 use crate::config::DeployMode;
+use crate::middleware::auth_middleware;
+pub use auth::AppState;
+use axum::{extract::State, middleware, routing::get, Json, Router};
+use http::{HeaderValue, Method};
+use std::sync::Arc;
+use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tower_http::services::ServeDir;
 
 pub fn create_router(state: Arc<AppState>) -> Router {
     let allowed_origins = std::env::var("ALLOWED_ORIGINS").unwrap_or_default();
@@ -51,20 +53,32 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .nest("/users", users::routes_no_layer())
         .nest("/sync", sync::routes_no_layer())
         .nest("/ai", ai::routes_no_layer())
-        .nest("/teams", teams::routes_no_layer().merge(kb::team_kb_routes()))
+        .nest(
+            "/teams",
+            teams::routes_no_layer().merge(kb::team_kb_routes()),
+        )
         .nest("/kb/personal", kb::personal_routes())
         .merge(stubs::routes_no_layer())
-        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ));
 
     // v1 路由（新客户端使用）
     let v1_auth_routes = Router::new()
         .nest("/users", users::routes_no_layer())
         .nest("/sync", sync::routes_no_layer())
         .nest("/ai", ai::routes_no_layer())
-        .nest("/teams", teams::routes_no_layer().merge(kb::team_kb_routes()))
+        .nest(
+            "/teams",
+            teams::routes_no_layer().merge(kb::team_kb_routes()),
+        )
         .nest("/kb/personal", kb::personal_routes())
         .merge(stubs::routes_no_layer())
-        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ));
 
     let upload_dir = state.config.upload_dir.clone();
 
@@ -87,9 +101,7 @@ async fn health_check() -> &'static str {
     "OK"
 }
 
-async fn deploy_info(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
+async fn deploy_info(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let mode = match state.config.deploy_mode {
         DeployMode::Public => "public",
         DeployMode::Private => "private",

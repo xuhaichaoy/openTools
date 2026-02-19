@@ -81,15 +81,25 @@ export const useRAGStore = create<RAGState>((set, get) => ({
 
   search: async (query) => {
     try {
-      const results = await invoke<RetrievalResult[]>('rag_keyword_search', {
+      const results = await invoke<RetrievalResult[]>('rag_search', {
         query,
         topK: get().config.topK,
+        threshold: get().config.scoreThreshold,
       })
       set({ searchResults: results })
       return results
     } catch (e) {
-      handleError(e, { context: '检索知识库' })
-      return []
+      try {
+        const fallback = await invoke<RetrievalResult[]>('rag_keyword_search', {
+          query,
+          topK: get().config.topK,
+        })
+        set({ searchResults: fallback })
+        return fallback
+      } catch (fallbackError) {
+        handleError(fallbackError, { context: '检索知识库' })
+        return []
+      }
     }
   },
 

@@ -1,22 +1,20 @@
-use axum::{
-    extract::{State, Extension},
-    routing::{get, post},
-    Json,
-    Router,
-    body::Body,
-    response::Response,
-};
 use crate::{
-    routes::AppState,
+    routes::{team_quota_common, AppState},
     services::auth::Claims,
-    Result,
-    Error,
+    Error, Result,
 };
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use uuid::Uuid;
-use serde::{Serialize, Deserialize};
+use axum::{
+    body::Body,
+    extract::{Extension, State},
+    response::Response,
+    routing::{get, post},
+    Json, Router,
+};
 use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use uuid::Uuid;
 
 #[derive(Debug, Serialize)]
 pub struct EnergyResponse {
@@ -44,8 +42,8 @@ async fn get_energy(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<EnergyResponse>> {
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
+    let user_id =
+        Uuid::parse_str(&claims.sub).map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
 
     let balance: i64 = sqlx::query_scalar(
         "INSERT INTO ai_energy (user_id, balance) VALUES ($1, 1000)
@@ -64,8 +62,8 @@ async fn deduct_energy(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<DeductRequest>,
 ) -> Result<Json<EnergyResponse>> {
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
+    let user_id =
+        Uuid::parse_str(&claims.sub).map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
 
     let balance: i64 = sqlx::query_scalar(
         "UPDATE ai_energy SET balance = balance - $1, updated_at = NOW()
@@ -93,8 +91,8 @@ async fn get_energy_logs(
     Extension(claims): Extension<Claims>,
     axum::extract::Query(params): axum::extract::Query<PaginationQuery>,
 ) -> Result<Json<serde_json::Value>> {
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
+    let user_id =
+        Uuid::parse_str(&claims.sub).map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
     let limit = params.limit.unwrap_or(20).min(100);
     let offset = params.offset.unwrap_or(0);
 
@@ -108,12 +106,12 @@ async fn get_energy_logs(
     .await
     .unwrap_or_default();
 
-    Ok(Json(serde_json::json!({ "logs": logs, "limit": limit, "offset": offset })))
+    Ok(Json(
+        serde_json::json!({ "logs": logs, "limit": limit, "offset": offset }),
+    ))
 }
 
-async fn get_models(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>> {
+async fn get_models(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::Value>> {
     let rows = sqlx::query_as::<_, ModelPricing>(
         "SELECT model_id, display_name, input_price_per_1k, output_price_per_1k, is_active
          FROM ai_model_pricing WHERE is_active = true ORDER BY display_name ASC",
@@ -132,12 +130,14 @@ async fn get_models(
 
     let models: Vec<serde_json::Value> = rows
         .into_iter()
-        .map(|r| serde_json::json!({
-            "id": r.model_id,
-            "name": r.display_name,
-            "input_price_per_1k": r.input_price_per_1k,
-            "output_price_per_1k": r.output_price_per_1k,
-        }))
+        .map(|r| {
+            serde_json::json!({
+                "id": r.model_id,
+                "name": r.display_name,
+                "input_price_per_1k": r.input_price_per_1k,
+                "output_price_per_1k": r.output_price_per_1k,
+            })
+        })
         .collect();
 
     Ok(Json(serde_json::json!({ "models": models })))
@@ -149,19 +149,18 @@ async fn ai_proxy_chat(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<serde_json::Value>,
 ) -> Result<Response> {
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
+    let user_id =
+        Uuid::parse_str(&claims.sub).map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
 
     // 公共部署模式下检查余额是否足够；私有部署跳过能量检查
     let energy_enabled = state.config.deploy_mode == crate::config::DeployMode::Public;
     if energy_enabled {
-        let current_balance: i64 = sqlx::query_scalar(
-            "SELECT balance FROM ai_energy WHERE user_id = $1",
-        )
-        .bind(user_id)
-        .fetch_optional(&state.db)
-        .await?
-        .unwrap_or(0);
+        let current_balance: i64 =
+            sqlx::query_scalar("SELECT balance FROM ai_energy WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_optional(&state.db)
+                .await?
+                .unwrap_or(0);
 
         if current_balance <= 0 {
             return Err(Error::BadRequest("Insufficient energy".into()));
@@ -170,12 +169,16 @@ async fn ai_proxy_chat(
 
     let api_key = std::env::var("PLATFORM_AI_API_KEY")
         .unwrap_or_else(|_| std::env::var("OPENAI_API_KEY").unwrap_or_default());
-    let api_base = std::env::var("PLATFORM_AI_BASE_URL")
-        .unwrap_or_else(|_| "https://api.deepseek.com".into());
+    let api_base =
+        std::env::var("PLATFORM_AI_BASE_URL").unwrap_or_else(|_| "https://api.deepseek.com".into());
 
-    let is_stream = payload.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+    let is_stream = payload
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
-    let res = state.http_client
+    let res = state
+        .http_client
         .post(format!("{}/chat/completions", api_base))
         .header("Authorization", format!("Bearer {}", api_key))
         .json(&payload)
@@ -187,14 +190,22 @@ async fn ai_proxy_chat(
 
     if !is_stream {
         // 非流式：读完整响应，计算 token 并扣费
-        let body_bytes = res.bytes().await
+        let body_bytes = res
+            .bytes()
+            .await
             .map_err(|e| Error::Internal(anyhow::anyhow!("Read error: {}", e)))?;
         let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap_or_default();
 
         // 从 usage 字段提取 token 数
         if let Some(usage) = body_json.get("usage") {
-            let total_tokens = usage.get("total_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-            let model = payload.get("model").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let total_tokens = usage
+                .get("total_tokens")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let model = payload
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
             let energy_cost = calculate_energy_cost(total_tokens, model);
 
             if energy_cost > 0 {
@@ -203,8 +214,14 @@ async fn ai_proxy_chat(
                     user_id,
                     energy_cost,
                     model,
-                    usage.get("prompt_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
-                    usage.get("completion_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
+                    usage
+                        .get("prompt_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                    usage
+                        .get("completion_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
                 )
                 .await;
             }
@@ -218,44 +235,67 @@ async fn ai_proxy_chat(
     } else {
         // 流式：转发 SSE 流，公共模式下在流结束时从最后一个 chunk 的 usage 扣费
         let db = state.db.clone();
-        let model = payload.get("model").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+        let model = payload
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
 
         let upstream = res.bytes_stream();
         let deducted = Arc::new(AtomicBool::new(false));
-        let mapped = upstream.map(move |chunk_result| {
-            match chunk_result {
-                Ok(bytes) => {
-                    if energy_enabled {
-                        let text = String::from_utf8_lossy(&bytes);
-                        for line in text.lines() {
-                            if let Some(data) = line.strip_prefix("data: ") {
-                                if data == "[DONE]" {
-                                    continue;
-                                }
-                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                                    if let Some(usage) = json.get("usage") {
-                                        if !deducted.swap(true, Ordering::SeqCst) {
-                                            let total_tokens = usage.get("total_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-                                            let energy_cost = calculate_energy_cost(total_tokens, &model);
-                                            if energy_cost > 0 {
-                                                let db = db.clone();
-                                                let model = model.clone();
-                                                let prompt = usage.get("prompt_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-                                                let completion = usage.get("completion_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-                                                tokio::spawn(async move {
-                                                    let _ = deduct_and_log_energy(&db, user_id, energy_cost, &model, prompt, completion).await;
-                                                });
-                                            }
+        let mapped = upstream.map(move |chunk_result| match chunk_result {
+            Ok(bytes) => {
+                if energy_enabled {
+                    let text = String::from_utf8_lossy(&bytes);
+                    for line in text.lines() {
+                        if let Some(data) = line.strip_prefix("data: ") {
+                            if data == "[DONE]" {
+                                continue;
+                            }
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                if let Some(usage) = json.get("usage") {
+                                    if !deducted.swap(true, Ordering::SeqCst) {
+                                        let total_tokens = usage
+                                            .get("total_tokens")
+                                            .and_then(|v| v.as_i64())
+                                            .unwrap_or(0);
+                                        let energy_cost =
+                                            calculate_energy_cost(total_tokens, &model);
+                                        if energy_cost > 0 {
+                                            let db = db.clone();
+                                            let model = model.clone();
+                                            let prompt = usage
+                                                .get("prompt_tokens")
+                                                .and_then(|v| v.as_i64())
+                                                .unwrap_or(0);
+                                            let completion = usage
+                                                .get("completion_tokens")
+                                                .and_then(|v| v.as_i64())
+                                                .unwrap_or(0);
+                                            tokio::spawn(async move {
+                                                let _ = deduct_and_log_energy(
+                                                    &db,
+                                                    user_id,
+                                                    energy_cost,
+                                                    &model,
+                                                    prompt,
+                                                    completion,
+                                                )
+                                                .await;
+                                            });
                                         }
                                     }
                                 }
                             }
                         }
                     }
-                    Ok(bytes)
                 }
-                Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())),
+                Ok(bytes)
             }
+            Err(e) => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            )),
         });
 
         let body = Body::from_stream(mapped);
@@ -275,8 +315,8 @@ async fn ai_team_proxy_chat(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<serde_json::Value>,
 ) -> Result<Response> {
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
+    let user_id =
+        Uuid::parse_str(&claims.sub).map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
 
     let team_id_str = payload
         .get("team_id")
@@ -290,9 +330,7 @@ async fn ai_team_proxy_chat(
         })?;
 
     let team_id = Uuid::parse_str(team_id_str)
-        .map_err(|_| {
-            Error::bad_request_code("TEAM_ID_REQUIRED", "Invalid team_id", None)
-        })?;
+        .map_err(|_| Error::bad_request_code("TEAM_ID_REQUIRED", "Invalid team_id", None))?;
 
     // 验证用户是团队成员
     let is_member: bool = sqlx::query_scalar(
@@ -337,7 +375,7 @@ async fn ai_team_proxy_chat(
     // 解析最终团队配置：team_config_id > model_name > 默认优先级
     let team_config = if let Some(config_id) = requested_team_config_id {
         sqlx::query_as::<_, TeamAiConfig>(
-            "SELECT id, team_id, base_url, api_key, model_name, is_active, protocol, priority, member_token_limit, created_at
+            "SELECT id, team_id, base_url, api_key, model_name, is_active, protocol, priority, created_at
              FROM team_ai_configs
              WHERE team_id = $1 AND id = $2 AND is_active = true
              LIMIT 1",
@@ -358,7 +396,7 @@ async fn ai_team_proxy_chat(
         })?
     } else if let Some(model_name) = requested_model.as_deref() {
         sqlx::query_as::<_, TeamAiConfig>(
-            "SELECT id, team_id, base_url, api_key, model_name, is_active, protocol, priority, member_token_limit, created_at
+            "SELECT id, team_id, base_url, api_key, model_name, is_active, protocol, priority, created_at
              FROM team_ai_configs
              WHERE team_id = $1 AND is_active = true AND model_name = $2
              ORDER BY priority ASC, created_at ASC
@@ -380,7 +418,7 @@ async fn ai_team_proxy_chat(
         })?
     } else {
         sqlx::query_as::<_, TeamAiConfig>(
-            "SELECT id, team_id, base_url, api_key, model_name, is_active, protocol, priority, member_token_limit, created_at
+            "SELECT id, team_id, base_url, api_key, model_name, is_active, protocol, priority, created_at
              FROM team_ai_configs
              WHERE team_id = $1 AND is_active = true
              ORDER BY priority ASC, created_at ASC
@@ -399,20 +437,17 @@ async fn ai_team_proxy_chat(
     };
 
     // 团队月额度校验（0 表示不限额）
-    enforce_team_monthly_quota(
-        &state.db,
-        team_id,
-        user_id,
-        &team_config.model_name,
-    )
-    .await?;
+    enforce_team_monthly_quota(&state.db, team_id, user_id, &team_config.model_name).await?;
 
     // 构建转发 payload：移除 team_id（上游 API 不认识），替换 model 为实际配置的 model
     let mut forward_payload = payload.clone();
     if let Some(obj) = forward_payload.as_object_mut() {
         obj.remove("team_id");
         obj.remove("team_config_id");
-        obj.insert("model".to_string(), serde_json::json!(team_config.model_name));
+        obj.insert(
+            "model".to_string(),
+            serde_json::json!(team_config.model_name),
+        );
     }
 
     let decrypted_key = crate::crypto::maybe_decrypt(&team_config.api_key);
@@ -423,9 +458,17 @@ async fn ai_team_proxy_chat(
     } else {
         format!("{}/chat/completions", team_config.base_url)
     };
-    let is_stream = payload.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
-    tracing::info!("[team_proxy] forwarding to {} | protocol={} model={} config_id={}",
-        forward_url, team_config.protocol, team_config.model_name, team_config.id);
+    let is_stream = payload
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    tracing::info!(
+        "[team_proxy] forwarding to {} | protocol={} model={} config_id={}",
+        forward_url,
+        team_config.protocol,
+        team_config.model_name,
+        team_config.id
+    );
 
     let mut req = state.http_client.post(&forward_url);
     if is_anthropic {
@@ -515,7 +558,10 @@ async fn ai_team_proxy_chat(
             }
             Ok(bytes)
         }
-        Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())),
+        Err(e) => Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            e.to_string(),
+        )),
     });
 
     let body = Body::from_stream(mapped);
@@ -536,14 +582,13 @@ async fn enforce_team_monthly_quota(
     user_id: Uuid,
     model: &str,
 ) -> Result<()> {
-    ensure_team_quota_tables(db).await?;
-
-    let month_key: String = sqlx::query_scalar("SELECT TO_CHAR(NOW(), 'YYYY-MM')")
-        .fetch_one(db)
-        .await?;
+    let month_key = team_quota_common::resolve_month_key(db, None).await?;
+    let (month_start, month_end) = team_quota_common::month_range_utc(&month_key)?;
 
     let base_tokens: i64 = sqlx::query_scalar(
-        "SELECT monthly_limit_tokens FROM team_ai_quota_policy WHERE team_id = $1",
+        "SELECT COALESCE(monthly_limit_tokens::BIGINT, 0)::BIGINT
+         FROM team_ai_quota_policy
+         WHERE team_id = $1",
     )
     .bind(team_id)
     .fetch_optional(db)
@@ -551,7 +596,7 @@ async fn enforce_team_monthly_quota(
     .unwrap_or(0);
 
     let extra_tokens: i64 = sqlx::query_scalar(
-        "SELECT extra_tokens
+        "SELECT COALESCE(extra_tokens::BIGINT, 0)::BIGINT
          FROM team_ai_member_quota_adjustments
          WHERE team_id = $1 AND user_id = $2 AND month_key = $3",
     )
@@ -569,17 +614,19 @@ async fn enforce_team_monthly_quota(
 
     let used_tokens: i64 = sqlx::query_scalar(
         "SELECT COALESCE(
-            SUM(COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)),
+            SUM(COALESCE(prompt_tokens, 0)::BIGINT + COALESCE(completion_tokens, 0)::BIGINT),
             0
         )::BIGINT
          FROM team_ai_usage_logs
          WHERE team_id = $1
            AND user_id = $2
-           AND created_at >= DATE_TRUNC('month', NOW())
-           AND created_at < DATE_TRUNC('month', NOW()) + INTERVAL '1 month'",
+           AND created_at >= $3
+           AND created_at < $4",
     )
     .bind(team_id)
     .bind(user_id)
+    .bind(month_start)
+    .bind(month_end)
     .fetch_one(db)
     .await?;
 
@@ -597,48 +644,6 @@ async fn enforce_team_monthly_quota(
             })),
         ));
     }
-
-    Ok(())
-}
-
-async fn ensure_team_quota_tables(db: &sqlx::PgPool) -> Result<()> {
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS team_ai_quota_policy (
-            team_id UUID PRIMARY KEY REFERENCES teams(id) ON DELETE CASCADE,
-            monthly_limit_tokens BIGINT NOT NULL DEFAULT 0,
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )",
-    )
-    .execute(db)
-    .await?;
-
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS team_ai_member_quota_adjustments (
-            team_id UUID NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-            user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            month_key CHAR(7) NOT NULL,
-            extra_tokens BIGINT NOT NULL DEFAULT 0,
-            updated_by UUID NOT NULL REFERENCES users(id),
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            PRIMARY KEY (team_id, user_id, month_key)
-        )",
-    )
-    .execute(db)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_team_ai_usage_month_user
-         ON team_ai_usage_logs(team_id, user_id, created_at DESC)",
-    )
-    .execute(db)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_team_quota_adjustments_lookup
-         ON team_ai_member_quota_adjustments(team_id, month_key, user_id)",
-    )
-    .execute(db)
-    .await?;
 
     Ok(())
 }
@@ -767,8 +772,6 @@ struct TeamAiConfig {
     protocol: String,
     #[allow(dead_code)]
     priority: i32,
-    #[allow(dead_code)]
-    member_token_limit: i64,
     #[allow(dead_code)]
     created_at: chrono::DateTime<chrono::Utc>,
 }

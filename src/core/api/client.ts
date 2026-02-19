@@ -7,6 +7,49 @@ interface RequestOptions extends RequestInit {
   skipAuth?: boolean;
 }
 
+export interface ApiErrorOptions {
+  status: number;
+  code: string;
+  message: string;
+  details?: unknown;
+  path: string;
+}
+
+export class ApiError extends Error {
+  status: number;
+  code: string;
+  details?: unknown;
+  path: string;
+
+  constructor(options: ApiErrorOptions) {
+    super(options.message);
+    this.name = "ApiError";
+    this.status = options.status;
+    this.code = options.code;
+    this.details = options.details;
+    this.path = options.path;
+  }
+}
+
+export function assertResponseShape<T>(
+  value: unknown,
+  guard: (input: unknown) => input is T,
+  path: string,
+  message = "Invalid response shape",
+): T {
+  if (guard(value)) {
+    return value;
+  }
+
+  throw new ApiError({
+    status: 200,
+    code: "INVALID_RESPONSE_SHAPE",
+    message,
+    details: value,
+    path,
+  });
+}
+
 let isRefreshing = false;
 let refreshPromise: Promise<boolean> | null = null;
 
@@ -47,6 +90,56 @@ async function tryRefreshToken(): Promise<boolean> {
   return refreshPromise;
 }
 
+async function parseBody(response: Response): Promise<{
+  parsed: any;
+  rawText: string;
+  parseError: Error | null;
+}> {
+  const rawText = await response.text();
+  if (!rawText) {
+    return { parsed: null, rawText: "", parseError: null };
+  }
+
+  try {
+    const parsed = JSON.parse(rawText);
+    return { parsed, rawText, parseError: null };
+  } catch (error) {
+    return {
+      parsed: null,
+      rawText,
+      parseError: error instanceof Error ? error : new Error(String(error)),
+    };
+  }
+}
+
+function buildApiError(
+  path: string,
+  status: number,
+  parsed: any,
+  rawText: string,
+  fallbackCode: string,
+  fallbackMessage: string,
+): ApiError {
+  const code =
+    typeof parsed?.code === "string" && parsed.code.trim().length > 0
+      ? parsed.code
+      : fallbackCode;
+  const message =
+    typeof parsed?.message === "string" && parsed.message.trim().length > 0
+      ? parsed.message
+      : typeof parsed?.error === "string" && parsed.error.trim().length > 0
+        ? parsed.error
+        : rawText || fallbackMessage;
+
+  return new ApiError({
+    status,
+    code,
+    message,
+    details: parsed?.details,
+    path,
+  });
+}
+
 async function request<T>(
   path: string,
   options: RequestOptions = {},
@@ -75,13 +168,24 @@ async function request<T>(
     defaultHeaders["Authorization"] = `Bearer ${token}`;
   }
 
-  const response = await fetch(url, {
-    ...rest,
-    headers: {
-      ...defaultHeaders,
-      ...headers,
-    },
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      ...rest,
+      headers: {
+        ...defaultHeaders,
+        ...headers,
+      },
+    });
+  } catch (error) {
+    throw new ApiError({
+      status: 0,
+      code: "NETWORK_ERROR",
+      message: error instanceof Error ? error.message : "Network error",
+      details: error,
+      path,
+    });
+  }
 
   // 401 → 自动尝试 refresh
   if (response.status === 401 && !retried && !skipAuth) {
@@ -91,21 +195,53 @@ async function request<T>(
     }
     logout();
     window.dispatchEvent(new CustomEvent("open-login-modal"));
-    throw new Error("Unauthorized");
+    throw new ApiError({
+      status: 401,
+      code: "UNAUTHORIZED",
+      message: "Unauthorized",
+      path,
+    });
   }
 
   if (response.status === 401) {
     logout();
     window.dispatchEvent(new CustomEvent("open-login-modal"));
-    throw new Error("Unauthorized");
+    throw new ApiError({
+      status: 401,
+      code: "UNAUTHORIZED",
+      message: "Unauthorized",
+      path,
+    });
   }
 
-  const data = await response.json();
+  const { parsed, rawText, parseError } = await parseBody(response);
+
   if (!response.ok) {
-    throw new Error(data.error || "Request failed");
+    throw buildApiError(
+      path,
+      response.status,
+      parsed,
+      rawText,
+      `HTTP_${response.status}`,
+      "Request failed",
+    );
   }
 
-  return data as T;
+  if (response.status === 204 || rawText.length === 0) {
+    return undefined as T;
+  }
+
+  if (parseError) {
+    throw new ApiError({
+      status: response.status,
+      code: "INVALID_JSON_RESPONSE",
+      message: `Invalid JSON response: ${parseError.message}`,
+      details: rawText,
+      path,
+    });
+  }
+
+  return parsed as T;
 }
 
 export const api = {
