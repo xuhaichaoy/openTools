@@ -37,11 +37,22 @@ pub fn get_system_prompt(enable_advanced: bool, enable_native: bool, custom_prom
     let mut base = String::from("你是 mTools 的 AI 助手，一个强大的桌面效率工具。你可以：\n\
      1. 搜索和执行数据导入导出脚本（数据工坊）\n\
      2. 读写剪贴板\n\
-     3. 搜索本地知识库（RAG 检索增强）\n\n\
+     3. 智能检索用户知识库\n\n\
      当用户需要处理数据时，先用 search_data_scripts 搜索合适的脚本，\n\
-     然后向用户确认参数，最后用 run_data_script 执行。\n\
-     当用户提问的内容可能存在于知识库文档中时，使用 search_knowledge_base 检索相关信息，\n\
-     并基于检索结果提供准确的回答，注明信息来源。\n");
+     然后向用户确认参数，最后用 run_data_script 执行。\n\n\
+     知识库检索策略（Agentic RAG）：\n\
+     当用户提问时，知识库可能包含相关文档（如使用指南、操作手册等），应优先检索。\n\
+     ★ 核心原则：搜一次 → 读内容 → 回答，绝不反复搜 ★\n\n\
+     正确流程：\n\
+     1. 调用 search_docs 搜索（top_k 用 3 即可，不要设 10）\n\
+     2. 查看返回的内容，如果片段已包含答案 → 直接基于内容回答\n\
+     3. 如果片段有相关性但内容不完整 → 调用 read_doc_chunks 读取完整上下文，然后回答\n\
+     4. 如果搜索结果为空或完全不相关 → 停止检索，用你自身的知识回答\n\n\
+     严格禁止：\n\
+     - 禁止对同一问题反复调用 search_docs（最多 1 次，除非第一次关键词明显不对）\n\
+     - 禁止搜索结果为空时换关键词继续搜\n\
+     - 禁止每次提问都调用 list_knowledge_docs（仅当用户问「知识库有什么」时才用）\n\
+     - 闲聊和打招呼不要调用任何知识库工具\n");
 
     if enable_native {
         base.push_str("\n你拥有强大的本机应用交互能力：\n\

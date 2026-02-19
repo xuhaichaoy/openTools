@@ -12,6 +12,27 @@ use tauri::{AppHandle, Manager};
 
 use crate::error::AppError;
 
+fn should_force_rag_for_query(query: &str) -> bool {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return false;
+    }
+
+    // 产品知识问答兜底：即便用户未开启自动检索，也先做一次预检索，避免模型遗漏工具调用。
+    let has_product_name = q.contains("51toolbox") || q.contains("mtools");
+    if !has_product_name {
+        return false;
+    }
+
+    const KNOWLEDGE_CUES: [&str; 24] = [
+        "如何", "怎么", "怎样", "支持", "可以", "是否", "能否", "创建",
+        "配置", "设置", "团队", "插件", "功能", "使用", "文档", "指南",
+        "教程", "管理", "同步", "知识库", "workflow", "api", "接口", "扩展",
+    ];
+
+    KNOWLEDGE_CUES.iter().any(|k| q.contains(k))
+}
+
 // ── Tauri Commands ──
 
 /// 保存聊天图片到应用数据目录，返回文件路径
@@ -188,13 +209,33 @@ pub async fn ai_chat_stream(
 
     let mut system_prompt = tools::get_system_prompt(enable_advanced, enable_native, &config.system_prompt);
 
-    // RAG 自动检索
-    if config.enable_rag_auto_search {
-        if let Some(user_query) = messages.iter().rev().find(|m| m.role == "user").and_then(|m| m.content.as_ref()) {
-            match super::rag::rag_search(app.clone(), user_query.clone(), Some(3), Some(0.5)).await {
+    // RAG 预检索：
+    // - 用户显式开启自动检索时执行
+    // - 或命中产品功能问答兜底规则（避免模型不调 search_docs）
+    if let Some(user_query) = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .and_then(|m| m.content.as_ref())
+    {
+        let force_rag = should_force_rag_for_query(user_query);
+        if config.enable_rag_auto_search || force_rag {
+            let rag_results = match super::rag::rag_search(
+                app.clone(),
+                user_query.clone(),
+                Some(3),
+                None,
+            )
+            .await
+            {
+                Ok(r) => Ok(r),
+                Err(_) => super::rag::rag_keyword_search(app.clone(), user_query.clone(), Some(3)).await,
+            };
+
+            match rag_results {
                 Ok(results) if !results.is_empty() => {
                     let mut rag_context = String::from(
-                        "\n\n---\n以下是从用户知识库中检索到的相关信息，请参考回答（如有引用请标注来源文档）：\n\n"
+                        "\n\n---\n以下是从用户知识库中检索到的相关信息，请优先基于这些内容回答（如有引用请标注来源文档）：\n\n"
                     );
                     for (i, r) in results.iter().enumerate() {
                         rag_context.push_str(&format!(
@@ -203,11 +244,16 @@ pub async fn ai_chat_stream(
                         ));
                     }
                     system_prompt.push_str(&rag_context);
-                    log::info!("RAG 自动检索：注入 {} 条知识库结果", results.len());
+                    log::info!(
+                        "RAG 预检索：注入 {} 条知识库结果（auto={}, force={}）",
+                        results.len(),
+                        config.enable_rag_auto_search,
+                        force_rag
+                    );
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    log::warn!("RAG 自动检索失败: {}", e);
+                    log::warn!("RAG 预检索失败: {}", e);
                 }
             }
         }

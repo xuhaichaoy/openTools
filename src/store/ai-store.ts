@@ -96,7 +96,7 @@ export const useAIStore = create<AIState>((set, get) => ({
     max_tokens: null,
     enable_advanced_tools: false,
     system_prompt: "",
-    enable_rag_auto_search: false,
+    enable_rag_auto_search: true,
     enable_native_tools: true,
     source: "own_key",
   },

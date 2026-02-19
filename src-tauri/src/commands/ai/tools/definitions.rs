@@ -65,22 +65,57 @@ pub fn get_base_tools() -> Vec<serde_json::Value> {
         {
             "type": "function",
             "function": {
-                "name": "search_knowledge_base",
-                "description": "在本地知识库中检索相关信息。当用户提问的内容可能存在于已导入的文档中时调用此工具进行 RAG 检索增强。",
+                "name": "list_knowledge_docs",
+                "description": "列出知识库中所有已索引文档的元数据。仅在需要了解知识库有哪些文档时调用，普通问答直接用 search_docs。",
+                "parameters": { "type": "object", "properties": {} }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_docs",
+                "description": "在知识库中搜索相关文档片段，返回内容足够直接回答问题。搜索一次即可，结果为空则停止搜索直接回答。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "检索查询内容"
+                            "description": "搜索关键词，简短精确，如「创建团队」「配置AI」"
                         },
                         "top_k": {
                             "type": "integer",
-                            "description": "返回结果数量，默认5",
-                            "default": 5
+                            "description": "返回结果数量，默认3，通常不需要更多",
+                            "default": 3
                         }
                     },
                     "required": ["query"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_doc_chunks",
+                "description": "读取 search_docs 找到的相关片段的完整内容及上下文。仅在 search_docs 返回了明确相关的结果后才调用。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "doc_id": {
+                            "type": "string",
+                            "description": "文档ID（从 search_docs 结果中获取）"
+                        },
+                        "chunk_indices": {
+                            "type": "array",
+                            "items": { "type": "integer" },
+                            "description": "要读取的 chunk 索引列表（从 search_docs 结果中获取）"
+                        },
+                        "context_window": {
+                            "type": "integer",
+                            "description": "上下文窗口大小，即目标 chunk 前后各包含几个相邻 chunk，默认1",
+                            "default": 1
+                        }
+                    },
+                    "required": ["doc_id", "chunk_indices"]
                 }
             }
         }

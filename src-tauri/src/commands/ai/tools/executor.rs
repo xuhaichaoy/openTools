@@ -66,17 +66,108 @@ pub async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<Str
                 .map_err(|e| e.to_string())?;
             Ok("已写入剪贴板".to_string())
         }
+        "list_knowledge_docs" => {
+            let summaries = crate::commands::rag::rag_list_doc_summaries(app.clone()).await?;
+            if summaries.is_empty() {
+                Ok("知识库为空，用户尚未导入任何文档。".to_string())
+            } else {
+                let mut output = format!("知识库中共 {} 个文档:\n\n", summaries.len());
+                for (i, s) in summaries.iter().enumerate() {
+                    output.push_str(&format!(
+                        "{}. [{}] {} ({}, {} 块, ~{} tokens)\n   标签: {:?} | 状态: {}\n",
+                        i + 1,
+                        s["id"].as_str().unwrap_or(""),
+                        s["name"].as_str().unwrap_or(""),
+                        s["format"].as_str().unwrap_or(""),
+                        s["chunkCount"].as_u64().unwrap_or(0),
+                        s["tokenCount"].as_u64().unwrap_or(0),
+                        s["tags"],
+                        s["status"].as_str().unwrap_or(""),
+                    ));
+                }
+                Ok(output)
+            }
+        }
+        "search_docs" => {
+            let query = args_value["query"].as_str().unwrap_or("").to_string();
+            let top_k = args_value["top_k"].as_u64().map(|v| v as usize);
+            let results = match crate::commands::rag::rag_search(
+                app.clone(),
+                query.clone(),
+                top_k,
+                None,
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(_) => crate::commands::rag::rag_keyword_search(app.clone(), query, top_k).await?,
+            };
+            if results.is_empty() {
+                Ok("知识库中未找到与该问题相关的内容。请直接用你的知识回答用户，不要再次搜索。".to_string())
+            } else {
+                let mut output = format!("找到 {} 个相关片段:\n\n", results.len());
+                for (i, r) in results.iter().enumerate() {
+                    let content = &r.chunk.content;
+                    let display = if content.chars().count() <= 500 {
+                        content.clone()
+                    } else {
+                        format!("{}…（已截断，用 read_doc_chunks 读取完整内容）",
+                            content.chars().take(500).collect::<String>())
+                    };
+                    output.push_str(&format!(
+                        "--- 片段 {} [doc_id={}, chunk={}, 来源={}, 相关度={:.0}%] ---\n{}\n\n",
+                        i + 1,
+                        r.chunk.doc_id,
+                        r.chunk.index,
+                        r.chunk.metadata.source,
+                        r.score * 100.0,
+                        display,
+                    ));
+                }
+                output.push_str("如果以上内容已包含答案，直接回答即可，无需再调用 read_doc_chunks。");
+                Ok(output)
+            }
+        }
+        "read_doc_chunks" => {
+            let doc_id = args_value["doc_id"].as_str().unwrap_or("").to_string();
+            let chunk_indices: Vec<usize> = args_value["chunk_indices"]
+                .as_array()
+                .map(|arr| arr.iter().filter_map(|v| v.as_u64().map(|n| n as usize)).collect())
+                .unwrap_or_default();
+            let context_window = args_value["context_window"].as_u64().map(|v| v as usize);
+            let chunks = crate::commands::rag::rag_read_doc_chunks(
+                app.clone(), doc_id, chunk_indices, context_window,
+            ).await?;
+            if chunks.is_empty() {
+                Ok("未找到指定的 chunk 内容。".to_string())
+            } else {
+                let mut output = String::new();
+                for chunk in &chunks {
+                    let is_target = chunk["isTarget"].as_bool().unwrap_or(false);
+                    let marker = if is_target { ">>>" } else { "   " };
+                    output.push_str(&format!(
+                        "{} [chunk {}] ({} tokens)\n{}\n\n",
+                        marker,
+                        chunk["index"].as_u64().unwrap_or(0),
+                        chunk["tokenCount"].as_u64().unwrap_or(0),
+                        chunk["content"].as_str().unwrap_or(""),
+                    ));
+                }
+                Ok(output)
+            }
+        }
+        // backward compat: old tool name → redirect to keyword search
         "search_knowledge_base" => {
             let query = args_value["query"].as_str().unwrap_or("").to_string();
             let top_k = args_value["top_k"].as_u64().map(|v| v as usize);
-            let results = crate::commands::rag::rag_search(app.clone(), query, top_k, None).await?;
+            let results = crate::commands::rag::rag_keyword_search(app.clone(), query, top_k).await?;
             if results.is_empty() {
                 Ok("知识库中未找到相关内容。".to_string())
             } else {
                 let mut output = format!("在知识库中找到 {} 个相关片段:\n\n", results.len());
                 for (i, r) in results.iter().enumerate() {
                     output.push_str(&format!(
-                        "--- 片段 {} (来源: {}, 相似度: {:.1}%) ---\n{}\n\n",
+                        "--- 片段 {} (来源: {}, 相关度: {:.1}%) ---\n{}\n\n",
                         i + 1,
                         r.chunk.metadata.source,
                         r.score * 100.0,

@@ -287,6 +287,9 @@ pub fn run() {
             commands::rag::rag_remove_doc,
             commands::rag::rag_reindex_doc,
             commands::rag::rag_search,
+            commands::rag::rag_keyword_search,
+            commands::rag::rag_list_doc_summaries,
+            commands::rag::rag_read_doc_chunks,
             commands::rag::rag_get_stats,
             commands::rag::rag_set_config,
             // ── DataForge ──

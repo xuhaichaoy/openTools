@@ -6,7 +6,7 @@
 export type DocFormat = 'txt' | 'md' | 'pdf' | 'json' | 'csv' | 'html'
 
 /** 文档状态 */
-export type DocStatus = 'pending' | 'processing' | 'indexed' | 'error'
+export type DocStatus = 'pending' | 'processing' | 'indexed' | 'indexed_full' | 'indexed_keyword' | 'error'
 
 /** 文档来源类型 */
 export type DocSourceType = 'local' | 'personal' | 'team'

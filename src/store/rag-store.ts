@@ -19,6 +19,7 @@ interface RAGState {
   removeDoc: (docId: string) => Promise<void>
   reindexDoc: (docId: string) => Promise<void>
   search: (query: string) => Promise<RetrievalResult[]>
+  keywordSearch: (query: string) => Promise<RetrievalResult[]>
   updateConfig: (config: Partial<RAGConfig>) => Promise<void>
   loadStats: () => Promise<void>
   setSearchQuery: (q: string) => void
@@ -80,15 +81,28 @@ export const useRAGStore = create<RAGState>((set, get) => ({
 
   search: async (query) => {
     try {
-      const results = await invoke<RetrievalResult[]>('rag_search', {
+      const results = await invoke<RetrievalResult[]>('rag_keyword_search', {
         query,
         topK: get().config.topK,
-        threshold: get().config.scoreThreshold,
       })
       set({ searchResults: results })
       return results
     } catch (e) {
       handleError(e, { context: '检索知识库' })
+      return []
+    }
+  },
+
+  keywordSearch: async (query) => {
+    try {
+      const results = await invoke<RetrievalResult[]>('rag_keyword_search', {
+        query,
+        topK: get().config.topK,
+      })
+      set({ searchResults: results })
+      return results
+    } catch (e) {
+      handleError(e, { context: '关键词检索' })
       return []
     }
   },

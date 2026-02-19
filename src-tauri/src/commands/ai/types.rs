@@ -75,7 +75,7 @@ impl Default for AIConfig {
             max_tokens: None,
             enable_advanced_tools: false,
             system_prompt: String::new(),
-            enable_rag_auto_search: false,
+            enable_rag_auto_search: true,
             enable_native_tools: true,
             source: Some("own_key".to_string()),
             team_id: None,

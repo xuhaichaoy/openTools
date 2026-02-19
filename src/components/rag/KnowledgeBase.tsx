@@ -244,11 +244,21 @@ function IndexedDocsPanel() {
 
   const getStatusIcon = (status: string) => {
     switch (status) {
-      case "indexed": return <CheckCircle className="w-3.5 h-3.5 text-green-400" />;
+      case "indexed_full": return <CheckCircle className="w-3.5 h-3.5 text-green-400" />;
+      case "indexed":
+      case "indexed_keyword": return <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />;
       case "processing": return <Loader2 className="w-3.5 h-3.5 text-yellow-400 animate-spin" />;
       case "error": return <AlertCircle className="w-3.5 h-3.5 text-red-400" />;
       default: return <FileText className="w-3.5 h-3.5 text-gray-400" />;
     }
+  };
+
+  const getIndexStatusLabel = (status: string) => {
+    if (status === "indexed_full") return { text: "全量索引", color: "#22C55E" };
+    if (status === "indexed" || status === "indexed_keyword") return { text: "关键词", color: EMERALD };
+    if (status === "processing") return { text: "处理中", color: "#EAB308" };
+    if (status === "error") return { text: "失败", color: "#EF4444" };
+    return { text: status, color: "#9CA3AF" };
   };
 
   const getSourceLabel = (doc: { sourceType?: string; sourceId?: string }) => {
@@ -297,6 +307,7 @@ function IndexedDocsPanel() {
           )}
           {docs.map((doc) => {
             const source = getSourceLabel(doc);
+            const indexStatus = getIndexStatusLabel(doc.status);
             return (
               <div
                 key={doc.id}
@@ -312,6 +323,12 @@ function IndexedDocsPanel() {
                         style={{ background: `${source.color}15`, color: source.color }}
                       >
                         {source.text}
+                      </span>
+                      <span
+                        className="text-[9px] px-1.5 py-0.5 rounded-full shrink-0"
+                        style={{ background: `${indexStatus.color}15`, color: indexStatus.color }}
+                      >
+                        {indexStatus.text}
                       </span>
                     </div>
                     <div className="text-[10px] text-[var(--color-text-secondary)] flex items-center gap-2 mt-0.5">
@@ -437,7 +454,7 @@ function CloudPanel({
   const color = scope === "personal" ? BLUE : BRAND;
 
   const isDocIndexed = (docName: string) => {
-    return ragDocs.some((d) => d.name === docName && d.sourceType === scope);
+    return ragDocs.some((d) => d.name === docName && d.sourceType === scope && (d.status === "indexed" || d.status === "indexed_full" || d.status === "indexed_keyword"));
   };
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
