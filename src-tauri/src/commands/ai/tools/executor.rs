@@ -20,20 +20,19 @@ pub async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<Str
     match name {
         "search_data_scripts" => {
             let query = args_value["query"].as_str().unwrap_or("").to_string();
-            let results = crate::commands::data_forge::dataforge_search_scripts(app.clone(), query).await?;
+            let results =
+                crate::commands::data_forge::dataforge_search_scripts(app.clone(), query).await?;
             Ok(serde_json::to_string_pretty(&results).unwrap_or_default())
         }
         "run_data_script" => {
-            let script_id = args_value["script_id"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
+            let script_id = args_value["script_id"].as_str().unwrap_or("").to_string();
             let params: HashMap<String, serde_json::Value> = args_value["params"]
                 .as_object()
                 .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                 .unwrap_or_default();
             let result =
-                crate::commands::data_forge::dataforge_run_script(app.clone(), script_id, params).await?;
+                crate::commands::data_forge::dataforge_run_script(app.clone(), script_id, params)
+                    .await?;
             Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
         }
         "run_shell_command" => {
@@ -91,19 +90,20 @@ pub async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<Str
         "search_docs" => {
             let query = args_value["query"].as_str().unwrap_or("").to_string();
             let top_k = args_value["top_k"].as_u64().map(|v| v as usize);
-            let results = match crate::commands::rag::rag_search(
-                app.clone(),
-                query.clone(),
-                top_k,
-                None,
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(_) => crate::commands::rag::rag_keyword_search(app.clone(), query, top_k).await?,
-            };
+            let results =
+                match crate::commands::rag::rag_search(app.clone(), query.clone(), top_k, None)
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(_) => {
+                        crate::commands::rag::rag_keyword_search(app.clone(), query, top_k).await?
+                    }
+                };
             if results.is_empty() {
-                Ok("知识库中未找到与该问题相关的内容。请直接用你的知识回答用户，不要再次搜索。".to_string())
+                Ok(
+                    "知识库中未找到与该问题相关的内容。请直接用你的知识回答用户，不要再次搜索。"
+                        .to_string(),
+                )
             } else {
                 let mut output = format!("找到 {} 个相关片段:\n\n", results.len());
                 for (i, r) in results.iter().enumerate() {
@@ -111,8 +111,10 @@ pub async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<Str
                     let display = if content.chars().count() <= 500 {
                         content.clone()
                     } else {
-                        format!("{}…（已截断，用 read_doc_chunks 读取完整内容）",
-                            content.chars().take(500).collect::<String>())
+                        format!(
+                            "{}…（已截断，用 read_doc_chunks 读取完整内容）",
+                            content.chars().take(500).collect::<String>()
+                        )
                     };
                     output.push_str(&format!(
                         "--- 片段 {} [doc_id={}, chunk={}, 来源={}, 相关度={:.0}%] ---\n{}\n\n",
@@ -124,7 +126,8 @@ pub async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<Str
                         display,
                     ));
                 }
-                output.push_str("如果以上内容已包含答案，直接回答即可，无需再调用 read_doc_chunks。");
+                output
+                    .push_str("如果以上内容已包含答案，直接回答即可，无需再调用 read_doc_chunks。");
                 Ok(output)
             }
         }
@@ -132,12 +135,20 @@ pub async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<Str
             let doc_id = args_value["doc_id"].as_str().unwrap_or("").to_string();
             let chunk_indices: Vec<usize> = args_value["chunk_indices"]
                 .as_array()
-                .map(|arr| arr.iter().filter_map(|v| v.as_u64().map(|n| n as usize)).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_u64().map(|n| n as usize))
+                        .collect()
+                })
                 .unwrap_or_default();
             let context_window = args_value["context_window"].as_u64().map(|v| v as usize);
             let chunks = crate::commands::rag::rag_read_doc_chunks(
-                app.clone(), doc_id, chunk_indices, context_window,
-            ).await?;
+                app.clone(),
+                doc_id,
+                chunk_indices,
+                context_window,
+            )
+            .await?;
             if chunks.is_empty() {
                 Ok("未找到指定的 chunk 内容。".to_string())
             } else {
@@ -160,7 +171,8 @@ pub async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<Str
         "search_knowledge_base" => {
             let query = args_value["query"].as_str().unwrap_or("").to_string();
             let top_k = args_value["top_k"].as_u64().map(|v| v as usize);
-            let results = crate::commands::rag::rag_keyword_search(app.clone(), query, top_k).await?;
+            let results =
+                crate::commands::rag::rag_keyword_search(app.clone(), query, top_k).await?;
             if results.is_empty() {
                 Ok("知识库中未找到相关内容。".to_string())
             } else {
@@ -185,10 +197,19 @@ pub async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<Str
                 return Err(format!("文件不存在: {}", path));
             }
             let bytes = std::fs::read(&file_path).map_err(|e| format!("读取失败: {}", e))?;
-            let truncated = if bytes.len() > max_bytes { &bytes[..max_bytes] } else { &bytes };
+            let truncated = if bytes.len() > max_bytes {
+                &bytes[..max_bytes]
+            } else {
+                &bytes
+            };
             let content = String::from_utf8_lossy(truncated).to_string();
             if bytes.len() > max_bytes {
-                Ok(format!("{}\n\n[文件截断，已读取 {}/{} 字节]", content, max_bytes, bytes.len()))
+                Ok(format!(
+                    "{}\n\n[文件截断，已读取 {}/{} 字节]",
+                    content,
+                    max_bytes,
+                    bytes.len()
+                ))
             } else {
                 Ok(content)
             }
@@ -213,13 +234,23 @@ pub async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<Str
                 return Err(format!("不是目录: {}", path));
             }
             let mut entries = Vec::new();
-            let read_dir = std::fs::read_dir(&dir_path).map_err(|e| format!("读取目录失败: {}", e))?;
+            let read_dir =
+                std::fs::read_dir(&dir_path).map_err(|e| format!("读取目录失败: {}", e))?;
             for entry in read_dir {
                 if let Ok(entry) = entry {
                     let name = entry.file_name().to_string_lossy().to_string();
-                    let ft = entry.file_type().map(|t| {
-                        if t.is_dir() { "📁" } else if t.is_symlink() { "🔗" } else { "📄" }
-                    }).unwrap_or("❓");
+                    let ft = entry
+                        .file_type()
+                        .map(|t| {
+                            if t.is_dir() {
+                                "📁"
+                            } else if t.is_symlink() {
+                                "🔗"
+                            } else {
+                                "📄"
+                            }
+                        })
+                        .unwrap_or("❓");
                     let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
                     if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                         entries.push(format!("{} {}/", ft, name));
@@ -229,7 +260,12 @@ pub async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<Str
                 }
             }
             entries.sort();
-            Ok(format!("目录 {} 下共 {} 项:\n{}", path, entries.len(), entries.join("\n")))
+            Ok(format!(
+                "目录 {} 下共 {} 项:\n{}",
+                path,
+                entries.len(),
+                entries.join("\n")
+            ))
         }
         "get_system_info" => {
             let os = std::env::consts::OS;
@@ -287,7 +323,8 @@ pub async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<Str
             let all_day = args_value["all_day"].as_bool();
             let result = crate::commands::native_apps::native_calendar_create_event(
                 calendar, title, start_date, end_date, location, notes, all_day,
-            ).await?;
+            )
+            .await?;
             Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
         }
         "native_calendar_list_events" => {
@@ -303,19 +340,22 @@ pub async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<Str
             let priority = args_value["priority"].as_i64().map(|p| p as i32);
             let result = crate::commands::native_apps::native_reminder_create(
                 list_name, title, notes, due_date, priority,
-            ).await?;
+            )
+            .await?;
             Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
         }
         "native_reminder_list_incomplete" => {
             let list_name = args_value["list_name"].as_str().map(|s| s.to_string());
-            let result = crate::commands::native_apps::native_reminder_list_incomplete(list_name).await?;
+            let result =
+                crate::commands::native_apps::native_reminder_list_incomplete(list_name).await?;
             Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
         }
         "native_notes_create" => {
             let title = args_value["title"].as_str().unwrap_or("").to_string();
             let body = args_value["body"].as_str().unwrap_or("").to_string();
             let folder = args_value["folder"].as_str().map(|s| s.to_string());
-            let result = crate::commands::native_apps::native_notes_create(folder, title, body).await?;
+            let result =
+                crate::commands::native_apps::native_notes_create(folder, title, body).await?;
             Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
         }
         "native_notes_search" => {
@@ -325,20 +365,30 @@ pub async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<Str
             Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
         }
         "native_mail_create" => {
-            let to: Vec<String> = args_value["to"].as_array()
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            let to: Vec<String> = args_value["to"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
                 .unwrap_or_default();
             let subject = args_value["subject"].as_str().unwrap_or("").to_string();
             let body = args_value["body"].as_str().unwrap_or("").to_string();
-            let cc: Option<Vec<String>> = args_value["cc"].as_array()
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect());
-            let result = crate::commands::native_apps::native_mail_create(to, subject, body, cc).await?;
+            let cc: Option<Vec<String>> = args_value["cc"].as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            });
+            let result =
+                crate::commands::native_apps::native_mail_create(to, subject, body, cc).await?;
             Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
         }
         "native_shortcuts_run" => {
             let shortcut_name = args_value["name"].as_str().unwrap_or("").to_string();
             let input = args_value["input"].as_str().map(|s| s.to_string());
-            let result = crate::commands::native_apps::native_shortcuts_run(shortcut_name, input).await?;
+            let result =
+                crate::commands::native_apps::native_shortcuts_run(shortcut_name, input).await?;
             Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
         }
         "native_app_open" => {
@@ -355,12 +405,19 @@ pub async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<Str
 }
 
 /// 请求用户确认危险工具的执行
-pub async fn request_tool_confirmation(app: &AppHandle, name: &str, args: &str) -> Result<bool, String> {
+pub async fn request_tool_confirmation(
+    app: &AppHandle,
+    name: &str,
+    args: &str,
+) -> Result<bool, String> {
     let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
 
     {
         let state = app.state::<ToolConfirmationState>();
-        let mut pending = state.pending.lock().map_err(|e| format!("锁获取失败: {}", e))?;
+        let mut pending = state
+            .pending
+            .lock()
+            .map_err(|e| format!("锁获取失败: {}", e))?;
         *pending = Some(tx);
     }
 
@@ -377,7 +434,10 @@ pub async fn request_tool_confirmation(app: &AppHandle, name: &str, args: &str) 
         Ok(Err(_)) => Ok(false),
         Err(_) => {
             let state = app.state::<ToolConfirmationState>();
-            let mut pending = state.pending.lock().map_err(|e| format!("锁获取失败: {}", e))?;
+            let mut pending = state
+                .pending
+                .lock()
+                .map_err(|e| format!("锁获取失败: {}", e))?;
             *pending = None;
             Ok(false)
         }

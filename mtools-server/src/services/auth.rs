@@ -1,5 +1,5 @@
-use crate::{Result, Error};
-use jsonwebtoken::{encode, decode, Header, EncodingKey};
+use crate::{Error, Result};
+use jsonwebtoken::{decode, encode, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -101,7 +101,10 @@ impl AuthService {
 
         // 存入 Redis，5 分钟过期
         let key = format!("sms:code:{}", phone);
-        let mut conn = self.redis.get_multiplexed_async_connection().await
+        let mut conn = self
+            .redis
+            .get_multiplexed_async_connection()
+            .await
             .map_err(|e| Error::Internal(anyhow::anyhow!("Redis error: {}", e)))?;
 
         redis::cmd("SET")
@@ -122,7 +125,10 @@ impl AuthService {
     /// 验证 SMS 验证码（从 Redis 读取比对，验证后删除）
     pub async fn verify_sms_code(&self, phone: &str, code: &str) -> Result<bool> {
         let key = format!("sms:code:{}", phone);
-        let mut conn = self.redis.get_multiplexed_async_connection().await
+        let mut conn = self
+            .redis
+            .get_multiplexed_async_connection()
+            .await
             .map_err(|e| Error::Internal(anyhow::anyhow!("Redis error: {}", e)))?;
 
         let stored: Option<String> = redis::cmd("GET")

@@ -22,6 +22,27 @@ export interface Team {
   owner_id: string;
   avatar_url?: string;
   created_at: string;
+  subscription_plan?: "trial" | "pro";
+  subscription_expires_at?: string | null;
+}
+
+function isTeamSubscriptionActive(team: Team): boolean {
+  const plan = team.subscription_plan ?? "trial";
+  const expiresAt = team.subscription_expires_at;
+  const now = Date.now();
+
+  return plan === "pro"
+    ? !expiresAt || new Date(expiresAt).getTime() > now
+    : !!expiresAt && new Date(expiresAt).getTime() > now;
+}
+
+function getTeamSubscriptionLabel(team: Team): string {
+  const plan = team.subscription_plan ?? "trial";
+  const active = isTeamSubscriptionActive(team);
+
+  if (!active) return "已到期";
+  if (plan === "trial") return "试用中";
+  return "已开通";
 }
 
 export function TeamTabContainer() {
@@ -133,6 +154,8 @@ export function TeamTabContainer() {
                     {team.owner_id === useAuthStore.getState().user?.id
                       ? "我创建的"
                       : "已加入"}
+                    {" · "}
+                    {getTeamSubscriptionLabel(team)}
                   </p>
                 </div>
               </div>
@@ -201,6 +224,7 @@ function TeamDetail({
     "members" | "ai-config" | "resources" | "usage"
   >("members");
   const { user } = useAuthStore();
+  const teamActive = isTeamSubscriptionActive(team);
   const isOwnerOrAdmin =
     team &&
     user &&
@@ -209,6 +233,12 @@ function TeamDetail({
         member.user_id === user.id &&
         (member.role === "owner" || member.role === "admin"),
     );
+
+  useEffect(() => {
+    if (!teamActive && teamSection !== "members") {
+      setTeamSection("members");
+    }
+  }, [teamActive, teamSection]);
 
   return (
     <div className="max-w-xl mx-auto space-y-4">
@@ -227,25 +257,42 @@ function TeamDetail({
         <div className="flex-1">
           <h2 className="text-sm font-semibold">{team.name}</h2>
           <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
-            {members.length} 名成员 · 创建于 {new Date(team.created_at).toLocaleDateString()}
+            {members.length} 名成员 · {getTeamSubscriptionLabel(team)} · 创建于 {new Date(team.created_at).toLocaleDateString()}
           </p>
         </div>
       </div>
 
+      {!teamActive && (
+        <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3">
+          <div className="text-xs font-semibold text-amber-600">团队已到期</div>
+          <div className="text-[10px] text-amber-600/90 mt-1">
+            当前仅可查看团队基础信息与成员列表，团队业务能力需续费后恢复。
+          </div>
+        </div>
+      )}
+
       <div className="flex gap-1 bg-[var(--color-bg)] rounded-xl p-1 border border-[var(--color-border)]">
         {[
-          { id: "members" as const, icon: Users, label: "成员" },
-          { id: "ai-config" as const, icon: Cpu, label: "AI 配置" },
-          { id: "resources" as const, icon: FolderOpen, label: "共享资源" },
-          { id: "usage" as const, icon: BarChart3, label: "用量统计" },
+          { id: "members" as const, icon: Users, label: "成员", requiresActive: false },
+          { id: "ai-config" as const, icon: Cpu, label: "AI 配置", requiresActive: true },
+          { id: "resources" as const, icon: FolderOpen, label: "共享资源", requiresActive: true },
+          { id: "usage" as const, icon: BarChart3, label: "用量统计", requiresActive: true },
         ].map((tab) => (
           <button
             key={tab.id}
-            onClick={() => setTeamSection(tab.id)}
+            onClick={() => {
+              if (tab.requiresActive && !teamActive) return;
+              setTeamSection(tab.id);
+            }}
+            disabled={tab.requiresActive && !teamActive}
             className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-xs font-medium transition-all ${
               teamSection === tab.id
                 ? "bg-[#F28F36]/10 text-[#F28F36]"
                 : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)]"
+            } ${
+              tab.requiresActive && !teamActive
+                ? "opacity-45 cursor-not-allowed hover:bg-transparent"
+                : ""
             }`}
           >
             <tab.icon className="w-3.5 h-3.5" />
@@ -259,6 +306,7 @@ function TeamDetail({
           teamId={team.id}
           members={members}
           isOwnerOrAdmin={!!isOwnerOrAdmin}
+          teamActive={teamActive}
           onMembersChange={onMembersChange}
         />
       )}
@@ -268,6 +316,7 @@ function TeamDetail({
           teamId={team.id}
           teamMembers={members}
           isOwnerOrAdmin={!!isOwnerOrAdmin}
+          teamActive={teamActive}
         />
       )}
 
@@ -275,11 +324,16 @@ function TeamDetail({
         <TeamResourcesSection
           teamId={team.id}
           isOwnerOrAdmin={!!isOwnerOrAdmin}
+          teamActive={teamActive}
         />
       )}
 
       {teamSection === "usage" && (
-        <TeamUsageSection teamId={team.id} isOwnerOrAdmin={!!isOwnerOrAdmin} />
+        <TeamUsageSection
+          teamId={team.id}
+          isOwnerOrAdmin={!!isOwnerOrAdmin}
+          teamActive={teamActive}
+        />
       )}
     </div>
   );

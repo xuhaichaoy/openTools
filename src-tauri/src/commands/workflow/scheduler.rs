@@ -1,6 +1,6 @@
+use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use once_cell::sync::Lazy;
 use tauri::{AppHandle, Emitter};
 
 use super::types::*;
@@ -144,19 +144,29 @@ fn schedule_workflow(app: AppHandle, wf: Workflow) {
 }
 
 /// 触发工作流执行并发送系统通知
-async fn trigger_workflow_execution(app: &AppHandle, wf_id: &str, wf_name: &str) -> Result<(), String> {
+async fn trigger_workflow_execution(
+    app: &AppHandle,
+    wf_id: &str,
+    wf_name: &str,
+) -> Result<(), String> {
     // 通过事件通知前端执行工作流
-    let _ = app.emit("workflow-scheduled-trigger", serde_json::json!({
-        "workflowId": wf_id,
-        "workflowName": wf_name,
-        "time": chrono::Local::now().format("%H:%M:%S").to_string(),
-    }));
+    let _ = app.emit(
+        "workflow-scheduled-trigger",
+        serde_json::json!({
+            "workflowId": wf_id,
+            "workflowName": wf_name,
+            "time": chrono::Local::now().format("%H:%M:%S").to_string(),
+        }),
+    );
 
     // 发送系统通知
-    let _ = app.emit("send-notification", serde_json::json!({
-        "title": "定时任务触发",
-        "body": format!("工作流「{}」已开始执行", wf_name),
-    }));
+    let _ = app.emit(
+        "send-notification",
+        serde_json::json!({
+            "title": "定时任务触发",
+            "body": format!("工作流「{}」已开始执行", wf_name),
+        }),
+    );
 
     Ok(())
 }
@@ -237,7 +247,11 @@ fn cron_field_matches_weekday(field: &str, weekday_mon0: u32) -> bool {
         return true;
     }
     // 将 Monday=0 格式转为 Sunday=0 格式（cron 标准）
-    let weekday_sun0 = if weekday_mon0 == 6 { 0 } else { weekday_mon0 + 1 };
+    let weekday_sun0 = if weekday_mon0 == 6 {
+        0
+    } else {
+        weekday_mon0 + 1
+    };
     for part in field.split(',') {
         let part = part.trim();
         if part.contains('-') {

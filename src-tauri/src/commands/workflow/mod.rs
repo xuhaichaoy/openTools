@@ -1,6 +1,6 @@
-pub mod types;
 pub mod engine;
 pub mod scheduler;
+pub mod types;
 
 pub use types::*;
 

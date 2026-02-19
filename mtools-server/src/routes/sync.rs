@@ -1,19 +1,17 @@
-use axum::{
-    extract::{State, Extension, Query},
-    routing::{get, post},
-    Json,
-    Router,
-};
 use crate::{
-    models::sync::{SyncRow, SyncPushRequest, SyncPullResponse},
+    models::sync::{SyncPullResponse, SyncPushRequest, SyncRow},
     routes::AppState,
-    services::auth::Claims,
-    Result,
-    Error,
+    services::{auth::Claims, entitlement},
+    Error, Result,
 };
+use axum::{
+    extract::{Extension, Query, State},
+    routing::{get, post},
+    Json, Router,
+};
+use serde::Deserialize;
 use std::sync::Arc;
 use uuid::Uuid;
-use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 pub struct PullQuery {
@@ -28,13 +26,17 @@ pub fn routes_no_layer() -> Router<Arc<AppState>> {
         .route("/status", get(sync_status))
 }
 
+fn parse_user_id(claims: &Claims) -> Result<Uuid> {
+    Uuid::parse_str(&claims.sub).map_err(|_| Error::BadRequest("Invalid user ID".into()))
+}
+
 async fn pull_data(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
     Query(query): Query<PullQuery>,
 ) -> Result<Json<SyncPullResponse>> {
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
+    let user_id = parse_user_id(&claims)?;
+    entitlement::require_personal_sync(&state.db, user_id).await?;
 
     let items = sqlx::query_as::<_, SyncRow>(
         "SELECT * FROM sync_data WHERE user_id = $1 AND data_type = $2 AND version > $3 ORDER BY version ASC",
@@ -61,8 +63,8 @@ async fn sync_status(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<serde_json::Value>> {
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
+    let user_id = parse_user_id(&claims)?;
+    entitlement::require_personal_sync(&state.db, user_id).await?;
 
     let rows = sqlx::query_as::<_, (String, Option<i32>)>(
         "SELECT data_type, MAX(version) as max_version FROM sync_data WHERE user_id = $1 GROUP BY data_type",
@@ -84,8 +86,8 @@ async fn push_data(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<SyncPushRequest>,
 ) -> Result<Json<serde_json::Value>> {
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
+    let user_id = parse_user_id(&claims)?;
+    entitlement::require_personal_sync(&state.db, user_id).await?;
 
     let mut tx = state
         .db
@@ -125,9 +127,7 @@ async fn push_data(
         }
     }
 
-    tx.commit()
-        .await
-        .map_err(|e| Error::Internal(e.into()))?;
+    tx.commit().await.map_err(|e| Error::Internal(e.into()))?;
 
     Ok(Json(serde_json::json!({
         "success": true,

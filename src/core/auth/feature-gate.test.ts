@@ -31,10 +31,21 @@ vi.mock("@/store/auth-store", () => {
 import { checkFeatureAccess } from "./feature-gate";
 import { useAuthStore } from "@/store/auth-store";
 
-function setAuthState(isLoggedIn: boolean, energy = 0) {
+function setAuthState(
+  isLoggedIn: boolean,
+  opts?: { plan?: "free" | "pro"; planExpiresAt?: string | null; energy?: number },
+) {
+  const plan = opts?.plan ?? "free";
+  const energy = opts?.energy ?? 0;
   (useAuthStore as any).setState({
     isLoggedIn,
-    user: isLoggedIn ? { energy } : null,
+    user: isLoggedIn
+      ? {
+          energy,
+          plan,
+          plan_expires_at: opts?.planExpiresAt ?? null,
+        }
+      : null,
   });
 }
 
@@ -52,8 +63,15 @@ describe("checkFeatureAccess", () => {
   });
 
   it("cloud_sync: should allow when logged in", () => {
-    setAuthState(true, 100);
+    setAuthState(true, { plan: "pro", energy: 100 });
     expect(checkFeatureAccess("cloud_sync").allowed).toBe(true);
+  });
+
+  it("cloud_sync: should deny for free users", () => {
+    setAuthState(true, { plan: "free", energy: 100 });
+    const result = checkFeatureAccess("cloud_sync");
+    expect(result.allowed).toBe(false);
+    expect(result.action).toBe("upgrade");
   });
 
   // ── platform_ai ──
@@ -64,16 +82,11 @@ describe("checkFeatureAccess", () => {
     expect(result.action).toBe("login");
   });
 
-  it("platform_ai: should deny when logged in but no energy", () => {
-    setAuthState(true, 0);
+  it("platform_ai: should deny when logged in", () => {
+    setAuthState(true, { plan: "pro", energy: 100 });
     const result = checkFeatureAccess("platform_ai");
     expect(result.allowed).toBe(false);
-    expect(result.action).toBe("recharge");
-  });
-
-  it("platform_ai: should allow when logged in with energy", () => {
-    setAuthState(true, 50);
-    expect(checkFeatureAccess("platform_ai").allowed).toBe(true);
+    expect(result.reason).toContain("暂未开放");
   });
 
   // ── team_ai ──
@@ -83,7 +96,7 @@ describe("checkFeatureAccess", () => {
   });
 
   it("team_ai: should allow when logged in (regardless of energy)", () => {
-    setAuthState(true, 0);
+    setAuthState(true, { plan: "free", energy: 0 });
     expect(checkFeatureAccess("team_ai").allowed).toBe(true);
   });
 
@@ -91,7 +104,7 @@ describe("checkFeatureAccess", () => {
 
   it("advanced_tools: should always allow", () => {
     expect(checkFeatureAccess("advanced_tools").allowed).toBe(true);
-    setAuthState(true, 100);
+    setAuthState(true, { plan: "free", energy: 100 });
     expect(checkFeatureAccess("advanced_tools").allowed).toBe(true);
   });
 
@@ -102,7 +115,7 @@ describe("checkFeatureAccess", () => {
   });
 
   it("energy_purchase: should allow when logged in", () => {
-    setAuthState(true);
+    setAuthState(true, { plan: "free" });
     expect(checkFeatureAccess("energy_purchase").allowed).toBe(true);
   });
 });

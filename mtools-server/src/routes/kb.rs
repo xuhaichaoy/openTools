@@ -1,13 +1,13 @@
+use crate::{
+    routes::AppState,
+    services::{auth::Claims, entitlement},
+    Error, Result,
+};
 use axum::{
     body::Body,
     extract::{Extension, Multipart, Path, State},
     routing::{get, post},
     Json, Router,
-};
-use crate::{
-    routes::AppState,
-    services::auth::Claims,
-    Error, Result,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -73,7 +73,12 @@ pub fn personal_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(list_personal_docs).post(create_personal_doc))
         .route("/upload", post(upload_personal_doc))
-        .route("/{doc_id}", get(get_personal_doc).patch(update_personal_doc).delete(delete_personal_doc))
+        .route(
+            "/{doc_id}",
+            get(get_personal_doc)
+                .patch(update_personal_doc)
+                .delete(delete_personal_doc),
+        )
         .route("/{doc_id}/download", get(download_doc))
 }
 
@@ -81,7 +86,12 @@ pub fn team_kb_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/{team_id}/kb", get(list_team_docs).post(create_team_doc))
         .route("/{team_id}/kb/upload", post(upload_team_doc))
-        .route("/{team_id}/kb/{doc_id}", get(get_team_doc).patch(update_team_doc).delete(delete_team_doc))
+        .route(
+            "/{team_id}/kb/{doc_id}",
+            get(get_team_doc)
+                .patch(update_team_doc)
+                .delete(delete_team_doc),
+        )
         .route("/{team_id}/kb/{doc_id}/download", get(download_team_doc))
 }
 
@@ -114,17 +124,7 @@ fn validate_format(format: &str) -> Result<()> {
 }
 
 async fn check_team_membership(db: &sqlx::PgPool, team_id: Uuid, user_id: Uuid) -> Result<()> {
-    let is_member: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM team_members WHERE team_id = $1 AND user_id = $2)",
-    )
-    .bind(team_id)
-    .bind(user_id)
-    .fetch_one(db)
-    .await?;
-
-    if !is_member {
-        return Err(Error::Unauthorized("Not a team member".into()));
-    }
+    entitlement::require_team_active(db, team_id, user_id).await?;
     Ok(())
 }
 
@@ -137,17 +137,18 @@ async fn check_team_admin_or_uploader(
     if user_id == uploader_id {
         return Ok(());
     }
-    let role: Option<String> = sqlx::query_scalar(
-        "SELECT role FROM team_members WHERE team_id = $1 AND user_id = $2",
-    )
-    .bind(team_id)
-    .bind(user_id)
-    .fetch_optional(db)
-    .await?;
+    let role: Option<String> =
+        sqlx::query_scalar("SELECT role FROM team_members WHERE team_id = $1 AND user_id = $2")
+            .bind(team_id)
+            .bind(user_id)
+            .fetch_optional(db)
+            .await?;
 
     match role.as_deref() {
         Some("owner") | Some("admin") => Ok(()),
-        Some(_) => Err(Error::Unauthorized("Admin or uploader permission required".into())),
+        Some(_) => Err(Error::Unauthorized(
+            "Admin or uploader permission required".into(),
+        )),
         None => Err(Error::Unauthorized("Not a team member".into())),
     }
 }
@@ -159,10 +160,12 @@ async fn save_doc_file(
     data: &[u8],
 ) -> Result<String> {
     let dir = std::path::Path::new(upload_dir).join("kb").join(sub_path);
-    tokio::fs::create_dir_all(&dir).await
+    tokio::fs::create_dir_all(&dir)
+        .await
         .map_err(|e| Error::from(format!("Failed to create directory: {e}")))?;
     let file_path = dir.join(filename);
-    tokio::fs::write(&file_path, data).await
+    tokio::fs::write(&file_path, data)
+        .await
         .map_err(|e| Error::from(format!("Failed to write file: {e}")))?;
     Ok(format!("kb/{}/{}", sub_path, filename))
 }
@@ -173,8 +176,8 @@ async fn list_personal_docs(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<Vec<KbDocumentInfo>>> {
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
+    let user_id =
+        Uuid::parse_str(&claims.sub).map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
 
     let rows = sqlx::query_as::<_, KbDocument>(
         "SELECT * FROM kb_documents WHERE owner_type = 'personal' AND owner_id = $1 ORDER BY updated_at DESC",
@@ -183,20 +186,23 @@ async fn list_personal_docs(
     .fetch_all(&state.db)
     .await?;
 
-    let docs: Vec<KbDocumentInfo> = rows.into_iter().map(|d| KbDocumentInfo {
-        id: d.id,
-        owner_type: d.owner_type,
-        owner_id: d.owner_id,
-        uploader_id: d.uploader_id,
-        name: d.name,
-        format: d.format,
-        size: d.size,
-        tags: d.tags,
-        description: d.description,
-        created_at: d.created_at,
-        updated_at: d.updated_at,
-        uploader_name: None,
-    }).collect();
+    let docs: Vec<KbDocumentInfo> = rows
+        .into_iter()
+        .map(|d| KbDocumentInfo {
+            id: d.id,
+            owner_type: d.owner_type,
+            owner_id: d.owner_id,
+            uploader_id: d.uploader_id,
+            name: d.name,
+            format: d.format,
+            size: d.size,
+            tags: d.tags,
+            description: d.description,
+            created_at: d.created_at,
+            updated_at: d.updated_at,
+            uploader_name: None,
+        })
+        .collect();
 
     Ok(Json(docs))
 }
@@ -206,8 +212,8 @@ async fn create_personal_doc(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<CreateDocRequest>,
 ) -> Result<Json<KbDocumentInfo>> {
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
+    let user_id =
+        Uuid::parse_str(&claims.sub).map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
 
     let format = payload.format.as_deref().unwrap_or("md").to_string();
     validate_format(&format)?;
@@ -224,7 +230,8 @@ async fn create_personal_doc(
         &format!("personal/{}", user_id),
         &filename,
         content_bytes,
-    ).await?;
+    )
+    .await?;
 
     let doc = sqlx::query_as::<_, KbDocument>(
         "INSERT INTO kb_documents (id, owner_type, owner_id, uploader_id, name, format, size, file_path, content, tags, description)
@@ -251,20 +258,22 @@ async fn upload_personal_doc(
     Extension(claims): Extension<Claims>,
     mut multipart: Multipart,
 ) -> Result<Json<KbDocumentInfo>> {
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
+    let user_id =
+        Uuid::parse_str(&claims.sub).map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
 
-    let field = multipart.next_field().await
+    let field = multipart
+        .next_field()
+        .await
         .map_err(|_| Error::BadRequest("Invalid multipart data".into()))?
         .ok_or_else(|| Error::BadRequest("No file uploaded".into()))?;
 
-    let original_name = field.file_name()
-        .unwrap_or("untitled.txt")
-        .to_string();
+    let original_name = field.file_name().unwrap_or("untitled.txt").to_string();
     let format = detect_format(&original_name);
     validate_format(&format)?;
 
-    let data = field.bytes().await
+    let data = field
+        .bytes()
+        .await
         .map_err(|_| Error::BadRequest("Failed to read file data".into()))?;
     if data.len() > MAX_DOC_SIZE {
         return Err(Error::BadRequest("File too large (max 10MB)".into()));
@@ -278,7 +287,8 @@ async fn upload_personal_doc(
         &format!("personal/{}", user_id),
         &filename,
         &data,
-    ).await?;
+    )
+    .await?;
 
     let doc = sqlx::query_as::<_, KbDocument>(
         "INSERT INTO kb_documents (id, owner_type, owner_id, uploader_id, name, format, size, file_path, content)
@@ -303,8 +313,8 @@ async fn get_personal_doc(
     Extension(claims): Extension<Claims>,
     Path(doc_id): Path<Uuid>,
 ) -> Result<Json<KbDocument>> {
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
+    let user_id =
+        Uuid::parse_str(&claims.sub).map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
 
     let doc = sqlx::query_as::<_, KbDocument>(
         "SELECT * FROM kb_documents WHERE id = $1 AND owner_type = 'personal' AND owner_id = $2",
@@ -324,8 +334,8 @@ async fn update_personal_doc(
     Path(doc_id): Path<Uuid>,
     Json(payload): Json<UpdateDocRequest>,
 ) -> Result<Json<KbDocument>> {
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
+    let user_id =
+        Uuid::parse_str(&claims.sub).map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
 
     let existing = sqlx::query_as::<_, KbDocument>(
         "SELECT * FROM kb_documents WHERE id = $1 AND owner_type = 'personal' AND owner_id = $2",
@@ -374,8 +384,8 @@ async fn delete_personal_doc(
     Extension(claims): Extension<Claims>,
     Path(doc_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>> {
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
+    let user_id =
+        Uuid::parse_str(&claims.sub).map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
 
     let doc = sqlx::query_as::<_, KbDocument>(
         "DELETE FROM kb_documents WHERE id = $1 AND owner_type = 'personal' AND owner_id = $2 RETURNING *",
@@ -397,8 +407,8 @@ async fn download_doc(
     Extension(claims): Extension<Claims>,
     Path(doc_id): Path<Uuid>,
 ) -> Result<axum::response::Response> {
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
+    let user_id =
+        Uuid::parse_str(&claims.sub).map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
 
     let doc = sqlx::query_as::<_, KbDocument>(
         "SELECT * FROM kb_documents WHERE id = $1 AND owner_type = 'personal' AND owner_id = $2",
@@ -419,8 +429,8 @@ async fn list_team_docs(
     Extension(claims): Extension<Claims>,
     Path(team_id): Path<Uuid>,
 ) -> Result<Json<Vec<KbDocumentInfo>>> {
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
+    let user_id =
+        Uuid::parse_str(&claims.sub).map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
     check_team_membership(&state.db, team_id, user_id).await?;
 
     #[derive(sqlx::FromRow)]
@@ -453,20 +463,23 @@ async fn list_team_docs(
     .fetch_all(&state.db)
     .await?;
 
-    let docs: Vec<KbDocumentInfo> = rows.into_iter().map(|d| KbDocumentInfo {
-        id: d.id,
-        owner_type: d.owner_type,
-        owner_id: d.owner_id,
-        uploader_id: d.uploader_id,
-        name: d.name,
-        format: d.format,
-        size: d.size,
-        tags: d.tags,
-        description: d.description,
-        created_at: d.created_at,
-        updated_at: d.updated_at,
-        uploader_name: d.uploader_name,
-    }).collect();
+    let docs: Vec<KbDocumentInfo> = rows
+        .into_iter()
+        .map(|d| KbDocumentInfo {
+            id: d.id,
+            owner_type: d.owner_type,
+            owner_id: d.owner_id,
+            uploader_id: d.uploader_id,
+            name: d.name,
+            format: d.format,
+            size: d.size,
+            tags: d.tags,
+            description: d.description,
+            created_at: d.created_at,
+            updated_at: d.updated_at,
+            uploader_name: d.uploader_name,
+        })
+        .collect();
 
     Ok(Json(docs))
 }
@@ -477,8 +490,8 @@ async fn create_team_doc(
     Path(team_id): Path<Uuid>,
     Json(payload): Json<CreateDocRequest>,
 ) -> Result<Json<KbDocumentInfo>> {
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
+    let user_id =
+        Uuid::parse_str(&claims.sub).map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
     check_team_membership(&state.db, team_id, user_id).await?;
 
     let format = payload.format.as_deref().unwrap_or("md").to_string();
@@ -496,7 +509,8 @@ async fn create_team_doc(
         &format!("teams/{}", team_id),
         &filename,
         content_bytes,
-    ).await?;
+    )
+    .await?;
 
     let doc = sqlx::query_as::<_, KbDocument>(
         "INSERT INTO kb_documents (id, owner_type, owner_id, uploader_id, name, format, size, file_path, content, tags, description)
@@ -526,21 +540,23 @@ async fn upload_team_doc(
     Path(team_id): Path<Uuid>,
     mut multipart: Multipart,
 ) -> Result<Json<KbDocumentInfo>> {
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
+    let user_id =
+        Uuid::parse_str(&claims.sub).map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
     check_team_membership(&state.db, team_id, user_id).await?;
 
-    let field = multipart.next_field().await
+    let field = multipart
+        .next_field()
+        .await
         .map_err(|_| Error::BadRequest("Invalid multipart data".into()))?
         .ok_or_else(|| Error::BadRequest("No file uploaded".into()))?;
 
-    let original_name = field.file_name()
-        .unwrap_or("untitled.txt")
-        .to_string();
+    let original_name = field.file_name().unwrap_or("untitled.txt").to_string();
     let format = detect_format(&original_name);
     validate_format(&format)?;
 
-    let data = field.bytes().await
+    let data = field
+        .bytes()
+        .await
         .map_err(|_| Error::BadRequest("Failed to read file data".into()))?;
     if data.len() > MAX_DOC_SIZE {
         return Err(Error::BadRequest("File too large (max 10MB)".into()));
@@ -554,7 +570,8 @@ async fn upload_team_doc(
         &format!("teams/{}", team_id),
         &filename,
         &data,
-    ).await?;
+    )
+    .await?;
 
     let doc = sqlx::query_as::<_, KbDocument>(
         "INSERT INTO kb_documents (id, owner_type, owner_id, uploader_id, name, format, size, file_path, content)
@@ -581,8 +598,8 @@ async fn get_team_doc(
     Extension(claims): Extension<Claims>,
     Path((team_id, doc_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<KbDocument>> {
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
+    let user_id =
+        Uuid::parse_str(&claims.sub).map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
     check_team_membership(&state.db, team_id, user_id).await?;
 
     let doc = sqlx::query_as::<_, KbDocument>(
@@ -603,8 +620,8 @@ async fn update_team_doc(
     Path((team_id, doc_id)): Path<(Uuid, Uuid)>,
     Json(payload): Json<UpdateDocRequest>,
 ) -> Result<Json<KbDocument>> {
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
+    let user_id =
+        Uuid::parse_str(&claims.sub).map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
     check_team_membership(&state.db, team_id, user_id).await?;
 
     let existing = sqlx::query_as::<_, KbDocument>(
@@ -656,8 +673,8 @@ async fn delete_team_doc(
     Extension(claims): Extension<Claims>,
     Path((team_id, doc_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<serde_json::Value>> {
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
+    let user_id =
+        Uuid::parse_str(&claims.sub).map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
     check_team_membership(&state.db, team_id, user_id).await?;
 
     let doc = sqlx::query_as::<_, KbDocument>(
@@ -687,8 +704,8 @@ async fn download_team_doc(
     Extension(claims): Extension<Claims>,
     Path((team_id, doc_id)): Path<(Uuid, Uuid)>,
 ) -> Result<axum::response::Response> {
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
+    let user_id =
+        Uuid::parse_str(&claims.sub).map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
     check_team_membership(&state.db, team_id, user_id).await?;
 
     let doc = sqlx::query_as::<_, KbDocument>(
@@ -707,7 +724,8 @@ async fn download_team_doc(
 
 async fn serve_doc_file(upload_dir: &str, doc: &KbDocument) -> Result<axum::response::Response> {
     let full_path = std::path::Path::new(upload_dir).join(&doc.file_path);
-    let data = tokio::fs::read(&full_path).await
+    let data = tokio::fs::read(&full_path)
+        .await
         .map_err(|_| Error::NotFound("File not found on disk".into()))?;
 
     let content_type = match doc.format.as_str() {
@@ -730,7 +748,13 @@ async fn serve_doc_file(upload_dir: &str, doc: &KbDocument) -> Result<axum::resp
 
 fn sanitize_filename(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
         .take(64)
         .collect()
 }

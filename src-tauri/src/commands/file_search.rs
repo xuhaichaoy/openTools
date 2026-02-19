@@ -34,11 +34,16 @@ fn classify_file(path: &str) -> String {
         // 音频
         "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" => "audio",
         // 文档
-        "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "pages" | "numbers" | "key" => "document",
+        "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "pages" | "numbers" | "key" => {
+            "document"
+        }
         // 代码
-        "rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "go" | "java" | "c" | "cpp" | "h" | "swift" | "kt" | "rb" | "php" | "vue" | "svelte" => "code",
+        "rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "go" | "java" | "c" | "cpp" | "h" | "swift"
+        | "kt" | "rb" | "php" | "vue" | "svelte" => "code",
         // 文本
-        "txt" | "md" | "log" | "csv" | "json" | "xml" | "yaml" | "yml" | "toml" | "ini" | "cfg" => "text",
+        "txt" | "md" | "log" | "csv" | "json" | "xml" | "yaml" | "yml" | "toml" | "ini" | "cfg" => {
+            "text"
+        }
         // 压缩包
         "zip" | "tar" | "gz" | "7z" | "rar" | "bz2" | "xz" | "dmg" | "iso" => "archive",
         // 可执行
@@ -56,13 +61,10 @@ fn get_file_metadata(path_str: &str) -> (u64, Option<String>, bool) {
         Ok(meta) => {
             let is_dir = meta.is_dir();
             let size = if is_dir { 0 } else { meta.len() };
-            let modified = meta
-                .modified()
-                .ok()
-                .map(|t| {
-                    let datetime: chrono::DateTime<chrono::Local> = t.into();
-                    datetime.format("%Y-%m-%d %H:%M").to_string()
-                });
+            let modified = meta.modified().ok().map(|t| {
+                let datetime: chrono::DateTime<chrono::Local> = t.into();
+                datetime.format("%Y-%m-%d %H:%M").to_string()
+            });
             (size, modified, is_dir)
         }
         Err(_) => (0, None, false),
@@ -96,9 +98,13 @@ fn path_to_result(path_str: &str) -> FileSearchResult {
 
 /// macOS: 使用 mdfind (Spotlight) 搜索
 #[cfg(target_os = "macos")]
-fn platform_search(query: &str, max_results: usize, file_types: &Option<Vec<String>>) -> Result<Vec<String>, String> {
+fn platform_search(
+    query: &str,
+    max_results: usize,
+    file_types: &Option<Vec<String>>,
+) -> Result<Vec<String>, String> {
     let mut mdfind_query = format!("kMDItemDisplayName == '*{}*'c", query);
-    
+
     // 按文件类型过滤
     if let Some(types) = file_types {
         let type_conditions: Vec<String> = types
@@ -114,11 +120,7 @@ fn platform_search(query: &str, max_results: usize, file_types: &Option<Vec<Stri
             })
             .collect();
         if !type_conditions.is_empty() {
-            mdfind_query = format!(
-                "({}) && ({})",
-                mdfind_query,
-                type_conditions.join(" || ")
-            );
+            mdfind_query = format!("({}) && ({})", mdfind_query, type_conditions.join(" || "));
         }
     }
 
@@ -146,7 +148,11 @@ fn platform_search(query: &str, max_results: usize, file_types: &Option<Vec<Stri
 
 /// Windows: 使用 where 命令或 dir 搜索
 #[cfg(target_os = "windows")]
-fn platform_search(query: &str, max_results: usize, _file_types: &Option<Vec<String>>) -> Result<Vec<String>, String> {
+fn platform_search(
+    query: &str,
+    max_results: usize,
+    _file_types: &Option<Vec<String>>,
+) -> Result<Vec<String>, String> {
     // 尝试使用 PowerShell 搜索常用目录
     let search_dirs = get_search_directories();
     let dirs_str = search_dirs
@@ -154,7 +160,7 @@ fn platform_search(query: &str, max_results: usize, _file_types: &Option<Vec<Str
         .map(|d| format!("'{}'", d))
         .collect::<Vec<_>>()
         .join(",");
-    
+
     let ps_script = format!(
         "Get-ChildItem -Path {} -Recurse -ErrorAction SilentlyContinue -Filter '*{}*' | Select-Object -First {} -ExpandProperty FullName",
         dirs_str, query, max_results
@@ -179,7 +185,11 @@ fn platform_search(query: &str, max_results: usize, _file_types: &Option<Vec<Str
 
 /// Linux: 使用 locate 或 find 搜索
 #[cfg(target_os = "linux")]
-fn platform_search(query: &str, max_results: usize, _file_types: &Option<Vec<String>>) -> Result<Vec<String>, String> {
+fn platform_search(
+    query: &str,
+    max_results: usize,
+    _file_types: &Option<Vec<String>>,
+) -> Result<Vec<String>, String> {
     // 先尝试 locate（快速，使用索引）
     let output = Command::new("locate")
         .arg("-i") // 忽略大小写
@@ -221,7 +231,7 @@ fn fallback_search(query: &str, max_results: usize) -> Result<Vec<String>, Strin
             .arg(format!("*{}*", query))
             .arg("-not")
             .arg("-path")
-            .arg("*/.*")          // 排除隐藏文件/目录
+            .arg("*/.*") // 排除隐藏文件/目录
             .arg("-not")
             .arg("-path")
             .arg("*/node_modules/*")
@@ -337,7 +347,10 @@ fn platform_app_search(query: &str, max_results: usize) -> Result<Vec<AppSearchR
 
 /// macOS 降级：直接扫描 /Applications 目录
 #[cfg(target_os = "macos")]
-fn fallback_app_search_macos(query: &str, max_results: usize) -> Result<Vec<AppSearchResult>, String> {
+fn fallback_app_search_macos(
+    query: &str,
+    max_results: usize,
+) -> Result<Vec<AppSearchResult>, String> {
     let query_lower = query.to_lowercase();
     let mut results = Vec::new();
     let dirs = ["/Applications", "/System/Applications"];
@@ -412,9 +425,8 @@ fn platform_app_search(query: &str, max_results: usize) -> Result<Vec<AppSearchR
     let mut seen = std::collections::HashSet::new();
 
     // 搜索开始菜单快捷方式
-    let start_menu_dirs: Vec<String> = vec![
-        r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs".to_string(),
-    ];
+    let start_menu_dirs: Vec<String> =
+        vec![r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs".to_string()];
     let user_start = if let Some(home) = dirs::home_dir() {
         Some(format!(
             "{}\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs",
@@ -454,7 +466,13 @@ fn scan_lnk_files(
             }
             let path = entry.path();
             if path.is_dir() {
-                scan_lnk_files(&path.display().to_string(), query_lower, max_results, results, seen);
+                scan_lnk_files(
+                    &path.display().to_string(),
+                    query_lower,
+                    max_results,
+                    results,
+                    seen,
+                );
             } else if let Some(ext) = path.extension() {
                 if ext == "lnk" {
                     let name = path
@@ -462,7 +480,9 @@ fn scan_lnk_files(
                         .and_then(|n| n.to_str())
                         .unwrap_or("")
                         .to_string();
-                    if name.to_lowercase().contains(query_lower) && !seen.contains(&name.to_lowercase()) {
+                    if name.to_lowercase().contains(query_lower)
+                        && !seen.contains(&name.to_lowercase())
+                    {
                         seen.insert(name.to_lowercase());
                         results.push(AppSearchResult {
                             name,
@@ -522,9 +542,7 @@ fn platform_app_search(query: &str, max_results: usize) -> Result<Vec<AppSearchR
                                 .map(|l| l.trim_start_matches("Exec=").to_string())
                                 .unwrap_or_default();
                             // 检查是否隐藏
-                            let no_display = content
-                                .lines()
-                                .any(|l| l.trim() == "NoDisplay=true");
+                            let no_display = content.lines().any(|l| l.trim() == "NoDisplay=true");
                             if !no_display
                                 && !name.is_empty()
                                 && name.to_lowercase().contains(&query_lower)

@@ -23,19 +23,13 @@ impl CollectionLocks {
     fn get_lock(&self, name: &str) -> Result<std::sync::Arc<RwLock<()>>, String> {
         // 先尝试读锁快速路径
         {
-            let map = self
-                .locks
-                .read()
-                .map_err(|e| format!("锁中毒: {}", e))?;
+            let map = self.locks.read().map_err(|e| format!("锁中毒: {}", e))?;
             if let Some(lock) = map.get(name) {
                 return Ok(lock.clone());
             }
         }
         // 写锁路径：创建新锁
-        let mut map = self
-            .locks
-            .write()
-            .map_err(|e| format!("锁中毒: {}", e))?;
+        let mut map = self.locks.write().map_err(|e| format!("锁中毒: {}", e))?;
         Ok(map
             .entry(name.to_string())
             .or_insert_with(|| std::sync::Arc::new(RwLock::new(())))
@@ -56,8 +50,7 @@ fn get_collection_path(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
         .map_err(|e| format!("获取数据目录失败: {}", e))?;
     let dir = app_data.join(DB_DIR);
     if !dir.exists() {
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| format!("创建数据库目录失败: {}", e))?;
+        std::fs::create_dir_all(&dir).map_err(|e| format!("创建数据库目录失败: {}", e))?;
     }
     Ok(dir.join(format!("{}.json", name)))
 }
@@ -67,14 +60,12 @@ fn read_collection(path: &PathBuf) -> Result<String, String> {
     if !path.exists() {
         return Ok("[]".to_string());
     }
-    std::fs::read_to_string(path)
-        .map_err(|e| format!("读取集合失败: {}", e))
+    std::fs::read_to_string(path).map_err(|e| format!("读取集合失败: {}", e))
 }
 
 /// 写入整个集合文件
 fn write_collection(path: &PathBuf, data: &str) -> Result<(), String> {
-    std::fs::write(path, data)
-        .map_err(|e| format!("写入集合失败: {}", e))
+    std::fs::write(path, data).map_err(|e| format!("写入集合失败: {}", e))
 }
 
 // ── Tauri Commands ──
@@ -109,8 +100,7 @@ pub async fn collection_create(
     // 插入到头部（与前端 JsonCollection 行为一致）
     arr.insert(0, new_item.clone());
 
-    let json = serde_json::to_string_pretty(&arr)
-        .map_err(|e| format!("序列化失败: {}", e))?;
+    let json = serde_json::to_string_pretty(&arr).map_err(|e| format!("序列化失败: {}", e))?;
     write_collection(&path, &json)?;
 
     Ok(new_item.to_string())
@@ -149,8 +139,7 @@ pub async fn collection_update(
 
     let updated = arr[idx].to_string();
 
-    let json = serde_json::to_string_pretty(&arr)
-        .map_err(|e| format!("序列化失败: {}", e))?;
+    let json = serde_json::to_string_pretty(&arr).map_err(|e| format!("序列化失败: {}", e))?;
     write_collection(&path, &json)?;
 
     Ok(updated)
@@ -158,11 +147,7 @@ pub async fn collection_update(
 
 /// 删除一条记录（按 id 匹配）
 #[tauri::command]
-pub async fn collection_delete(
-    app: AppHandle,
-    name: String,
-    id: String,
-) -> Result<bool, String> {
+pub async fn collection_delete(app: AppHandle, name: String, id: String) -> Result<bool, String> {
     let path = get_collection_path(&app, &name)?;
     let lock = COLLECTION_LOCKS.get_lock(&name)?;
     let _guard = lock.write().map_err(|e| format!("获取写锁失败: {}", e))?;
@@ -176,8 +161,7 @@ pub async fn collection_delete(
     let deleted = arr.len() < original_len;
 
     if deleted {
-        let json = serde_json::to_string_pretty(&arr)
-            .map_err(|e| format!("序列化失败: {}", e))?;
+        let json = serde_json::to_string_pretty(&arr).map_err(|e| format!("序列化失败: {}", e))?;
         write_collection(&path, &json)?;
     }
 
@@ -186,11 +170,7 @@ pub async fn collection_delete(
 
 /// 覆盖整个集合（同步引擎 pull 后使用）
 #[tauri::command]
-pub async fn collection_set_all(
-    app: AppHandle,
-    name: String,
-    items: String,
-) -> Result<(), String> {
+pub async fn collection_set_all(app: AppHandle, name: String, items: String) -> Result<(), String> {
     let path = get_collection_path(&app, &name)?;
     let lock = COLLECTION_LOCKS.get_lock(&name)?;
     let _guard = lock.write().map_err(|e| format!("获取写锁失败: {}", e))?;
@@ -198,8 +178,7 @@ pub async fn collection_set_all(
     // 验证是合法的 JSON 数组，并格式化后写入
     let arr: Vec<serde_json::Value> =
         serde_json::from_str(&items).map_err(|e| format!("解析 JSON 数组失败: {}", e))?;
-    let json = serde_json::to_string_pretty(&arr)
-        .map_err(|e| format!("序列化失败: {}", e))?;
+    let json = serde_json::to_string_pretty(&arr).map_err(|e| format!("序列化失败: {}", e))?;
     write_collection(&path, &json)?;
 
     Ok(())

@@ -1,11 +1,11 @@
 //! 插件系统模块 — 类型、生命周期、API 桥、取色器
 
-pub mod types;
-pub mod lifecycle;
 pub mod api_bridge;
+pub mod lifecycle;
+pub mod types;
 
-// Re-export types for external use (e.g. PluginCache managed state in lib.rs)
-pub use types::PluginCache;
+// Re-export types for external use (e.g. managed state in lib.rs)
+pub use types::{PluginCache, PluginDevState};
 
 use tauri::{AppHandle, Manager};
 
@@ -20,7 +20,12 @@ pub async fn plugin_get_pixel_at(x: i32, y: i32) -> Result<String, String> {
 fn get_pixel_at_screen(sx: i32, sy: i32) -> Result<String, String> {
     let path = std::env::temp_dir().join("mtools_pixel.png");
     let status = std::process::Command::new("screencapture")
-        .args(["-x", "-R", &format!("{},{},1,1", sx, sy), &*path.to_string_lossy()])
+        .args([
+            "-x",
+            "-R",
+            &format!("{},{},1,1", sx, sy),
+            &*path.to_string_lossy(),
+        ])
         .status()
         .map_err(|e| format!("screencapture 失败: {}", e))?;
     if !status.success() {
@@ -104,13 +109,14 @@ async fn macos_native_color_pick() -> Result<String, String> {
 
     if !binary_path.exists() {
         let objc_code = include_str!("../picker_macos.m");
-        std::fs::write(&source_path, objc_code)
-            .map_err(|e| format!("写入源文件失败: {}", e))?;
+        std::fs::write(&source_path, objc_code).map_err(|e| format!("写入源文件失败: {}", e))?;
 
         let compile = tokio::process::Command::new("/usr/bin/clang")
             .args([
-                "-framework", "Cocoa",
-                "-o", &*binary_path.to_string_lossy(),
+                "-framework",
+                "Cocoa",
+                "-o",
+                &*binary_path.to_string_lossy(),
                 &*source_path.to_string_lossy(),
             ])
             .output()
@@ -121,8 +127,10 @@ async fn macos_native_color_pick() -> Result<String, String> {
 
         if !compile.status.success() {
             let _ = std::fs::remove_file(&binary_path);
-            let msg = format!("编译取色程序失败: {}",
-                String::from_utf8_lossy(&compile.stderr).trim());
+            let msg = format!(
+                "编译取色程序失败: {}",
+                String::from_utf8_lossy(&compile.stderr).trim()
+            );
             log::error!("{}", msg);
             return Err(msg);
         }
@@ -147,7 +155,11 @@ async fn macos_native_color_pick() -> Result<String, String> {
         let msg = format!(
             "取色返回异常 stdout={:?} stderr={}",
             hex,
-            if stderr.is_empty() { "(空)" } else { stderr.as_str() }
+            if stderr.is_empty() {
+                "(空)"
+            } else {
+                stderr.as_str()
+            }
         );
         log::error!("{}", msg);
         Err(msg)

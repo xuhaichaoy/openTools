@@ -43,10 +43,15 @@ export interface HandleErrorOptions {
 }
 
 const CODE_MESSAGE_MAP: Record<string, string> = {
+  PLAN_REQUIRED: "个人云同步需要会员，仅本地可用",
+  TEAM_SUBSCRIPTION_REQUIRED: "团队会员未开通或已到期",
+  TEAM_TRIAL_EXPIRED: "团队试用已到期",
   TEAM_QUOTA_EXCEEDED: "本月额度已用尽",
   TEAM_MODEL_UNAVAILABLE: "团队模型不可用",
   NO_ACTIVE_TEAM_MODEL: "团队暂无可用模型",
   TEAM_ID_REQUIRED: "缺少团队信息，请先选择团队",
+  PLATFORM_AI_NOT_AVAILABLE: "平台 AI 暂未开放",
+  TEAM_WORKFLOW_TEMPLATE_NOT_FOUND: "团队工作流模板不存在",
   INVALID_RESPONSE_SHAPE: "服务返回结构异常",
   NETWORK_ERROR: "网络异常，请检查网络连接",
 };

@@ -51,8 +51,15 @@ pub async fn get_python_path() -> Result<String, String> {
                     version
                 };
                 // 获取完整路径
-                let which_cmd = if cfg!(target_os = "windows") { "where" } else { "which" };
-                let full_path = Command::new(which_cmd).arg(name).output().ok()
+                let which_cmd = if cfg!(target_os = "windows") {
+                    "where"
+                } else {
+                    "which"
+                };
+                let full_path = Command::new(which_cmd)
+                    .arg(name)
+                    .output()
+                    .ok()
                     .and_then(|o| String::from_utf8(o.stdout).ok())
                     .map(|s| s.trim().lines().next().unwrap_or("").to_string())
                     .unwrap_or_else(|| name.to_string());
@@ -90,7 +97,11 @@ pub async fn preview_file(file_path: String, max_bytes: Option<usize>) -> Result
 
     let max = max_bytes.unwrap_or(102400); // 默认 100KB
     let bytes = std::fs::read(&path).map_err(|e| format!("读取失败: {}", e))?;
-    let truncated = if bytes.len() > max { &bytes[..max] } else { &bytes };
+    let truncated = if bytes.len() > max {
+        &bytes[..max]
+    } else {
+        &bytes
+    };
     let content = String::from_utf8_lossy(truncated).to_string();
     Ok(content)
 }
@@ -109,15 +120,26 @@ pub async fn open_file_location(file_path: String) -> Result<(), String> {
 
     #[cfg(target_os = "macos")]
     {
-        Command::new("open").arg("-R").arg(&file_path).spawn().map_err(|e| e.to_string())?;
+        Command::new("open")
+            .arg("-R")
+            .arg(&file_path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
     }
     #[cfg(target_os = "windows")]
     {
-        Command::new("explorer").arg("/select,").arg(&file_path).spawn().map_err(|e| e.to_string())?;
+        Command::new("explorer")
+            .arg("/select,")
+            .arg(&file_path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
     }
     #[cfg(target_os = "linux")]
     {
-        Command::new("xdg-open").arg(dir).spawn().map_err(|e| e.to_string())?;
+        Command::new("xdg-open")
+            .arg(dir)
+            .spawn()
+            .map_err(|e| e.to_string())?;
     }
 
     Ok(())
@@ -125,16 +147,10 @@ pub async fn open_file_location(file_path: String) -> Result<(), String> {
 
 /// 保存对话历史到本地
 #[tauri::command]
-pub async fn save_chat_history(
-    app: tauri::AppHandle,
-    conversations: String,
-) -> Result<(), String> {
+pub async fn save_chat_history(app: tauri::AppHandle, conversations: String) -> Result<(), String> {
     use tauri_plugin_store::StoreExt;
     let store = app.store("chat-history.json").map_err(|e| e.to_string())?;
-    store.set(
-        "conversations",
-        serde_json::Value::String(conversations),
-    );
+    store.set("conversations", serde_json::Value::String(conversations));
     Ok(())
 }
 
@@ -152,16 +168,10 @@ pub async fn load_chat_history(app: tauri::AppHandle) -> Result<String, String> 
 
 /// 保存 Agent 会话历史
 #[tauri::command]
-pub async fn save_agent_history(
-    app: tauri::AppHandle,
-    sessions: String,
-) -> Result<(), String> {
+pub async fn save_agent_history(app: tauri::AppHandle, sessions: String) -> Result<(), String> {
     use tauri_plugin_store::StoreExt;
     let store = app.store("agent-history.json").map_err(|e| e.to_string())?;
-    store.set(
-        "sessions",
-        serde_json::Value::String(sessions),
-    );
+    store.set("sessions", serde_json::Value::String(sessions));
     Ok(())
 }
 
@@ -179,10 +189,7 @@ pub async fn load_agent_history(app: tauri::AppHandle) -> Result<String, String>
 
 /// 保存通用设置
 #[tauri::command]
-pub async fn save_general_settings(
-    app: tauri::AppHandle,
-    settings: String,
-) -> Result<(), String> {
+pub async fn save_general_settings(app: tauri::AppHandle, settings: String) -> Result<(), String> {
     use tauri::Manager;
     use tauri_plugin_store::StoreExt;
 
@@ -197,10 +204,7 @@ pub async fn save_general_settings(
 
     // 2. 持久化存储
     let store = app.store("config.json").map_err(|e| e.to_string())?;
-    store.set(
-        "general_settings",
-        serde_json::Value::String(settings),
-    );
+    store.set("general_settings", serde_json::Value::String(settings));
     store.save().map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -264,7 +268,11 @@ pub async fn clean_old_chat_images(app: tauri::AppHandle, days: u64) -> Result<S
     }
 
     if deleted_count > 0 {
-        Ok(format!("已清理 {} 张过期图片，释放 {:.2} MB 空间", deleted_count, total_size as f64 / 1024.0 / 1024.0))
+        Ok(format!(
+            "已清理 {} 张过期图片，释放 {:.2} MB 空间",
+            deleted_count,
+            total_size as f64 / 1024.0 / 1024.0
+        ))
     } else {
         Ok("没有需要清理的过期图片".to_string())
     }
@@ -369,10 +377,7 @@ fn validate_shell_command(command: &str) -> Result<(), String> {
     let trimmed = lower.trim();
     for pattern in BLOCKED_COMMAND_PATTERNS {
         if trimmed.contains(pattern) {
-            return Err(format!(
-                "安全限制：命令包含被禁止的模式 '{}'",
-                pattern
-            ));
+            return Err(format!("安全限制：命令包含被禁止的模式 '{}'", pattern));
         }
     }
     Ok(())
@@ -393,7 +398,11 @@ pub async fn read_text_file(app: tauri::AppHandle, path: String) -> Result<Strin
 
 /// 写入文本文件（受路径白名单保护）
 #[tauri::command]
-pub async fn write_text_file(app: tauri::AppHandle, path: String, content: String) -> Result<String, String> {
+pub async fn write_text_file(
+    app: tauri::AppHandle,
+    path: String,
+    content: String,
+) -> Result<String, String> {
     validate_path_access(&app, &path)?;
     let p = std::path::Path::new(&path);
     // 自动创建父目录
@@ -454,7 +463,8 @@ pub async fn run_shell_command(command: String) -> Result<String, String> {
                 "exit_code": code,
                 "stdout": stdout,
                 "stderr": stderr,
-            }).to_string())
+            })
+            .to_string())
         }
         Err(e) => Err(format!("执行失败: {}", e)),
     }

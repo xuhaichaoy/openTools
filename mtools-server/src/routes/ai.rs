@@ -1,6 +1,6 @@
 use crate::{
     routes::{team_quota_common, AppState},
-    services::auth::Claims,
+    services::{auth::Claims, entitlement},
     Error, Result,
 };
 use axum::{
@@ -11,6 +11,7 @@ use axum::{
     Json, Router,
 };
 use futures_util::StreamExt;
+use http::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -149,6 +150,19 @@ async fn ai_proxy_chat(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<serde_json::Value>,
 ) -> Result<Response> {
+    let platform_ai_enabled = std::env::var("ENABLE_PLATFORM_AI")
+        .unwrap_or_default()
+        .trim()
+        .eq("1");
+    if !platform_ai_enabled {
+        return Err(Error::api(
+            StatusCode::FORBIDDEN,
+            "PLATFORM_AI_NOT_AVAILABLE",
+            "平台 AI 暂未开放",
+            None,
+        ));
+    }
+
     let user_id =
         Uuid::parse_str(&claims.sub).map_err(|_| Error::BadRequest("Invalid user ID".into()))?;
 
@@ -332,23 +346,7 @@ async fn ai_team_proxy_chat(
     let team_id = Uuid::parse_str(team_id_str)
         .map_err(|_| Error::bad_request_code("TEAM_ID_REQUIRED", "Invalid team_id", None))?;
 
-    // 验证用户是团队成员
-    let is_member: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM team_members WHERE team_id = $1 AND user_id = $2)",
-    )
-    .bind(team_id)
-    .bind(user_id)
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or(false);
-
-    if !is_member {
-        return Err(Error::unauthorized_code(
-            "TEAM_ACCESS_DENIED",
-            "Not a team member",
-            Some(serde_json::json!({ "team_id": team_id })),
-        ));
-    }
+    entitlement::require_team_active(&state.db, team_id, user_id).await?;
 
     let requested_model = payload
         .get("model")

@@ -1,7 +1,7 @@
 use serde_json::Value;
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use url::Url;
 
@@ -33,14 +33,17 @@ fn get_app_url(app: &AppHandle) -> WebviewUrl {
     #[cfg(debug_assertions)]
     {
         if let Ok(dev_url) = Url::parse("http://localhost:5173/") {
-             println!("[ScreenCapture] get_app_url returning dev url: {}", dev_url);
+            println!("[ScreenCapture] get_app_url returning dev url: {}", dev_url);
             return WebviewUrl::External(dev_url);
         }
     }
     // 生产模式：复用主窗口 URL
     if let Some(main_win) = app.get_webview_window("main") {
         if let Ok(url) = main_win.url() {
-            println!("[ScreenCapture] get_app_url returning main window url: {}", url);
+            println!(
+                "[ScreenCapture] get_app_url returning main window url: {}",
+                url
+            );
             return WebviewUrl::External(url);
         }
     }
@@ -64,21 +67,17 @@ pub async fn init_screenshot_window(app: AppHandle) -> Result<(), String> {
     // 仅标记截图模式，不注入图片数据（数据通过事件传递）
     let init_script = "window.__SCREENSHOT_MODE__=true;";
 
-    WebviewWindowBuilder::new(
-        &app,
-        "screenshot",
-        get_app_url(&app),
-    )
-    .title("截图")
-    .inner_size(mon_w, mon_h)
-    .position(mon_x, mon_y)
-    .decorations(false)
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .visible(false) // 关键：创建时不显示，等就绪后再 show
-    .initialization_script(init_script)
-    .build()
-    .map_err(|e| format!("创建截图窗口失败: {e}"))?;
+    WebviewWindowBuilder::new(&app, "screenshot", get_app_url(&app))
+        .title("截图")
+        .inner_size(mon_w, mon_h)
+        .position(mon_x, mon_y)
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .visible(false) // 关键：创建时不显示，等就绪后再 show
+        .initialization_script(init_script)
+        .build()
+        .map_err(|e| format!("创建截图窗口失败: {e}"))?;
 
     Ok(())
 }
@@ -95,7 +94,8 @@ pub async fn screenshot_window_ready() -> Result<(), String> {
 pub async fn show_screenshot_window(app: AppHandle) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("screenshot") {
         win.show().map_err(|e| format!("显示截图窗口失败: {e}"))?;
-        win.set_focus().map_err(|e| format!("聚焦截图窗口失败: {e}"))?;
+        win.set_focus()
+            .map_err(|e| format!("聚焦截图窗口失败: {e}"))?;
     }
     Ok(())
 }
@@ -140,7 +140,8 @@ async fn start_capture_inner(app: &AppHandle, monitor_id: Option<u32>) -> Result
 
     // 2. 获取显示器信息
     let main_win = app.get_webview_window("main");
-    let monitor_info = main_win.as_ref()
+    let monitor_info = main_win
+        .as_ref()
         .and_then(|w| w.current_monitor().ok().flatten());
 
     // 发送开始截图事件，通知前端重置状态（解决"显示旧图"问题）
@@ -165,31 +166,25 @@ async fn start_capture_inner(app: &AppHandle, monitor_id: Option<u32>) -> Result
         // 窗口不存在（首次或被关闭了），创建新的（使用与主窗口相同 URL，开发模式才能加载）
         SCREENSHOT_WINDOW_READY.store(false, Ordering::SeqCst);
         let init_script = "window.__SCREENSHOT_MODE__=true;";
-        WebviewWindowBuilder::new(
-            app,
-            "screenshot",
-            get_app_url(app),
-        )
-        .title("截图")
-        .inner_size(mon_w, mon_h)
-        .position(mon_x, mon_y)
-        .decorations(false)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .visible(false)
-        .initialization_script(init_script)
-        .build()
-        .map_err(|e| format!("创建截图窗口失败: {e}"))?;
+        WebviewWindowBuilder::new(app, "screenshot", get_app_url(app))
+            .title("截图")
+            .inner_size(mon_w, mon_h)
+            .position(mon_x, mon_y)
+            .decorations(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .visible(false)
+            .initialization_script(init_script)
+            .build()
+            .map_err(|e| format!("创建截图窗口失败: {e}"))?;
         true
     } else {
         // 窗口已存在，调整位置和大小以匹配目标显示器
         if let Some(win) = app.get_webview_window("screenshot") {
-            let _ = win.set_position(tauri::Position::Logical(
-                tauri::LogicalPosition::new(mon_x, mon_y),
-            ));
-            let _ = win.set_size(tauri::Size::Logical(
-                tauri::LogicalSize::new(mon_w, mon_h),
-            ));
+            let _ = win.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(
+                mon_x, mon_y,
+            )));
+            let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize::new(mon_w, mon_h)));
         }
         false
     };
@@ -266,7 +261,10 @@ async fn start_capture_inner(app: &AppHandle, monitor_id: Option<u32>) -> Result
     }
 
     // 7. 通过事件发送截图数据到截图窗口
-    println!("[ScreenCapture] Emitting screenshot-data: path={}", path_str);
+    println!(
+        "[ScreenCapture] Emitting screenshot-data: path={}",
+        path_str
+    );
     let payload = serde_json::json!({
         "path": path_str,
         "base64": data_url,
@@ -282,9 +280,9 @@ async fn start_capture_inner(app: &AppHandle, monitor_id: Option<u32>) -> Result
     if let Some(win) = app.get_webview_window("screenshot") {
         println!("[ScreenCapture] Window found, emitting to target window");
         if let Err(e) = win.emit("screenshot-data", &payload) {
-             eprintln!("[ScreenCapture] Emit to window failed: {}", e);
-             // Fallback to global emit
-             let _ = app.emit("screenshot-data", &payload);
+            eprintln!("[ScreenCapture] Emit to window failed: {}", e);
+            // Fallback to global emit
+            let _ = app.emit("screenshot-data", &payload);
         }
     } else {
         println!("[ScreenCapture] Window not found (unexpected), emitting globally");
@@ -329,84 +327,95 @@ pub async fn finish_capture(
 
     // 2. 在阻塞线程中裁剪并复制到剪贴板
     let do_copy = copy_to_clipboard.unwrap_or(true);
-    let source_path_opt = CURRENT_SCREENSHOT_PATH.lock()
+    let source_path_opt = CURRENT_SCREENSHOT_PATH
+        .lock()
         .map_err(|e| format!("获取截图锁失败: {e}"))?
         .clone();
 
     // 如果没有 annotated_image，则必须有 source_path
     if annotated_image.is_none() && source_path_opt.is_none() {
-         return Err("没有可用的截图源文件".to_string());
+        return Err("没有可用的截图源文件".to_string());
     }
 
     let source_path_for_crop = source_path_opt.clone();
-    let (result_str, result_base64, result_w, result_h) = tokio::task::spawn_blocking(move || -> Result<(String, String, u32, u32), String> {
-        let dynamic_img = if let Some(base64_str) = annotated_image {
-             // Case A: 前端传来了已标注的图片 (Base64)
-             // 去掉头部的 "data:image/png;base64,"
-             let data = base64_str.split(',').last().unwrap_or(&base64_str);
-             use base64::{engine::general_purpose, Engine as _};
-             let bytes = general_purpose::STANDARD
-                 .decode(data)
-                 .map_err(|e| format!("Base64 解码失败: {e}"))?;
-             image::load_from_memory(&bytes)
-                 .map_err(|e| format!("加载标注图片失败: {e}"))?
-        } else {
-             // Case B: 仅裁剪原图
-             let path = source_path_for_crop
-                 .as_ref()
-                 .ok_or_else(|| "没有可用的截图源文件".to_string())?;
-             let img = image::open(&path).map_err(|e| format!("打开截图失败: {e}"))?;
-             img.crop_imm(x, y, width, height)
-        };
-        
-        let out_w = dynamic_img.width();
-        let out_h = dynamic_img.height();
+    let (result_str, result_base64, result_w, result_h) =
+        tokio::task::spawn_blocking(move || -> Result<(String, String, u32, u32), String> {
+            let dynamic_img = if let Some(base64_str) = annotated_image {
+                // Case A: 前端传来了已标注的图片 (Base64)
+                // 去掉头部的 "data:image/png;base64,"
+                let data = base64_str.split(',').last().unwrap_or(&base64_str);
+                use base64::{engine::general_purpose, Engine as _};
+                let bytes = general_purpose::STANDARD
+                    .decode(data)
+                    .map_err(|e| format!("Base64 解码失败: {e}"))?;
+                image::load_from_memory(&bytes).map_err(|e| format!("加载标注图片失败: {e}"))?
+            } else {
+                // Case B: 仅裁剪原图
+                let path = source_path_for_crop
+                    .as_ref()
+                    .ok_or_else(|| "没有可用的截图源文件".to_string())?;
+                let img = image::open(&path).map_err(|e| format!("打开截图失败: {e}"))?;
+                img.crop_imm(x, y, width, height)
+            };
 
-        // 保存（统一存为 png）
-        let result_path = std::env::temp_dir().join("51toolbox-screenshot-result.png");
-        dynamic_img.save(&result_path).map_err(|e| format!("保存截图结果失败: {e}"))?;
+            let out_w = dynamic_img.width();
+            let out_h = dynamic_img.height();
 
-        // 同时返回 base64，前端可直接消费，避免再次读临时文件失败
-        let mut encoded = std::io::Cursor::new(Vec::new());
-        dynamic_img
-            .write_to(&mut encoded, image::ImageFormat::Png)
-            .map_err(|e| format!("编码截图结果失败: {e}"))?;
-        use base64::{engine::general_purpose, Engine as _};
-        let image_base64 = general_purpose::STANDARD.encode(encoded.get_ref());
+            // 保存（统一存为 png）
+            let result_path = std::env::temp_dir().join("51toolbox-screenshot-result.png");
+            dynamic_img
+                .save(&result_path)
+                .map_err(|e| format!("保存截图结果失败: {e}"))?;
 
-        if do_copy {
-            let rgba = dynamic_img.to_rgba8();
-            let w = rgba.width() as usize;
-            let h = rgba.height() as usize;
-            let bytes = rgba.into_raw();
-            match arboard::Clipboard::new() {
-                Ok(mut clipboard) => {
-                    let _ = clipboard.set_image(arboard::ImageData {
-                        width: w,
-                        height: h,
-                        bytes: bytes.into(),
-                    });
-                }
-                Err(e) => {
-                    eprintln!("剪贴板初始化失败（不影响截图保存）: {e}");
+            // 同时返回 base64，前端可直接消费，避免再次读临时文件失败
+            let mut encoded = std::io::Cursor::new(Vec::new());
+            dynamic_img
+                .write_to(&mut encoded, image::ImageFormat::Png)
+                .map_err(|e| format!("编码截图结果失败: {e}"))?;
+            use base64::{engine::general_purpose, Engine as _};
+            let image_base64 = general_purpose::STANDARD.encode(encoded.get_ref());
+
+            if do_copy {
+                let rgba = dynamic_img.to_rgba8();
+                let w = rgba.width() as usize;
+                let h = rgba.height() as usize;
+                let bytes = rgba.into_raw();
+                match arboard::Clipboard::new() {
+                    Ok(mut clipboard) => {
+                        let _ = clipboard.set_image(arboard::ImageData {
+                            width: w,
+                            height: h,
+                            bytes: bytes.into(),
+                        });
+                    }
+                    Err(e) => {
+                        eprintln!("剪贴板初始化失败（不影响截图保存）: {e}");
+                    }
                 }
             }
-        }
 
-        Ok((result_path.to_string_lossy().to_string(), image_base64, out_w, out_h))
-    })
-    .await
-    .map_err(|e| format!("任务执行失败: {e}"))??;
+            Ok((
+                result_path.to_string_lossy().to_string(),
+                image_base64,
+                out_w,
+                out_h,
+            ))
+        })
+        .await
+        .map_err(|e| format!("任务执行失败: {e}"))??;
 
     // 3. 通知主窗口（含 action 字段）
     let action_str = action.unwrap_or_else(|| "copy".to_string());
-    let _ = app.emit("capture-done", serde_json::json!({
-        "path": result_str,
-        "action": action_str,
-        "imageBase64": result_base64,
-        "imageWidth": result_w,
-        "imageHeight": result_h,
-    }));
+    let _ = app.emit(
+        "capture-done",
+        serde_json::json!({
+            "path": result_str,
+            "action": action_str,
+            "imageBase64": result_base64,
+            "imageWidth": result_w,
+            "imageHeight": result_h,
+        }),
+    );
 
     // 4. 恢复主窗口
     if let Some(main_win) = app.get_webview_window("main") {

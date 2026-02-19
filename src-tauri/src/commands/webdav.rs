@@ -26,7 +26,6 @@ async fn test_depth_with_timeout(
 
 // WebDAV客户端创建：建立连接并验证服务器可达性
 pub async fn create_client(url: &str, username: &str, password: &str) -> Result<Client, String> {
-    
     // 超时时间
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 
@@ -35,7 +34,6 @@ pub async fn create_client(url: &str, username: &str, password: &str) -> Result<
 
     // 核心逻辑：根据 Scheme 决定连接策略
     if parsed_url.scheme() == "https" {
-      
         // 1. 创建带超时的 reqwest 客户端
         let http_client = reqwest_dav::re_exports::reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
@@ -50,7 +48,6 @@ pub async fn create_client(url: &str, username: &str, password: &str) -> Result<
             .set_agent(http_client) // 使用 set_agent 注入配置
             .build()
             .map_err(|e| format!("创建 WebDAV 客户端失败: {}", e))
-
     } else {
         // --- HTTP 策略继续使用 IP 直连可以避免一些 DNS 问题
 

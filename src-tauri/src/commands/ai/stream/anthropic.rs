@@ -1,9 +1,9 @@
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::commands::ai::types::{AIConfig, ChatMessage, ToolCall, FunctionCall};
+use super::StreamCancellation;
 use crate::commands::ai::request::build_anthropic_request;
 use crate::commands::ai::tools::executor::execute_tool;
-use super::StreamCancellation;
+use crate::commands::ai::types::{AIConfig, ChatMessage, FunctionCall, ToolCall};
 
 /// Anthropic 流式对话处理（含多轮工具调用循环）
 pub async fn anthropic_stream_loop(
@@ -29,7 +29,8 @@ pub async fn anthropic_stream_loop(
         );
 
         let url = format!("{}/v1/messages", config.base_url);
-        let is_team = config.source.as_deref() == Some("team") || config.source.as_deref() == Some("platform");
+        let is_team = config.source.as_deref() == Some("team")
+            || config.source.as_deref() == Some("platform");
 
         let mut req_builder = client
             .post(&url)
@@ -129,8 +130,10 @@ pub async fn anthropic_stream_loop(
                                 let block = &parsed["content_block"];
                                 if block["type"].as_str() == Some("tool_use") {
                                     has_tool_use = true;
-                                    current_tool_id = block["id"].as_str().unwrap_or("").to_string();
-                                    current_tool_name = block["name"].as_str().unwrap_or("").to_string();
+                                    current_tool_id =
+                                        block["id"].as_str().unwrap_or("").to_string();
+                                    current_tool_name =
+                                        block["name"].as_str().unwrap_or("").to_string();
                                     current_tool_input.clear();
                                 }
                             }

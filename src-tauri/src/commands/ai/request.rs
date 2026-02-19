@@ -39,7 +39,7 @@ pub fn message_to_api_json(msg: &ChatMessage) -> serde_json::Value {
                                 "detail": "auto"
                             }
                         }));
-                    },
+                    }
                     Err(e) => {
                         eprintln!("Failed to read image at {}: {}", img_path, e);
                     }
@@ -51,16 +51,30 @@ pub fn message_to_api_json(msg: &ChatMessage) -> serde_json::Value {
             "role": msg.role,
             "content": parts
         });
-        if let Some(tc) = &msg.tool_calls { json["tool_calls"] = serde_json::to_value(tc).unwrap_or_default(); }
-        if let Some(id) = &msg.tool_call_id { json["tool_call_id"] = serde_json::json!(id); }
-        if let Some(n) = &msg.name { json["name"] = serde_json::json!(n); }
+        if let Some(tc) = &msg.tool_calls {
+            json["tool_calls"] = serde_json::to_value(tc).unwrap_or_default();
+        }
+        if let Some(id) = &msg.tool_call_id {
+            json["tool_call_id"] = serde_json::json!(id);
+        }
+        if let Some(n) = &msg.name {
+            json["name"] = serde_json::json!(n);
+        }
         json
     } else {
         let mut json = serde_json::json!({ "role": msg.role });
-        if let Some(c) = &msg.content { json["content"] = serde_json::json!(c); }
-        if let Some(tc) = &msg.tool_calls { json["tool_calls"] = serde_json::to_value(tc).unwrap_or_default(); }
-        if let Some(id) = &msg.tool_call_id { json["tool_call_id"] = serde_json::json!(id); }
-        if let Some(n) = &msg.name { json["name"] = serde_json::json!(n); }
+        if let Some(c) = &msg.content {
+            json["content"] = serde_json::json!(c);
+        }
+        if let Some(tc) = &msg.tool_calls {
+            json["tool_calls"] = serde_json::to_value(tc).unwrap_or_default();
+        }
+        if let Some(id) = &msg.tool_call_id {
+            json["tool_call_id"] = serde_json::json!(id);
+        }
+        if let Some(n) = &msg.name {
+            json["name"] = serde_json::json!(n);
+        }
         json
     }
 }

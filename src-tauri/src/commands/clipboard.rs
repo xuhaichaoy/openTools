@@ -100,7 +100,11 @@ pub fn start_clipboard_watcher(app: &AppHandle) {
 
             let read_result = app_for_task.run_on_main_thread(move || {
                 use tauri_plugin_clipboard_manager::ClipboardExt;
-                let text = app_clone.clipboard().read_text().ok().filter(|s| !s.is_empty());
+                let text = app_clone
+                    .clipboard()
+                    .read_text()
+                    .ok()
+                    .filter(|s| !s.is_empty());
                 let _ = tx.send(text);
             });
 
@@ -140,7 +144,14 @@ pub fn start_clipboard_watcher(app: &AppHandle) {
                 .as_millis() as u64;
 
             let preview = if text.len() > 100 {
-                format!("{}...", &text[..text.char_indices().nth(100).map(|(i, _)| i).unwrap_or(text.len())])
+                format!(
+                    "{}...",
+                    &text[..text
+                        .char_indices()
+                        .nth(100)
+                        .map(|(i, _)| i)
+                        .unwrap_or(text.len())]
+                )
             } else {
                 text.clone()
             };
@@ -167,10 +178,13 @@ pub fn start_clipboard_watcher(app: &AppHandle) {
             save_history(&app_for_task, &history);
 
             // 通知前端
-            let _ = app_for_task.emit("clipboard-history-update", serde_json::json!({
-                "entry": entry,
-                "total": history.entries.len(),
-            }));
+            let _ = app_for_task.emit(
+                "clipboard-history-update",
+                serde_json::json!({
+                    "entry": entry,
+                    "total": history.entries.len(),
+                }),
+            );
         }
     });
 }

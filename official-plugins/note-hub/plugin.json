@@ -1,0 +1,18 @@
+{
+  "pluginName": "笔记中心",
+  "description": "速记、AI 笔记、Markdown 编辑",
+  "version": "1.0.0",
+  "main": "index.html",
+  "pluginType": "ui",
+  "features": [
+    {
+      "code": "note-hub",
+      "explain": "笔记中心",
+      "cmds": ["note", "note-hub"]
+    }
+  ],
+  "mtools": {
+    "permissions": [],
+    "dataProfile": "note_hub"
+  }
+}

@@ -1,4 +1,8 @@
-use crate::{routes::AppState, services::auth::Claims, Error, Result};
+use crate::{
+    routes::AppState,
+    services::{auth::Claims, entitlement},
+    Error, Result,
+};
 use axum::{
     extract::{Extension, Path, State},
     routing::{get, post},
@@ -45,6 +49,10 @@ pub struct Team {
     pub owner_id: Uuid,
     pub avatar_url: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    pub subscription_plan: String,
+    pub subscription_started_at: chrono::DateTime<chrono::Utc>,
+    pub subscription_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub subscription_updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
@@ -116,6 +124,18 @@ async fn check_admin(db: &sqlx::PgPool, team_id: Uuid, user_id: Uuid) -> Result<
     }
 }
 
+async fn check_membership_active(db: &sqlx::PgPool, team_id: Uuid, user_id: Uuid) -> Result<()> {
+    check_membership(db, team_id, user_id).await?;
+    entitlement::require_team_active(db, team_id, user_id).await?;
+    Ok(())
+}
+
+async fn check_admin_active(db: &sqlx::PgPool, team_id: Uuid, user_id: Uuid) -> Result<()> {
+    check_admin(db, team_id, user_id).await?;
+    entitlement::require_team_active(db, team_id, user_id).await?;
+    Ok(())
+}
+
 fn parse_user_id(claims: &Claims) -> Result<Uuid> {
     Uuid::parse_str(&claims.sub).map_err(|_| Error::BadRequest("Invalid user ID".into()))
 }
@@ -135,7 +155,12 @@ async fn create_team(
         .map_err(|e| Error::Internal(e.into()))?;
 
     let team: Team = sqlx::query_as(
-        "INSERT INTO teams (name, owner_id) VALUES ($1, $2) RETURNING id, name, owner_id, avatar_url, created_at",
+        "INSERT INTO teams (
+            name, owner_id, subscription_plan, subscription_started_at, subscription_expires_at, subscription_updated_at
+         ) VALUES ($1, $2, 'trial', NOW(), NOW() + INTERVAL '3 days', NOW())
+         RETURNING
+            id, name, owner_id, avatar_url, created_at,
+            subscription_plan, subscription_started_at, subscription_expires_at, subscription_updated_at",
     )
     .bind(&payload.name)
     .bind(user_id)
@@ -158,7 +183,9 @@ async fn list_my_teams(
 ) -> Result<Json<Vec<Team>>> {
     let user_id = parse_user_id(&claims)?;
     let teams = sqlx::query_as::<_, Team>(
-        "SELECT t.id, t.name, t.owner_id, t.avatar_url, t.created_at
+        "SELECT
+            t.id, t.name, t.owner_id, t.avatar_url, t.created_at,
+            t.subscription_plan, t.subscription_started_at, t.subscription_expires_at, t.subscription_updated_at
          FROM teams t JOIN team_members tm ON t.id = tm.team_id
          WHERE tm.user_id = $1",
     )
@@ -178,7 +205,11 @@ async fn get_team_details(
     check_membership(&state.db, team_id, user_id).await?;
 
     let team = sqlx::query_as::<_, Team>(
-        "SELECT id, name, owner_id, avatar_url, created_at FROM teams WHERE id = $1",
+        "SELECT
+            id, name, owner_id, avatar_url, created_at,
+            subscription_plan, subscription_started_at, subscription_expires_at, subscription_updated_at
+         FROM teams
+         WHERE id = $1",
     )
     .bind(team_id)
     .fetch_one(&state.db)
@@ -194,7 +225,7 @@ async fn update_team(
     Json(payload): Json<UpdateTeamRequest>,
 ) -> Result<Json<Team>> {
     let user_id = parse_user_id(&claims)?;
-    check_admin(&state.db, team_id, user_id).await?;
+    check_admin_active(&state.db, team_id, user_id).await?;
 
     let team = sqlx::query_as::<_, Team>(
         "UPDATE teams SET
@@ -202,7 +233,9 @@ async fn update_team(
             avatar_url = COALESCE($2, avatar_url),
             updated_at = NOW()
          WHERE id = $3
-         RETURNING id, name, owner_id, avatar_url, created_at",
+         RETURNING
+            id, name, owner_id, avatar_url, created_at,
+            subscription_plan, subscription_started_at, subscription_expires_at, subscription_updated_at",
     )
     .bind(&payload.name)
     .bind(&payload.avatar_url)
@@ -219,6 +252,7 @@ async fn delete_team(
     Path(team_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>> {
     let user_id = parse_user_id(&claims)?;
+    entitlement::require_team_active(&state.db, team_id, user_id).await?;
 
     // 只有 owner 可以解散
     let owner_id: Uuid = sqlx::query_scalar("SELECT owner_id FROM teams WHERE id = $1")
@@ -267,7 +301,7 @@ async fn invite_member(
     Json(payload): Json<InviteMemberRequest>,
 ) -> Result<Json<serde_json::Value>> {
     let user_id = parse_user_id(&claims)?;
-    check_admin(&state.db, team_id, user_id).await?;
+    check_admin_active(&state.db, team_id, user_id).await?;
 
     let target_user = if let Some(ref email) = payload.email {
         sqlx::query_scalar::<_, Uuid>("SELECT id FROM users WHERE email = $1")
@@ -306,7 +340,7 @@ async fn update_member_role(
     Json(payload): Json<UpdateMemberRoleRequest>,
 ) -> Result<Json<serde_json::Value>> {
     let user_id = parse_user_id(&claims)?;
-    check_admin(&state.db, team_id, user_id).await?;
+    check_admin_active(&state.db, team_id, user_id).await?;
 
     sqlx::query("UPDATE team_members SET role = $1 WHERE team_id = $2 AND user_id = $3")
         .bind(&payload.role)
@@ -324,7 +358,7 @@ async fn remove_member(
     Path((team_id, target_uid)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<serde_json::Value>> {
     let user_id = parse_user_id(&claims)?;
-    check_admin(&state.db, team_id, user_id).await?;
+    check_admin_active(&state.db, team_id, user_id).await?;
 
     if target_uid == user_id {
         return Err(Error::BadRequest("Cannot remove yourself".into()));
@@ -348,7 +382,50 @@ async fn share_resource(
     Json(payload): Json<ShareResourceRequest>,
 ) -> Result<Json<serde_json::Value>> {
     let user_id = parse_user_id(&claims)?;
-    check_membership(&state.db, team_id, user_id).await?;
+    check_membership_active(&state.db, team_id, user_id).await?;
+
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| Error::Internal(e.into()))?;
+
+    let mut resource_id = payload.resource_id.clone();
+    let mut resource_name = payload.resource_name.clone();
+
+    if payload.resource_type == "workflow" {
+        let legacy_name = resource_name
+            .clone()
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| format!("工作流模板({})", payload.resource_id));
+
+        let workflow_json = serde_json::json!({
+            "legacy": true,
+            "source_resource_id": payload.resource_id,
+            "note": "legacy shared workflow without body, please re-share from latest client",
+        });
+
+        let created_template_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO team_workflow_templates (
+                team_id, name, description, icon, category, workflow_json, version,
+                created_by, updated_by, created_at, updated_at
+             ) VALUES (
+                $1, $2, $3, '📋', 'legacy', $4, 1,
+                $5, $5, NOW(), NOW()
+             )
+             RETURNING id",
+        )
+        .bind(team_id)
+        .bind(&legacy_name)
+        .bind(Some("历史兼容分享记录（无正文），请重新分享后导入"))
+        .bind(&workflow_json)
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        resource_id = created_template_id.to_string();
+        resource_name = Some(legacy_name);
+    }
 
     sqlx::query(
         "INSERT INTO team_shared_resources (team_id, user_id, resource_type, resource_id, resource_name)
@@ -358,12 +435,18 @@ async fn share_resource(
     .bind(team_id)
     .bind(user_id)
     .bind(&payload.resource_type)
-    .bind(&payload.resource_id)
-    .bind(&payload.resource_name)
-    .execute(&state.db)
+    .bind(&resource_id)
+    .bind(&resource_name)
+    .execute(&mut *tx)
     .await?;
 
-    Ok(Json(serde_json::json!({ "message": "Resource shared" })))
+    tx.commit().await.map_err(|e| Error::Internal(e.into()))?;
+
+    Ok(Json(serde_json::json!({
+        "message": "Resource shared",
+        "resource_type": payload.resource_type,
+        "resource_id": resource_id
+    })))
 }
 
 async fn list_shared_resources(
@@ -372,7 +455,7 @@ async fn list_shared_resources(
     Path(team_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>> {
     let user_id = parse_user_id(&claims)?;
-    check_membership(&state.db, team_id, user_id).await?;
+    check_membership_active(&state.db, team_id, user_id).await?;
 
     let resources = sqlx::query_as::<_, SharedResource>(
         "SELECT sr.id, sr.team_id, sr.user_id, sr.resource_type, sr.resource_id, sr.resource_name, sr.shared_at, u.username
@@ -393,7 +476,7 @@ async fn unshare_resource(
     Path((team_id, resource_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<serde_json::Value>> {
     let user_id = parse_user_id(&claims)?;
-    check_membership(&state.db, team_id, user_id).await?;
+    check_membership_active(&state.db, team_id, user_id).await?;
 
     sqlx::query("DELETE FROM team_shared_resources WHERE id = $1 AND team_id = $2")
         .bind(resource_id)
@@ -412,7 +495,7 @@ async fn get_ai_config(
     Path(team_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>> {
     let user_id = parse_user_id(&claims)?;
-    check_admin(&state.db, team_id, user_id).await?;
+    check_admin_active(&state.db, team_id, user_id).await?;
 
     let rows = sqlx::query_as::<_, TeamAiConfigRowWithKey>(
         "SELECT id, team_id, config_name, protocol, base_url, api_key, model_name, priority, is_active, created_at
@@ -454,7 +537,7 @@ async fn set_ai_config(
     Json(payload): Json<SetAiConfigRequest>,
 ) -> Result<Json<serde_json::Value>> {
     let user_id = parse_user_id(&claims)?;
-    check_admin(&state.db, team_id, user_id).await?;
+    check_admin_active(&state.db, team_id, user_id).await?;
 
     let config_name = payload.config_name.as_deref().unwrap_or("default");
     let protocol = payload.protocol.as_deref().unwrap_or("openai");
@@ -521,7 +604,7 @@ async fn get_team_ai_models(
     Path(team_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>> {
     let user_id = parse_user_id(&claims)?;
-    check_membership(&state.db, team_id, user_id).await?;
+    check_membership_active(&state.db, team_id, user_id).await?;
 
     let models = sqlx::query_as::<_, TeamAiModelInfo>(
         "SELECT
@@ -551,7 +634,7 @@ async fn get_team_ai_usage(
     Path(team_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>> {
     let user_id = parse_user_id(&claims)?;
-    check_admin(&state.db, team_id, user_id).await?;
+    check_admin_active(&state.db, team_id, user_id).await?;
 
     let usage = sqlx::query_as::<_, TeamUsageRow>(
         "SELECT
@@ -581,7 +664,7 @@ async fn patch_ai_config(
     Json(payload): Json<PatchAiConfigRequest>,
 ) -> Result<Json<serde_json::Value>> {
     let user_id = parse_user_id(&claims)?;
-    check_admin(&state.db, team_id, user_id).await?;
+    check_admin_active(&state.db, team_id, user_id).await?;
 
     if let Some(priority) = payload.priority {
         if priority < 0 {
@@ -613,7 +696,7 @@ async fn delete_ai_config(
     Path((team_id, config_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<serde_json::Value>> {
     let user_id = parse_user_id(&claims)?;
-    check_admin(&state.db, team_id, user_id).await?;
+    check_admin_active(&state.db, team_id, user_id).await?;
 
     sqlx::query("DELETE FROM team_ai_configs WHERE id = $1 AND team_id = $2")
         .bind(config_id)

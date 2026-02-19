@@ -34,10 +34,7 @@ pub struct SyncPullResponse {
 
 /// 测试 mTools 服务器连接
 #[tauri::command]
-pub async fn mtools_sync_test(
-    token: String,
-    base_url: String,
-) -> Result<bool, String> {
+pub async fn mtools_sync_test(token: String, base_url: String) -> Result<bool, String> {
     let client = reqwest::Client::new();
     let response = client
         .get(format!("{}/health", base_url))
@@ -99,6 +96,9 @@ pub async fn mtools_sync_pull(
         return Err(format!("拉取失败: {}", body));
     }
 
-    let result: SyncPullResponse = response.json().await.map_err(|e| format!("解析失败: {}", e))?;
+    let result: SyncPullResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("解析失败: {}", e))?;
     Ok(result)
 }

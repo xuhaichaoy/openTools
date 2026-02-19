@@ -1,16 +1,10 @@
-use axum::{
-    extract::State,
-    routing::post,
-    Json,
-    Router,
-};
 use crate::{
-    models::user::{SmsLoginRequest, EmailLoginRequest, AuthResponse, User},
-    services::AuthService,
     config::Config,
-    Result,
-    Error,
+    models::user::{AuthResponse, EmailLoginRequest, SmsLoginRequest, User},
+    services::AuthService,
+    Error, Result,
 };
+use axum::{extract::State, routing::post, Json, Router};
 use sqlx::PgPool;
 use std::sync::Arc;
 
@@ -80,9 +74,14 @@ async fn email_register(
     }
 
     let password_hash = hash_password(&payload.password)?;
-    let username = payload
-        .username
-        .unwrap_or_else(|| payload.email.split('@').next().unwrap_or("user").to_string());
+    let username = payload.username.unwrap_or_else(|| {
+        payload
+            .email
+            .split('@')
+            .next()
+            .unwrap_or("user")
+            .to_string()
+    });
 
     let user = sqlx::query_as::<_, User>(
         "INSERT INTO users (email, username, password_hash) VALUES ($1, $2, $3) RETURNING *",
@@ -136,7 +135,10 @@ async fn refresh_token(
     let claims = state.auth.validate_token(&tokens.access_token)?;
 
     let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
-        .bind(uuid::Uuid::parse_str(&claims.sub).map_err(|_| Error::Unauthorized("Invalid token".into()))?)
+        .bind(
+            uuid::Uuid::parse_str(&claims.sub)
+                .map_err(|_| Error::Unauthorized("Invalid token".into()))?,
+        )
         .fetch_one(&state.db)
         .await?;
 

@@ -1,7 +1,7 @@
 pub mod definitions;
 pub mod executor;
 
-use definitions::{get_base_tools, get_advanced_tools, get_native_app_tools};
+use definitions::{get_advanced_tools, get_base_tools, get_native_app_tools};
 
 /// 判断工具是否为"危险"操作，需要用户确认才能执行
 pub fn is_dangerous_tool(name: &str) -> bool {
@@ -33,8 +33,13 @@ pub fn get_tools(enable_advanced: bool, enable_native: bool) -> Vec<serde_json::
 }
 
 /// 构建 AI system prompt
-pub fn get_system_prompt(enable_advanced: bool, enable_native: bool, custom_prompt: &str) -> String {
-    let mut base = String::from("你是 mTools 的 AI 助手，一个强大的桌面效率工具。你可以：\n\
+pub fn get_system_prompt(
+    enable_advanced: bool,
+    enable_native: bool,
+    custom_prompt: &str,
+) -> String {
+    let mut base = String::from(
+        "你是 mTools 的 AI 助手，一个强大的桌面效率工具。你可以：\n\
      1. 搜索和执行数据导入导出脚本（数据工坊）\n\
      2. 读写剪贴板\n\
      3. 智能检索用户知识库\n\n\
@@ -52,7 +57,8 @@ pub fn get_system_prompt(enable_advanced: bool, enable_native: bool, custom_prom
      - 禁止对同一问题反复调用 search_docs（最多 1 次，除非第一次关键词明显不对）\n\
      - 禁止搜索结果为空时换关键词继续搜\n\
      - 禁止每次提问都调用 list_knowledge_docs（仅当用户问「知识库有什么」时才用）\n\
-     - 闲聊和打招呼不要调用任何知识库工具\n");
+     - 闲聊和打招呼不要调用任何知识库工具\n",
+    );
 
     if enable_native {
         base.push_str("\n你拥有强大的本机应用交互能力：\n\

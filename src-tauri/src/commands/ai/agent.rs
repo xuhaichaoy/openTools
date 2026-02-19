@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use tauri::{AppHandle, Emitter, Manager};
 
-use super::types::{AIConfig, ChatMessage, ToolCall, FunctionCall};
 use super::request::build_api_request;
 use super::stream::StreamCancellation;
+use super::types::{AIConfig, ChatMessage, FunctionCall, ToolCall};
 use crate::error::AppError;
 
 /// Agent 专用流式对话 — 前端传入 tools 定义，后端不执行工具
@@ -21,7 +21,12 @@ pub async fn ai_agent_stream(
     cancellation.reset();
 
     let mut request = build_api_request(
-        &config.model, &messages, config.temperature, config.max_tokens, &tools, true,
+        &config.model,
+        &messages,
+        config.temperature,
+        config.max_tokens,
+        &tools,
+        true,
     );
 
     if let Some(ref tid) = config.team_id {
@@ -134,11 +139,10 @@ pub async fn ai_agent_stream(
                                     if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
                                         pending_tool_calls[idx].function.name = name.to_string();
                                     }
-                                    if let Some(args) = func.get("arguments").and_then(|a| a.as_str()) {
-                                        tc_args_buffer
-                                            .entry(idx)
-                                            .or_default()
-                                            .push_str(args);
+                                    if let Some(args) =
+                                        func.get("arguments").and_then(|a| a.as_str())
+                                    {
+                                        tc_args_buffer.entry(idx).or_default().push_str(args);
                                     }
                                 }
                             }

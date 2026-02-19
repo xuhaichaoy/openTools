@@ -2,16 +2,14 @@ mod commands;
 pub mod crypto;
 pub mod error;
 
-use tauri::{
-    Manager,
-    PhysicalPosition,
-    Position,
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    menu::{Menu, MenuItem},
-};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::path::PathBuf;
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Manager, PhysicalPosition, Position,
+};
 
 fn is_subpath_of(path: &std::path::Path, root: &std::path::Path) -> bool {
     path.starts_with(root)
@@ -59,6 +57,10 @@ fn allowed_mtplugin_roots(app: &tauri::AppHandle) -> Vec<PathBuf> {
     }
     // 4) 截图预览等临时文件目录
     roots.push(std::env::temp_dir());
+    // 5) 官方市场插件目录（AppData/plugins/official）
+    if let Ok(app_data_dir) = app.path().app_data_dir() {
+        roots.push(app_data_dir.join("plugins").join("official"));
+    }
 
     // 只保留可规范化的目录，避免无效路径干扰判断
     roots
@@ -69,9 +71,7 @@ fn allowed_mtplugin_roots(app: &tauri::AppHandle) -> Vec<PathBuf> {
 
 fn is_allowed_mtplugin_path(app: &tauri::AppHandle, canonical: &std::path::Path) -> bool {
     let roots = allowed_mtplugin_roots(app);
-    roots
-        .iter()
-        .any(|root| is_subpath_of(canonical, root))
+    roots.iter().any(|root| is_subpath_of(canonical, root))
 }
 
 /// 显示窗口的统一帮助函数：显示 → 聚焦，并临时抑制失焦隐藏
@@ -122,7 +122,11 @@ fn place_main_window_top_center(window: &tauri::WebviewWindow) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_log::Builder::default().level(log::LevelFilter::Info).build())
+        .plugin(
+            tauri_plugin_log::Builder::default()
+                .level(log::LevelFilter::Info)
+                .build(),
+        )
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -135,6 +139,9 @@ pub fn run() {
         })
         .manage(commands::ai::StreamCancellation::new())
         .manage(std::sync::Mutex::new(commands::plugin::PluginCache::new()))
+        .manage(std::sync::Mutex::new(
+            commands::plugin::PluginDevState::new(),
+        ))
         .manage(commands::mcp::McpServerManager::new())
         .manage(commands::ding::DingManager::new())
         // 自定义协议：为插件文件提供 Tauri IPC 支持
@@ -246,10 +253,23 @@ pub fn run() {
             commands::plugin::lifecycle::plugin_add_dev_dir,
             commands::plugin::lifecycle::plugin_remove_dev_dir,
             commands::plugin::lifecycle::plugin_set_enabled,
+            commands::plugin::lifecycle::plugin_market_install,
+            commands::plugin::lifecycle::plugin_market_install_official_local,
+            commands::plugin::lifecycle::plugin_market_uninstall,
+            commands::plugin::lifecycle::plugin_market_clear_data,
+            commands::plugin::lifecycle::plugin_dev_watch_start,
+            commands::plugin::lifecycle::plugin_dev_watch_stop,
+            commands::plugin::lifecycle::plugin_dev_watch_status,
+            commands::plugin::lifecycle::plugin_dev_get_trace_buffer,
+            commands::plugin::lifecycle::plugin_dev_clear_trace_buffer,
             commands::plugin::api_bridge::plugin_open,
             commands::plugin::api_bridge::plugin_close,
             commands::plugin::api_bridge::plugin_api_call,
             commands::plugin::api_bridge::plugin_get_embed_html,
+            commands::plugin::api_bridge::plugin_dev_simulate_event,
+            commands::plugin::api_bridge::plugin_dev_open_devtools,
+            commands::plugin::api_bridge::plugin_dev_storage_dump,
+            commands::plugin::api_bridge::plugin_dev_storage_clear,
             commands::plugin::plugin_start_color_picker,
             commands::plugin::plugin_get_pixel_at,
             // ── Workflow ──
@@ -368,7 +388,10 @@ pub fn run() {
 // ── Setup 子函数 ──
 
 /// 创建系统托盘
-fn setup_tray(app: &tauri::App, suppress_hide: &Arc<AtomicUsize>) -> Result<(), Box<dyn std::error::Error>> {
+fn setup_tray(
+    app: &tauri::App,
+    suppress_hide: &Arc<AtomicUsize>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let show_item = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
@@ -385,7 +408,9 @@ fn setup_tray(app: &tauri::App, suppress_hide: &Arc<AtomicUsize>) -> Result<(), 
                     show_window(&window, &suppress_for_menu);
                 }
             }
-            "quit" => { app.exit(0); }
+            "quit" => {
+                app.exit(0);
+            }
             _ => {}
         })
         .on_tray_icon_event(move |tray, event| {
@@ -411,8 +436,13 @@ fn setup_tray(app: &tauri::App, suppress_hide: &Arc<AtomicUsize>) -> Result<(), 
 }
 
 /// 注册全局快捷键
-fn setup_shortcuts(app: &tauri::App, suppress_hide: &Arc<AtomicUsize>) -> Result<(), Box<dyn std::error::Error>> {
-    use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState, GlobalShortcutExt};
+fn setup_shortcuts(
+    app: &tauri::App,
+    suppress_hide: &Arc<AtomicUsize>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri_plugin_global_shortcut::{
+        Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
+    };
 
     let toggle_shortcut = Shortcut::new(Some(Modifiers::META), Code::Digit2);
     let context_shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyA);
@@ -467,14 +497,18 @@ fn setup_window_events(
             }
             let (hide_on_blur, always_on_top) = {
                 use tauri_plugin_store::StoreExt;
-                let settings = app_handle_for_focus.store("config.json").ok()
+                let settings = app_handle_for_focus
+                    .store("config.json")
+                    .ok()
                     .and_then(|store| store.get("general_settings"))
                     .and_then(|v| v.as_str().map(|s| s.to_string()))
                     .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok());
-                let hide = settings.as_ref()
+                let hide = settings
+                    .as_ref()
                     .and_then(|obj| obj.get("hideOnBlur").and_then(|v| v.as_bool()))
                     .unwrap_or(true);
-                let top = settings.as_ref()
+                let top = settings
+                    .as_ref()
                     .and_then(|obj| obj.get("alwaysOnTop").and_then(|v| v.as_bool()))
                     .unwrap_or(true);
                 (hide, top)
@@ -519,9 +553,9 @@ fn schedule_cleanup(app_handle: &tauri::AppHandle) {
     let handle = app_handle.clone();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(5));
-        if let Err(e) = tauri::async_runtime::block_on(
-            commands::system::clean_old_chat_images(handle, 7),
-        ) {
+        if let Err(e) =
+            tauri::async_runtime::block_on(commands::system::clean_old_chat_images(handle, 7))
+        {
             log::warn!("自动清理图片失败: {}", e);
         }
     });
@@ -534,10 +568,9 @@ fn url_decode(input: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(
-                std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
-                16,
-            ) {
+            if let Ok(byte) =
+                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
+            {
                 result.push(byte);
                 i += 3;
                 continue;

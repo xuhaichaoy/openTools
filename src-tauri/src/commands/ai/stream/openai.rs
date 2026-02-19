@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::commands::ai::types::{AIConfig, ChatMessage, ToolCall, FunctionCall};
+use super::StreamCancellation;
 use crate::commands::ai::request::build_api_request;
 use crate::commands::ai::tools::executor::execute_tool;
-use super::StreamCancellation;
+use crate::commands::ai::types::{AIConfig, ChatMessage, FunctionCall, ToolCall};
 
 /// OpenAI 兼容协议的流式对话处理（含多轮 tool_calls 循环）
 pub async fn openai_stream_loop(
@@ -18,7 +18,12 @@ pub async fn openai_stream_loop(
     let cancellation = app.state::<StreamCancellation>();
 
     let mut request = build_api_request(
-        &config.model, &full_messages, config.temperature, config.max_tokens, tools, true,
+        &config.model,
+        &full_messages,
+        config.temperature,
+        config.max_tokens,
+        tools,
+        true,
     );
 
     if let Some(ref tid) = config.team_id {
@@ -29,8 +34,14 @@ pub async fn openai_stream_loop(
     }
 
     let url = format!("{}/chat/completions", config.base_url);
-    log::info!("[ai_chat_stream] POST {} | source={:?} model={} team_id={:?} team_config_id={:?}",
-        url, config.source, config.model, config.team_id, config.team_config_id);
+    log::info!(
+        "[ai_chat_stream] POST {} | source={:?} model={} team_id={:?} team_config_id={:?}",
+        url,
+        config.source,
+        config.model,
+        config.team_id,
+        config.team_config_id
+    );
 
     let response = client
         .post(&url)
@@ -44,7 +55,12 @@ pub async fn openai_stream_loop(
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        log::error!("[ai_chat_stream] {} → HTTP {} body={}", url, status, &body[..body.len().min(200)]);
+        log::error!(
+            "[ai_chat_stream] {} → HTTP {} body={}",
+            url,
+            status,
+            &body[..body.len().min(200)]
+        );
         let _ = app.emit(
             "ai-stream-error",
             serde_json::json!({
@@ -98,7 +114,9 @@ pub async fn openai_stream_loop(
                             );
                             let mut tool_messages = Vec::new();
                             for tc in &pending_tool_calls {
-                                let result = execute_tool(app, &tc.function.name, &tc.function.arguments).await;
+                                let result =
+                                    execute_tool(app, &tc.function.name, &tc.function.arguments)
+                                        .await;
                                 let content = match result {
                                     Ok(r) => r,
                                     Err(e) => format!("工具执行失败: {}", e),
@@ -137,7 +155,12 @@ pub async fn openai_stream_loop(
                                     break;
                                 }
                                 let mut follow_request = build_api_request(
-                                    &config.model, &full_messages, config.temperature, config.max_tokens, tools, false,
+                                    &config.model,
+                                    &full_messages,
+                                    config.temperature,
+                                    config.max_tokens,
+                                    tools,
+                                    false,
                                 );
                                 if let Some(ref tid) = config.team_id {
                                     follow_request["team_id"] = serde_json::json!(tid);
@@ -156,19 +179,35 @@ pub async fn openai_stream_loop(
                                 {
                                     Ok(resp) => {
                                         if let Ok(body) = resp.text().await {
-                                            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) {
+                                            if let Ok(parsed) =
+                                                serde_json::from_str::<serde_json::Value>(&body)
+                                            {
                                                 let message = &parsed["choices"][0]["message"];
 
-                                                if let Some(new_tcs) = message["tool_calls"].as_array() {
+                                                if let Some(new_tcs) =
+                                                    message["tool_calls"].as_array()
+                                                {
                                                     if !new_tcs.is_empty() {
-                                                        let mut round_tool_calls: Vec<ToolCall> = Vec::new();
+                                                        let mut round_tool_calls: Vec<ToolCall> =
+                                                            Vec::new();
                                                         for tc_val in new_tcs {
                                                             let tc = ToolCall {
-                                                                id: tc_val["id"].as_str().unwrap_or("").to_string(),
+                                                                id: tc_val["id"]
+                                                                    .as_str()
+                                                                    .unwrap_or("")
+                                                                    .to_string(),
                                                                 call_type: "function".to_string(),
                                                                 function: FunctionCall {
-                                                                    name: tc_val["function"]["name"].as_str().unwrap_or("").to_string(),
-                                                                    arguments: tc_val["function"]["arguments"].as_str().unwrap_or("{}").to_string(),
+                                                                    name: tc_val["function"]
+                                                                        ["name"]
+                                                                        .as_str()
+                                                                        .unwrap_or("")
+                                                                        .to_string(),
+                                                                    arguments: tc_val["function"]
+                                                                        ["arguments"]
+                                                                        .as_str()
+                                                                        .unwrap_or("{}")
+                                                                        .to_string(),
                                                                 },
                                                             };
                                                             round_tool_calls.push(tc);
@@ -184,10 +223,17 @@ pub async fn openai_stream_loop(
 
                                                         let mut round_tool_messages = Vec::new();
                                                         for tc in &round_tool_calls {
-                                                            let result = execute_tool(app, &tc.function.name, &tc.function.arguments).await;
+                                                            let result = execute_tool(
+                                                                app,
+                                                                &tc.function.name,
+                                                                &tc.function.arguments,
+                                                            )
+                                                            .await;
                                                             let content = match result {
                                                                 Ok(r) => r,
-                                                                Err(e) => format!("工具执行失败: {}", e),
+                                                                Err(e) => {
+                                                                    format!("工具执行失败: {}", e)
+                                                                }
                                                             };
                                                             let _ = app.emit(
                                                                 "ai-stream-tool-result",
@@ -203,14 +249,18 @@ pub async fn openai_stream_loop(
                                                                 content: Some(content),
                                                                 tool_calls: None,
                                                                 tool_call_id: Some(tc.id.clone()),
-                                                                name: Some(tc.function.name.clone()),
+                                                                name: Some(
+                                                                    tc.function.name.clone(),
+                                                                ),
                                                                 images: None,
                                                             });
                                                         }
 
                                                         full_messages.push(ChatMessage {
                                                             role: "assistant".to_string(),
-                                                            content: message["content"].as_str().map(|s| s.to_string()),
+                                                            content: message["content"]
+                                                                .as_str()
+                                                                .map(|s| s.to_string()),
                                                             tool_calls: Some(round_tool_calls),
                                                             tool_call_id: None,
                                                             name: None,
@@ -292,11 +342,10 @@ pub async fn openai_stream_loop(
                                     if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
                                         pending_tool_calls[idx].function.name = name.to_string();
                                     }
-                                    if let Some(args) = func.get("arguments").and_then(|a| a.as_str()) {
-                                        tc_args_buffer
-                                            .entry(idx)
-                                            .or_default()
-                                            .push_str(args);
+                                    if let Some(args) =
+                                        func.get("arguments").and_then(|a| a.as_str())
+                                    {
+                                        tc_args_buffer.entry(idx).or_default().push_str(args);
                                     }
                                 }
                             }

@@ -1,5 +1,5 @@
-pub mod user;
 pub mod sync;
+pub mod user;
 
-pub use user::User;
 pub use sync::SyncRow;
+pub use user::User;

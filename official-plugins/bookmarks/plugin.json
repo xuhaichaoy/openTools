@@ -1,0 +1,18 @@
+{
+  "pluginName": "网页书签",
+  "description": "书签管理，支持 Chrome/Firefox 导入",
+  "version": "1.0.0",
+  "main": "index.html",
+  "pluginType": "ui",
+  "features": [
+    {
+      "code": "bookmarks",
+      "explain": "网页书签",
+      "cmds": ["bk", "bookmarks"]
+    }
+  ],
+  "mtools": {
+    "permissions": [],
+    "dataProfile": "bookmarks"
+  }
+}

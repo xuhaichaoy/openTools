@@ -1,9 +1,5 @@
-use axum::{
-    routing::get,
-    Json,
-    Router,
-};
 use crate::routes::AppState;
+use axum::{routing::get, Json, Router};
 use std::sync::Arc;
 
 pub fn routes_no_layer() -> Router<Arc<AppState>> {
@@ -34,7 +30,9 @@ async fn create_order() -> Json<serde_json::Value> {
 }
 
 async fn get_subscription() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "plan": "free", "status": "active", "message": "Subscription management coming soon" }))
+    Json(
+        serde_json::json!({ "plan": "free", "status": "active", "message": "Subscription management coming soon" }),
+    )
 }
 
 async fn get_vouchers() -> Json<serde_json::Value> {
@@ -42,5 +40,7 @@ async fn get_vouchers() -> Json<serde_json::Value> {
 }
 
 async fn redeem_voucher() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "error": "Voucher redemption not yet available", "coming_soon": true }))
+    Json(
+        serde_json::json!({ "error": "Voucher redemption not yet available", "coming_soon": true }),
+    )
 }

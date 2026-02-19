@@ -108,6 +108,10 @@ export interface PluginInstance {
   dirPath: string        // 插件目录绝对路径
   enabled: boolean
   isBuiltin: boolean     // 是否为内置插件
+  source?: 'builtin' | 'official' | 'community' | 'dev' | string
+  slug?: string
+  isOfficial?: boolean
+  dataProfile?: string
 }
 
 /** 插件匹配结果 */
@@ -116,4 +120,68 @@ export interface PluginMatchResult {
   feature: PluginFeature
   matchedCmd: string | PluginCommand
   score: number          // 匹配分数 (用于排序)
+}
+
+export interface PluginDevTraceItem {
+  pluginId: string
+  method: string
+  callId: number
+  durationMs: number
+  success: boolean
+  error?: string
+  permissionDecision: string
+  permissionReason?: string
+  createdAt: string
+}
+
+export interface PluginDevWatchStatus {
+  running: boolean
+  watchedDirs: string[]
+  pluginId?: string
+  changedCount: number
+  lastChangedAt?: string
+  lastError?: string
+}
+
+export type PluginCompatCapabilityStatus = 'supported' | 'partial' | 'not_supported'
+
+export interface PluginCompatMatrixItem {
+  capability: string
+  status: PluginCompatCapabilityStatus
+  notes?: string
+}
+
+export interface PluginPreflightReport {
+  ok: boolean
+  fileSizeBytes: number
+  manifest: {
+    pluginName: string
+    version: string
+    featuresCount: number
+    permissions: string[]
+  } | null
+  compatibility: PluginCompatMatrixItem[]
+  risks: string[]
+}
+
+export interface PluginMarketApp {
+  id: string
+  slug: string
+  name: string
+  description: string
+  tag: string
+  version: string
+  installs: number
+  isOfficial?: boolean
+  currentVersion?: string | null
+  packageSizeBytes?: number | null
+}
+
+export interface PluginMarketPackage {
+  slug: string
+  version: string
+  packageSha256: string
+  packageSizeBytes: number
+  downloadUrl: string
+  isOfficial: boolean
 }

@@ -98,13 +98,20 @@ fn get_scripts_dir(app: &AppHandle) -> PathBuf {
     }
 
     // cwd = src-tauri/ 时，scripts/ 在上一层
-    let parent_scripts = app_dir.parent().map(|p| p.join("scripts")).unwrap_or_default();
+    let parent_scripts = app_dir
+        .parent()
+        .map(|p| p.join("scripts"))
+        .unwrap_or_default();
     if parent_scripts.exists() {
         log::info!("数据工坊: 使用项目根目录 scripts: {:?}", parent_scripts);
         return parent_scripts;
     }
 
-    log::warn!("数据工坊: 未找到 scripts 目录，尝试了: {:?}, {:?}", scripts_dir, parent_scripts);
+    log::warn!(
+        "数据工坊: 未找到 scripts 目录，尝试了: {:?}, {:?}",
+        scripts_dir,
+        parent_scripts
+    );
     scripts_dir
 }
 
@@ -132,7 +139,8 @@ fn scan_scripts(scripts_dir: &PathBuf) -> Vec<ScriptMeta> {
                         // 可能是单个 meta 或数组
                         if let Ok(meta) = serde_json::from_str::<ScriptMeta>(&content) {
                             scripts.push(meta);
-                        } else if let Ok(metas) = serde_json::from_str::<Vec<ScriptMeta>>(&content) {
+                        } else if let Ok(metas) = serde_json::from_str::<Vec<ScriptMeta>>(&content)
+                        {
                             scripts.extend(metas);
                         }
                     }
@@ -190,7 +198,9 @@ pub async fn dataforge_search_scripts(
             s.name.to_lowercase().contains(&query_lower)
                 || s.description.to_lowercase().contains(&query_lower)
                 || s.category.to_lowercase().contains(&query_lower)
-                || s.tags.iter().any(|t| t.to_lowercase().contains(&query_lower))
+                || s.tags
+                    .iter()
+                    .any(|t| t.to_lowercase().contains(&query_lower))
         })
         .collect();
 
@@ -220,10 +230,13 @@ pub async fn dataforge_run_script(
         .as_millis() as u64;
 
     // 发送开始事件
-    let _ = app.emit("dataforge-execution-start", serde_json::json!({
-        "execution_id": execution_id,
-        "script_id": script_id,
-    }));
+    let _ = app.emit(
+        "dataforge-execution-start",
+        serde_json::json!({
+            "execution_id": execution_id,
+            "script_id": script_id,
+        }),
+    );
 
     // 构造 Python 命令参数
     let script_path = scripts_dir.join(&script.script);
@@ -266,7 +279,11 @@ pub async fn dataforge_run_script(
         script_name: script.name.clone(),
         category: script.category.clone(),
         params,
-        status: if success { "success".into() } else { "failed".into() },
+        status: if success {
+            "success".into()
+        } else {
+            "failed".into()
+        },
         started_at,
         finished_at: Some(finished_at),
         duration_ms: Some(finished_at - started_at),
@@ -287,16 +304,22 @@ pub async fn dataforge_run_script(
             history.insert(0, record.clone());
             // 只保留最近 200 条
             history.truncate(200);
-            store.set("execution_history", serde_json::to_value(&history).unwrap_or_default());
+            store.set(
+                "execution_history",
+                serde_json::to_value(&history).unwrap_or_default(),
+            );
             let _ = store.save();
         }
     }
 
     // 发送完成事件
-    let _ = app.emit("dataforge-execution-done", serde_json::json!({
-        "execution_id": execution_id,
-        "record": &record,
-    }));
+    let _ = app.emit(
+        "dataforge-execution-done",
+        serde_json::json!({
+            "execution_id": execution_id,
+            "record": &record,
+        }),
+    );
 
     Ok(record)
 }

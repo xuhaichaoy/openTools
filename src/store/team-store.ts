@@ -8,13 +8,59 @@
 import { create } from "zustand";
 import { api, assertResponseShape } from "@/core/api/client";
 import { handleError } from "@/core/errors";
+import type { Workflow } from "@/core/workflows/types";
 
 export interface Team {
   id: string;
   name: string;
+  owner_id?: string;
+  avatar_url?: string;
+  created_at?: string;
+  subscription_plan?: "trial" | "pro";
+  subscription_started_at?: string;
+  subscription_expires_at?: string | null;
+  subscription_updated_at?: string;
+}
+
+export interface TeamEntitlements {
+  team_plan: "trial" | "pro";
+  is_team_active: boolean;
+  can_team_server_storage?: boolean;
+  expires_at: string | null;
+  status: "trial_active" | "pro_active" | "expired";
+  is_member: boolean;
+  role: "owner" | "admin" | "member" | null;
+}
+
+export interface TeamWorkflowTemplateSummary {
+  id: string;
+  team_id: string;
+  name: string;
+  description: string | null;
+  icon: string | null;
+  category: string | null;
+  version: number;
+  created_by: string;
+  updated_by: string;
+  created_at: string;
+  updated_at: string;
+  is_legacy: boolean;
+  legacy_resource_id?: string | null;
+  created_by_username?: string | null;
+}
+
+export interface TeamWorkflowTemplateDetail
+  extends Omit<TeamWorkflowTemplateSummary, "id"> {
+  id: string;
+  workflow_json: Workflow;
+}
+
+export interface CreateTeamWorkflowTemplatePayload {
+  name: string;
   description?: string;
-  role: string;
-  member_count?: number;
+  icon?: string;
+  category?: string;
+  workflow_json: Omit<Workflow, "id" | "builtin" | "created_at">;
 }
 
 interface TeamState {
@@ -42,6 +88,26 @@ interface TeamState {
     teamId: string,
     filterType?: string,
   ) => Promise<SharedResource[]>;
+
+  /** 获取团队订阅权益 */
+  getTeamEntitlements: (teamId: string) => Promise<TeamEntitlements>;
+
+  /** 获取团队工作流模板列表 */
+  listWorkflowTemplates: (
+    teamId: string,
+  ) => Promise<TeamWorkflowTemplateSummary[]>;
+
+  /** 创建团队工作流模板 */
+  createWorkflowTemplate: (
+    teamId: string,
+    payload: CreateTeamWorkflowTemplatePayload,
+  ) => Promise<TeamWorkflowTemplateDetail>;
+
+  /** 获取团队工作流模板详情 */
+  getWorkflowTemplate: (
+    teamId: string,
+    templateId: string,
+  ) => Promise<TeamWorkflowTemplateDetail>;
 }
 
 export interface SharedResource {
@@ -79,6 +145,66 @@ function isSharedResourceResponse(
     Array.isArray(value.resources) &&
     value.resources.every((item) => isSharedResource(item))
   );
+}
+
+function isTeamEntitlements(input: unknown): input is TeamEntitlements {
+  if (!input || typeof input !== "object") return false;
+  const item = input as Record<string, unknown>;
+  return (
+    (item.team_plan === "trial" || item.team_plan === "pro") &&
+    typeof item.is_team_active === "boolean" &&
+    (typeof item.can_team_server_storage === "boolean" ||
+      item.can_team_server_storage === undefined) &&
+    (typeof item.expires_at === "string" || item.expires_at === null) &&
+    (item.status === "trial_active" ||
+      item.status === "pro_active" ||
+      item.status === "expired") &&
+    typeof item.is_member === "boolean" &&
+    (item.role === "owner" ||
+      item.role === "admin" ||
+      item.role === "member" ||
+      item.role === null)
+  );
+}
+
+function isTeamWorkflowTemplateSummary(
+  input: unknown,
+): input is TeamWorkflowTemplateSummary {
+  if (!input || typeof input !== "object") return false;
+  const item = input as Record<string, unknown>;
+  return (
+    typeof item.id === "string" &&
+    typeof item.team_id === "string" &&
+    typeof item.name === "string" &&
+    (typeof item.description === "string" || item.description === null) &&
+    (typeof item.icon === "string" || item.icon === null) &&
+    (typeof item.category === "string" || item.category === null) &&
+    typeof item.version === "number" &&
+    typeof item.created_by === "string" &&
+    typeof item.updated_by === "string" &&
+    typeof item.created_at === "string" &&
+    typeof item.updated_at === "string" &&
+    typeof item.is_legacy === "boolean"
+  );
+}
+
+function isTeamWorkflowTemplateListResponse(
+  input: unknown,
+): input is { templates: TeamWorkflowTemplateSummary[] } {
+  if (!input || typeof input !== "object") return false;
+  const value = input as Record<string, unknown>;
+  return (
+    Array.isArray(value.templates) &&
+    value.templates.every((item) => isTeamWorkflowTemplateSummary(item))
+  );
+}
+
+function isTeamWorkflowTemplateDetail(
+  input: unknown,
+): input is TeamWorkflowTemplateDetail {
+  if (!isTeamWorkflowTemplateSummary(input)) return false;
+  const item = input as Record<string, unknown>;
+  return typeof item.workflow_json === "object" && item.workflow_json !== null;
 }
 
 export const useTeamStore = create<TeamState>((set, get) => ({
@@ -135,5 +261,50 @@ export const useTeamStore = create<TeamState>((set, get) => ({
       return all.filter((r) => r.resource_type === filterType);
     }
     return all;
+  },
+
+  async getTeamEntitlements(teamId) {
+    const path = `/teams/${teamId}/entitlements`;
+    const payload = await api.get<unknown>(path);
+    return assertResponseShape(
+      payload,
+      isTeamEntitlements,
+      path,
+      "团队权益接口返回结构不正确",
+    );
+  },
+
+  async listWorkflowTemplates(teamId) {
+    const path = `/teams/${teamId}/workflow-templates`;
+    const payload = await api.get<unknown>(path);
+    const { templates } = assertResponseShape(
+      payload,
+      isTeamWorkflowTemplateListResponse,
+      path,
+      "团队工作流模板接口返回结构不正确",
+    );
+    return templates;
+  },
+
+  async createWorkflowTemplate(teamId, payload) {
+    const path = `/teams/${teamId}/workflow-templates`;
+    const result = await api.post<unknown>(path, payload);
+    return assertResponseShape(
+      result,
+      isTeamWorkflowTemplateDetail,
+      path,
+      "创建团队工作流模板返回结构不正确",
+    );
+  },
+
+  async getWorkflowTemplate(teamId, templateId) {
+    const path = `/teams/${teamId}/workflow-templates/${templateId}`;
+    const result = await api.get<unknown>(path);
+    return assertResponseShape(
+      result,
+      isTeamWorkflowTemplateDetail,
+      path,
+      "团队工作流模板详情返回结构不正确",
+    );
   },
 }));

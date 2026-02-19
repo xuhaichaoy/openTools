@@ -14,8 +14,14 @@ import {
   Languages,
   Workflow,
   BookOpen,
+  TextCursorInput,
+  Bookmark,
+  Zap,
 } from "lucide-react";
 import { useDragWindow } from "@/hooks/useDragWindow";
+import { registry } from "@/core/plugin-system/registry";
+import { usePluginStore } from "@/store/plugin-store";
+import { isBuiltinPluginInstallRequired } from "@/plugins/builtin";
 
 interface FeatureCard {
   id: string;
@@ -33,6 +39,18 @@ interface HomeProps {
 
 export function Home({ onNavigate, onBack }: HomeProps) {
   const { onMouseDown } = useDragWindow();
+  const { plugins } = usePluginStore();
+  const installedOfficialSlugSet = new Set(
+    plugins
+      .filter((plugin) => plugin.enabled && plugin.source === "official")
+      .map((plugin) => plugin.slug?.toLowerCase())
+      .filter(Boolean) as string[],
+  );
+  const hasTool = (viewId: string) => {
+    if (!isBuiltinPluginInstallRequired(viewId)) return true;
+    return installedOfficialSlugSet.has(viewId) && Boolean(registry.getByViewId(viewId));
+  };
+
   const features: FeatureCard[] = [
     {
       id: "ai-center",
@@ -42,14 +60,16 @@ export function Home({ onNavigate, onBack }: HomeProps) {
       color: "text-indigo-400 bg-indigo-400/10",
       action: () => onNavigate("ai-center"),
     },
-    {
-      id: "dev-toolbox",
-      icon: <Wrench className="w-5 h-5" />,
-      title: "开发工具箱",
-      description: "JSON、时间戳、Base64",
-      color: "text-yellow-400 bg-yellow-400/10",
-      action: () => onNavigate("dev-toolbox"),
-    },
+    ...(hasTool("dev-toolbox")
+      ? [{
+          id: "dev-toolbox",
+          icon: <Wrench className="w-5 h-5" />,
+          title: "开发工具箱",
+          description: "JSON、时间戳、Base64",
+          color: "text-yellow-400 bg-yellow-400/10",
+          action: () => onNavigate("dev-toolbox"),
+        }]
+      : []),
     {
       id: "screen-capture",
       icon: <Camera className="w-5 h-5" />,
@@ -66,14 +86,16 @@ export function Home({ onNavigate, onBack }: HomeProps) {
       color: "text-teal-400 bg-teal-400/10",
       action: () => onNavigate("screen-translate"),
     },
-    {
-      id: "note-hub",
-      icon: <FileText className="w-5 h-5" />,
-      title: "笔记中心",
-      description: "速记、AI 笔记、Markdown",
-      color: "text-lime-400 bg-lime-400/10",
-      action: () => onNavigate("note-hub"),
-    },
+    ...(hasTool("note-hub")
+      ? [{
+          id: "note-hub",
+          icon: <FileText className="w-5 h-5" />,
+          title: "笔记中心",
+          description: "速记、AI 笔记、Markdown",
+          color: "text-lime-400 bg-lime-400/10",
+          action: () => onNavigate("note-hub"),
+        }]
+      : []),
     {
       id: "workflows",
       icon: <Workflow className="w-5 h-5" />,
@@ -98,14 +120,16 @@ export function Home({ onNavigate, onBack }: HomeProps) {
       color: "text-pink-400 bg-pink-400/10",
       action: () => onNavigate("color"),
     },
-    {
-      id: "qr-code",
-      icon: <QrCode className="w-5 h-5" />,
-      title: "二维码",
-      description: "二维码/条形码识别与生成",
-      color: "text-violet-400 bg-violet-400/10",
-      action: () => onNavigate("qr-code"),
-    },
+    ...(hasTool("qr-code")
+      ? [{
+          id: "qr-code",
+          icon: <QrCode className="w-5 h-5" />,
+          title: "二维码",
+          description: "二维码/条形码识别与生成",
+          color: "text-violet-400 bg-violet-400/10",
+          action: () => onNavigate("qr-code"),
+        }]
+      : []),
     {
       id: "data-forge",
       icon: <Database className="w-5 h-5" />,
@@ -114,14 +138,54 @@ export function Home({ onNavigate, onBack }: HomeProps) {
       color: "text-purple-400 bg-purple-400/10",
       action: () => onNavigate("data-forge"),
     },
-    {
-      id: "image-search",
-      icon: <Search className="w-5 h-5" />,
-      title: "以图搜图",
-      description: "反向图片搜索 + AI 理解",
-      color: "text-indigo-400 bg-indigo-400/10",
-      action: () => onNavigate("image-search"),
-    },
+    ...(hasTool("image-search")
+      ? [
+          {
+            id: "image-search",
+            icon: <Search className="w-5 h-5" />,
+            title: "以图搜图",
+            description: "反向图片搜索 + AI 理解",
+            color: "text-indigo-400 bg-indigo-400/10",
+            action: () => onNavigate("image-search"),
+          },
+        ]
+      : []),
+    ...(hasTool("system-actions")
+      ? [
+          {
+            id: "system-actions",
+            icon: <Zap className="w-5 h-5" />,
+            title: "系统操作",
+            description: "常用系统动作与快捷执行",
+            color: "text-amber-400 bg-amber-400/10",
+            action: () => onNavigate("system-actions"),
+          },
+        ]
+      : []),
+    ...(hasTool("snippets")
+      ? [
+          {
+            id: "snippets",
+            icon: <TextCursorInput className="w-5 h-5" />,
+            title: "快捷短语",
+            description: "文本片段管理与快速插入",
+            color: "text-emerald-400 bg-emerald-400/10",
+            action: () => onNavigate("snippets"),
+          },
+        ]
+      : []),
+    ...(hasTool("bookmarks")
+      ? [
+          {
+            id: "bookmarks",
+            icon: <Bookmark className="w-5 h-5" />,
+            title: "网页书签",
+            description: "收藏管理与快速检索",
+            color: "text-blue-400 bg-blue-400/10",
+            action: () => onNavigate("bookmarks"),
+          },
+        ]
+      : []),
     {
       id: "cloud-sync",
       icon: <Cloud className="w-5 h-5" />,

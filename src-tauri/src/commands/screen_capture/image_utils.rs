@@ -35,12 +35,18 @@ pub fn capture_all_windows() -> Result<Vec<WindowCapture>, String> {
     if temp_dir.exists() {
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
-    std::fs::create_dir_all(&temp_dir)
-        .map_err(|e| format!("创建临时目录失败: {e}"))?;
+    std::fs::create_dir_all(&temp_dir).map_err(|e| format!("创建临时目录失败: {e}"))?;
 
     let system_titles = [
-        "Dock", "Menu Bar", "MenuBar", "Status", "Notification Center",
-        "", "Desktop", "mTools", "截图",
+        "Dock",
+        "Menu Bar",
+        "MenuBar",
+        "Status",
+        "Notification Center",
+        "",
+        "Desktop",
+        "mTools",
+        "截图",
     ];
 
     let mut captures: Vec<WindowCapture> = Vec::new();
@@ -56,10 +62,7 @@ pub fn capture_all_windows() -> Result<Vec<WindowCapture>, String> {
         let height = window.height().unwrap_or(0);
 
         // 跳过系统窗口、无标题窗口、过小窗口
-        if system_titles.contains(&title.as_str())
-            || title.len() < 2
-            || width < 100
-            || height < 100
+        if system_titles.contains(&title.as_str()) || title.len() < 2 || width < 100 || height < 100
         {
             continue;
         }
@@ -70,11 +73,7 @@ pub fn capture_all_windows() -> Result<Vec<WindowCapture>, String> {
             Err(_) => continue,
         };
 
-        let path = temp_dir.join(format!(
-            "window-{}-{}.png",
-            i,
-            normalized_filename(&title)
-        ));
+        let path = temp_dir.join(format!("window-{}-{}.png", i, normalized_filename(&title)));
         if image.save(&path).is_err() {
             continue;
         }
@@ -95,11 +94,17 @@ pub fn capture_all_windows() -> Result<Vec<WindowCapture>, String> {
 /// 检查系统中是否有 ffmpeg
 pub(super) fn which_ffmpeg() -> bool {
     if cfg!(windows) {
-        Command::new("where").arg("ffmpeg").output()
-            .map(|o| o.status.success()).unwrap_or(false)
+        Command::new("where")
+            .arg("ffmpeg")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
     } else {
-        Command::new("which").arg("ffmpeg").output()
-            .map(|o| o.status.success()).unwrap_or(false)
+        Command::new("which")
+            .arg("ffmpeg")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
     }
 }
 
@@ -119,20 +124,20 @@ pub struct NativeWindowInfo {
 pub async fn list_windows_xcap() -> Result<Vec<NativeWindowInfo>, String> {
     let windows = xcap::Window::all().map_err(|e| format!("获取窗口列表失败: {e}"))?;
     let mut results = Vec::new();
-    
+
     for window in windows {
         // 尝试获取 id，xcap window可能有 id() 方法，若无则使用 pid 或其他特征
         // 在 xcap 0.8 中，Window可能有 id()。若编译失败稍后修复。
         // 这里假设 xcap::Window 有 id() 方法。如果报错，我们改用其他方式。
-        let id = window.id().unwrap_or(0); 
+        let id = window.id().unwrap_or(0);
         let title = window.title().unwrap_or_default();
         let app_name = window.app_name().unwrap_or_default();
         let width = window.width().unwrap_or(0);
         let height = window.height().unwrap_or(0);
-        
+
         // 过滤逻辑
         if window.is_minimized().unwrap_or(true) || width < 50 || height < 50 || title.is_empty() {
-             continue;
+            continue;
         }
 
         // 生成缩略图 (可选，为了性能先不生成，或者只生成很小的)
@@ -142,7 +147,7 @@ pub async fn list_windows_xcap() -> Result<Vec<NativeWindowInfo>, String> {
         // 为了流畅度，这里暂时不返回缩略图，或者只返回应用图标（如果能获取）。
         // xcap 不直接提供图标。
         // 我们先返回 None，前端显示默认图标。
-        
+
         results.push(NativeWindowInfo {
             id,
             title,
@@ -152,20 +157,24 @@ pub async fn list_windows_xcap() -> Result<Vec<NativeWindowInfo>, String> {
             thumbnail: None, // 暂不支持实时缩略图以提升列表加载速度
         });
     }
-    
+
     Ok(results)
 }
 
 #[tauri::command]
-pub async fn capture_window_xcap_by_id( window_id: u32) -> Result<String, String> {
+pub async fn capture_window_xcap_by_id(window_id: u32) -> Result<String, String> {
     // 隐藏主窗口的逻辑在前端调用此命令前处理，或者这里不做处理（只负责截取）
-    
+
     let windows = xcap::Window::all().map_err(|e| format!("获取窗口列表失败: {e}"))?;
-    let window = windows.into_iter().find(|w| w.id().unwrap_or(0) == window_id)
+    let window = windows
+        .into_iter()
+        .find(|w| w.id().unwrap_or(0) == window_id)
         .ok_or_else(|| "未找到指定 ID 的窗口".to_string())?;
 
-    let img = window.capture_image().map_err(|e| format!("截图失败: {e}"))?;
-    
+    let img = window
+        .capture_image()
+        .map_err(|e| format!("截图失败: {e}"))?;
+
     // 保存到临时文件
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -173,7 +182,7 @@ pub async fn capture_window_xcap_by_id( window_id: u32) -> Result<String, String
         .as_millis();
     let path = std::env::temp_dir().join(format!("xcap-win-{}.png", ts));
     img.save(&path).map_err(|e| format!("保存失败: {e}"))?;
-    
+
     // 记录路径供 finish_capture 使用
     if let Ok(mut guard) = super::recording::CURRENT_SCREENSHOT_PATH.lock() {
         *guard = Some(path.to_string_lossy().to_string());

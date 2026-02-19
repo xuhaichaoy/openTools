@@ -79,11 +79,12 @@ pub async fn ding_create(
     );
 
     // 写入临时文件
-    let temp_dir = app.path().temp_dir()
+    let temp_dir = app
+        .path()
+        .temp_dir()
         .map_err(|e| format!("Get temp dir failed: {}", e))?;
     let html_path = temp_dir.join(format!("{}.html", id));
-    std::fs::write(&html_path, html)
-        .map_err(|e| format!("Write HTML failed: {}", e))?;
+    std::fs::write(&html_path, html).map_err(|e| format!("Write HTML failed: {}", e))?;
 
     // 创建透明无边框窗口：使用 file:// URL，避免错误回落到主应用首页
     let file_url = Url::from_file_path(&html_path)
@@ -113,7 +114,10 @@ pub async fn ding_create(
     };
 
     if let Some(mgr) = app.try_state::<DingManager>() {
-        mgr.instances.lock().map_err(|e| format!("Lock poisoned: {}", e))?.insert(id.clone(), info);
+        mgr.instances
+            .lock()
+            .map_err(|e| format!("Lock poisoned: {}", e))?
+            .insert(id.clone(), info);
     }
 
     Ok(id)
@@ -164,25 +168,31 @@ pub async fn ding_close(ding_id: String, app: AppHandle) -> Result<(), String> {
         window.close().map_err(|e| format!("Close failed: {}", e))?;
     }
     if let Some(mgr) = app.try_state::<DingManager>() {
-        mgr.instances.lock().map_err(|e| format!("Lock poisoned: {}", e))?.remove(&ding_id);
+        mgr.instances
+            .lock()
+            .map_err(|e| format!("Lock poisoned: {}", e))?
+            .remove(&ding_id);
     }
     Ok(())
 }
 
 /// 设置贴图透明度
 #[tauri::command]
-pub async fn ding_set_opacity(
-    ding_id: String,
-    opacity: f64,
-    app: AppHandle,
-) -> Result<(), String> {
+pub async fn ding_set_opacity(ding_id: String, opacity: f64, app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(&ding_id) {
         // Tauri 2 doesn't have set_opacity directly; use JS injection
         let js = format!("document.body.style.opacity = '{}'", opacity);
-        window.eval(&js).map_err(|e| format!("Eval failed: {}", e))?;
+        window
+            .eval(&js)
+            .map_err(|e| format!("Eval failed: {}", e))?;
     }
     if let Some(mgr) = app.try_state::<DingManager>() {
-        if let Some(info) = mgr.instances.lock().map_err(|e| format!("Lock poisoned: {}", e))?.get_mut(&ding_id) {
+        if let Some(info) = mgr
+            .instances
+            .lock()
+            .map_err(|e| format!("Lock poisoned: {}", e))?
+            .get_mut(&ding_id)
+        {
             info.opacity = opacity;
         }
     }
@@ -193,7 +203,13 @@ pub async fn ding_set_opacity(
 #[tauri::command]
 pub async fn ding_list(app: AppHandle) -> Result<Vec<DingInfo>, String> {
     if let Some(mgr) = app.try_state::<DingManager>() {
-        Ok(mgr.instances.lock().map_err(|e| format!("Lock poisoned: {}", e))?.values().cloned().collect())
+        Ok(mgr
+            .instances
+            .lock()
+            .map_err(|e| format!("Lock poisoned: {}", e))?
+            .values()
+            .cloned()
+            .collect())
     } else {
         Ok(vec![])
     }
@@ -203,13 +219,22 @@ pub async fn ding_list(app: AppHandle) -> Result<Vec<DingInfo>, String> {
 #[tauri::command]
 pub async fn ding_close_all(app: AppHandle) -> Result<(), String> {
     if let Some(mgr) = app.try_state::<DingManager>() {
-        let ids: Vec<String> = mgr.instances.lock().map_err(|e| format!("Lock poisoned: {}", e))?.keys().cloned().collect();
+        let ids: Vec<String> = mgr
+            .instances
+            .lock()
+            .map_err(|e| format!("Lock poisoned: {}", e))?
+            .keys()
+            .cloned()
+            .collect();
         for id in ids {
             if let Some(window) = app.get_webview_window(&id) {
                 let _ = window.close();
             }
         }
-        mgr.instances.lock().map_err(|e| format!("Lock poisoned: {}", e))?.clear();
+        mgr.instances
+            .lock()
+            .map_err(|e| format!("Lock poisoned: {}", e))?
+            .clear();
     }
     Ok(())
 }

@@ -1,5 +1,5 @@
-use tauri::{AppHandle, Manager};
 use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::{AppHandle, Manager};
 
 static IS_DRAGGING: AtomicBool = AtomicBool::new(false);
 
@@ -58,8 +58,7 @@ pub async fn show_window_cmd(app: AppHandle) -> Result<(), String> {
 /// 开始拖拽窗口（nchao 方式：记录初始位置，轮询鼠标移动）
 #[tauri::command]
 pub async fn start_drag(app: AppHandle) -> Result<(), String> {
-    let window = app.get_webview_window("main")
-        .ok_or("找不到主窗口")?;
+    let window = app.get_webview_window("main").ok_or("找不到主窗口")?;
 
     // 获取窗口当前位置
     let win_pos = window.outer_position().map_err(|e| e.to_string())?;
@@ -81,9 +80,10 @@ pub async fn start_drag(app: AppHandle) -> Result<(), String> {
                 let dy = cur.y as i32 - mouse_y;
                 let new_x = win_x + dx;
                 let new_y = win_y + dy;
-                let _ = win.set_position(tauri::Position::Physical(
-                    tauri::PhysicalPosition { x: new_x, y: new_y },
-                ));
+                let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
+                    x: new_x,
+                    y: new_y,
+                }));
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }

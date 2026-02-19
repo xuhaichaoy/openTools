@@ -8,7 +8,8 @@ export interface User {
   email?: string;
   username: string;
   avatar_url?: string;
-  plan: "free" | "pro" | "team";
+  plan: "free" | "pro";
+  plan_expires_at?: string | null;
   energy: number;
   registered_at?: string;
 }
@@ -26,6 +27,14 @@ interface AuthState {
   updateEnergy: (energy: number) => void;
 }
 
+function normalizeUser(user: User | null): User | null {
+  if (!user) return null;
+  return {
+    ...user,
+    plan: user.plan === "pro" ? "pro" : "free",
+  };
+}
+
 export const useAuthStore = create<AuthState>()(
   persist(
     (set) => ({
@@ -34,17 +43,22 @@ export const useAuthStore = create<AuthState>()(
       refreshToken: null,
       isLoggedIn: false,
 
-      setUser: (user) => set({ user, isLoggedIn: !!user }),
+      setUser: (user) => {
+        const normalized = normalizeUser(user);
+        set({ user: normalized, isLoggedIn: !!normalized });
+      },
       setToken: (token) => set({ token }),
       setRefreshToken: (refreshToken) => set({ refreshToken }),
 
-      login: (user, token, refreshToken) =>
+      login: (user, token, refreshToken) => {
+        const normalized = normalizeUser(user);
         set({
-          user,
+          user: normalized,
           token,
           refreshToken: refreshToken ?? null,
-          isLoggedIn: true,
-        }),
+          isLoggedIn: !!normalized,
+        });
+      },
 
       logout: () =>
         set({

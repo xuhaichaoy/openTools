@@ -28,7 +28,9 @@ pub(super) fn node_to_step(node: &WorkflowGraphNode) -> WorkflowStep {
 }
 
 /// 邻接表：source -> [(target, source_handle)]
-pub(super) fn build_adjacency(edges: &[WorkflowGraphEdge]) -> HashMap<String, Vec<(String, Option<String>)>> {
+pub(super) fn build_adjacency(
+    edges: &[WorkflowGraphEdge],
+) -> HashMap<String, Vec<(String, Option<String>)>> {
     let mut adj: HashMap<String, Vec<(String, Option<String>)>> = HashMap::new();
     for e in edges {
         adj.entry(e.source.clone())
@@ -47,7 +49,8 @@ async fn execute_dag(
     context: &mut HashMap<String, String>,
 ) -> Result<String, String> {
     let adj = build_adjacency(edges);
-    let node_map: HashMap<String, &WorkflowGraphNode> = nodes.iter().map(|n| (n.id.clone(), n)).collect();
+    let node_map: HashMap<String, &WorkflowGraphNode> =
+        nodes.iter().map(|n| (n.id.clone(), n)).collect();
     let step_ids: HashSet<String> = nodes
         .iter()
         .filter(|n| n.node_type != "start" && n.node_type != "end")
@@ -101,12 +104,10 @@ async fn execute_dag(
                         }
                         continue;
                     }
-                    Some("retry") => {
-                        match execute_step(app, &step, context).await {
-                            Ok(r) => r,
-                            Err(e2) => return Err(format!("步骤 {} 重试失败: {}", step.name, e2)),
-                        }
-                    }
+                    Some("retry") => match execute_step(app, &step, context).await {
+                        Ok(r) => r,
+                        Err(e2) => return Err(format!("步骤 {} 重试失败: {}", step.name, e2)),
+                    },
                     _ => return Err(format!("步骤 {} 执行失败: {}", step.name, e)),
                 }
             }
@@ -168,16 +169,17 @@ pub async fn workflow_execute(
         serde_json::json!({ "workflowId": workflow.id, "name": workflow.name }),
     );
 
-    let final_output = if let (Some(ref nodes), Some(ref edges)) = (&workflow.nodes, &workflow.edges) {
-        if !nodes.is_empty() && !edges.is_empty() {
-            let out = execute_dag(&app, &workflow.id, nodes, edges, &mut context).await?;
-            out
+    let final_output =
+        if let (Some(ref nodes), Some(ref edges)) = (&workflow.nodes, &workflow.edges) {
+            if !nodes.is_empty() && !edges.is_empty() {
+                let out = execute_dag(&app, &workflow.id, nodes, edges, &mut context).await?;
+                out
+            } else {
+                execute_linear(&app, &workflow, &mut context).await?
+            }
         } else {
             execute_linear(&app, &workflow, &mut context).await?
-        }
-    } else {
-        execute_linear(&app, &workflow, &mut context).await?
-    };
+        };
 
     let _ = app.emit(
         "workflow-done",
@@ -196,7 +198,8 @@ async fn execute_linear(
     for step in &workflow.steps {
         if let Some(cond) = &step.condition {
             let evaluated = interpolate(cond, context);
-            if evaluated.trim().is_empty() || evaluated.trim() == "''" || evaluated.trim() == "\"\"" {
+            if evaluated.trim().is_empty() || evaluated.trim() == "''" || evaluated.trim() == "\"\""
+            {
                 continue;
             }
         }
@@ -215,12 +218,10 @@ async fn execute_linear(
                 );
                 match step.on_error.as_deref() {
                     Some("skip") => continue,
-                    Some("retry") => {
-                        match execute_step(app, step, context).await {
-                            Ok(r) => r,
-                            Err(e2) => return Err(format!("步骤 {} 重试失败: {}", step.name, e2)),
-                        }
-                    }
+                    Some("retry") => match execute_step(app, step, context).await {
+                        Ok(r) => r,
+                        Err(e2) => return Err(format!("步骤 {} 重试失败: {}", step.name, e2)),
+                    },
                     _ => return Err(format!("步骤 {} 执行失败: {}", step.name, e)),
                 }
             }
@@ -264,14 +265,21 @@ async fn execute_step(
             Ok(text)
         }
         "clipboard_write" => {
-            let text = step.config.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            let text = step
+                .config
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let text = interpolate(text, context);
             let app_clone = app.clone();
             let text_clone = text.clone();
             let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
             app.run_on_main_thread(move || {
                 use tauri_plugin_clipboard_manager::ClipboardExt;
-                let r = app_clone.clipboard().write_text(&text_clone).map_err(|e| e.to_string());
+                let r = app_clone
+                    .clipboard()
+                    .write_text(&text_clone)
+                    .map_err(|e| e.to_string());
                 let _ = tx.send(r);
             })
             .map_err(|e| e.to_string())?;
@@ -279,17 +287,34 @@ async fn execute_step(
             Ok(text)
         }
         "ai_chat" => {
-            let prompt = step.config.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+            let prompt = step
+                .config
+                .get("prompt")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let prompt = interpolate(prompt, context);
-            let system_prompt = step.config.get("system_prompt").and_then(|v| v.as_str()).unwrap_or("你是一个有用的助手。回答使用中文。");
+            let system_prompt = step
+                .config
+                .get("system_prompt")
+                .and_then(|v| v.as_str())
+                .unwrap_or("你是一个有用的助手。回答使用中文。");
             let system_prompt = interpolate(system_prompt, context);
-            let model = step.config.get("model").and_then(|v| v.as_str()).unwrap_or("gpt-4o");
-            let temperature = step.config.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.7) as f32;
+            let model = step
+                .config
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("gpt-4o");
+            let temperature = step
+                .config
+                .get("temperature")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.7) as f32;
 
             // 加载配置获取 API key
             use tauri_plugin_store::StoreExt;
             let store = app.store("config.json").map_err(|e| e.to_string())?;
-            let ai_config: super::super::ai::AIConfig = store.get("ai_config")
+            let ai_config: super::super::ai::AIConfig = store
+                .get("ai_config")
                 .and_then(|v| serde_json::from_value(v).ok())
                 .unwrap_or_default();
 
@@ -313,8 +338,12 @@ async fn execute_step(
                 .await
                 .map_err(|e| format!("AI 请求失败: {}", e))?;
 
-            let body = response.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
-            let parsed: serde_json::Value = serde_json::from_str(&body).map_err(|e| format!("解析响应失败: {}", e))?;
+            let body = response
+                .text()
+                .await
+                .map_err(|e| format!("读取响应失败: {}", e))?;
+            let parsed: serde_json::Value =
+                serde_json::from_str(&body).map_err(|e| format!("解析响应失败: {}", e))?;
             let content = parsed["choices"][0]["message"]["content"]
                 .as_str()
                 .unwrap_or("")
@@ -322,12 +351,23 @@ async fn execute_step(
             Ok(content)
         }
         "script" => {
-            let script_type = step.config.get("type").and_then(|v| v.as_str()).unwrap_or("shell");
-            let script = step.config.get("script").and_then(|v| v.as_str()).unwrap_or("");
+            let script_type = step
+                .config
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("shell");
+            let script = step
+                .config
+                .get("script")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let script = interpolate(script, context);
 
             let (cmd, args) = match script_type {
-                "python" => ("python3".to_string(), vec!["-c".to_string(), script.clone()]),
+                "python" => (
+                    "python3".to_string(),
+                    vec!["-c".to_string(), script.clone()],
+                ),
                 _ => ("sh".to_string(), vec!["-c".to_string(), script.clone()]),
             };
 
@@ -347,23 +387,51 @@ async fn execute_step(
             Ok(stdout.trim().to_string())
         }
         "transform" => {
-            let transform_type = step.config.get("type").and_then(|v| v.as_str()).unwrap_or("template");
-            let input = step.config.get("input").and_then(|v| v.as_str()).unwrap_or("{{prev.output}}");
+            let transform_type = step
+                .config
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("template");
+            let input = step
+                .config
+                .get("input")
+                .and_then(|v| v.as_str())
+                .unwrap_or("{{prev.output}}");
             let input = interpolate(input, context);
 
             match transform_type {
                 "template" => {
-                    let template = step.config.get("template").and_then(|v| v.as_str()).unwrap_or("");
+                    let template = step
+                        .config
+                        .get("template")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     Ok(interpolate(template, context))
                 }
                 "replace" => {
-                    let pattern = step.config.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
-                    let replacement = step.config.get("replacement").and_then(|v| v.as_str()).unwrap_or("");
+                    let pattern = step
+                        .config
+                        .get("pattern")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let replacement = step
+                        .config
+                        .get("replacement")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     Ok(input.replace(pattern, replacement))
                 }
                 "split" => {
-                    let delimiter = step.config.get("delimiter").and_then(|v| v.as_str()).unwrap_or("\n");
-                    let index = step.config.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                    let delimiter = step
+                        .config
+                        .get("delimiter")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("\n");
+                    let index = step
+                        .config
+                        .get("index")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as usize;
                     let parts: Vec<&str> = input.split(delimiter).collect();
                     Ok(parts.get(index).unwrap_or(&"").to_string())
                 }
@@ -371,10 +439,22 @@ async fn execute_step(
             }
         }
         "http" => {
-            let method = step.config.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
-            let url = step.config.get("url").and_then(|v| v.as_str()).unwrap_or("");
+            let method = step
+                .config
+                .get("method")
+                .and_then(|v| v.as_str())
+                .unwrap_or("GET");
+            let url = step
+                .config
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let url = interpolate(url, context);
-            let body_str = step.config.get("body").and_then(|v| v.as_str()).unwrap_or("");
+            let body_str = step
+                .config
+                .get("body")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let body_str = interpolate(body_str, context);
 
             let client = reqwest::Client::new();
@@ -397,19 +477,37 @@ async fn execute_step(
                 req = req.body(body_str);
             }
 
-            let response = req.send().await.map_err(|e| format!("HTTP 请求失败: {}", e))?;
-            let text = response.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+            let response = req
+                .send()
+                .await
+                .map_err(|e| format!("HTTP 请求失败: {}", e))?;
+            let text = response
+                .text()
+                .await
+                .map_err(|e| format!("读取响应失败: {}", e))?;
             Ok(text)
         }
         "file_read" => {
-            let path = step.config.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let path = step
+                .config
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let path = interpolate(path, context);
             std::fs::read_to_string(&path).map_err(|e| format!("读取文件失败: {}", e))
         }
         "file_write" => {
-            let path = step.config.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let path = step
+                .config
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let path = interpolate(path, context);
-            let content = step.config.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let content = step
+                .config
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let content = interpolate(content, context);
             if let Some(parent) = std::path::Path::new(&path).parent() {
                 let _ = std::fs::create_dir_all(parent);
@@ -418,33 +516,66 @@ async fn execute_step(
             Ok(format!("已写入 {}", path))
         }
         "notification" => {
-            let message = step.config.get("message").and_then(|v| v.as_str()).unwrap_or("");
+            let message = step
+                .config
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let message = interpolate(message, context);
             use tauri_plugin_notification::NotificationExt;
-            let _ = app.notification().builder().title("mTools").body(&message).show();
+            let _ = app
+                .notification()
+                .builder()
+                .title("mTools")
+                .body(&message)
+                .show();
             Ok(message)
         }
         "user_input" => {
             // 用户输入步骤 — 在前端处理，此处返回已有变量
-            let var_name = step.config.get("variable").and_then(|v| v.as_str()).unwrap_or("input");
+            let var_name = step
+                .config
+                .get("variable")
+                .and_then(|v| v.as_str())
+                .unwrap_or("input");
             Ok(context.get(var_name).cloned().unwrap_or_default())
         }
         "condition" => {
             // 条件判断 — 对表达式做变量插值，非空即为 true
-            let expr = step.config.get("expression").and_then(|v| v.as_str()).unwrap_or("");
+            let expr = step
+                .config
+                .get("expression")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let evaluated = interpolate(expr, context);
             let is_true = !evaluated.trim().is_empty()
                 && evaluated.trim() != "false"
                 && evaluated.trim() != "0"
                 && evaluated.trim() != "''"
                 && evaluated.trim() != "\"\"";
-            Ok(if is_true { "true".to_string() } else { "false".to_string() })
+            Ok(if is_true {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            })
         }
         "plugin_action" => {
             // 插件动作 — 通过事件桥委托前端执行
-            let plugin_id = step.config.get("pluginId").and_then(|v| v.as_str()).unwrap_or("");
-            let action_name = step.config.get("actionName").and_then(|v| v.as_str()).unwrap_or("");
-            let params_raw = step.config.get("params").and_then(|v| v.as_str()).unwrap_or("{}");
+            let plugin_id = step
+                .config
+                .get("pluginId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let action_name = step
+                .config
+                .get("actionName")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let params_raw = step
+                .config
+                .get("params")
+                .and_then(|v| v.as_str())
+                .unwrap_or("{}");
             let params_raw = interpolate(params_raw, context);
 
             // 生成唯一请求 ID
@@ -452,12 +583,15 @@ async fn execute_step(
             let request_id_clone = request_id.clone();
 
             // 向前端发送执行请求
-            let _ = app.emit("workflow-plugin-action", serde_json::json!({
-                "requestId": request_id,
-                "pluginId": plugin_id,
-                "actionName": action_name,
-                "params": params_raw,
-            }));
+            let _ = app.emit(
+                "workflow-plugin-action",
+                serde_json::json!({
+                    "requestId": request_id,
+                    "pluginId": plugin_id,
+                    "actionName": action_name,
+                    "params": params_raw,
+                }),
+            );
 
             // 监听前端返回的结果
             let (tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
@@ -467,12 +601,18 @@ async fn execute_step(
 
             let _handler = app_clone.listen("workflow-plugin-action-result", move |event| {
                 if let Ok(payload) = serde_json::from_str::<serde_json::Value>(event.payload()) {
-                    if payload.get("requestId").and_then(|v| v.as_str()) == Some(&request_id_clone) {
-                        let result = if let Some(err) = payload.get("error").and_then(|v| v.as_str()) {
-                            Err(err.to_string())
-                        } else {
-                            Ok(payload.get("result").and_then(|v| v.as_str()).unwrap_or("").to_string())
-                        };
+                    if payload.get("requestId").and_then(|v| v.as_str()) == Some(&request_id_clone)
+                    {
+                        let result =
+                            if let Some(err) = payload.get("error").and_then(|v| v.as_str()) {
+                                Err(err.to_string())
+                            } else {
+                                Ok(payload
+                                    .get("result")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string())
+                            };
                         if let Ok(mut guard) = tx_clone.lock() {
                             if let Some(sender) = guard.take() {
                                 let _ = sender.send(result);

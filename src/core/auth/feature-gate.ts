@@ -20,8 +20,13 @@ export type GateResult = {
 function computeGateResult(
   feature: Feature,
   isLoggedIn: boolean,
-  energy: number,
+  userPlan?: "free" | "pro",
+  userPlanExpiresAt?: string | null,
 ): GateResult {
+  const isPersonalProActive =
+    userPlan === "pro" &&
+    (!userPlanExpiresAt || new Date(userPlanExpiresAt).getTime() > Date.now());
+
   switch (feature) {
     case "cloud_sync":
       if (!isLoggedIn) {
@@ -29,6 +34,13 @@ function computeGateResult(
           allowed: false,
           reason: "登录后即可使用云同步功能",
           action: "login",
+        };
+      }
+      if (!isPersonalProActive) {
+        return {
+          allowed: false,
+          reason: "个人云同步需要会员",
+          action: "upgrade",
         };
       }
       return { allowed: true };
@@ -41,14 +53,10 @@ function computeGateResult(
           action: "login",
         };
       }
-      if (energy <= 0) {
-        return {
-          allowed: false,
-          reason: "AI 能量不足，请充值",
-          action: "recharge",
-        };
-      }
-      return { allowed: true };
+      return {
+        allowed: false,
+        reason: "平台 AI 暂未开放",
+      };
 
     case "team_ai":
       if (!isLoggedIn) {
@@ -93,7 +101,12 @@ function computeGateResult(
  */
 export function checkFeatureAccess(feature: Feature): GateResult {
   const { isLoggedIn, user } = useAuthStore.getState();
-  return computeGateResult(feature, isLoggedIn, user?.energy || 0);
+  return computeGateResult(
+    feature,
+    isLoggedIn,
+    user?.plan,
+    user?.plan_expires_at,
+  );
 }
 
 /**
@@ -101,8 +114,9 @@ export function checkFeatureAccess(feature: Feature): GateResult {
  */
 export function useFeatureGate(feature: Feature): GateResult {
   const isLoggedIn = useAuthStore((s) => s.isLoggedIn);
-  const energy = useAuthStore((s) => s.user?.energy || 0);
-  return computeGateResult(feature, isLoggedIn, energy);
+  const userPlan = useAuthStore((s) => s.user?.plan);
+  const userPlanExpiresAt = useAuthStore((s) => s.user?.plan_expires_at);
+  return computeGateResult(feature, isLoggedIn, userPlan, userPlanExpiresAt);
 }
 
 /**

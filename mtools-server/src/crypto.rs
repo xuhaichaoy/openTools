@@ -5,42 +5,40 @@
 
 use aes_gcm::{
     aead::{Aead, KeyInit, OsRng},
-    Aes256Gcm, AeadCore, Nonce,
+    AeadCore, Aes256Gcm, Nonce,
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use once_cell::sync::Lazy;
 
 const ENC_PREFIX: &str = "enc:";
 
-static ENCRYPTION_KEY: Lazy<[u8; 32]> = Lazy::new(|| {
-    match std::env::var("ENCRYPTION_KEY") {
-        Ok(key_b64) => {
-            let decoded = B64.decode(key_b64.trim()).expect(
-                "ENCRYPTION_KEY must be a valid base64-encoded 32-byte key",
-            );
-            assert_eq!(
-                decoded.len(),
-                32,
-                "ENCRYPTION_KEY must be exactly 32 bytes (got {})",
-                decoded.len()
-            );
-            let mut key = [0u8; 32];
-            key.copy_from_slice(&decoded);
-            key
-        }
-        Err(_) => {
-            tracing::warn!(
-                "ENCRYPTION_KEY not set — using fallback key. \
+static ENCRYPTION_KEY: Lazy<[u8; 32]> = Lazy::new(|| match std::env::var("ENCRYPTION_KEY") {
+    Ok(key_b64) => {
+        let decoded = B64
+            .decode(key_b64.trim())
+            .expect("ENCRYPTION_KEY must be a valid base64-encoded 32-byte key");
+        assert_eq!(
+            decoded.len(),
+            32,
+            "ENCRYPTION_KEY must be exactly 32 bytes (got {})",
+            decoded.len()
+        );
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&decoded);
+        key
+    }
+    Err(_) => {
+        tracing::warn!(
+            "ENCRYPTION_KEY not set — using fallback key. \
                  Set a 32-byte base64 key in production!"
-            );
-            use hkdf::Hkdf;
-            use sha2::Sha256;
-            let hk = Hkdf::<Sha256>::new(Some(b"mtools-dev-salt"), b"mtools-dev-fallback");
-            let mut key = [0u8; 32];
-            hk.expand(b"mtools-server-aes256gcm", &mut key)
-                .expect("valid length");
-            key
-        }
+        );
+        use hkdf::Hkdf;
+        use sha2::Sha256;
+        let hk = Hkdf::<Sha256>::new(Some(b"mtools-dev-salt"), b"mtools-dev-fallback");
+        let mut key = [0u8; 32];
+        hk.expand(b"mtools-server-aes256gcm", &mut key)
+            .expect("valid length");
+        key
     }
 });
 
@@ -48,8 +46,7 @@ pub fn encrypt(plaintext: &str) -> anyhow::Result<String> {
     if plaintext.is_empty() {
         return Ok(String::new());
     }
-    let cipher =
-        Aes256Gcm::new_from_slice(&*ENCRYPTION_KEY).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let cipher = Aes256Gcm::new_from_slice(&*ENCRYPTION_KEY).map_err(|e| anyhow::anyhow!("{e}"))?;
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
     let ciphertext = cipher
         .encrypt(&nonce, plaintext.as_bytes())
@@ -75,8 +72,7 @@ pub fn decrypt(value: &str) -> anyhow::Result<String> {
     let (nonce_bytes, ciphertext) = blob.split_at(12);
     let nonce = Nonce::from_slice(nonce_bytes);
 
-    let cipher =
-        Aes256Gcm::new_from_slice(&*ENCRYPTION_KEY).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let cipher = Aes256Gcm::new_from_slice(&*ENCRYPTION_KEY).map_err(|e| anyhow::anyhow!("{e}"))?;
     let plaintext = cipher
         .decrypt(nonce, ciphertext)
         .map_err(|_| anyhow::anyhow!("decryption failed"))?;

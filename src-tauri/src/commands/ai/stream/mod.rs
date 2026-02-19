@@ -1,5 +1,5 @@
-pub mod openai;
 pub mod anthropic;
+pub mod openai;
 
 // ── 工具确认状态（用于危险工具执行前的用户确认） ──
 
@@ -21,11 +21,13 @@ impl StreamCancellation {
     }
 
     pub fn cancel(&self) {
-        self.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn reset(&self) {
-        self.cancelled.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.cancelled
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn is_cancelled(&self) -> bool {

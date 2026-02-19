@@ -1,9 +1,86 @@
 //! 插件 API 桥接 — plugin_api_call / 嵌入 HTML / utools shim 生成
 
 use std::path::PathBuf;
+use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
-use super::lifecycle::get_cached_plugins;
+use super::lifecycle::{get_cached_plugins, push_dev_trace};
+use super::types::{PluginDevTraceItem, PluginInfo};
+
+fn now_rfc3339() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+fn find_plugin<'a>(plugins: &'a [PluginInfo], plugin_id: &str) -> Option<&'a PluginInfo> {
+    plugins.iter().find(|p| p.id == plugin_id)
+}
+
+fn required_permission(method: &str) -> Option<&'static str> {
+    match method {
+        "copyText" | "copyImage" => Some("clipboard"),
+        "showNotification" => Some("notification"),
+        "shellOpenExternal" | "shellOpenPath" | "shellShowItemInFolder" => Some("shell"),
+        "getPath" => Some("filesystem"),
+        "screenCapture" => Some("system"),
+        _ => None,
+    }
+}
+
+fn evaluate_permission(plugin: &PluginInfo, method: &str) -> (bool, String, Option<String>) {
+    if plugin.is_builtin {
+        return (true, "allow".to_string(), None);
+    }
+
+    let required = match required_permission(method) {
+        Some(p) => p,
+        None => return (true, "allow".to_string(), None),
+    };
+    let declared = plugin
+        .manifest
+        .mtools
+        .as_ref()
+        .map(|m| &m.permissions)
+        .cloned()
+        .unwrap_or_default();
+
+    if declared.iter().any(|p| p == required) {
+        return (true, "allow".to_string(), None);
+    }
+
+    let reason = format!("缺少权限 `{}`，无法调用 `{}`", required, method);
+    (false, "deny".to_string(), Some(reason))
+}
+
+fn record_trace(
+    app: &AppHandle,
+    plugin_id: String,
+    method: String,
+    call_id: u64,
+    started: Instant,
+    result: &Result<String, String>,
+    permission_decision: String,
+    permission_reason: Option<String>,
+) {
+    let duration_ms = started.elapsed().as_millis();
+    let (success, error) = match result {
+        Ok(_) => (true, None),
+        Err(e) => (false, Some(e.clone())),
+    };
+    push_dev_trace(
+        app,
+        PluginDevTraceItem {
+            plugin_id,
+            method,
+            call_id,
+            duration_ms,
+            success,
+            error,
+            permission_decision,
+            permission_reason,
+            created_at: now_rfc3339(),
+        },
+    );
+}
 
 // ── 插件窗口管理 ──
 
@@ -44,9 +121,8 @@ pub async fn plugin_open(
     // 开发模式
     if let Some(dev) = &plugin.manifest.development {
         if let Some(main_url) = dev.get("main").and_then(|v| v.as_str()) {
-            let url = WebviewUrl::External(
-                main_url.parse().map_err(|e| format!("无效 URL: {}", e))?,
-            );
+            let url =
+                WebviewUrl::External(main_url.parse().map_err(|e| format!("无效 URL: {}", e))?);
             let enter_script = generate_plugin_enter_script(&feature_code, "text", None);
             WebviewWindowBuilder::new(&app, &window_label, url)
                 .title(&title)
@@ -69,8 +145,8 @@ pub async fn plugin_open(
     if !main_path.exists() {
         return Err(format!("插件入口文件不存在: {}", main_path.display()));
     }
-    let html_content = std::fs::read_to_string(&main_path)
-        .map_err(|e| format!("读取插件文件失败: {}", e))?;
+    let html_content =
+        std::fs::read_to_string(&main_path).map_err(|e| format!("读取插件文件失败: {}", e))?;
 
     let base_url = format!(
         "mtplugin://localhost{}/",
@@ -78,8 +154,7 @@ pub async fn plugin_open(
     );
     let html_with_base = inject_base_tag(&html_content, &base_url);
 
-    let json_html =
-        serde_json::to_string(&html_with_base).map_err(|e| e.to_string())?;
+    let json_html = serde_json::to_string(&html_with_base).map_err(|e| e.to_string())?;
 
     let inject_script = format!(
         r#"(function(){{
@@ -133,7 +208,11 @@ setTimeout(__run,0);
 }
 
 #[tauri::command]
-pub async fn plugin_close(app: AppHandle, plugin_id: String, feature_code: String) -> Result<(), String> {
+pub async fn plugin_close(
+    app: AppHandle,
+    plugin_id: String,
+    feature_code: String,
+) -> Result<(), String> {
     let window_label = format!("plugin-{}-{}", plugin_id, feature_code);
     if let Some(window) = app.get_webview_window(&window_label) {
         window.close().map_err(|e| e.to_string())?;
@@ -151,26 +230,91 @@ pub async fn plugin_api_call(
     args: String,
     call_id: u64,
 ) -> Result<String, String> {
-    let _ = call_id;
-    let args: serde_json::Value =
-        serde_json::from_str(&args).map_err(|e| format!("无效参数 JSON: {}", e))?;
+    let started = Instant::now();
+    let args: serde_json::Value = match serde_json::from_str(&args) {
+        Ok(v) => v,
+        Err(e) => {
+            let result = Err(format!("无效参数 JSON: {}", e));
+            record_trace(
+                &app,
+                plugin_id,
+                method,
+                call_id,
+                started,
+                &result,
+                "deny".to_string(),
+                Some("参数解析失败".to_string()),
+            );
+            return result;
+        }
+    };
 
     let plugins = get_cached_plugins(&app);
-    let plugin = plugins
-        .iter()
-        .find(|p| p.id == plugin_id)
-        .ok_or_else(|| format!("插件 {} 不存在", plugin_id))?;
+    let plugin = match find_plugin(&plugins, &plugin_id) {
+        Some(p) => p,
+        None => {
+            let result = Err(format!("插件 {} 不存在", plugin_id));
+            record_trace(
+                &app,
+                plugin_id,
+                method,
+                call_id,
+                started,
+                &result,
+                "deny".to_string(),
+                Some("插件不存在".to_string()),
+            );
+            return result;
+        }
+    };
+
     if !plugin.enabled {
-        return Err(format!("插件 {} 已被禁用", plugin_id));
+        let result = Err(format!("插件 {} 已被禁用", plugin_id));
+        record_trace(
+            &app,
+            plugin_id,
+            method,
+            call_id,
+            started,
+            &result,
+            "deny".to_string(),
+            Some("插件已禁用".to_string()),
+        );
+        return result;
     }
 
-    match method.as_str() {
+    let (permission_allowed, permission_decision, permission_reason) =
+        evaluate_permission(plugin, &method);
+    if !permission_allowed {
+        let reason = permission_reason
+            .clone()
+            .unwrap_or_else(|| "权限校验未通过".to_string());
+        let result = Err(format!("PLUGIN_PERMISSION_DENIED: {}", reason));
+        record_trace(
+            &app,
+            plugin_id,
+            method,
+            call_id,
+            started,
+            &result,
+            permission_decision,
+            permission_reason,
+        );
+        return result;
+    }
+
+    let result = match method.as_str() {
         "hideMainWindow" => {
-            if let Some(w) = app.get_webview_window("main") { let _ = w.hide(); }
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.hide();
+            }
             Ok("null".to_string())
         }
         "showMainWindow" => {
-            if let Some(w) = app.get_webview_window("main") { let _ = w.show(); let _ = w.set_focus(); }
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
             Ok("null".to_string())
         }
         "setExpendHeight" => {
@@ -191,13 +335,20 @@ pub async fn plugin_api_call(
         "copyText" => {
             let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
             use tauri_plugin_clipboard_manager::ClipboardExt;
-            app.clipboard().write_text(text).map_err(|e| e.to_string())?;
+            app.clipboard()
+                .write_text(text)
+                .map_err(|e| e.to_string())?;
             Ok("true".to_string())
         }
         "showNotification" => {
             let body = args.get("body").and_then(|v| v.as_str()).unwrap_or("");
             use tauri_plugin_notification::NotificationExt;
-            app.notification().builder().title("mTools").body(body).show().map_err(|e| e.to_string())?;
+            app.notification()
+                .builder()
+                .title("mTools")
+                .body(body)
+                .show()
+                .map_err(|e| e.to_string())?;
             Ok("null".to_string())
         }
         "shellOpenExternal" => {
@@ -213,13 +364,28 @@ pub async fn plugin_api_call(
         "shellShowItemInFolder" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
             #[cfg(target_os = "macos")]
-            { let _ = std::process::Command::new("open").arg("-R").arg(path).spawn(); }
+            {
+                let _ = std::process::Command::new("open")
+                    .arg("-R")
+                    .arg(path)
+                    .spawn();
+            }
             #[cfg(target_os = "windows")]
-            { let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path)).spawn(); }
+            {
+                let _ = std::process::Command::new("explorer")
+                    .arg(format!("/select,{}", path))
+                    .spawn();
+            }
             #[cfg(target_os = "linux")]
-            { let _ = std::process::Command::new("xdg-open")
-                .arg(std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("/")))
-                .spawn(); }
+            {
+                let _ = std::process::Command::new("xdg-open")
+                    .arg(
+                        std::path::Path::new(path)
+                            .parent()
+                            .unwrap_or(std::path::Path::new("/")),
+                    )
+                    .spawn();
+            }
             Ok("null".to_string())
         }
         "getPath" => {
@@ -244,52 +410,78 @@ pub async fn plugin_api_call(
         "copyImage" => {
             let base64_data = args.get("base64").and_then(|v| v.as_str()).unwrap_or("");
             if base64_data.is_empty() {
-                return Err("base64 数据为空".to_string());
-            }
-            let pure_b64 = if let Some(pos) = base64_data.find(",") {
-                &base64_data[pos + 1..]
+                Err("base64 数据为空".to_string())
             } else {
-                base64_data
-            };
-            use base64::Engine;
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(pure_b64)
-                .map_err(|e| format!("base64 解码失败: {}", e))?;
-            let tmp_dir = std::env::temp_dir();
-            let tmp_path = tmp_dir.join(format!("mtools_copyimg_{}.png", std::process::id()));
-            std::fs::write(&tmp_path, &bytes).map_err(|e| format!("写入临时图片失败: {}", e))?;
-            let _ = app.emit("plugin-copy-image", serde_json::json!({ "path": tmp_path.to_string_lossy() }));
-            Ok("true".to_string())
+                let pure_b64 = if let Some(pos) = base64_data.find(',') {
+                    &base64_data[pos + 1..]
+                } else {
+                    base64_data
+                };
+                use base64::Engine;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(pure_b64)
+                    .map_err(|e| format!("base64 解码失败: {}", e))?;
+                let tmp_dir = std::env::temp_dir();
+                let tmp_path = tmp_dir.join(format!("mtools_copyimg_{}.png", std::process::id()));
+                std::fs::write(&tmp_path, &bytes)
+                    .map_err(|e| format!("写入临时图片失败: {}", e))?;
+                let _ = app.emit(
+                    "plugin-copy-image",
+                    serde_json::json!({ "path": tmp_path.to_string_lossy() }),
+                );
+                Ok("true".to_string())
+            }
         }
         "screenCapture" => {
-            let _ = app.emit("plugin-screen-capture", serde_json::json!({ "pluginId": plugin_id }));
+            let _ = app.emit(
+                "plugin-screen-capture",
+                serde_json::json!({ "pluginId": plugin_id }),
+            );
             Ok("null".to_string())
         }
         "setSubInput" => {
-            let placeholder = args.get("placeholder").and_then(|v| v.as_str()).unwrap_or("");
-            let is_focus = args.get("isFocus").and_then(|v| v.as_bool()).unwrap_or(true);
-            let _ = app.emit("plugin-set-sub-input", serde_json::json!({
-                "pluginId": plugin_id, "placeholder": placeholder, "isFocus": is_focus,
-            }));
+            let placeholder = args
+                .get("placeholder")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let is_focus = args
+                .get("isFocus")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let _ = app.emit(
+                "plugin-set-sub-input",
+                serde_json::json!({
+                    "pluginId": plugin_id, "placeholder": placeholder, "isFocus": is_focus,
+                }),
+            );
             Ok("null".to_string())
         }
         "removeSubInput" => {
-            let _ = app.emit("plugin-remove-sub-input", serde_json::json!({ "pluginId": plugin_id }));
+            let _ = app.emit(
+                "plugin-remove-sub-input",
+                serde_json::json!({ "pluginId": plugin_id }),
+            );
             Ok("null".to_string())
         }
         "redirect" => {
             let label = args.get("label").and_then(|v| v.as_str()).unwrap_or("");
-            let payload = args.get("payload").cloned().unwrap_or(serde_json::Value::Null);
-            let _ = app.emit("plugin-redirect", serde_json::json!({
-                "pluginId": plugin_id, "label": label, "payload": payload,
-            }));
+            let payload = args
+                .get("payload")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let _ = app.emit(
+                "plugin-redirect",
+                serde_json::json!({
+                    "pluginId": plugin_id, "label": label, "payload": payload,
+                }),
+            );
             Ok("null".to_string())
         }
         "getFeatures" => {
             let plugins = get_cached_plugins(&app);
-            if let Some(plugin) = plugins.iter().find(|p| p.id == plugin_id) {
-                let features_json = serde_json::to_string(&plugin.manifest.features)
-                    .unwrap_or("[]".to_string());
+            if let Some(p) = plugins.iter().find(|p| p.id == plugin_id) {
+                let features_json =
+                    serde_json::to_string(&p.manifest.features).unwrap_or("[]".to_string());
                 Ok(features_json)
             } else {
                 Ok("[]".to_string())
@@ -298,7 +490,10 @@ pub async fn plugin_api_call(
         "dbStorage.setItem" => {
             use tauri_plugin_store::StoreExt;
             let key = args.get("key").and_then(|v| v.as_str()).unwrap_or("");
-            let value = args.get("value").cloned().unwrap_or(serde_json::Value::Null);
+            let value = args
+                .get("value")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
             let store_name = format!("plugin-{}.json", plugin_id);
             let store = app.store(&store_name).map_err(|e| e.to_string())?;
             store.set(key, value);
@@ -330,9 +525,21 @@ pub async fn plugin_api_call(
         }
         _ => {
             log::warn!("插件 {} 调用了未实现的 API: {}", plugin_id, method);
-            Err(format!("API 未实现: {}", method))
+            Err(format!("PLUGIN_API_NOT_IMPLEMENTED: {}", method))
         }
-    }
+    };
+
+    record_trace(
+        &app,
+        plugin_id,
+        method,
+        call_id,
+        started,
+        &result,
+        permission_decision,
+        permission_reason,
+    );
+    result
 }
 
 // ── iframe 嵌入 HTML ──
@@ -359,19 +566,143 @@ pub async fn plugin_get_embed_html(
         .find(|f| f.code == feature_code)
         .ok_or_else(|| format!("功能 {} 不存在", feature_code))?;
 
-    let main_file = plugin.manifest.main.as_deref().ok_or("插件缺少 main 入口")?;
+    let main_file = plugin
+        .manifest
+        .main
+        .as_deref()
+        .ok_or("插件缺少 main 入口")?;
     let main_path = PathBuf::from(&plugin.dir_path).join(main_file);
     if !main_path.exists() {
         return Err(format!("插件入口文件不存在: {}", main_path.display()));
     }
-    let html_content = std::fs::read_to_string(&main_path)
-        .map_err(|e| format!("读取插件文件失败: {}", e))?;
+    let html_content =
+        std::fs::read_to_string(&main_path).map_err(|e| format!("读取插件文件失败: {}", e))?;
 
-    let base_url = format!("mtplugin://localhost{}/", plugin.dir_path.replace('\\', "/"));
+    let base_url = format!(
+        "mtplugin://localhost{}/",
+        plugin.dir_path.replace('\\', "/")
+    );
     let html_with_base = inject_base_tag(&html_content, &base_url);
     let bridge = generate_embed_bridge(&plugin_id, &bridge_token);
     let html_with_bridge = inject_embed_bridge(&html_with_base, &bridge);
     Ok(html_with_bridge)
+}
+
+#[tauri::command]
+pub async fn plugin_dev_simulate_event(
+    app: AppHandle,
+    plugin_id: String,
+    feature_code: String,
+    event_type: String,
+    payload_json: String,
+) -> Result<(), String> {
+    let payload: serde_json::Value = serde_json::from_str(&payload_json)
+        .map_err(|e| format!("payload_json 不是有效 JSON: {}", e))?;
+
+    let label = format!("plugin-{}-{}", plugin_id, feature_code);
+    let payload_literal = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
+    let script = match event_type.as_str() {
+        "onPluginEnter" => format!(
+            "(() => {{ const p = {payload}; if (window.__utoolsOnEnterCallback) window.__utoolsOnEnterCallback(p); }})();",
+            payload = payload_literal
+        ),
+        "onPluginOut" => "(() => { if (window.__utoolsOnOutCallback) window.__utoolsOnOutCallback(); })();"
+            .to_string(),
+        "setSubInput" => format!(
+            "(() => {{ const p = {payload}; const text = typeof p === 'string' ? p : (p && (p.text ?? p.value ?? '')) || ''; if (window.__utoolsSubInputCallback) window.__utoolsSubInputCallback(text); }})();",
+            payload = payload_literal
+        ),
+        "redirect" => {
+            let redirect_label = payload
+                .get("label")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let redirect_payload = payload
+                .get("payload")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let _ = app.emit(
+                "plugin-redirect",
+                serde_json::json!({
+                    "pluginId": plugin_id,
+                    "label": redirect_label,
+                    "payload": redirect_payload,
+                }),
+            );
+            "void 0;".to_string()
+        }
+        "screenCapture" => format!(
+            "(() => {{ const p = {payload}; if (window.__utoolsScreenCaptureCallback) window.__utoolsScreenCaptureCallback(p); }})();",
+            payload = payload_literal
+        ),
+        _ => {
+            return Err(format!(
+                "不支持的事件类型: {} (支持: onPluginEnter/onPluginOut/setSubInput/redirect/screenCapture)",
+                event_type
+            ));
+        }
+    };
+
+    if let Some(window) = app.get_webview_window(&label) {
+        let _ = window.eval(&script);
+    }
+
+    let _ = app.emit(
+        "plugin-dev:simulate-event",
+        serde_json::json!({
+            "pluginId": plugin_id,
+            "featureCode": feature_code,
+            "eventType": event_type,
+            "payload": payload,
+        }),
+    );
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn plugin_dev_open_devtools(
+    app: AppHandle,
+    window_label_or_embed_target: String,
+) -> Result<(), String> {
+    let label = if window_label_or_embed_target == "embed" {
+        "main".to_string()
+    } else {
+        window_label_or_embed_target
+    };
+
+    let window = app
+        .get_webview_window(&label)
+        .ok_or_else(|| format!("窗口不存在: {}", label))?;
+    window.open_devtools();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn plugin_dev_storage_dump(
+    app: AppHandle,
+    plugin_id: String,
+) -> Result<serde_json::Value, String> {
+    use tauri_plugin_store::StoreExt;
+
+    let store_name = format!("plugin-{}.json", plugin_id);
+    let store = app.store(&store_name).map_err(|e| e.to_string())?;
+    let entries = store.entries();
+    let mut map = serde_json::Map::new();
+    for (key, value) in entries {
+        map.insert(key, value);
+    }
+    Ok(serde_json::Value::Object(map))
+}
+
+#[tauri::command]
+pub async fn plugin_dev_storage_clear(app: AppHandle, plugin_id: String) -> Result<(), String> {
+    use tauri_plugin_store::StoreExt;
+
+    let store_name = format!("plugin-{}.json", plugin_id);
+    let store = app.store(&store_name).map_err(|e| e.to_string())?;
+    store.clear();
+    Ok(())
 }
 
 // ── HTML 工具函数 ──
@@ -384,7 +715,12 @@ pub(super) fn inject_base_tag(html: &str, base_url: &str) -> String {
         format!("{}{}{}", &html[..insert_pos], base_tag, &html[insert_pos..])
     } else if let Some(pos) = lower.find("<html>") {
         let insert_pos = pos + 6;
-        format!("{}<head>{}</head>{}", &html[..insert_pos], base_tag, &html[insert_pos..])
+        format!(
+            "{}<head>{}</head>{}",
+            &html[..insert_pos],
+            base_tag,
+            &html[insert_pos..]
+        )
     } else {
         format!("<head>{}</head>{}", base_tag, html)
     }
@@ -395,10 +731,20 @@ fn inject_embed_bridge(html: &str, bridge_script: &str) -> String {
     let lower = html.to_lowercase();
     if let Some(pos) = lower.find("<head>") {
         let insert_pos = pos + 6;
-        format!("{}{}{}", &html[..insert_pos], script_tag, &html[insert_pos..])
+        format!(
+            "{}{}{}",
+            &html[..insert_pos],
+            script_tag,
+            &html[insert_pos..]
+        )
     } else if let Some(pos) = lower.find("<html>") {
         let insert_pos = pos + 6;
-        format!("{}<head>{}</head>{}", &html[..insert_pos], script_tag, &html[insert_pos..])
+        format!(
+            "{}<head>{}</head>{}",
+            &html[..insert_pos],
+            script_tag,
+            &html[insert_pos..]
+        )
     } else {
         format!("<head>{}</head>{}", script_tag, html)
     }
@@ -414,7 +760,8 @@ fn escape_js_string(s: &str) -> String {
 // ── Shim 生成 ──
 
 pub(super) fn generate_utools_shim(plugin_id: &str) -> String {
-    format!(r#"
+    format!(
+        r#"
 (function() {{
   'use strict';
   const coreInvoke = window.__TAURI__?.core?.invoke;
@@ -503,13 +850,16 @@ pub(super) fn generate_utools_shim(plugin_id: &str) -> String {
   window.rubick = utools;
   console.log('[mTools] utools API shim 已注入, pluginId:', __pluginId);
 }})();
-"#, plugin_id = plugin_id)
+"#,
+        plugin_id = plugin_id
+    )
 }
 
 fn generate_embed_bridge(plugin_id: &str, bridge_token: &str) -> String {
     let plugin_id_esc = escape_js_string(plugin_id);
     let bridge_token_esc = escape_js_string(bridge_token);
-    format!(r#"
+    format!(
+        r#"
 (function(){{
   var __pluginId = '{plugin_id_esc}';
   var __bridgeToken = '{bridge_token_esc}';
@@ -616,16 +966,49 @@ fn generate_embed_bridge(plugin_id: &str, bridge_token: &str) -> String {
       }}
     }}
   }};
+
+  window.addEventListener('message', function(e) {{
+    var d = e.data || {{}};
+    if (d.type !== 'mtools-dev-simulate') return;
+    if (d.pluginId !== __pluginId) return;
+    var p = d.payload;
+    switch (d.eventType) {{
+      case 'onPluginEnter':
+        if (window.__utoolsOnEnterCallback) window.__utoolsOnEnterCallback(p || {{ code: '', type: 'text', payload: null }});
+        break;
+      case 'onPluginOut':
+        if (window.__utoolsOnOutCallback) window.__utoolsOnOutCallback();
+        break;
+      case 'setSubInput':
+        var text = typeof p === 'string' ? p : (p && (p.text || p.value || '')) || '';
+        if (window.__utoolsSubInputCallback) window.__utoolsSubInputCallback(text);
+        break;
+      case 'screenCapture':
+        if (window.__utoolsScreenCaptureCallback) window.__utoolsScreenCaptureCallback(p || null);
+        break;
+      case 'redirect':
+        // redirect 无内建回调，这里仅保留兼容入口
+        break;
+    }}
+  }});
 }})();
-"#, plugin_id_esc = plugin_id_esc, bridge_token_esc = bridge_token_esc)
+"#,
+        plugin_id_esc = plugin_id_esc,
+        bridge_token_esc = bridge_token_esc
+    )
 }
 
-pub(super) fn generate_plugin_enter_script(code: &str, cmd_type: &str, payload: Option<&str>) -> String {
+pub(super) fn generate_plugin_enter_script(
+    code: &str,
+    cmd_type: &str,
+    payload: Option<&str>,
+) -> String {
     let payload_js = match payload {
         Some(p) => format!("'{}'", p.replace('\'', "\\'")),
         None => "undefined".to_string(),
     };
-    format!(r#"
+    format!(
+        r#"
 (function() {{
   setTimeout(function() {{
     if (window.__utoolsOnEnterCallback) {{
@@ -637,5 +1020,9 @@ pub(super) fn generate_plugin_enter_script(code: &str, cmd_type: &str, payload: 
     }}
   }}, 100);
 }})();
-"#, code = code, cmd_type = cmd_type, payload_js = payload_js)
+"#,
+        code = code,
+        cmd_type = cmd_type,
+        payload_js = payload_js
+    )
 }

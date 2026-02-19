@@ -1,9 +1,9 @@
-use std::path::PathBuf;
-use tauri::{AppHandle, Manager};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use ort::session::Session;
 use serde::{Deserialize, Serialize};
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64;
+use std::path::PathBuf;
+use tauri::{AppHandle, Manager};
 
 /// OCR 识别结果中的文字块
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,9 +77,7 @@ impl OcrEngine {
             log::info!("OCR {} model not found at {:?}, skipping.", name, path);
             return None;
         }
-        match Session::builder()
-            .and_then(|b| b.commit_from_file(path))
-        {
+        match Session::builder().and_then(|b| b.commit_from_file(path)) {
             Ok(session) => {
                 log::info!("OCR {} model loaded successfully.", name);
                 Some(session)
@@ -163,7 +161,10 @@ pub async fn ocr_detect(_image_path: String, app: AppHandle) -> Result<String, S
             if engine.is_available() {
                 Ok("OCR Engine ready (models loaded)".to_string())
             } else {
-                Ok("OCR Engine initialized but models not found. Please install OCR models.".to_string())
+                Ok(
+                    "OCR Engine initialized but models not found. Please install OCR models."
+                        .to_string(),
+                )
             }
         }
         Err(e) => Err(format!("OCR Engine init failed: {}", e)),

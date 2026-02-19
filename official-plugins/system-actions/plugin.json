@@ -1,0 +1,18 @@
+{
+  "pluginName": "系统操作",
+  "description": "一键执行常用系统动作",
+  "version": "1.0.0",
+  "main": "index.html",
+  "pluginType": "ui",
+  "features": [
+    {
+      "code": "system-actions",
+      "explain": "系统操作",
+      "cmds": ["sys", "system-actions"]
+    }
+  ],
+  "mtools": {
+    "permissions": [],
+    "dataProfile": "none"
+  }
+}

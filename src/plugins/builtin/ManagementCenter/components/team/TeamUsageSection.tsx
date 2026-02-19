@@ -13,10 +13,22 @@ interface TeamUsageRow {
 export function TeamUsageSection({
   teamId,
   isOwnerOrAdmin,
+  teamActive,
 }: {
   teamId: string;
   isOwnerOrAdmin: boolean;
+  teamActive: boolean;
 }) {
+  if (!teamActive) {
+    return (
+      <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-4">
+        <p className="text-[10px] text-[var(--color-text-secondary)] italic text-center py-6">
+          团队已到期，用量统计不可用
+        </p>
+      </div>
+    );
+  }
+
   if (!isOwnerOrAdmin) {
     return (
       <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-4">

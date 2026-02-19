@@ -23,10 +23,12 @@ export function TeamAIConfigSection({
   teamId,
   teamMembers,
   isOwnerOrAdmin,
+  teamActive,
 }: {
   teamId: string;
   teamMembers: TeamMember[];
   isOwnerOrAdmin: boolean;
+  teamActive: boolean;
 }) {
   const [configs, setConfigs] = useState<AiConfigItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -44,6 +46,12 @@ export function TeamAIConfigSection({
 
   useEffect(() => {
     const fetchConfigs = async () => {
+      if (!teamActive) {
+        setConfigs([]);
+        setLoading(false);
+        return;
+      }
+
       try {
         if (isOwnerOrAdmin) {
           const res = await api.get<{ configs: AiConfigItem[] }>(
@@ -75,14 +83,16 @@ export function TeamAIConfigSection({
     };
 
     fetchConfigs();
-  }, [teamId, isOwnerOrAdmin]);
+  }, [teamId, isOwnerOrAdmin, teamActive]);
 
   const reloadConfigs = async () => {
+    if (!teamActive) return;
     const res = await api.get<{ configs: AiConfigItem[] }>(`/teams/${teamId}/ai-config`);
     setConfigs(res.configs || []);
   };
 
   const handleSave = async () => {
+    if (!teamActive) return;
     if (!form.api_key && !form.id) return;
 
     setSaving(true);
@@ -116,6 +126,7 @@ export function TeamAIConfigSection({
   };
 
   const handleDelete = async (configId: string) => {
+    if (!teamActive) return;
     if (deletingId === configId) {
       try {
         await api.delete(`/teams/${teamId}/ai-config/${configId}`);
@@ -134,6 +145,7 @@ export function TeamAIConfigSection({
   };
 
   const handleToggleActive = async (configId: string, currentActive: boolean) => {
+    if (!teamActive) return;
     try {
       await api.patch(`/teams/${teamId}/ai-config/${configId}`, {
         is_active: !currentActive,
@@ -151,6 +163,7 @@ export function TeamAIConfigSection({
   };
 
   const handleEdit = (item: AiConfigItem) => {
+    if (!teamActive) return;
     setForm({
       id: item.id,
       config_name: item.config_name || item.display_name || "",
@@ -166,6 +179,17 @@ export function TeamAIConfigSection({
     return (
       <div className="flex items-center justify-center py-12">
         <Loader2 className="w-5 h-5 animate-spin text-[#F28F36]" />
+      </div>
+    );
+  }
+
+  if (!teamActive) {
+    return (
+      <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-4">
+        <h3 className="text-xs font-semibold">团队 AI 模型配置</h3>
+        <p className="text-[10px] text-[var(--color-text-secondary)] mt-1">
+          团队已到期，团队 AI 配置与配额能力不可用，续费后恢复。
+        </p>
       </div>
     );
   }

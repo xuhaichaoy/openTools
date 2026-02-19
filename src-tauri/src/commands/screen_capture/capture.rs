@@ -18,7 +18,10 @@ static HELPER: std::sync::LazyLock<Mutex<Option<HelperProcess>>> =
     std::sync::LazyLock::new(|| Mutex::new(None));
 
 fn get_helpers_dir(app: &AppHandle) -> PathBuf {
-    let data_dir = app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| PathBuf::from("."));
     data_dir.join("helpers")
 }
 
@@ -40,7 +43,8 @@ fn resolve_helper_path(app: &AppHandle) -> PathBuf {
     // 开发环境：从可执行文件位置推断 workspace 根目录
     if let Ok(exe_dir) = app.path().executable_dir() {
         // exe_dir 一般为 .../51ToolBox/src-tauri/target/debug
-        let workspace_root = exe_dir.parent()
+        let workspace_root = exe_dir
+            .parent()
             .and_then(|p| p.parent())
             .and_then(|p| p.parent());
         if let Some(root) = workspace_root {
@@ -106,7 +110,11 @@ fn ensure_helper(app: &AppHandle) -> Result<(), String> {
     let stdout = child.stdout.take().ok_or("无法获取 helper stdout")?;
     let reader = BufReader::new(stdout);
 
-    *guard = Some(HelperProcess { child, stdin, stdout_reader: reader });
+    *guard = Some(HelperProcess {
+        child,
+        stdin,
+        stdout_reader: reader,
+    });
     Ok(())
 }
 
@@ -135,7 +143,8 @@ fn call_helper(app: &AppHandle, method: &str, params: Value) -> Result<Value, St
     // 读取响应 (跳过事件推送，转发给前端)
     loop {
         let mut response_line = String::new();
-        hp.stdout_reader.read_line(&mut response_line)
+        hp.stdout_reader
+            .read_line(&mut response_line)
             .map_err(|e| format!("读取 helper 响应失败: {e}"))?;
 
         let response_line = response_line.trim();
@@ -197,7 +206,8 @@ fn get_download_url(component: &str) -> String {
 
 pub(super) fn get_monitor_info(app: &AppHandle) -> (f64, f64, f64, f64) {
     let main_win = app.get_webview_window("main");
-    let monitor_info = main_win.as_ref()
+    let monitor_info = main_win
+        .as_ref()
         .and_then(|w| w.current_monitor().ok().flatten());
     if let Some(m) = &monitor_info {
         let pos = m.position();
@@ -256,7 +266,8 @@ pub async fn screen_capture_download(app: AppHandle, component: String) -> Resul
 
     // 使用 reqwest 下载
     let client = reqwest::Client::new();
-    let resp = client.get(&url)
+    let resp = client
+        .get(&url)
         .send()
         .await
         .map_err(|e| format!("下载请求失败: {e}"))?;
@@ -269,10 +280,16 @@ pub async fn screen_capture_download(app: AppHandle, component: String) -> Resul
                 helpers_dir.display()
             ));
         }
-        return Err(format!("下载失败: HTTP {}。若为 404，可本地编译 helper 后复制到应用数据目录的 helpers 文件夹", resp.status()));
+        return Err(format!(
+            "下载失败: HTTP {}。若为 404，可本地编译 helper 后复制到应用数据目录的 helpers 文件夹",
+            resp.status()
+        ));
     }
 
-    let bytes = resp.bytes().await.map_err(|e| format!("下载数据失败: {e}"))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("下载数据失败: {e}"))?;
 
     // 写入文件
     std::fs::write(&target_path, &bytes).map_err(|e| format!("写入文件失败: {e}"))?;
@@ -282,15 +299,17 @@ pub async fn screen_capture_download(app: AppHandle, component: String) -> Resul
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o755);
-        std::fs::set_permissions(&target_path, perms)
-            .map_err(|e| format!("设置权限失败: {e}"))?;
+        std::fs::set_permissions(&target_path, perms).map_err(|e| format!("设置权限失败: {e}"))?;
     }
 
     // 发送完成事件
-    let _ = app.emit("screen-capture-download-done", serde_json::json!({
-        "component": component,
-        "path": target_path.to_string_lossy().to_string(),
-    }));
+    let _ = app.emit(
+        "screen-capture-download-done",
+        serde_json::json!({
+            "component": component,
+            "path": target_path.to_string_lossy().to_string(),
+        }),
+    );
 
     Ok(())
 }
@@ -303,9 +322,7 @@ pub async fn screen_capture_call(
     params: Value,
 ) -> Result<Value, String> {
     // 在阻塞线程中执行 (helper IPC 是同步的)
-    tokio::task::spawn_blocking(move || {
-        call_helper(&app, &method, params)
-    })
-    .await
-    .map_err(|e| format!("任务执行失败: {e}"))?
+    tokio::task::spawn_blocking(move || call_helper(&app, &method, params))
+        .await
+        .map_err(|e| format!("任务执行失败: {e}"))?
 }

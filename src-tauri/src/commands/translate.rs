@@ -25,11 +25,7 @@ pub async fn translate_text(
     }
 }
 
-async fn google_translate(
-    text: &str,
-    from: &str,
-    to: &str,
-) -> Result<TranslateResult, String> {
+async fn google_translate(text: &str, from: &str, to: &str) -> Result<TranslateResult, String> {
     let url = format!(
         "https://translate.googleapis.com/translate_a/single?client=gtx&sl={}&tl={}&dt=t&q={}",
         from,

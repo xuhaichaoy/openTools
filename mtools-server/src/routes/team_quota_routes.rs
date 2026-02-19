@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     routes::{team_quota_common, AppState},
-    services::auth::Claims,
+    services::{auth::Claims, entitlement},
     Error, Result,
 };
 
@@ -54,6 +54,8 @@ fn parse_user_id(claims: &Claims) -> Result<Uuid> {
 }
 
 async fn check_admin(db: &sqlx::PgPool, team_id: Uuid, user_id: Uuid) -> Result<()> {
+    entitlement::require_team_active(db, team_id, user_id).await?;
+
     let role: Option<String> =
         sqlx::query_scalar("SELECT role FROM team_members WHERE team_id = $1 AND user_id = $2")
             .bind(team_id)

@@ -16,11 +16,13 @@ export function TeamMembersSection({
   teamId,
   members,
   isOwnerOrAdmin,
+  teamActive,
   onMembersChange,
 }: {
   teamId: string;
   members: TeamMember[];
   isOwnerOrAdmin: boolean;
+  teamActive: boolean;
   onMembersChange: () => void;
 }) {
   const [showInvite, setShowInvite] = useState(false);
@@ -30,8 +32,10 @@ export function TeamMembersSection({
   const [inviteError, setInviteError] = useState("");
   const [inviteSuccess, setInviteSuccess] = useState("");
   const { user } = useAuthStore();
+  const canManageMembers = isOwnerOrAdmin && teamActive;
 
   const handleInvite = async () => {
+    if (!canManageMembers) return;
     if (!inviteEmail.trim()) return;
     setInviting(true);
     setInviteError("");
@@ -53,6 +57,7 @@ export function TeamMembersSection({
   };
 
   const handleRemoveMember = async (memberId: string) => {
+    if (!canManageMembers) return;
     if (!confirm("确定要移除该成员吗？")) return;
     try {
       await api.delete(`/teams/${teamId}/members/${memberId}`);
@@ -63,6 +68,7 @@ export function TeamMembersSection({
   };
 
   const handleChangeRole = async (memberId: string, newRole: string) => {
+    if (!canManageMembers) return;
     try {
       await api.patch(`/teams/${teamId}/members/${memberId}`, {
         role: newRole,
@@ -79,7 +85,7 @@ export function TeamMembersSection({
         <h3 className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
           成员列表 ({members.length})
         </h3>
-        {isOwnerOrAdmin && (
+        {canManageMembers && (
           <button
             onClick={() => setShowInvite(!showInvite)}
             className="flex items-center gap-1.5 text-xs font-bold text-[#F28F36] hover:text-[#F28F36] transition-colors"
@@ -89,6 +95,12 @@ export function TeamMembersSection({
           </button>
         )}
       </div>
+
+      {!teamActive && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[10px] text-amber-600">
+          团队已到期，成员管理写操作已禁用。
+        </div>
+      )}
 
       {showInvite && (
         <div className="bg-[var(--color-bg)] rounded-lg border border-[#F28F36]/20 p-5 space-y-3 animate-in slide-in-from-top-2 duration-200">
@@ -166,7 +178,7 @@ export function TeamMembersSection({
                 </div>
               </div>
             </div>
-            {isOwnerOrAdmin &&
+            {canManageMembers &&
               member.role !== "owner" &&
               member.user_id !== user?.id && (
                 <div className="flex items-center gap-2">

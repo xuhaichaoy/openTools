@@ -1,0 +1,18 @@
+{
+  "pluginName": "二维码",
+  "description": "二维码/条形码识别与生成",
+  "version": "1.0.0",
+  "main": "index.html",
+  "pluginType": "ui",
+  "features": [
+    {
+      "code": "qr-code",
+      "explain": "二维码",
+      "cmds": ["qr", "qr-code"]
+    }
+  ],
+  "mtools": {
+    "permissions": [],
+    "dataProfile": "none"
+  }
+}

@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { handleError } from "@/core/errors";
+import { ErrorLevel, handleError } from "@/core/errors";
+import { api, ApiError } from "@/core/api/client";
 import { useAuthStore } from "@/store/auth-store";
 import { useBookmarkStore, bookmarksDb } from "@/store/bookmark-store";
 import { useSnippetStore, snippetsDb } from "@/store/snippet-store";
@@ -19,9 +20,31 @@ import { mergeCloudAIConfig, type AIConfigWithVersion } from "./sync-ai-config";
 
 const SYNC_INTERVAL_MS = 60_000;
 
+interface PersonalEntitlementsResponse {
+  can_personal_sync?: boolean;
+  can_personal_server_storage?: boolean;
+}
+
+async function canSyncPersonalData(): Promise<boolean> {
+  try {
+    const entitlements = await api.get<PersonalEntitlementsResponse>(
+      "/users/entitlements",
+    );
+    return !!(
+      entitlements.can_personal_sync ?? entitlements.can_personal_server_storage
+    );
+  } catch (error) {
+    if (error instanceof ApiError && error.code === "PLAN_REQUIRED") {
+      return false;
+    }
+    throw error;
+  }
+}
+
 export function SyncManager() {
   const { isLoggedIn } = useAuthStore();
   const isSyncing = useRef(false);
+  const syncBlockedNotified = useRef(false);
 
   useEffect(() => {
     if (!isLoggedIn) return;
@@ -31,6 +54,24 @@ export function SyncManager() {
       isSyncing.current = true;
 
       try {
+        const allowPersonalSync = await canSyncPersonalData();
+        if (!allowPersonalSync) {
+          if (!syncBlockedNotified.current) {
+            syncBlockedNotified.current = true;
+            handleError(
+              new ApiError({
+                status: 403,
+                code: "PLAN_REQUIRED",
+                message: "个人云同步需要会员，仅本地可用",
+                path: "/users/entitlements",
+              }),
+              { context: "数据同步", level: ErrorLevel.Warning },
+            );
+          }
+          return;
+        }
+        syncBlockedNotified.current = false;
+
         // 1. 同步书签（SyncableCollection — dirty 追踪）
         await syncSyncableCollection({
           dataType: "bookmarks",

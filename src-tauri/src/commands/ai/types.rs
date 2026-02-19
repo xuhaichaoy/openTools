@@ -66,7 +66,9 @@ pub struct AIConfig {
     pub active_own_key_id: Option<String>,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 impl Default for AIConfig {
     fn default() -> Self {

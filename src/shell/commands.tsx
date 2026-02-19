@@ -5,11 +5,53 @@ import {
   Database,
   ClipboardList,
   FileText,
+  Zap,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { useAIStore } from "@/store/ai-store";
 import { commandRouter } from "./CommandRouter";
-import type { ResultItem } from "@/components/search/ResultList";
+import { registry } from "@/core/plugin-system/registry";
+import { useAppStore } from "@/store/app-store";
+import { usePluginStore } from "@/store/plugin-store";
+import { handleError } from "@/core/errors";
+
+function ensureBuiltinPluginInstalled(
+  viewId: string,
+  pluginName: string,
+  pushView: (viewId: string) => void,
+) {
+  if (registry.getByViewId(viewId)) {
+    pushView(viewId);
+    return;
+  }
+  handleError(new Error(`请先在插件市场安装「${pluginName}」`), {
+    context: "插件未安装",
+  });
+  useAppStore.getState().requestNavigate("plugins");
+}
+
+function openMarketPluginBySlug(
+  slug: string,
+  pluginName: string,
+  pushView: (viewId: string) => void,
+) {
+  // 迁移插件安装后优先走内置成熟实现（与历史功能保持一致）
+  if (registry.getByViewId(slug)) {
+    pushView(slug);
+    return;
+  }
+
+  const { plugins, openPlugin } = usePluginStore.getState();
+  const target = plugins.find(
+    (plugin) => plugin.enabled && plugin.slug?.toLowerCase() === slug.toLowerCase(),
+  );
+  const feature = target?.manifest.features?.[0];
+  if (target && feature) {
+    openPlugin(target.id, feature.code);
+    return;
+  }
+  ensureBuiltinPluginInstalled(slug, pluginName, pushView);
+}
 
 commandRouter.register({
   prefix: "ai",
@@ -118,6 +160,20 @@ commandRouter.register({
 });
 
 commandRouter.register({
+  prefix: "sys",
+  name: "系统操作",
+  handle: (keyword, ctx) => [{
+    id: "system-actions-enter",
+    title: keyword ? `系统操作：${keyword}` : "打开系统操作",
+    description: "执行常用系统动作",
+    icon: <Zap className="w-6 h-6" />,
+    color: "text-amber-500 bg-amber-500/10",
+    category: "工具",
+    action: () => openMarketPluginBySlug("system-actions", "系统操作", ctx.pushView),
+  }],
+});
+
+commandRouter.register({
   prefix: "sn",
   name: "快捷短语",
   handle: (keyword, ctx) => [{
@@ -127,7 +183,7 @@ commandRouter.register({
     icon: <FileText className="w-6 h-6" />,
     color: "text-emerald-500 bg-emerald-500/10",
     category: "工具",
-    action: () => ctx.pushView("snippets"),
+    action: () => openMarketPluginBySlug("snippets", "快捷短语", ctx.pushView),
   }],
 });
 
@@ -141,7 +197,7 @@ commandRouter.register({
     icon: <Globe className="w-6 h-6" />,
     color: "text-blue-500 bg-blue-500/10",
     category: "工具",
-    action: () => ctx.pushView("bookmarks"),
+    action: () => openMarketPluginBySlug("bookmarks", "网页书签", ctx.pushView),
   }],
 });
 

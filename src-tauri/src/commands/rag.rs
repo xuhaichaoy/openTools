@@ -101,7 +101,10 @@ impl Default for RAGConfig {
 // ── 工具函数 ──
 
 fn get_rag_dir(app: &AppHandle) -> PathBuf {
-    let app_data = app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| PathBuf::from("."));
     let rag_dir = app_data.join("rag");
     let _ = std::fs::create_dir_all(&rag_dir);
     rag_dir
@@ -143,17 +146,23 @@ fn save_docs_index(app: &AppHandle, docs: &[KnowledgeDoc]) {
 /// 简单的 token 估算（按字符数 / 4）
 fn estimate_tokens(text: &str) -> usize {
     // 中文字符约 1-2 token，英文约 4 字符 1 token
-    let cjk_count = text.chars().filter(|c| {
-        let code = *c as u32;
-        (0x4E00..=0x9FFF).contains(&code) || (0x3400..=0x4DBF).contains(&code)
-    }).count();
+    let cjk_count = text
+        .chars()
+        .filter(|c| {
+            let code = *c as u32;
+            (0x4E00..=0x9FFF).contains(&code) || (0x3400..=0x4DBF).contains(&code)
+        })
+        .count();
     let other_count = text.chars().count() - cjk_count;
     cjk_count * 2 + other_count / 4
 }
 
 /// 文本分块
 fn chunk_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
-    let sentences: Vec<&str> = text.split(|c: char| c == '\n' || c == '。' || c == '.' || c == '！' || c == '!' || c == '？' || c == '?')
+    let sentences: Vec<&str> = text
+        .split(|c: char| {
+            c == '\n' || c == '。' || c == '.' || c == '！' || c == '!' || c == '？' || c == '?'
+        })
         .filter(|s| !s.trim().is_empty())
         .collect();
 
@@ -163,7 +172,9 @@ fn chunk_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
 
     for sentence in &sentences {
         let sentence = sentence.trim();
-        if sentence.is_empty() { continue; }
+        if sentence.is_empty() {
+            continue;
+        }
 
         let sent_tokens = estimate_tokens(sentence);
 
@@ -209,22 +220,26 @@ async fn get_embeddings(app: &AppHandle, texts: &[String]) -> Result<Vec<Vec<f32
     let store = app.store("config.json").map_err(|e| e.to_string())?;
     let ai_config = store.get("ai_config");
 
-    let base_url = rag_config.embedding_base_url
+    let base_url = rag_config
+        .embedding_base_url
         .as_deref()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| {
-            ai_config.as_ref()
+            ai_config
+                .as_ref()
                 .and_then(|v| v.get("base_url"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("https://api.openai.com/v1")
         })
         .to_string();
 
-    let raw_api_key = rag_config.embedding_api_key
+    let raw_api_key = rag_config
+        .embedding_api_key
         .as_deref()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| {
-            ai_config.as_ref()
+            ai_config
+                .as_ref()
                 .and_then(|v| v.get("api_key"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
@@ -259,16 +274,21 @@ async fn get_embeddings(app: &AppHandle, texts: &[String]) -> Result<Vec<Vec<f32
         return Err(format!("Embedding API 返回错误 {}: {}", status, text));
     }
 
-    let result: serde_json::Value = resp.json().await.map_err(|e| format!("解析响应失败: {}", e))?;
+    let result: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("解析响应失败: {}", e))?;
 
     let embeddings: Vec<Vec<f32>> = result["data"]
         .as_array()
         .ok_or("响应中缺少 data 字段")?
         .iter()
         .filter_map(|item| {
-            item["embedding"]
-                .as_array()
-                .map(|arr| arr.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect())
+            item["embedding"].as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_f64().map(|f| f as f32))
+                    .collect()
+            })
         })
         .collect();
 
@@ -343,7 +363,10 @@ fn load_vectors_for_doc(app: &AppHandle, doc_id: &str) -> Vec<Vec<f32>> {
                     let offset = (i * dim + j) * 4;
                     if offset + 4 <= bytes.len() {
                         let val = f32::from_le_bytes([
-                            bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+                            bytes[offset],
+                            bytes[offset + 1],
+                            bytes[offset + 2],
+                            bytes[offset + 3],
                         ]);
                         vec.push(val);
                     }
@@ -505,7 +528,9 @@ fn remove_doc_from_index(index: &mut InvertedIndex, doc_id: &str) {
 /// 基于索引中实际存在的文档数计算，不依赖 status 字段
 fn update_index_stats(index: &mut InvertedIndex, _docs: &[KnowledgeDoc]) {
     // 从索引的 postings 中统计实际有多少个不同的 doc_id
-    let doc_ids: std::collections::HashSet<&str> = index.postings.values()
+    let doc_ids: std::collections::HashSet<&str> = index
+        .postings
+        .values()
         .flat_map(|postings| postings.iter().map(|p| p.doc_id.as_str()))
         .collect();
     index.doc_count = doc_ids.len().max(1);
@@ -566,14 +591,16 @@ fn bm25_search(
                 .collect::<std::collections::HashSet<_>>()
                 .len() as f64;
             let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
-            if idf <= 0.0 { continue; }
+            if idf <= 0.0 {
+                continue;
+            }
 
             for posting in postings {
                 let key = (posting.doc_id.clone(), posting.chunk_idx);
                 let tf = posting.tf as f64;
                 let doc_len = *chunk_token_lens.get(&key).unwrap_or(&1) as f64;
-                let tf_norm = (tf * (k1 + 1.0))
-                    / (tf + k1 * (1.0 - b + b * doc_len / avg_doc_len.max(1.0)));
+                let tf_norm =
+                    (tf * (k1 + 1.0)) / (tf + k1 * (1.0 - b + b * doc_len / avg_doc_len.max(1.0)));
                 *scores.entry(key).or_insert(0.0) += idf * tf_norm;
             }
         }
@@ -586,7 +613,11 @@ fn bm25_search(
     // 归一化分数到 0-1 范围
     let max_score = scores.values().cloned().fold(f64::NEG_INFINITY, f64::max);
     let min_score = scores.values().cloned().fold(f64::INFINITY, f64::min);
-    let score_range = if max_score > min_score { max_score - min_score } else { 1.0 };
+    let score_range = if max_score > min_score {
+        max_score - min_score
+    } else {
+        1.0
+    };
 
     let mut sorted: Vec<((String, usize), f64)> = scores.into_iter().collect();
     sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -596,7 +627,11 @@ fn bm25_search(
     for ((doc_id, chunk_idx), score) in sorted {
         let chunks = load_chunks_for_doc(app, &doc_id);
         if let Some(chunk) = chunks.into_iter().find(|c| c.index == chunk_idx) {
-            let normalized = if score_range > 0.0 { (score - min_score) / score_range } else { 1.0 };
+            let normalized = if score_range > 0.0 {
+                (score - min_score) / score_range
+            } else {
+                1.0
+            };
             results.push(RetrievalResult {
                 chunk,
                 score: (normalized * 0.7 + 0.3) as f32, // scale to 0.3-1.0
@@ -624,10 +659,13 @@ async fn import_doc_internal(
     let doc_id = doc.id.clone();
 
     use tauri::Emitter;
-    let _ = app.emit("rag-index-progress", serde_json::json!({
-        "docId": &doc_id,
-        "status": "processing",
-    }));
+    let _ = app.emit(
+        "rag-index-progress",
+        serde_json::json!({
+            "docId": &doc_id,
+            "status": "processing",
+        }),
+    );
 
     // 1) 分块
     let text_chunks = chunk_text(content, config.chunk_size, config.chunk_overlap);
@@ -673,10 +711,13 @@ async fn import_doc_internal(
     }
     save_docs_index(app, &docs);
 
-    let _ = app.emit("rag-index-progress", serde_json::json!({
-        "docId": &doc_id,
-        "status": "indexed",
-    }));
+    let _ = app.emit(
+        "rag-index-progress",
+        serde_json::json!({
+            "docId": &doc_id,
+            "status": "indexed",
+        }),
+    );
 
     // 3) 向量索引（可选增强，失败不阻断）
     let batch_size = 20;
@@ -729,11 +770,14 @@ pub async fn rag_import_doc(
         return Err(format!("文件不存在: {}", file_path));
     }
 
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("读取文件失败: {}", e))?;
+    let content = std::fs::read_to_string(&path).map_err(|e| format!("读取文件失败: {}", e))?;
 
     let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-    let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
     let format = detect_format(&file_path);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -853,7 +897,9 @@ pub async fn rag_reindex_doc(app: AppHandle, doc_id: String) -> Result<(), Strin
 /// 不依赖文档 status，直接扫描 chunks 目录，有 chunks 文件但不在索引中的就补建
 fn ensure_keyword_index(app: &AppHandle, index: &mut InvertedIndex) {
     let chunks_dir = get_chunks_dir(app);
-    let Ok(entries) = std::fs::read_dir(&chunks_dir) else { return };
+    let Ok(entries) = std::fs::read_dir(&chunks_dir) else {
+        return;
+    };
 
     // 收集磁盘上所有有 chunks 文件的 doc_id
     let disk_doc_ids: Vec<String> = entries
@@ -873,10 +919,13 @@ fn ensure_keyword_index(app: &AppHandle, index: &mut InvertedIndex) {
     }
 
     // 找出不在关键词索引中的 doc_id
-    let index_doc_ids: std::collections::HashSet<&str> = index.postings.values()
+    let index_doc_ids: std::collections::HashSet<&str> = index
+        .postings
+        .values()
         .flat_map(|postings| postings.iter().map(|p| p.doc_id.as_str()))
         .collect();
-    let missing: Vec<&String> = disk_doc_ids.iter()
+    let missing: Vec<&String> = disk_doc_ids
+        .iter()
         .filter(|id| !index_doc_ids.contains(id.as_str()))
         .collect();
 
@@ -884,7 +933,11 @@ fn ensure_keyword_index(app: &AppHandle, index: &mut InvertedIndex) {
         return;
     }
 
-    log::info!("关键词索引缺少 {} 个文档（共 {} 个），补充建立...", missing.len(), disk_doc_ids.len());
+    log::info!(
+        "关键词索引缺少 {} 个文档（共 {} 个），补充建立...",
+        missing.len(),
+        disk_doc_ids.len()
+    );
     for doc_id in &missing {
         let chunks = load_chunks_for_doc(app, doc_id);
         if !chunks.is_empty() {
@@ -948,12 +1001,19 @@ pub async fn rag_search(
                         if i < vectors.len() {
                             let score = cosine_similarity(&query_vec, &vectors[i]);
                             if score >= threshold {
-                                results.push(RetrievalResult { chunk: chunk.clone(), score });
+                                results.push(RetrievalResult {
+                                    chunk: chunk.clone(),
+                                    score,
+                                });
                             }
                         }
                     }
                 }
-                results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+                results.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
                 results.truncate(top_k * 2);
                 results
             }
@@ -986,9 +1046,16 @@ pub async fn rag_search(
 
     let mut fused: Vec<RetrievalResult> = fused_scores
         .into_values()
-        .map(|(score, chunk)| RetrievalResult { chunk, score: score as f32 })
+        .map(|(score, chunk)| RetrievalResult {
+            chunk,
+            score: score as f32,
+        })
         .collect();
-    fused.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    fused.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     fused.truncate(top_k);
 
     Ok(fused)
@@ -1000,7 +1067,9 @@ pub async fn rag_list_doc_summaries(app: AppHandle) -> Result<Vec<serde_json::Va
     let docs = load_docs_index(&app);
     let summaries: Vec<serde_json::Value> = docs
         .iter()
-        .filter(|d| d.status == "indexed" || d.status == "indexed_full" || d.status == "indexed_keyword")
+        .filter(|d| {
+            d.status == "indexed" || d.status == "indexed_full" || d.status == "indexed_keyword"
+        })
         .map(|d| {
             serde_json::json!({
                 "id": d.id,

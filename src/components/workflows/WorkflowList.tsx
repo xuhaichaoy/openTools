@@ -3,7 +3,10 @@ import { ArrowLeft, Plus, Play, Pencil, Trash2, RefreshCw, Loader2, Share2, Down
 import { handleError } from '@/core/errors'
 import { useWorkflowStore } from '@/store/workflow-store'
 import { useAuthStore } from '@/store/auth-store'
-import { useTeamStore, type SharedResource } from '@/store/team-store'
+import {
+  useTeamStore,
+  type TeamWorkflowTemplateSummary,
+} from '@/store/team-store'
 import { useToast } from '@/components/ui/Toast'
 import { WorkflowEditor } from './WorkflowEditor'
 import { WorkflowRunner } from './WorkflowRunner'
@@ -13,13 +16,20 @@ import { useDragWindow } from '@/hooks/useDragWindow'
 export function WorkflowList({ onBack }: { onBack?: () => void }) {
   const { workflows, loadWorkflows, createWorkflow, updateWorkflow, deleteWorkflow, executeWorkflow, currentExecution, clearExecution } = useWorkflowStore()
   const { isLoggedIn } = useAuthStore()
-  const { teams, activeTeamId, loadTeams, shareResource, listSharedResources } = useTeamStore()
+  const {
+    teams,
+    activeTeamId,
+    loadTeams,
+    createWorkflowTemplate,
+    listWorkflowTemplates,
+    getWorkflowTemplate,
+  } = useTeamStore()
   const [mode, setMode] = useState<'list' | 'create' | 'edit' | 'team-templates'>('list')
   const [editingWorkflow, setEditingWorkflow] = useState<Workflow | null>(null)
   const [loading, setLoading] = useState(false)
   const [filterCategory, setFilterCategory] = useState<string>('all')
   const [sharingId, setSharingId] = useState<string | null>(null)
-  const [teamTemplates, setTeamTemplates] = useState<SharedResource[]>([])
+  const [teamTemplates, setTeamTemplates] = useState<TeamWorkflowTemplateSummary[]>([])
   const [importingId, setImportingId] = useState<string | null>(null)
   const { toast } = useToast()
   const { onMouseDown } = useDragWindow()
@@ -83,11 +93,18 @@ export function WorkflowList({ onBack }: { onBack?: () => void }) {
     if (!activeTeamId) return
     setSharingId(workflow.id)
     try {
-      await shareResource(activeTeamId, 'workflow', workflow.id, workflow.name)
+      const { id: _id, builtin: _builtin, created_at: _createdAt, ...workflowBody } =
+        workflow
+      await createWorkflowTemplate(activeTeamId, {
+        name: workflow.name,
+        description: workflow.description,
+        icon: workflow.icon,
+        category: workflow.category,
+        workflow_json: workflowBody,
+      })
       toast('success', `已分享「${workflow.name}」到团队`)
     } catch (e) {
-      handleError(e, { context: '分享工作流到团队', silent: true })
-      toast('warning', '分享失败')
+      handleError(e, { context: '分享工作流到团队' })
     } finally {
       setSharingId(null)
     }
@@ -96,34 +113,48 @@ export function WorkflowList({ onBack }: { onBack?: () => void }) {
   const handleShowTeamTemplates = async () => {
     if (!activeTeamId) return
     try {
-      const resources = await listSharedResources(activeTeamId, 'workflow')
-      setTeamTemplates(resources)
+      const templates = await listWorkflowTemplates(activeTeamId)
+      setTeamTemplates(templates)
       setMode('team-templates')
     } catch (e) {
-      handleError(e, { context: '获取团队工作流模板', silent: true })
-      toast('warning', '获取团队模板失败')
+      handleError(e, { context: '获取团队工作流模板' })
     }
   }
 
-  const handleImportTemplate = async (template: SharedResource) => {
+  const handleImportTemplate = async (template: TeamWorkflowTemplateSummary) => {
+    if (!activeTeamId) return
     setImportingId(template.id)
     try {
+      if (template.is_legacy) {
+        toast('warning', '该模板为历史记录，缺少正文，请让分享者重新分享')
+        return
+      }
+
+      const detail = await getWorkflowTemplate(activeTeamId, template.id)
+      const rawWorkflow = detail.workflow_json as Partial<Workflow>
+      const {
+        id: _id,
+        builtin: _builtin,
+        created_at: _createdAt,
+        ...workflowBody
+      } = rawWorkflow as Workflow
+
+      if (!workflowBody.name || !workflowBody.trigger) {
+        throw new Error('模板内容缺失，无法导入')
+      }
+
       // 从团队模板创建一个私有副本
       const newWorkflow: Omit<Workflow, 'id' | 'builtin' | 'created_at'> = {
-        name: `${template.resource_name ?? '团队模板'}（副本）`,
-        description: `从团队模板导入 - by ${template.username}`,
-        icon: '📋',
-        category: '导入',
-        trigger: { type: 'keyword', keyword: '' },
-        steps: [],
-        nodes: [],
-        edges: [],
+        ...(workflowBody as Omit<Workflow, 'id' | 'builtin' | 'created_at'>),
+        name: `${workflowBody.name}（副本）`,
+        description:
+          workflowBody.description ||
+          `从团队模板导入 - by ${template.created_by_username ?? template.created_by}`,
       }
       await createWorkflow(newWorkflow)
-      toast('success', `已导入「${template.resource_name}」`)
+      toast('success', `已导入「${template.name}」`)
     } catch (e) {
-      handleError(e, { context: '导入团队模板', silent: true })
-      toast('warning', '导入失败')
+      handleError(e, { context: '导入团队模板' })
     } finally {
       setImportingId(null)
     }
@@ -159,14 +190,19 @@ export function WorkflowList({ onBack }: { onBack?: () => void }) {
           {teamTemplates.map((tpl) => (
             <div key={tpl.id} className="flex items-center justify-between p-3 rounded-lg bg-[var(--color-bg-secondary)] border border-[var(--color-border)] hover:border-[#F28F36]/30 transition-colors">
               <div className="min-w-0 flex-1">
-                <div className="text-xs font-medium text-[var(--color-text)] truncate">{tpl.resource_name ?? tpl.resource_id}</div>
+                <div className="text-xs font-medium text-[var(--color-text)] truncate">{tpl.name}</div>
                 <div className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
-                  分享者: {tpl.username} · {new Date(tpl.shared_at).toLocaleDateString()}
+                  分享者: {tpl.created_by_username ?? tpl.created_by} · {new Date(tpl.updated_at).toLocaleDateString()}
                 </div>
+                {tpl.is_legacy && (
+                  <div className="text-[10px] text-amber-500 mt-0.5">
+                    历史记录：缺少正文，需重新分享后导入
+                  </div>
+                )}
               </div>
               <button
                 onClick={() => handleImportTemplate(tpl)}
-                disabled={importingId === tpl.id}
+                disabled={importingId === tpl.id || tpl.is_legacy}
                 className="flex items-center gap-1 px-2 py-1 text-[10px] rounded bg-[#F28F36]/10 text-[#F28F36] hover:bg-[#F28F36]/20 transition-colors disabled:opacity-40"
               >
                 {importingId === tpl.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}

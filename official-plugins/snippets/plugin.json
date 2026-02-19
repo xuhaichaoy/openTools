@@ -1,0 +1,18 @@
+{
+  "pluginName": "快捷短语",
+  "description": "文本片段管理，支持静态模板和 AI 动态生成",
+  "version": "1.0.0",
+  "main": "index.html",
+  "pluginType": "ui",
+  "features": [
+    {
+      "code": "snippets",
+      "explain": "快捷短语",
+      "cmds": ["sn", "snippets"]
+    }
+  ],
+  "mtools": {
+    "permissions": [],
+    "dataProfile": "snippets"
+  }
+}

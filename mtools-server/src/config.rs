@@ -37,8 +37,7 @@ impl Config {
                 .unwrap_or_else(|_| "3000".to_string())
                 .parse()?,
             deploy_mode,
-            upload_dir: std::env::var("UPLOAD_DIR")
-                .unwrap_or_else(|_| "./uploads".to_string()),
+            upload_dir: std::env::var("UPLOAD_DIR").unwrap_or_else(|_| "./uploads".to_string()),
         })
     }
 }

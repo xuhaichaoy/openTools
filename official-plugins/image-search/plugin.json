@@ -1,0 +1,18 @@
+{
+  "pluginName": "以图搜图",
+  "description": "反向图片搜索 + AI 图片理解",
+  "version": "1.0.0",
+  "main": "index.html",
+  "pluginType": "ui",
+  "features": [
+    {
+      "code": "image-search",
+      "explain": "以图搜图",
+      "cmds": ["img", "image-search"]
+    }
+  ],
+  "mtools": {
+    "permissions": [],
+    "dataProfile": "none"
+  }
+}

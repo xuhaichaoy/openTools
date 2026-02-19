@@ -1,0 +1,18 @@
+{
+  "pluginName": "开发工具箱",
+  "description": "JSON 格式化、时间戳转换、Base64 编解码",
+  "version": "1.0.0",
+  "main": "index.html",
+  "pluginType": "ui",
+  "features": [
+    {
+      "code": "dev-toolbox",
+      "explain": "开发工具箱",
+      "cmds": ["devtool", "dev-toolbox"]
+    }
+  ],
+  "mtools": {
+    "permissions": [],
+    "dataProfile": "none"
+  }
+}

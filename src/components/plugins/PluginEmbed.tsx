@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { ArrowLeft } from "lucide-react";
 import { useDragWindow } from "@/hooks/useDragWindow";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 interface PluginEmbedProps {
   pluginId: string;
@@ -20,6 +21,7 @@ export function PluginEmbed({
 }: PluginEmbedProps) {
   const [html, setHtml] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [reloadTick, setReloadTick] = useState(0);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const { onMouseDown } = useDragWindow();
 
@@ -45,7 +47,50 @@ export function PluginEmbed({
     return () => {
       cancelled = true;
     };
-  }, [pluginId, featureCode, bridgeToken]);
+  }, [pluginId, featureCode, bridgeToken, reloadTick]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const unlistenTasks: Promise<() => void>[] = [];
+
+    unlistenTasks.push(
+      listen<any>("plugin-dev:file-changed", (event) => {
+        if (cancelled) return;
+        const pluginIds = Array.isArray(event.payload?.pluginIds)
+          ? event.payload.pluginIds
+          : [];
+        if (pluginIds.includes(pluginId)) {
+          setReloadTick((v) => v + 1);
+        }
+      }),
+    );
+
+    unlistenTasks.push(
+      listen<any>("plugin-dev:simulate-event", (event) => {
+        if (cancelled) return;
+        const payload = event.payload ?? {};
+        if (payload.pluginId !== pluginId || payload.featureCode !== featureCode) {
+          return;
+        }
+        iframeRef.current?.contentWindow?.postMessage(
+          {
+            type: "mtools-dev-simulate",
+            pluginId,
+            eventType: payload.eventType,
+            payload: payload.payload ?? null,
+          },
+          "*",
+        );
+      }),
+    );
+
+    return () => {
+      cancelled = true;
+      for (const task of unlistenTasks) {
+        task.then((fn) => fn()).catch(() => {});
+      }
+    };
+  }, [pluginId, featureCode]);
 
   return (
     <div className="flex flex-col h-full bg-[var(--color-bg)] rounded-xl overflow-hidden">

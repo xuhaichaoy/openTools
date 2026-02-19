@@ -1,7 +1,9 @@
 import { useAppStore } from "@/store/app-store";
 import { registry } from "@/core/plugin-system/registry";
-import { Globe, Terminal, ScanText, Languages, MessageCircle } from "lucide-react";
+import { Globe, Terminal, ScanText, Languages, MessageCircle, Puzzle } from "lucide-react";
 import { useMemo } from "react";
+import { usePluginStore } from "@/store/plugin-store";
+import { isBuiltinPluginInstallRequired } from "@/plugins/builtin";
 
 interface DashboardProps {
   onNavigate: (view: string) => void;
@@ -9,28 +11,60 @@ interface DashboardProps {
 
 export function Dashboard({ onNavigate }: DashboardProps) {
   const { setSelectedIndex, setSearchValue, recentTools, addRecentTool } = useAppStore();
+  const { plugins, openPlugin } = usePluginStore();
 
-  // AI 助手已合并进 registry，直接从 registry 获取所有插件
-  const allTools = registry.getAll().map((plugin) => ({
-    id: plugin.id,
-    icon: plugin.icon,
-    title: plugin.name,
-    viewId: plugin.viewId,
-    action: () => {
-      addRecentTool(plugin.viewId);
-      onNavigate(plugin.viewId);
-    },
-    color: plugin.color,
-  }));
+  const allTools = useMemo(() => {
+    const builtinTools = registry.getAll().map((plugin) => ({
+      id: plugin.id,
+      icon: plugin.icon,
+      title: plugin.name,
+      recentKey: plugin.viewId,
+      action: () => {
+        addRecentTool(plugin.viewId);
+        onNavigate(plugin.viewId);
+      },
+      color: plugin.color,
+    }));
+
+    const externalTools = plugins
+      .filter((plugin) => {
+        if (plugin.isBuiltin || !plugin.enabled || plugin.manifest.features.length === 0) {
+          return false;
+        }
+        const slug = plugin.slug?.toLowerCase();
+        if (plugin.source === "official" && slug && isBuiltinPluginInstallRequired(slug)) {
+          return false;
+        }
+        return true;
+      })
+      .map((plugin) => {
+        const primaryFeature = plugin.manifest.features[0];
+        return {
+          id: `ext-${plugin.id}`,
+          icon: <Puzzle className="w-6 h-6" />,
+          title: plugin.manifest.pluginName,
+          recentKey: `plugin:${plugin.id}`,
+          action: () => {
+            addRecentTool(`plugin:${plugin.id}`);
+            openPlugin(plugin.id, primaryFeature.code);
+          },
+          color: plugin.source === "official"
+            ? "text-orange-500 bg-orange-500/10"
+            : "text-cyan-500 bg-cyan-500/10",
+        };
+      });
+
+    return [...builtinTools, ...externalTools];
+  }, [addRecentTool, onNavigate, openPlugin, plugins]);
 
   // 按最近使用排序：最近使用过的排在前面，其余保持原始顺序
   const tools = useMemo(() => {
     if (recentTools.length === 0) return allTools;
     const recentSet = new Set(recentTools);
     const recent = recentTools
-      .map((viewId) => allTools.find((t) => t.viewId === viewId))
+      .map((key) => allTools.find((t) => t.recentKey === key))
       .filter(Boolean) as typeof allTools;
-    const rest = allTools.filter((t) => !recentSet.has(t.viewId));
+    const rest = allTools.filter((t) => !recentSet.has(t.recentKey));
     return [...recent, ...rest];
   }, [allTools, recentTools]);
 

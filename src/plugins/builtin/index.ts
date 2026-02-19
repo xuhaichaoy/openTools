@@ -88,6 +88,36 @@ const SnippetsPlugin = lazy(() =>
 const BookmarksPlugin = lazy(() => import("./Bookmarks/index"));
 const ManagementCenterPlugin = lazy(() => import("./ManagementCenter/index"));
 
+// 这 7 个内置插件改为“插件市场安装后可用”
+export const MARKET_INSTALL_REQUIRED_BUILTIN_PLUGIN_IDS = [
+  "dev-toolbox",
+  "note-hub",
+  "qr-code",
+  "image-search",
+  "system-actions",
+  "snippets",
+  "bookmarks",
+] as const;
+
+const marketInstallRequiredBuiltinPluginIdSet = new Set<string>(
+  MARKET_INSTALL_REQUIRED_BUILTIN_PLUGIN_IDS,
+);
+
+export function isBuiltinPluginInstallRequired(pluginId: string): boolean {
+  return marketInstallRequiredBuiltinPluginIdSet.has(pluginId);
+}
+
+export function resolveBuiltinPlugins(installedPluginIds: string[] = []): MToolsPlugin[] {
+  const installedSet = new Set(installedPluginIds.map((id) => id.toLowerCase()));
+  return builtinPlugins.filter((plugin) => {
+    // 迁移到官方市场的插件不再以内置方式注册
+    if (isBuiltinPluginInstallRequired(plugin.id)) {
+      return installedSet.has(plugin.id.toLowerCase());
+    }
+    return true;
+  });
+}
+
 // ── 所有内置插件定义（15 个） ──
 
 export const builtinPlugins: MToolsPlugin[] = [

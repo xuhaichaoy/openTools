@@ -8,7 +8,8 @@ async fn main() -> anyhow::Result<()> {
     // 初始化日志
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "mtools_server=debug,tower_http=debug".into()),
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "mtools_server=debug,tower_http=debug".into()),
         ))
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -21,9 +22,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Connected to database");
 
     // 运行数据库迁移
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await?;
+    sqlx::migrate!("./migrations").run(&pool).await?;
     tracing::info!("Database migrations applied");
 
     // 初始化 Redis 连接
@@ -34,10 +33,8 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Connected to Redis");
 
     // 初始化服务
-    let auth_service = mtools_server::services::AuthService::new(
-        config.jwt_secret.clone(),
-        redis_client.clone(),
-    );
+    let auth_service =
+        mtools_server::services::AuthService::new(config.jwt_secret.clone(), redis_client.clone());
 
     // 创建上传目录
     let avatar_dir = std::path::Path::new(&config.upload_dir).join("avatars");
@@ -70,7 +67,11 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }

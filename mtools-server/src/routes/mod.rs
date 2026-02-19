@@ -1,10 +1,13 @@
 pub mod ai;
 pub mod auth;
 pub mod kb;
+pub mod plugins;
 pub mod stubs;
 pub mod sync;
+pub mod team_entitlements;
 pub mod team_quota_common;
 pub mod team_quota_routes;
+pub mod team_workflow_templates;
 pub mod teams;
 pub mod users;
 
@@ -53,9 +56,13 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .nest("/users", users::routes_no_layer())
         .nest("/sync", sync::routes_no_layer())
         .nest("/ai", ai::routes_no_layer())
+        .nest("/plugins", plugins::private_routes_no_layer())
         .nest(
             "/teams",
-            teams::routes_no_layer().merge(kb::team_kb_routes()),
+            teams::routes_no_layer()
+                .merge(team_entitlements::routes_no_layer())
+                .merge(team_workflow_templates::routes_no_layer())
+                .merge(kb::team_kb_routes()),
         )
         .nest("/kb/personal", kb::personal_routes())
         .merge(stubs::routes_no_layer())
@@ -69,9 +76,13 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .nest("/users", users::routes_no_layer())
         .nest("/sync", sync::routes_no_layer())
         .nest("/ai", ai::routes_no_layer())
+        .nest("/plugins", plugins::private_routes_no_layer())
         .nest(
             "/teams",
-            teams::routes_no_layer().merge(kb::team_kb_routes()),
+            teams::routes_no_layer()
+                .merge(team_entitlements::routes_no_layer())
+                .merge(team_workflow_templates::routes_no_layer())
+                .merge(kb::team_kb_routes()),
         )
         .nest("/kb/personal", kb::personal_routes())
         .merge(stubs::routes_no_layer())
@@ -86,6 +97,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/health", get(health_check))
         .route("/deploy-info", get(deploy_info))
         .nest_service("/uploads", ServeDir::new(&upload_dir))
+        .nest("/v1/plugins", plugins::public_routes_no_layer())
+        .nest("/plugins", plugins::public_routes_no_layer())
         // v1 路由
         .nest("/v1/auth", auth::routes())
         .nest("/v1", v1_auth_routes)

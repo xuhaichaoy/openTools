@@ -1,12 +1,12 @@
-pub mod types;
-pub mod request;
-pub mod tools;
-pub mod stream;
 pub mod agent;
+pub mod request;
+pub mod stream;
+pub mod tools;
+pub mod types;
 
 // Re-export all public types and command functions
-pub use types::{AIConfig, ChatMessage, OwnKeyModelConfig};
 pub use stream::{StreamCancellation, ToolConfirmationState};
+pub use types::{AIConfig, ChatMessage, OwnKeyModelConfig};
 
 use tauri::{AppHandle, Manager};
 
@@ -25,9 +25,30 @@ fn should_force_rag_for_query(query: &str) -> bool {
     }
 
     const KNOWLEDGE_CUES: [&str; 24] = [
-        "如何", "怎么", "怎样", "支持", "可以", "是否", "能否", "创建",
-        "配置", "设置", "团队", "插件", "功能", "使用", "文档", "指南",
-        "教程", "管理", "同步", "知识库", "workflow", "api", "接口", "扩展",
+        "如何",
+        "怎么",
+        "怎样",
+        "支持",
+        "可以",
+        "是否",
+        "能否",
+        "创建",
+        "配置",
+        "设置",
+        "团队",
+        "插件",
+        "功能",
+        "使用",
+        "文档",
+        "指南",
+        "教程",
+        "管理",
+        "同步",
+        "知识库",
+        "workflow",
+        "api",
+        "接口",
+        "扩展",
     ];
 
     KNOWLEDGE_CUES.iter().any(|k| q.contains(k))
@@ -84,13 +105,11 @@ pub async fn ai_confirm_tool(app: AppHandle, approved: bool) -> Result<(), AppEr
 
 /// 非流式 AI 对话（保持向后兼容）
 #[tauri::command]
-pub async fn ai_chat(
-    messages: Vec<ChatMessage>,
-    config: AIConfig,
-) -> Result<String, AppError> {
+pub async fn ai_chat(messages: Vec<ChatMessage>, config: AIConfig) -> Result<String, AppError> {
     let client = reqwest::Client::new();
     let protocol = config.protocol.as_deref().unwrap_or("openai");
-    let is_team = config.source.as_deref() == Some("team") || config.source.as_deref() == Some("platform");
+    let is_team =
+        config.source.as_deref() == Some("team") || config.source.as_deref() == Some("platform");
 
     if protocol == "anthropic" {
         let system_prompt: String = messages
@@ -159,7 +178,12 @@ pub async fn ai_chat(
         Err(AppError::Custom("Anthropic 无回复内容".to_string()))
     } else {
         let mut request_body = request::build_api_request(
-            &config.model, &messages, config.temperature, config.max_tokens, &[], false,
+            &config.model,
+            &messages,
+            config.temperature,
+            config.max_tokens,
+            &[],
+            false,
         );
 
         if let Some(ref tid) = config.team_id {
@@ -213,7 +237,8 @@ pub async fn ai_chat_stream(
     let cancellation = app.state::<StreamCancellation>();
     cancellation.reset();
 
-    let mut system_prompt = tools::get_system_prompt(enable_advanced, enable_native, &config.system_prompt);
+    let mut system_prompt =
+        tools::get_system_prompt(enable_advanced, enable_native, &config.system_prompt);
 
     // RAG 预检索：
     // - 用户显式开启自动检索时执行
@@ -235,7 +260,9 @@ pub async fn ai_chat_stream(
             .await
             {
                 Ok(r) => Ok(r),
-                Err(_) => super::rag::rag_keyword_search(app.clone(), user_query.clone(), Some(3)).await,
+                Err(_) => {
+                    super::rag::rag_keyword_search(app.clone(), user_query.clone(), Some(3)).await
+                }
             };
 
             match rag_results {
@@ -246,7 +273,10 @@ pub async fn ai_chat_stream(
                     for (i, r) in results.iter().enumerate() {
                         rag_context.push_str(&format!(
                             "[{}] 来源：{}（相关度 {:.0}%）\n{}\n\n",
-                            i + 1, r.chunk.metadata.source, r.score * 100.0, r.chunk.content,
+                            i + 1,
+                            r.chunk.metadata.source,
+                            r.score * 100.0,
+                            r.chunk.content,
                         ));
                     }
                     system_prompt.push_str(&rag_context);
@@ -270,9 +300,16 @@ pub async fn ai_chat_stream(
     if protocol == "anthropic" {
         let full_messages: Vec<ChatMessage> = messages;
         return stream::anthropic::anthropic_stream_loop(
-            &app, &client, &config, &conversation_id,
-            &system_prompt, full_messages, &tool_list,
-        ).await.map_err(AppError::Custom);
+            &app,
+            &client,
+            &config,
+            &conversation_id,
+            &system_prompt,
+            full_messages,
+            &tool_list,
+        )
+        .await
+        .map_err(AppError::Custom);
     }
 
     // OpenAI 协议（默认）
@@ -287,16 +324,22 @@ pub async fn ai_chat_stream(
     full_messages.extend(messages);
 
     stream::openai::openai_stream_loop(
-        &app, &client, &config, &conversation_id,
-        full_messages, &tool_list,
-    ).await.map_err(AppError::Custom)
+        &app,
+        &client,
+        &config,
+        &conversation_id,
+        full_messages,
+        &tool_list,
+    )
+    .await
+    .map_err(AppError::Custom)
 }
 
 /// 获取 AI 配置（磁盘密文 → 自动解密后返回明文）
 #[tauri::command]
 pub async fn ai_get_config(app: AppHandle) -> Result<AIConfig, AppError> {
-    use tauri_plugin_store::StoreExt;
     use crate::crypto::maybe_decrypt;
+    use tauri_plugin_store::StoreExt;
 
     let store = app
         .store("config.json")
@@ -314,13 +357,12 @@ pub async fn ai_get_config(app: AppHandle) -> Result<AIConfig, AppError> {
 /// 保存 AI 配置（明文 → 加密后存储到磁盘）
 #[tauri::command]
 pub async fn ai_set_config(app: AppHandle, config: AIConfig) -> Result<(), AppError> {
-    use tauri_plugin_store::StoreExt;
     use crate::crypto::encrypt_api_key;
+    use tauri_plugin_store::StoreExt;
 
     let mut config = config;
     if !config.api_key.is_empty() && !config.api_key.starts_with("enc:") {
-        config.api_key =
-            encrypt_api_key(&config.api_key).map_err(AppError::Custom)?;
+        config.api_key = encrypt_api_key(&config.api_key).map_err(AppError::Custom)?;
     }
 
     let store = app
@@ -334,8 +376,8 @@ pub async fn ai_set_config(app: AppHandle, config: AIConfig) -> Result<(), AppEr
 /// 获取自有 Key 列表（磁盘密文 → 自动解密后返回明文）
 #[tauri::command]
 pub async fn ai_get_own_keys(app: AppHandle) -> Result<Vec<OwnKeyModelConfig>, AppError> {
-    use tauri_plugin_store::StoreExt;
     use crate::crypto::maybe_decrypt;
+    use tauri_plugin_store::StoreExt;
 
     let store = app
         .store("config.json")
@@ -355,8 +397,8 @@ pub async fn ai_get_own_keys(app: AppHandle) -> Result<Vec<OwnKeyModelConfig>, A
 /// 保存自有 Key 列表（明文 → 加密后存储到磁盘）
 #[tauri::command]
 pub async fn ai_set_own_keys(app: AppHandle, keys: Vec<OwnKeyModelConfig>) -> Result<(), AppError> {
-    use tauri_plugin_store::StoreExt;
     use crate::crypto::encrypt_api_key;
+    use tauri_plugin_store::StoreExt;
 
     let keys: Vec<OwnKeyModelConfig> = keys
         .into_iter()

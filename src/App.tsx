@@ -35,7 +35,6 @@ import {
 
 // 插件注册中心
 import { registry } from "@/core/plugin-system/registry";
-import { builtinPlugins } from "@/plugins/builtin";
 import { getMToolsAI } from "@/core/ai/mtools-ai";
 import { ScopedStorage } from "@/core/plugin-system/storage";
 import { createPluginContext } from "@/core/plugin-system/context";
@@ -51,17 +50,11 @@ import { formatFileSize } from "@/shell/ResultBuilder";
 import { updateWindowSize } from "@/shell/WindowSizeManager";
 
 import { handleError, ErrorLevel } from "@/core/errors";
-import {
-  emitPluginEvent,
-  PluginEventTypes,
-} from "@/core/plugin-system/event-bus";
 import { WINDOW_HEIGHT_EXPANDED } from "@/core/constants";
+import { isBuiltinPluginInstallRequired, resolveBuiltinPlugins } from "@/plugins/builtin";
 
 // 初始化：注册所有内置插件
-registry.registerAll(builtinPlugins);
-
-// 核心壳保留的特殊视图（不走插件注册）
-type ShellView = "main" | "plugin-embed" | "context-action" | "home";
+registry.registerAll(resolveBuiltinPlugins());
 
 // 独立窗口模式检测：截图选区窗口
 const specialView = window.__SCREENSHOT_MODE__ ? "screenshot" : null;
@@ -84,9 +77,9 @@ function MainApp() {
     return typeof top === 'string' ? top : top?.viewId ?? 'main';
   });
   const { mode, searchValue, setWindowExpanded, reset, pushView, popView, resetToMain } = useAppStore();
+  const runtimePlugins = usePluginStore((s) => s.plugins);
 
   const [contextText, setContextText] = useState("");
-  const { config } = useAIStore();
 
   // ── 提取的 Hooks ──
   const fileResults = useFileSearch(searchValue);
@@ -146,6 +139,22 @@ function MainApp() {
       unlistenScheduled?.();
     };
   }, []);
+
+  const installedOfficialBuiltinPluginIds = useMemo(() => {
+    const ids = new Set<string>();
+    runtimePlugins.forEach((plugin) => {
+      const slug = plugin.slug?.toLowerCase();
+      if (!plugin.enabled || !slug) return;
+      if (plugin.source !== "official") return;
+      if (!isBuiltinPluginInstallRequired(slug)) return;
+      ids.add(slug);
+    });
+    return Array.from(ids).sort();
+  }, [runtimePlugins]);
+
+  useEffect(() => {
+    registry.registerAll(resolveBuiltinPlugins(installedOfficialBuiltinPluginIds));
+  }, [installedOfficialBuiltinPluginIds]);
 
   // 监听 app-store 导航请求
   const pendingNavigate = useAppStore((s) => s.pendingNavigate);
@@ -348,13 +357,39 @@ function MainApp() {
       }));
 
     // 6) 搜索外部插件
-    const pluginMatches = usePluginStore.getState().matchInput(searchValue);
+    const pluginMatches = usePluginStore
+      .getState()
+      .matchInput(searchValue)
+      .filter((pr) => {
+        const slug = pr.plugin.slug?.toLowerCase();
+        if (
+          pr.plugin.source === "official" &&
+          slug &&
+          isBuiltinPluginInstallRequired(slug) &&
+          registry.getByViewId(slug)
+        ) {
+          return false;
+        }
+        return true;
+      });
     const BUILTIN_COLOR_PICKER = "color-picker";
     const BUILTIN_SCREEN_CAPTURE = "screen-capture";
     const pluginResults: ResultItem[] = pluginMatches.map((pr) => {
       const code = pr.feature.code;
       const isColorPicker = code === BUILTIN_COLOR_PICKER;
       const isScreenCapture = code === BUILTIN_SCREEN_CAPTURE;
+      const slug = pr.plugin.slug?.toLowerCase();
+      const openBuiltin = () => {
+        if (
+          slug &&
+          isBuiltinPluginInstallRequired(slug) &&
+          registry.getByViewId(slug)
+        ) {
+          pushView(slug);
+          return true;
+        }
+        return false;
+      };
       return {
         id: `plugin-${pr.plugin.id}-${code}`,
         title: pr.plugin.manifest.pluginName,
@@ -366,7 +401,10 @@ function MainApp() {
           ? handleDirectColorPicker
           : isScreenCapture
             ? () => pushView("screen-capture")
-            : () => usePluginStore.getState().openPlugin(pr.plugin.id, code),
+            : () => {
+              if (openBuiltin()) return;
+              usePluginStore.getState().openPlugin(pr.plugin.id, code);
+            },
       };
     });
 
@@ -385,8 +423,9 @@ function MainApp() {
 
     // 8) 书签搜索混排
     const bmStore = useBookmarkStore.getState();
+    const bookmarkPluginInstalled = Boolean(registry.getByViewId("bookmarks"));
     const bmMatches =
-      searchValue.length >= 2
+      bookmarkPluginInstalled && searchValue.length >= 2
         ? bmStore.searchBookmarks(searchValue).slice(0, 6)
         : [];
     const bookmarkItems: ResultItem[] = bmMatches.map((bm) => ({
@@ -478,6 +517,13 @@ function MainApp() {
   // 当前激活的插件
   const activePlugin = registry.getByViewId(view);
   const prevPluginRef = useRef<typeof activePlugin>(null);
+
+  useEffect(() => {
+    const shellViews = new Set(["main", "home", "plugin-embed", "context-action"]);
+    if (!activePlugin && !shellViews.has(view)) {
+      resetToMain();
+    }
+  }, [activePlugin, view, resetToMain]);
 
   const pluginContext = useMemo(
     () =>

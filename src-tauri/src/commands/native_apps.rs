@@ -17,13 +17,25 @@ pub struct NativeAppResult {
 
 impl NativeAppResult {
     fn ok(message: impl Into<String>) -> Self {
-        Self { success: true, message: message.into(), data: None }
+        Self {
+            success: true,
+            message: message.into(),
+            data: None,
+        }
     }
     fn ok_with_data(message: impl Into<String>, data: serde_json::Value) -> Self {
-        Self { success: true, message: message.into(), data: Some(data) }
+        Self {
+            success: true,
+            message: message.into(),
+            data: Some(data),
+        }
     }
     fn err(message: impl Into<String>) -> Self {
-        Self { success: false, message: message.into(), data: None }
+        Self {
+            success: false,
+            message: message.into(),
+            data: None,
+        }
     }
 }
 
@@ -53,7 +65,9 @@ fn run_applescript_multiline(lines: &[&str]) -> Result<String, String> {
     for line in lines {
         cmd.arg("-e").arg(*line);
     }
-    let output = cmd.output().map_err(|e| format!("执行 AppleScript 失败: {}", e))?;
+    let output = cmd
+        .output()
+        .map_err(|e| format!("执行 AppleScript 失败: {}", e))?;
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -118,8 +132,8 @@ pub async fn native_calendar_list() -> Result<NativeAppResult, String> {
     "#;
     match run_jxa(script) {
         Ok(output) => {
-            let data: serde_json::Value = serde_json::from_str(&output)
-                .unwrap_or(serde_json::Value::String(output));
+            let data: serde_json::Value =
+                serde_json::from_str(&output).unwrap_or(serde_json::Value::String(output));
             Ok(NativeAppResult::ok_with_data("获取日历列表成功", data))
         }
         Err(e) => Ok(NativeAppResult::err(e)),
@@ -178,8 +192,8 @@ pub async fn native_calendar_create_event(
 
     match run_jxa(&script) {
         Ok(output) => {
-            let data: serde_json::Value = serde_json::from_str(&output)
-                .unwrap_or(serde_json::Value::String(output));
+            let data: serde_json::Value =
+                serde_json::from_str(&output).unwrap_or(serde_json::Value::String(output));
             Ok(NativeAppResult::ok_with_data(
                 format!("已在日历「{}」中创建事件「{}」", cal_name, title),
                 data,
@@ -191,9 +205,7 @@ pub async fn native_calendar_create_event(
 
 /// 查询今日/近期日历事件
 #[tauri::command]
-pub async fn native_calendar_list_events(
-    days: Option<i32>,
-) -> Result<NativeAppResult, String> {
+pub async fn native_calendar_list_events(days: Option<i32>) -> Result<NativeAppResult, String> {
     let range_days = days.unwrap_or(1);
     let script = format!(
         r#"
@@ -231,8 +243,8 @@ pub async fn native_calendar_list_events(
 
     match run_jxa(&script) {
         Ok(output) => {
-            let data: serde_json::Value = serde_json::from_str(&output)
-                .unwrap_or(serde_json::Value::String(output));
+            let data: serde_json::Value =
+                serde_json::from_str(&output).unwrap_or(serde_json::Value::String(output));
             let count = data.as_array().map(|a| a.len()).unwrap_or(0);
             Ok(NativeAppResult::ok_with_data(
                 format!("找到 {} 个日程事件（未来 {} 天）", count, range_days),
@@ -261,8 +273,8 @@ pub async fn native_reminder_lists() -> Result<NativeAppResult, String> {
     "#;
     match run_jxa(script) {
         Ok(output) => {
-            let data: serde_json::Value = serde_json::from_str(&output)
-                .unwrap_or(serde_json::Value::String(output));
+            let data: serde_json::Value =
+                serde_json::from_str(&output).unwrap_or(serde_json::Value::String(output));
             Ok(NativeAppResult::ok_with_data("获取提醒列表成功", data))
         }
         Err(e) => Ok(NativeAppResult::err(e)),
@@ -316,8 +328,8 @@ pub async fn native_reminder_create(
 
     match run_jxa(&script) {
         Ok(output) => {
-            let data: serde_json::Value = serde_json::from_str(&output)
-                .unwrap_or(serde_json::Value::String(output));
+            let data: serde_json::Value =
+                serde_json::from_str(&output).unwrap_or(serde_json::Value::String(output));
             Ok(NativeAppResult::ok_with_data(
                 format!("已创建提醒「{}」", title),
                 data,
@@ -369,8 +381,8 @@ pub async fn native_reminder_list_incomplete(
 
     match run_jxa(&script) {
         Ok(output) => {
-            let data: serde_json::Value = serde_json::from_str(&output)
-                .unwrap_or(serde_json::Value::String(output));
+            let data: serde_json::Value =
+                serde_json::from_str(&output).unwrap_or(serde_json::Value::String(output));
             let count = data.as_array().map(|a| a.len()).unwrap_or(0);
             Ok(NativeAppResult::ok_with_data(
                 format!("找到 {} 个未完成提醒", count),
@@ -418,8 +430,8 @@ pub async fn native_notes_create(
 
     match run_jxa(&script) {
         Ok(output) => {
-            let data: serde_json::Value = serde_json::from_str(&output)
-                .unwrap_or(serde_json::Value::String(output));
+            let data: serde_json::Value =
+                serde_json::from_str(&output).unwrap_or(serde_json::Value::String(output));
             Ok(NativeAppResult::ok_with_data(
                 format!("已创建备忘录「{}」", title),
                 data,
@@ -463,8 +475,8 @@ pub async fn native_notes_search(
 
     match run_jxa(&script) {
         Ok(output) => {
-            let data: serde_json::Value = serde_json::from_str(&output)
-                .unwrap_or(serde_json::Value::String(output));
+            let data: serde_json::Value =
+                serde_json::from_str(&output).unwrap_or(serde_json::Value::String(output));
             let count = data.as_array().map(|a| a.len()).unwrap_or(0);
             Ok(NativeAppResult::ok_with_data(
                 format!("找到 {} 条相关备忘录", count),
@@ -487,13 +499,26 @@ pub async fn native_mail_create(
     body: String,
     cc: Option<Vec<String>>,
 ) -> Result<NativeAppResult, String> {
-    let to_recipients = to.iter()
-        .map(|addr| format!(r#"msg.toRecipients.push(app.Recipient({{address: "{}"}}));"#, escape_js(addr)))
+    let to_recipients = to
+        .iter()
+        .map(|addr| {
+            format!(
+                r#"msg.toRecipients.push(app.Recipient({{address: "{}"}}));"#,
+                escape_js(addr)
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
-    let cc_recipients = cc.unwrap_or_default().iter()
-        .map(|addr| format!(r#"msg.ccRecipients.push(app.Recipient({{address: "{}"}}));"#, escape_js(addr)))
+    let cc_recipients = cc
+        .unwrap_or_default()
+        .iter()
+        .map(|addr| {
+            format!(
+                r#"msg.ccRecipients.push(app.Recipient({{address: "{}"}}));"#,
+                escape_js(addr)
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -555,7 +580,10 @@ pub async fn native_shortcuts_list() -> Result<NativeAppResult, String> {
             ))
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            Ok(NativeAppResult::err(format!("获取快捷指令失败: {}", stderr)))
+            Ok(NativeAppResult::err(format!(
+                "获取快捷指令失败: {}",
+                stderr
+            )))
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -575,7 +603,8 @@ pub async fn native_shortcuts_run(
         if let Some(ref inp) = input {
             cmd.arg("-i").arg(inp);
         }
-        let output = cmd.output()
+        let output = cmd
+            .output()
             .map_err(|e| format!("运行快捷指令失败: {}", e))?;
 
         if output.status.success() {

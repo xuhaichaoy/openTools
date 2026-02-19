@@ -7,14 +7,22 @@ import type { SharedResource } from "@/store/team-store";
 export function TeamResourcesSection({
   teamId,
   isOwnerOrAdmin,
+  teamActive,
 }: {
   teamId: string;
   isOwnerOrAdmin: boolean;
+  teamActive: boolean;
 }) {
   const [resources, setResources] = useState<SharedResource[]>([]);
   const [loading, setLoading] = useState(true);
 
   const fetchResources = useCallback(async () => {
+    if (!teamActive) {
+      setResources([]);
+      setLoading(false);
+      return;
+    }
+
     try {
       const res = await api.get<{ resources: SharedResource[] }>(
         `/teams/${teamId}/resources`,
@@ -25,13 +33,14 @@ export function TeamResourcesSection({
     } finally {
       setLoading(false);
     }
-  }, [teamId]);
+  }, [teamId, teamActive]);
 
   useEffect(() => {
     fetchResources();
   }, [fetchResources]);
 
   const handleUnshare = async (resourceId: string) => {
+    if (!teamActive) return;
     if (!confirm("确定要取消共享该资源吗？")) return;
     try {
       await api.delete(`/teams/${teamId}/resources/${resourceId}`);
@@ -45,6 +54,17 @@ export function TeamResourcesSection({
     return (
       <div className="flex items-center justify-center py-12">
         <Loader2 className="w-5 h-5 animate-spin text-[#F28F36]" />
+      </div>
+    );
+  }
+
+  if (!teamActive) {
+    return (
+      <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-4">
+        <h3 className="text-xs font-semibold">共享资源</h3>
+        <p className="text-[10px] text-[var(--color-text-secondary)] mt-1">
+          团队已到期，团队共享资源能力不可用，续费后恢复。
+        </p>
       </div>
     );
   }

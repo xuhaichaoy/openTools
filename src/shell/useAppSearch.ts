@@ -12,12 +12,43 @@ export interface AppSearchResult {
   path: string;
 }
 
+const EMPTY_APP_RESULTS: AppSearchResult[] = [];
+
 /**
  * 本地应用搜索（app 前缀或通用搜索），带 200ms 防抖
  */
 export function useAppSearch(searchValue: string): AppSearchResult[] {
   const [appResults, setAppResults] = useState<AppSearchResult[]>([]);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const trimmed = searchValue.trim();
+  const isFilePrefix = trimmed.startsWith("f ");
+  const isAppPrefix = trimmed.startsWith("app ");
+  const query = isFilePrefix
+    ? trimmed.slice(2).trim()
+    : isAppPrefix
+      ? trimmed.slice(4).trim()
+      : trimmed;
+  const prefixModes = [
+    "ai ",
+    "bd ",
+    "gg ",
+    "bing ",
+    "/ ",
+    "cb",
+    "data ",
+    "sys ",
+    "sn ",
+    "bk ",
+  ];
+  const isPrefix = prefixModes.some(
+    (p) => trimmed.startsWith(p) || trimmed === p.trim(),
+  );
+  const shouldSearch = !(
+    !query ||
+    query.length < 2 ||
+    isFilePrefix ||
+    (isPrefix && !isAppPrefix)
+  );
 
   useEffect(() => {
     if (timerRef.current) {
@@ -25,38 +56,7 @@ export function useAppSearch(searchValue: string): AppSearchResult[] {
       timerRef.current = null;
     }
 
-    const trimmed = searchValue.trim();
-    const isFilePrefix = trimmed.startsWith("f ");
-    const isAppPrefix = trimmed.startsWith("app ");
-    const query = isFilePrefix
-      ? trimmed.slice(2).trim()
-      : isAppPrefix
-        ? trimmed.slice(4).trim()
-        : trimmed;
-
-    // 前缀模式不搜索应用
-    const prefixModes = [
-      "ai ",
-      "bd ",
-      "gg ",
-      "bing ",
-      "/ ",
-      "cb",
-      "data ",
-      "sn ",
-      "bk ",
-    ];
-    const isPrefix = prefixModes.some(
-      (p) => trimmed.startsWith(p) || trimmed === p.trim(),
-    );
-
-    if (
-      !query ||
-      query.length < 2 ||
-      isFilePrefix ||
-      (isPrefix && !isAppPrefix)
-    ) {
-      setAppResults([]);
+    if (!shouldSearch) {
       return;
     }
 
@@ -78,7 +78,7 @@ export function useAppSearch(searchValue: string): AppSearchResult[] {
         clearTimeout(timerRef.current);
       }
     };
-  }, [searchValue]);
+  }, [isAppPrefix, query, shouldSearch]);
 
-  return appResults;
+  return shouldSearch ? appResults : EMPTY_APP_RESULTS;
 }
