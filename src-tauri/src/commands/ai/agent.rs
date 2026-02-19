@@ -26,6 +26,9 @@ pub async fn ai_agent_stream(
 
     if let Some(ref tid) = config.team_id {
         request["team_id"] = serde_json::json!(tid);
+        if let Some(ref tcid) = config.team_config_id {
+            request["team_config_id"] = serde_json::json!(tcid);
+        }
     }
 
     let response = client

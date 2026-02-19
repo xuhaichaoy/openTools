@@ -55,6 +55,9 @@ pub struct AIConfig {
     /// 团队模式时的团队 ID
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team_id: Option<String>,
+    /// 团队模式时精确选择的配置 ID
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_config_id: Option<String>,
     /// API 协议：openai / anthropic
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<String>,
@@ -79,6 +82,7 @@ impl Default for AIConfig {
             enable_native_tools: true,
             source: Some("own_key".to_string()),
             team_id: None,
+            team_config_id: None,
             protocol: None,
             active_own_key_id: None,
         }

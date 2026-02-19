@@ -44,6 +44,9 @@ pub async fn anthropic_stream_loop(
             if let Some(ref tid) = config.team_id {
                 let mut r = request.clone();
                 r["team_id"] = serde_json::json!(tid);
+                if let Some(ref tcid) = config.team_config_id {
+                    r["team_config_id"] = serde_json::json!(tcid);
+                }
                 r
             } else {
                 request.clone()

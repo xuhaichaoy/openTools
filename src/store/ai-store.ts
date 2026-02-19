@@ -87,6 +87,20 @@ function triggerPersist() {
   debouncedPersist(() => useAIStore.getState().persistHistory());
 }
 
+function normalizeConfig(config: AIConfig): AIConfig {
+  const source = config.source || "own_key";
+  const normalized: AIConfig = { ...config, source };
+
+  if (source !== "team") {
+    normalized.team_id = undefined;
+    normalized.team_config_id = undefined;
+  } else if (!normalized.team_id) {
+    normalized.team_config_id = undefined;
+  }
+
+  return normalized;
+}
+
 export const useAIStore = create<AIState>((set, get) => ({
   config: {
     base_url: DEFAULT_AI_BASE_URL,
@@ -107,12 +121,12 @@ export const useAIStore = create<AIState>((set, get) => ({
   pendingToolConfirm: null,
   ownKeys: [],
 
-  setConfig: (config) => set({ config }),
+  setConfig: (config) => set({ config: normalizeConfig(config) }),
 
   loadConfig: async () => {
     try {
       const config = await invoke<AIConfig>("ai_get_config");
-      set({ config });
+      set({ config: normalizeConfig(config) });
     } catch (e) {
       handleError(e, { context: "加载 AI 配置", silent: true });
     }
@@ -120,8 +134,9 @@ export const useAIStore = create<AIState>((set, get) => ({
 
   saveConfig: async (config) => {
     try {
-      await invoke("ai_set_config", { config });
-      set({ config });
+      const normalized = normalizeConfig(config);
+      await invoke("ai_set_config", { config: normalized });
+      set({ config: normalized });
     } catch (e) {
       handleError(e, { context: "保存 AI 配置" });
     }
@@ -177,6 +192,8 @@ export const useAIStore = create<AIState>((set, get) => ({
     const newConfig: AIConfig = {
       ...config,
       source: "own_key",
+      team_id: undefined,
+      team_config_id: undefined,
       protocol: key.protocol,
       base_url: key.base_url,
       api_key: key.api_key,
@@ -186,8 +203,9 @@ export const useAIStore = create<AIState>((set, get) => ({
       active_own_key_id: id,
     };
 
-    set({ config: newConfig });
-    invoke("ai_set_config", { config: newConfig }).catch((e) =>
+    const normalized = normalizeConfig(newConfig);
+    set({ config: normalized });
+    invoke("ai_set_config", { config: normalized }).catch((e) =>
       handleError(e, { context: "保存 AI 配置" }),
     );
   },

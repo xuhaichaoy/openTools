@@ -63,11 +63,11 @@ function Toggle({
 
 // ── 团队模型信息 ──
 interface TeamModelInfo {
-  id: string;
-  config_name: string;
+  config_id: string;
+  display_name: string;
   model_name: string;
   protocol: string;
-  base_url: string;
+  priority: number;
 }
 
 export function AIModelTab() {
@@ -180,7 +180,9 @@ export function AIModelTab() {
       {config.source === "team" && (
         <TeamSourceSection
           teamId={config.team_id}
-          onTeamChange={(teamId) => updateAndSave({ team_id: teamId })}
+          onTeamChange={(teamId) =>
+            updateAndSave({ team_id: teamId, team_config_id: undefined })
+          }
         />
       )}
 
@@ -773,10 +775,10 @@ function TeamSourceSection({
           ) : models.length > 0 ? (
             <div className="divide-y divide-[var(--color-border)]">
               {models.map((m) => (
-                <div key={m.id} className="flex items-center gap-2.5 py-2.5">
+                <div key={m.config_id} className="flex items-center gap-2.5 py-2.5">
                   <Cpu className="w-3.5 h-3.5" style={{ color: BRAND }} />
                   <div>
-                    <div className="text-xs font-medium">{m.config_name}</div>
+                    <div className="text-xs font-medium">{m.display_name}</div>
                     <div className="text-[10px] text-[var(--color-text-secondary)]">
                       <span className={`inline-block px-1 py-0.5 rounded text-[9px] font-medium mr-1 ${
                         m.protocol === "anthropic"
@@ -785,7 +787,7 @@ function TeamSourceSection({
                       }`}>
                         {m.protocol === "anthropic" ? "Anthropic" : "OpenAI"}
                       </span>
-                      {m.model_name}
+                      {m.model_name} · 优先级 {m.priority}
                     </div>
                   </div>
                 </div>

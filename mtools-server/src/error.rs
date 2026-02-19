@@ -24,6 +24,14 @@ pub enum Error {
 
     #[error("Not Found: {0}")]
     NotFound(String),
+
+    #[error("{code}: {message}")]
+    Api {
+        status: StatusCode,
+        code: String,
+        message: String,
+        details: Option<serde_json::Value>,
+    },
 }
 
 impl From<anyhow::Error> for Error {
@@ -38,24 +46,98 @@ impl From<String> for Error {
     }
 }
 
+impl Error {
+    pub fn api(
+        status: StatusCode,
+        code: impl Into<String>,
+        message: impl Into<String>,
+        details: Option<serde_json::Value>,
+    ) -> Self {
+        Self::Api {
+            status,
+            code: code.into(),
+            message: message.into(),
+            details,
+        }
+    }
+
+    pub fn bad_request_code(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        details: Option<serde_json::Value>,
+    ) -> Self {
+        Self::api(StatusCode::BAD_REQUEST, code, message, details)
+    }
+
+    pub fn unauthorized_code(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        details: Option<serde_json::Value>,
+    ) -> Self {
+        Self::api(StatusCode::UNAUTHORIZED, code, message, details)
+    }
+
+    pub fn not_found_code(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        details: Option<serde_json::Value>,
+    ) -> Self {
+        Self::api(StatusCode::NOT_FOUND, code, message, details)
+    }
+}
+
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        let (status, message) = match &self {
+        let (status, code, message, details) = match &self {
             Self::Internal(e) => {
                 tracing::error!("Internal error: {:?}", e);
-                (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "INTERNAL_SERVER_ERROR".to_string(),
+                    "Internal server error".to_string(),
+                    None,
+                )
             }
             Self::Database(e) => {
                 tracing::error!("Database error: {:?}", e);
-                (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "INTERNAL_SERVER_ERROR".to_string(),
+                    "Internal server error".to_string(),
+                    None,
+                )
             }
-            Self::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
-            Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
-            Self::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
+            Self::Unauthorized(msg) => (
+                StatusCode::UNAUTHORIZED,
+                "UNAUTHORIZED".to_string(),
+                msg.clone(),
+                None,
+            ),
+            Self::BadRequest(msg) => (
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST".to_string(),
+                msg.clone(),
+                None,
+            ),
+            Self::NotFound(msg) => (
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND".to_string(),
+                msg.clone(),
+                None,
+            ),
+            Self::Api {
+                status,
+                code,
+                message,
+                details,
+            } => (*status, code.clone(), message.clone(), details.clone()),
         };
 
         let body = Json(json!({
+            "code": code,
+            "message": message,
             "error": message,
+            "details": details,
         }));
 
         (status, body).into_response()

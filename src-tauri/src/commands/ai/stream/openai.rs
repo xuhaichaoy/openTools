@@ -23,11 +23,14 @@ pub async fn openai_stream_loop(
 
     if let Some(ref tid) = config.team_id {
         request["team_id"] = serde_json::json!(tid);
+        if let Some(ref tcid) = config.team_config_id {
+            request["team_config_id"] = serde_json::json!(tcid);
+        }
     }
 
     let url = format!("{}/chat/completions", config.base_url);
-    log::info!("[ai_chat_stream] POST {} | source={:?} model={} team_id={:?}",
-        url, config.source, config.model, config.team_id);
+    log::info!("[ai_chat_stream] POST {} | source={:?} model={} team_id={:?} team_config_id={:?}",
+        url, config.source, config.model, config.team_id, config.team_config_id);
 
     let response = client
         .post(&url)
@@ -138,6 +141,9 @@ pub async fn openai_stream_loop(
                                 );
                                 if let Some(ref tid) = config.team_id {
                                     follow_request["team_id"] = serde_json::json!(tid);
+                                    if let Some(ref tcid) = config.team_config_id {
+                                        follow_request["team_config_id"] = serde_json::json!(tcid);
+                                    }
                                 }
 
                                 match client

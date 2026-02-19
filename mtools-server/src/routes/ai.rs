@@ -281,10 +281,18 @@ async fn ai_team_proxy_chat(
     let team_id_str = payload
         .get("team_id")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::BadRequest("team_id required".into()))?;
+        .ok_or_else(|| {
+            Error::bad_request_code(
+                "TEAM_ID_REQUIRED",
+                "team_id is required when source=team",
+                None,
+            )
+        })?;
 
     let team_id = Uuid::parse_str(team_id_str)
-        .map_err(|_| Error::BadRequest("Invalid team_id".into()))?;
+        .map_err(|_| {
+            Error::bad_request_code("TEAM_ID_REQUIRED", "Invalid team_id", None)
+        })?;
 
     // 验证用户是团队成员
     let is_member: bool = sqlx::query_scalar(
@@ -297,39 +305,113 @@ async fn ai_team_proxy_chat(
     .unwrap_or(false);
 
     if !is_member {
-        return Err(Error::Unauthorized("Not a team member".into()));
+        return Err(Error::unauthorized_code(
+            "TEAM_ACCESS_DENIED",
+            "Not a team member",
+            Some(serde_json::json!({ "team_id": team_id })),
+        ));
     }
 
-    // 获取团队 AI 配置：优先按 model 匹配，否则取第一个激活配置
-    let requested_model = payload.get("model").and_then(|v| v.as_str()).unwrap_or("");
-    let team_config = if !requested_model.is_empty() {
+    let requested_model = payload
+        .get("model")
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.trim().is_empty())
+        .map(|v| v.trim().to_string());
+
+    let requested_team_config_id = payload
+        .get("team_config_id")
+        .and_then(|v| v.as_str())
+        .map(|raw| raw.trim().to_string())
+        .filter(|raw| !raw.is_empty())
+        .map(|raw| {
+            Uuid::parse_str(&raw).map_err(|_| {
+                Error::bad_request_code(
+                    "TEAM_MODEL_UNAVAILABLE",
+                    "Invalid team_config_id",
+                    Some(serde_json::json!({ "team_config_id": raw })),
+                )
+            })
+        })
+        .transpose()?;
+
+    // 解析最终团队配置：team_config_id > model_name > 默认优先级
+    let team_config = if let Some(config_id) = requested_team_config_id {
         sqlx::query_as::<_, TeamAiConfig>(
-            "SELECT id, team_id, base_url, api_key, model_name, is_active, protocol FROM team_ai_configs WHERE team_id = $1 AND is_active = true AND model_name = $2 LIMIT 1",
+            "SELECT id, team_id, base_url, api_key, model_name, is_active, protocol, priority, member_token_limit, created_at
+             FROM team_ai_configs
+             WHERE team_id = $1 AND id = $2 AND is_active = true
+             LIMIT 1",
         )
         .bind(team_id)
-        .bind(requested_model)
+        .bind(config_id)
         .fetch_optional(&state.db)
         .await?
-    } else {
-        None
-    };
-    let team_config = match team_config {
-        Some(c) => c,
-        None => {
-            sqlx::query_as::<_, TeamAiConfig>(
-                "SELECT id, team_id, base_url, api_key, model_name, is_active, protocol FROM team_ai_configs WHERE team_id = $1 AND is_active = true ORDER BY created_at ASC LIMIT 1",
+        .ok_or_else(|| {
+            Error::bad_request_code(
+                "TEAM_MODEL_UNAVAILABLE",
+                "Requested team model is unavailable",
+                Some(serde_json::json!({
+                    "team_id": team_id,
+                    "team_config_id": config_id,
+                })),
             )
-            .bind(team_id)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or_else(|| Error::BadRequest("No active team AI config".into()))?
-        }
+        })?
+    } else if let Some(model_name) = requested_model.as_deref() {
+        sqlx::query_as::<_, TeamAiConfig>(
+            "SELECT id, team_id, base_url, api_key, model_name, is_active, protocol, priority, member_token_limit, created_at
+             FROM team_ai_configs
+             WHERE team_id = $1 AND is_active = true AND model_name = $2
+             ORDER BY priority ASC, created_at ASC
+             LIMIT 1",
+        )
+        .bind(team_id)
+        .bind(model_name)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| {
+            Error::bad_request_code(
+                "TEAM_MODEL_UNAVAILABLE",
+                "Requested model is unavailable in team",
+                Some(serde_json::json!({
+                    "team_id": team_id,
+                    "model": model_name,
+                })),
+            )
+        })?
+    } else {
+        sqlx::query_as::<_, TeamAiConfig>(
+            "SELECT id, team_id, base_url, api_key, model_name, is_active, protocol, priority, member_token_limit, created_at
+             FROM team_ai_configs
+             WHERE team_id = $1 AND is_active = true
+             ORDER BY priority ASC, created_at ASC
+             LIMIT 1",
+        )
+        .bind(team_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| {
+            Error::bad_request_code(
+                "NO_ACTIVE_TEAM_MODEL",
+                "No active team AI config",
+                Some(serde_json::json!({ "team_id": team_id })),
+            )
+        })?
     };
+
+    // 团队月额度校验（0 表示不限额）
+    enforce_team_monthly_quota(
+        &state.db,
+        team_id,
+        user_id,
+        &team_config.model_name,
+    )
+    .await?;
 
     // 构建转发 payload：移除 team_id（上游 API 不认识），替换 model 为实际配置的 model
     let mut forward_payload = payload.clone();
     if let Some(obj) = forward_payload.as_object_mut() {
         obj.remove("team_id");
+        obj.remove("team_config_id");
         obj.insert("model".to_string(), serde_json::json!(team_config.model_name));
     }
 
@@ -341,6 +423,7 @@ async fn ai_team_proxy_chat(
     } else {
         format!("{}/chat/completions", team_config.base_url)
     };
+    let is_stream = payload.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
     tracing::info!("[team_proxy] forwarding to {} | protocol={} model={} config_id={}",
         forward_url, team_config.protocol, team_config.model_name, team_config.id);
 
@@ -360,51 +443,79 @@ async fn ai_team_proxy_chat(
         .map_err(|e| Error::Internal(anyhow::anyhow!("Team proxy error: {}", e)))?;
 
     let status = res.status();
-    let stream = res.bytes_stream();
 
+    if !is_stream {
+        let body_bytes = res
+            .bytes()
+            .await
+            .map_err(|e| Error::Internal(anyhow::anyhow!("Read error: {}", e)))?;
+        let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap_or_default();
+
+        if let Some(usage) = body_json.get("usage") {
+            let (prompt_tokens, completion_tokens) = extract_usage_tokens(usage);
+            if prompt_tokens > 0 || completion_tokens > 0 {
+                let _ = insert_team_usage_log(
+                    &state.db,
+                    team_id,
+                    user_id,
+                    team_config.id,
+                    &team_config.model_name,
+                    prompt_tokens,
+                    completion_tokens,
+                )
+                .await;
+            }
+        }
+
+        return Ok(Response::builder()
+            .status(status)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body_bytes))
+            .unwrap());
+    }
+
+    let stream = res.bytes_stream();
     let db = state.db.clone();
     let model = team_config.model_name.clone();
+    let config_id = team_config.id;
     let logged = Arc::new(AtomicBool::new(false));
-    let mapped = stream.map(move |chunk| {
-        match chunk {
-            Ok(bytes) => {
-                let text = String::from_utf8_lossy(&bytes);
-                for line in text.lines() {
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        if data == "[DONE]" {
-                            continue;
-                        }
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                            if let Some(usage) = json.get("usage") {
-                                if !logged.swap(true, Ordering::SeqCst) {
-                                    let prompt = usage.get("prompt_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-                                    let completion = usage.get("completion_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-                                    if prompt > 0 || completion > 0 {
-                                        let db = db.clone();
-                                        let model = model.clone();
-                                        tokio::spawn(async move {
-                                            let _ = sqlx::query(
-                                                "INSERT INTO team_ai_usage_logs (team_id, user_id, model, input_tokens, output_tokens, created_at) \
-                                                 VALUES ($1, $2, $3, $4, $5, NOW())"
-                                            )
-                                            .bind(team_id)
-                                            .bind(user_id)
-                                            .bind(&model)
-                                            .bind(prompt)
-                                            .bind(completion)
-                                            .execute(&db)
-                                            .await;
-                                        });
-                                    }
+    let mapped = stream.map(move |chunk| match chunk {
+        Ok(bytes) => {
+            let text = String::from_utf8_lossy(&bytes);
+            for line in text.lines() {
+                if let Some(data) = line.strip_prefix("data: ") {
+                    if data == "[DONE]" {
+                        continue;
+                    }
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                        if let Some(usage) = json.get("usage") {
+                            if !logged.swap(true, Ordering::SeqCst) {
+                                let (prompt_tokens, completion_tokens) =
+                                    extract_usage_tokens(usage);
+                                if prompt_tokens > 0 || completion_tokens > 0 {
+                                    let db = db.clone();
+                                    let model = model.clone();
+                                    tokio::spawn(async move {
+                                        let _ = insert_team_usage_log(
+                                            &db,
+                                            team_id,
+                                            user_id,
+                                            config_id,
+                                            &model,
+                                            prompt_tokens,
+                                            completion_tokens,
+                                        )
+                                        .await;
+                                    });
                                 }
                             }
                         }
                     }
                 }
-                Ok(bytes)
             }
-            Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())),
+            Ok(bytes)
         }
+        Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())),
     });
 
     let body = Body::from_stream(mapped);
@@ -418,6 +529,158 @@ async fn ai_team_proxy_chat(
 }
 
 // ── 辅助函数 ──
+
+async fn enforce_team_monthly_quota(
+    db: &sqlx::PgPool,
+    team_id: Uuid,
+    user_id: Uuid,
+    model: &str,
+) -> Result<()> {
+    ensure_team_quota_tables(db).await?;
+
+    let month_key: String = sqlx::query_scalar("SELECT TO_CHAR(NOW(), 'YYYY-MM')")
+        .fetch_one(db)
+        .await?;
+
+    let base_tokens: i64 = sqlx::query_scalar(
+        "SELECT monthly_limit_tokens FROM team_ai_quota_policy WHERE team_id = $1",
+    )
+    .bind(team_id)
+    .fetch_optional(db)
+    .await?
+    .unwrap_or(0);
+
+    let extra_tokens: i64 = sqlx::query_scalar(
+        "SELECT extra_tokens
+         FROM team_ai_member_quota_adjustments
+         WHERE team_id = $1 AND user_id = $2 AND month_key = $3",
+    )
+    .bind(team_id)
+    .bind(user_id)
+    .bind(&month_key)
+    .fetch_optional(db)
+    .await?
+    .unwrap_or(0);
+
+    let effective_tokens = base_tokens.saturating_add(extra_tokens);
+    if effective_tokens <= 0 {
+        return Ok(());
+    }
+
+    let used_tokens: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(
+            SUM(COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)),
+            0
+        )::BIGINT
+         FROM team_ai_usage_logs
+         WHERE team_id = $1
+           AND user_id = $2
+           AND created_at >= DATE_TRUNC('month', NOW())
+           AND created_at < DATE_TRUNC('month', NOW()) + INTERVAL '1 month'",
+    )
+    .bind(team_id)
+    .bind(user_id)
+    .fetch_one(db)
+    .await?;
+
+    if used_tokens >= effective_tokens {
+        return Err(Error::bad_request_code(
+            "TEAM_QUOTA_EXCEEDED",
+            "Team monthly quota exceeded",
+            Some(serde_json::json!({
+                "team_id": team_id,
+                "user_id": user_id,
+                "month": month_key,
+                "used_tokens": used_tokens,
+                "effective_tokens": effective_tokens,
+                "model": model,
+            })),
+        ));
+    }
+
+    Ok(())
+}
+
+async fn ensure_team_quota_tables(db: &sqlx::PgPool) -> Result<()> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS team_ai_quota_policy (
+            team_id UUID PRIMARY KEY REFERENCES teams(id) ON DELETE CASCADE,
+            monthly_limit_tokens BIGINT NOT NULL DEFAULT 0,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )",
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS team_ai_member_quota_adjustments (
+            team_id UUID NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+            user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            month_key CHAR(7) NOT NULL,
+            extra_tokens BIGINT NOT NULL DEFAULT 0,
+            updated_by UUID NOT NULL REFERENCES users(id),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (team_id, user_id, month_key)
+        )",
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_team_ai_usage_month_user
+         ON team_ai_usage_logs(team_id, user_id, created_at DESC)",
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_team_quota_adjustments_lookup
+         ON team_ai_member_quota_adjustments(team_id, month_key, user_id)",
+    )
+    .execute(db)
+    .await?;
+
+    Ok(())
+}
+
+fn extract_usage_tokens(usage: &serde_json::Value) -> (i64, i64) {
+    let prompt_tokens = usage
+        .get("prompt_tokens")
+        .and_then(|v| v.as_i64())
+        .or_else(|| usage.get("input_tokens").and_then(|v| v.as_i64()))
+        .unwrap_or(0);
+    let completion_tokens = usage
+        .get("completion_tokens")
+        .and_then(|v| v.as_i64())
+        .or_else(|| usage.get("output_tokens").and_then(|v| v.as_i64()))
+        .unwrap_or(0);
+    (prompt_tokens, completion_tokens)
+}
+
+async fn insert_team_usage_log(
+    db: &sqlx::PgPool,
+    team_id: Uuid,
+    user_id: Uuid,
+    config_id: Uuid,
+    model: &str,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO team_ai_usage_logs (
+            team_id, user_id, config_id, model, prompt_tokens, completion_tokens, created_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, NOW())",
+    )
+    .bind(team_id)
+    .bind(user_id)
+    .bind(config_id)
+    .bind(model)
+    .bind(prompt_tokens)
+    .bind(completion_tokens)
+    .execute(db)
+    .await?;
+    Ok(())
+}
 
 fn calculate_energy_cost(total_tokens: i64, _model: &str) -> i64 {
     // Fallback: 1 energy per 1000 tokens
@@ -502,4 +765,10 @@ struct TeamAiConfig {
     #[allow(dead_code)]
     is_active: bool,
     protocol: String,
+    #[allow(dead_code)]
+    priority: i32,
+    #[allow(dead_code)]
+    member_token_limit: i64,
+    #[allow(dead_code)]
+    created_at: chrono::DateTime<chrono::Utc>,
 }

@@ -296,7 +296,11 @@ function TeamDetail({
       )}
 
       {teamSection === "ai-config" && (
-        <AIConfigSection team={team} isOwnerOrAdmin={!!isOwnerOrAdmin} />
+        <AIConfigSection
+          team={team}
+          members={members}
+          isOwnerOrAdmin={!!isOwnerOrAdmin}
+        />
       )}
 
       {teamSection === "resources" && (
@@ -499,22 +503,27 @@ function MembersSection({
 // ── AI 配置 ──
 
 interface AiConfigItem {
-  id: string;
-  config_name: string;
+  id?: string;
+  config_id?: string;
+  config_name?: string;
+  display_name?: string;
   model_name: string | null;
   provider?: string;
   protocol: string;
-  base_url: string;
-  member_token_limit: number;
-  is_active: boolean;
+  base_url?: string;
+  member_token_limit?: number;
+  priority?: number;
+  is_active?: boolean;
   masked_key?: string;
 }
 
 function AIConfigSection({
   team,
+  members,
   isOwnerOrAdmin,
 }: {
   team: Team;
+  members: TeamMember[];
   isOwnerOrAdmin: boolean;
 }) {
   const [configs, setConfigs] = useState<AiConfigItem[]>([]);
@@ -527,6 +536,7 @@ function AIConfigSection({
     base_url: "https://api.openai.com/v1",
     api_key: "",
     member_token_limit: 0,
+    priority: 1000,
   });
   const [saving, setSaving] = useState(false);
 
@@ -542,7 +552,18 @@ function AIConfigSection({
           const res = await api.get<{ models: AiConfigItem[] }>(
             `/teams/${team.id}/ai-models`,
           );
-          setConfigs(res.models || []);
+          setConfigs(
+            (res.models || []).map((m) => ({
+              id: m.config_id || m.id,
+              config_id: m.config_id || m.id,
+              display_name: m.display_name,
+              config_name: m.display_name,
+              model_name: m.model_name,
+              protocol: m.protocol,
+              priority: m.priority,
+              is_active: true,
+            })),
+          );
         }
       } catch (err) {
         handleError(err, { context: "获取团队 AI 配置" });
@@ -565,6 +586,7 @@ function AIConfigSection({
         base_url: form.base_url,
         api_key: form.api_key,
         member_token_limit: form.member_token_limit,
+        priority: form.priority,
       });
       setForm({
         id: undefined,
@@ -574,6 +596,7 @@ function AIConfigSection({
         base_url: "https://api.openai.com/v1",
         api_key: "",
         member_token_limit: 0,
+        priority: 1000,
       });
       // Refresh
       const res = await api.get<{ configs: AiConfigItem[] }>(
@@ -623,12 +646,13 @@ function AIConfigSection({
   const handleEdit = (c: AiConfigItem) => {
     setForm({
       id: c.id,
-      config_name: c.config_name,
+      config_name: c.config_name || c.display_name || "",
       model_name: c.model_name || "",
       protocol: c.protocol,
-      base_url: c.base_url,
+      base_url: c.base_url || "https://api.openai.com/v1",
       api_key: "", // Keys are not returned
-      member_token_limit: c.member_token_limit,
+      member_token_limit: c.member_token_limit || 0,
+      priority: c.priority ?? 1000,
     });
   };
 
@@ -656,27 +680,31 @@ function AIConfigSection({
           <div className="divide-y divide-[var(--color-border)]">
             {configs.map((c, i) => (
               <div
-                key={c.id || i}
+                key={c.id || c.config_id || i}
                 className="flex items-center justify-between py-2.5"
               >
                 <div className="flex items-center gap-2.5">
                   <Cpu className="w-3.5 h-3.5 text-[#F28F36]" />
                   <div>
-                    <div className="text-xs font-medium">{c.config_name}</div>
+                    <div className="text-xs font-medium">
+                      {c.config_name || c.display_name || c.model_name || "未命名模型"}
+                    </div>
                     <div className="text-[10px] text-[var(--color-text-secondary)]">
                       {c.protocol} · {c.model_name || "全型号"}
                       {c.masked_key && (
                         <span className="ml-1.5 opacity-50">{c.masked_key}</span>
                       )}
-                      {c.member_token_limit > 0 &&
+                      {(c.member_token_limit || 0) > 0 &&
                         ` · 每人限额 ${c.member_token_limit}`}
+                      {typeof c.priority === "number" &&
+                        ` · 优先级P${c.priority}(越小越优先)`}
                     </div>
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
                   {isOwnerOrAdmin ? (
                     <button
-                      onClick={() => handleToggleActive(c.id, c.is_active)}
+                      onClick={() => c.id && handleToggleActive(c.id, !!c.is_active)}
                       className="relative w-8 h-[18px] rounded-full transition-colors shrink-0"
                       title={c.is_active ? "点击停用" : "点击启用"}
                       style={{
@@ -709,9 +737,10 @@ function AIConfigSection({
                         <Settings className="w-3.5 h-3.5" />
                       </button>
                       <button
-                        onClick={() => handleDelete(c.id)}
+                        onClick={() => c.id && handleDelete(c.id)}
                         className={`p-1 transition-colors ${deletingId === c.id ? "text-red-500" : "text-[var(--color-text-secondary)] hover:text-red-500"}`}
                         title={deletingId === c.id ? "再次点击确认删除" : "删除"}
+                        disabled={!c.id}
                       >
                         {deletingId === c.id ? (
                           <span className="text-xs font-medium">确认?</span>
@@ -807,6 +836,27 @@ function AIConfigSection({
                 className="w-full bg-transparent text-xs outline-none"
               />
             </div>
+            <div className="flex items-center gap-2 bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-1.5 px-2.5">
+              <label className="text-[10px] font-semibold text-[var(--color-text-secondary)] whitespace-nowrap">
+                优先级（越小越优先）
+              </label>
+              <input
+                type="number"
+                placeholder="数字越小越优先"
+                value={form.priority}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    priority: Math.max(0, parseInt(e.target.value || "0", 10) || 0),
+                  })
+                }
+                className="w-full bg-transparent text-xs outline-none"
+              />
+            </div>
+            <p className="text-[10px] text-[var(--color-text-secondary)]">
+              当同一模型有多条可用配置时，系统优先选择优先级最小的配置；如果未指定 team_config_id，
+              也会按优先级自动兜底。
+            </p>
             <button
               onClick={handleSave}
               disabled={!form.model_name || (!form.id && !form.api_key) || saving}
@@ -819,8 +869,294 @@ function AIConfigSection({
         )}
       </div>
 
+      {isOwnerOrAdmin && <TeamQuotaSection teamId={team.id} members={members} />}
+
       {/* Embedding API 配置（本地知识库向量化） */}
       <EmbeddingConfigSection />
+    </div>
+  );
+}
+
+function currentMonthKey() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = `${now.getMonth() + 1}`.padStart(2, "0");
+  return `${year}-${month}`;
+}
+
+interface TeamQuotaMember {
+  user_id: string;
+  username: string;
+  role: string;
+  used_tokens: number;
+  base_tokens: number;
+  extra_tokens: number;
+  effective_limit_tokens: number;
+  remaining_tokens: number | null;
+}
+
+function TeamQuotaSection({
+  teamId,
+  members: teamMembers,
+}: {
+  teamId: string;
+  members: TeamMember[];
+}) {
+  const [month, setMonth] = useState(currentMonthKey());
+  const [monthlyLimit, setMonthlyLimit] = useState(0);
+  const [quotaMembers, setQuotaMembers] = useState<TeamQuotaMember[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState("");
+  const [savingPolicy, setSavingPolicy] = useState(false);
+  const [patchingMember, setPatchingMember] = useState(false);
+  const [selectedUserId, setSelectedUserId] = useState("");
+  const [extraDeltaTokens, setExtraDeltaTokens] = useState(0);
+  const mergedMembers: TeamQuotaMember[] = teamMembers.map((tm) => {
+    const quota = quotaMembers.find((q) => q.user_id === tm.user_id);
+    const baseTokens = quota?.base_tokens ?? monthlyLimit;
+    const extraTokens = quota?.extra_tokens ?? 0;
+    const effectiveTokens =
+      quota?.effective_limit_tokens ??
+      (baseTokens <= 0 ? 0 : baseTokens + extraTokens);
+    const usedTokens = quota?.used_tokens ?? 0;
+    const remainingTokens =
+      quota?.remaining_tokens ??
+      (effectiveTokens <= 0 ? null : Math.max(effectiveTokens - usedTokens, 0));
+    return {
+      user_id: tm.user_id,
+      username: tm.username,
+      role: tm.role,
+      used_tokens: usedTokens,
+      base_tokens: baseTokens,
+      extra_tokens: extraTokens,
+      effective_limit_tokens: effectiveTokens,
+      remaining_tokens: remainingTokens,
+    };
+  });
+
+  const selectedMember = mergedMembers.find((m) => m.user_id === selectedUserId);
+
+  const fetchQuotaData = useCallback(async () => {
+    setLoading(true);
+    setLoadError("");
+    try {
+      const [policyRes, membersRes] = await Promise.all([
+        api.get<{ monthly_limit_tokens: number }>(`/teams/${teamId}/ai-quota`, {
+          month,
+        }),
+        api.get<{ members: TeamQuotaMember[] }>(`/teams/${teamId}/ai-quota/members`, {
+          month,
+        }),
+      ]);
+      setMonthlyLimit(policyRes.monthly_limit_tokens || 0);
+      setQuotaMembers(membersRes.members || []);
+    } catch (err: any) {
+      const msg =
+        err?.message ||
+        "获取团队月额度配置失败，请确认服务端已升级并执行数据库迁移。";
+      setLoadError(msg);
+    } finally {
+      setLoading(false);
+    }
+  }, [teamId, month]);
+
+  useEffect(() => {
+    fetchQuotaData();
+  }, [fetchQuotaData]);
+
+  useEffect(() => {
+    if (selectedUserId) return;
+    if (teamMembers.length > 0) {
+      setSelectedUserId(teamMembers[0].user_id);
+    }
+  }, [teamMembers, selectedUserId]);
+
+  useEffect(() => {
+    if (mergedMembers.length === 0) {
+      if (selectedUserId) setSelectedUserId("");
+      return;
+    }
+    if (!mergedMembers.some((m) => m.user_id === selectedUserId)) {
+      setSelectedUserId(mergedMembers[0].user_id);
+    }
+  }, [mergedMembers, selectedUserId]);
+
+  const handleSavePolicy = async () => {
+    setSavingPolicy(true);
+    try {
+      await api.put(`/teams/${teamId}/ai-quota/policy`, {
+        monthly_limit_tokens: Math.max(0, monthlyLimit),
+      });
+      await fetchQuotaData();
+    } catch (err) {
+      handleError(err, { context: "保存团队月额度策略" });
+    } finally {
+      setSavingPolicy(false);
+    }
+  };
+
+  const handlePatchMember = async () => {
+    if (!selectedUserId || !extraDeltaTokens) return;
+    setPatchingMember(true);
+    try {
+      await api.patch(`/teams/${teamId}/ai-quota/member/${selectedUserId}`, {
+        month,
+        extra_delta_tokens: extraDeltaTokens,
+      });
+      setExtraDeltaTokens(0);
+      await fetchQuotaData();
+    } catch (err) {
+      handleError(err, { context: "设置成员月度加额" });
+    } finally {
+      setPatchingMember(false);
+    }
+  };
+
+  return (
+    <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-4 space-y-3">
+      <div>
+        <h3 className="text-xs font-semibold">团队月额度策略</h3>
+        <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
+          按自然月生效。成员有效额度 = 团队月额度 + 成员本月加额。
+        </p>
+      </div>
+
+      <div className="grid grid-cols-4 gap-2">
+        <div className="col-span-1">
+          <label className="text-[10px] text-[var(--color-text-secondary)]">月份</label>
+          <input
+            type="month"
+            value={month}
+            onChange={(e) => setMonth(e.target.value)}
+            className="w-full mt-1 bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-1.5 px-2.5 text-xs outline-none"
+          />
+        </div>
+        <div className="col-span-2">
+          <label className="text-[10px] text-[var(--color-text-secondary)]">
+            团队成员月额度（token，0=不限额）
+          </label>
+          <input
+            type="number"
+            min={0}
+            value={monthlyLimit}
+            onChange={(e) =>
+              setMonthlyLimit(Math.max(0, parseInt(e.target.value || "0", 10) || 0))
+            }
+            className="w-full mt-1 bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-1.5 px-2.5 text-xs outline-none"
+          />
+        </div>
+        <div className="col-span-1 flex items-end">
+          <button
+            onClick={handleSavePolicy}
+            disabled={savingPolicy}
+            className="w-full py-1.5 rounded-lg bg-[#F28F36] text-white text-xs font-semibold disabled:opacity-50"
+          >
+            {savingPolicy ? "保存中..." : "保存额度策略"}
+          </button>
+        </div>
+      </div>
+
+      {loadError && (
+        <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2">
+          <div className="text-[11px] text-red-400 font-medium">额度数据加载失败</div>
+          <div className="text-[10px] text-red-300/90 mt-0.5">{loadError}</div>
+          <button
+            onClick={fetchQuotaData}
+            className="mt-2 text-[10px] px-2 py-1 rounded border border-red-400/40 text-red-300 hover:bg-red-500/10"
+          >
+            重试
+          </button>
+        </div>
+      )}
+
+      <div className="pt-2 border-t border-[var(--color-border)] space-y-2">
+        <div className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
+          成员本月加额
+        </div>
+        <div className="grid grid-cols-4 gap-2">
+          <select
+            value={selectedUserId}
+            onChange={(e) => setSelectedUserId(e.target.value)}
+            className="col-span-1 bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-1.5 px-2.5 text-xs outline-none"
+          >
+            {mergedMembers.map((m) => (
+              <option key={m.user_id} value={m.user_id}>
+                {m.username}
+              </option>
+            ))}
+          </select>
+          <input
+            type="number"
+            value={extraDeltaTokens || ""}
+            onChange={(e) =>
+              setExtraDeltaTokens(
+                Math.max(0, parseInt(e.target.value || "0", 10) || 0),
+              )
+            }
+            placeholder="本月增加 token"
+            className="col-span-2 bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-1.5 px-2.5 text-xs outline-none"
+          />
+          <button
+            onClick={handlePatchMember}
+            disabled={!selectedUserId || extraDeltaTokens <= 0 || patchingMember}
+            className="col-span-1 px-3 py-1.5 rounded-lg border border-[var(--color-border)] text-xs font-semibold hover:bg-[var(--color-bg-hover)] disabled:opacity-50"
+          >
+            {patchingMember ? "提交中..." : "增加本月额度"}
+          </button>
+        </div>
+        {selectedMember && (
+          <div className="text-[10px] text-[var(--color-text-secondary)]">
+            当前成员：已用 {selectedMember.used_tokens.toLocaleString()}，当前加额{" "}
+            {selectedMember.extra_tokens.toLocaleString()}，剩余{" "}
+            {selectedMember.remaining_tokens == null
+              ? "∞"
+              : selectedMember.remaining_tokens.toLocaleString()}
+          </div>
+        )}
+      </div>
+
+      <div className="pt-2 border-t border-[var(--color-border)]">
+        <div className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-2">
+          本月成员额度概览
+        </div>
+        {loading ? (
+          <div className="flex items-center justify-center py-6">
+            <Loader2 className="w-4 h-4 animate-spin text-[#F28F36]" />
+          </div>
+        ) : mergedMembers.length === 0 ? (
+          <div className="text-[10px] text-[var(--color-text-secondary)] text-center py-4">
+            当前团队还没有成员
+          </div>
+        ) : (
+          <div className="divide-y divide-[var(--color-border)]">
+            {mergedMembers.map((m) => (
+              <div key={m.user_id} className="flex items-center justify-between py-2 text-xs">
+                <div>
+                  <div className="font-medium">{m.username}</div>
+                  <div className="text-[10px] text-[var(--color-text-secondary)]">
+                    已用 {m.used_tokens.toLocaleString()} · 默认{" "}
+                    {m.base_tokens.toLocaleString()} · 加额{" "}
+                    {m.extra_tokens.toLocaleString()}
+                  </div>
+                </div>
+                <div className="text-right">
+                  <div className="font-semibold">
+                    {m.effective_limit_tokens > 0
+                      ? `${m.effective_limit_tokens.toLocaleString()}`
+                      : "不限额"}
+                  </div>
+                  <div className="text-[10px] text-[var(--color-text-secondary)]">
+                    剩余{" "}
+                    {m.remaining_tokens == null
+                      ? "∞"
+                      : m.remaining_tokens.toLocaleString()}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

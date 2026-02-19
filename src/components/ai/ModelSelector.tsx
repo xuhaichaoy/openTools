@@ -4,11 +4,11 @@ import { useAIStore } from "@/store/ai-store";
 import { api } from "@/core/api/client";
 
 interface TeamModelInfo {
-  id: string;
-  config_name: string;
+  config_id: string;
+  display_name: string;
   model_name: string;
   protocol: string;
-  base_url: string;
+  priority: number;
 }
 
 export function ModelSelector() {
@@ -30,14 +30,73 @@ export function ModelSelector() {
   // 加载团队模型
   useEffect(() => {
     if (config.source === "team" && config.team_id) {
+      let cancelled = false;
       api
         .get<{ models: TeamModelInfo[] }>(
           `/teams/${config.team_id}/ai-models`,
         )
-        .then((res) => setTeamModels(res.models || []))
-        .catch(() => setTeamModels([]));
+        .then((res) => {
+          if (!cancelled) {
+            setTeamModels(res.models || []);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setTeamModels([]);
+          }
+        });
+      return () => {
+        cancelled = true;
+      };
+    } else {
+      setTeamModels([]);
     }
   }, [config.source, config.team_id]);
+
+  // 团队模式下自动修正无效 team_config_id，并优先选中最高优先级模型
+  useEffect(() => {
+    if (config.source !== "team" || !config.team_id) return;
+
+    if (teamModels.length === 0) {
+      if (config.team_config_id) {
+        saveConfig({
+          ...config,
+          team_config_id: undefined,
+        });
+      }
+      return;
+    }
+
+    const selected = config.team_config_id
+      ? teamModels.find((m) => m.config_id === config.team_config_id)
+      : undefined;
+    if (selected) return;
+
+    const fallback = teamModels[0];
+    const nextProtocol = (fallback.protocol || "openai") as
+      | "openai"
+      | "anthropic";
+    if (
+      config.team_config_id !== fallback.config_id ||
+      config.model !== fallback.model_name ||
+      config.protocol !== nextProtocol
+    ) {
+      saveConfig({
+        ...config,
+        team_config_id: fallback.config_id,
+        model: fallback.model_name,
+        protocol: nextProtocol,
+      });
+    }
+  }, [
+    config.source,
+    config.team_config_id,
+    config.team_id,
+    config.model,
+    config.protocol,
+    teamModels,
+    saveConfig,
+  ]);
 
   // 点击外部关闭
   useEffect(() => {
@@ -74,8 +133,10 @@ export function ModelSelector() {
       if (key) return key.name || key.model;
     }
     if (source === "team") {
-      const tm = teamModels.find((m) => m.model_name === currentModel);
-      if (tm) return tm.config_name;
+      const tm = config.team_config_id
+        ? teamModels.find((m) => m.config_id === config.team_config_id)
+        : teamModels.find((m) => m.model_name === currentModel);
+      if (tm) return tm.display_name;
     }
     return currentModel;
   };
@@ -88,6 +149,7 @@ export function ModelSelector() {
   const handleSelectTeamModel = (m: TeamModelInfo) => {
     const newConfig = {
       ...config,
+      team_config_id: m.config_id,
       model: m.model_name,
       protocol: (m.protocol || "openai") as "openai" | "anthropic",
     };
@@ -172,10 +234,10 @@ export function ModelSelector() {
               <>
                 {teamModels.length > 0 ? (
                   teamModels.map((m) => {
-                    const isActive = currentModel === m.model_name;
+                    const isActive = config.team_config_id === m.config_id;
                     return (
                       <button
-                        key={m.id}
+                        key={m.config_id}
                         onClick={() => handleSelectTeamModel(m)}
                         className={`w-full flex items-center justify-between px-3 py-2 text-xs hover:bg-[var(--color-bg-hover)] transition-colors ${
                           isActive
@@ -186,12 +248,12 @@ export function ModelSelector() {
                         <div className="flex items-center gap-2">
                           <Cpu className="w-3 h-3 shrink-0" />
                           <div className="text-left">
-                            <div className="font-medium">{m.config_name}</div>
+                            <div className="font-medium">{m.display_name}</div>
                             <div className="text-[10px] text-[var(--color-text-secondary)]">
                               {m.protocol === "anthropic"
                                 ? "Anthropic"
                                 : "OpenAI"}{" "}
-                              · {m.model_name}
+                              · {m.model_name} · P{m.priority}
                             </div>
                           </div>
                         </div>

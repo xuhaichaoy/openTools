@@ -38,6 +38,7 @@ export interface AIConfig {
   enable_native_tools: boolean;
   source?: "own_key" | "team" | "platform";
   team_id?: string;
+  team_config_id?: string;
   /** API 协议：openai 或 anthropic */
   protocol?: "openai" | "anthropic";
   /** 当前激活的自有 Key 配置 ID */

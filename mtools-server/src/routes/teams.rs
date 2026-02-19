@@ -1,6 +1,6 @@
 use axum::{
-    extract::{State, Extension, Path},
-    routing::{get, post},
+    extract::{State, Extension, Path, Query},
+    routing::{get, post, put, patch},
     Json,
     Router,
 };
@@ -13,6 +13,7 @@ use crate::{
 use std::sync::Arc;
 use uuid::Uuid;
 use serde::{Deserialize, Serialize};
+use chrono::Datelike;
 
 #[derive(Debug, Deserialize)]
 pub struct CreateTeamRequest {
@@ -75,6 +76,10 @@ pub fn routes_no_layer() -> Router<Arc<AppState>> {
         .route("/{id}/ai-config/{cid}", axum::routing::patch(patch_ai_config).delete(delete_ai_config))
         .route("/{id}/ai-models", get(get_team_ai_models))
         .route("/{id}/ai-usage", get(get_team_ai_usage))
+        .route("/{id}/ai-quota", get(get_team_ai_quota))
+        .route("/{id}/ai-quota/policy", put(set_team_ai_quota_policy))
+        .route("/{id}/ai-quota/member/{uid}", patch(patch_team_member_ai_quota))
+        .route("/{id}/ai-quota/members", get(get_team_ai_quota_members))
 }
 
 // ── 辅助函数 ──
@@ -112,6 +117,77 @@ async fn check_admin(db: &sqlx::PgPool, team_id: Uuid, user_id: Uuid) -> Result<
 
 fn parse_user_id(claims: &Claims) -> Result<Uuid> {
     Uuid::parse_str(&claims.sub).map_err(|_| Error::BadRequest("Invalid user ID".into()))
+}
+
+async fn ensure_team_quota_tables(db: &sqlx::PgPool) -> Result<()> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS team_ai_quota_policy (
+            team_id UUID PRIMARY KEY REFERENCES teams(id) ON DELETE CASCADE,
+            monthly_limit_tokens BIGINT NOT NULL DEFAULT 0,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )",
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS team_ai_member_quota_adjustments (
+            team_id UUID NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+            user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            month_key CHAR(7) NOT NULL,
+            extra_tokens BIGINT NOT NULL DEFAULT 0,
+            updated_by UUID NOT NULL REFERENCES users(id),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (team_id, user_id, month_key)
+        )",
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_team_ai_usage_month_user
+         ON team_ai_usage_logs(team_id, user_id, created_at DESC)",
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_team_quota_adjustments_lookup
+         ON team_ai_member_quota_adjustments(team_id, month_key, user_id)",
+    )
+    .execute(db)
+    .await?;
+
+    Ok(())
+}
+
+fn current_month_key() -> String {
+    let now = chrono::Local::now();
+    format!("{:04}-{:02}", now.year(), now.month())
+}
+
+fn normalize_month_key(month: Option<&str>) -> Result<String> {
+    let value = month
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(current_month_key);
+
+    if value.len() != 7 || !value.is_ascii() || &value[4..5] != "-" {
+        return Err(Error::BadRequest("Invalid month format, expected YYYY-MM".into()));
+    }
+
+    let year: i32 = value[0..4]
+        .parse()
+        .map_err(|_| Error::BadRequest("Invalid month format, expected YYYY-MM".into()))?;
+    let month_num: u32 = value[5..7]
+        .parse()
+        .map_err(|_| Error::BadRequest("Invalid month format, expected YYYY-MM".into()))?;
+
+    if year < 1970 || !(1..=12).contains(&month_num) {
+        return Err(Error::BadRequest("Invalid month format, expected YYYY-MM".into()));
+    }
+
+    Ok(format!("{:04}-{:02}", year, month_num))
 }
 
 // ── 团队 CRUD ──
@@ -405,8 +481,10 @@ async fn get_ai_config(
     check_admin(&state.db, team_id, user_id).await?;
 
     let rows = sqlx::query_as::<_, TeamAiConfigRowWithKey>(
-        "SELECT id, team_id, config_name, protocol, base_url, api_key, model_name, member_token_limit, is_active, created_at
-         FROM team_ai_configs WHERE team_id = $1 ORDER BY created_at ASC",
+        "SELECT id, team_id, config_name, protocol, base_url, api_key, model_name, member_token_limit, priority, is_active, created_at
+         FROM team_ai_configs
+         WHERE team_id = $1
+         ORDER BY priority ASC, created_at ASC",
     )
     .bind(team_id)
     .fetch_all(&state.db)
@@ -425,6 +503,7 @@ async fn get_ai_config(
                 "base_url": r.base_url,
                 "model_name": r.model_name,
                 "member_token_limit": r.member_token_limit,
+                "priority": r.priority,
                 "is_active": r.is_active,
                 "created_at": r.created_at,
                 "masked_key": masked,
@@ -447,6 +526,12 @@ async fn set_ai_config(
     let config_name = payload.config_name.as_deref().unwrap_or("default");
     let protocol = payload.protocol.as_deref().unwrap_or("openai");
     let member_token_limit = payload.member_token_limit.unwrap_or(0);
+    let priority = payload.priority;
+    if let Some(value) = priority {
+        if value < 0 {
+            return Err(Error::BadRequest("priority must be >= 0".into()));
+        }
+    }
 
     let encrypted_key = if payload.api_key.is_empty() {
         String::new()
@@ -464,8 +549,9 @@ async fn set_ai_config(
                 api_key = CASE WHEN $4 = '' THEN api_key ELSE $4 END,
                 model_name = $5,
                 member_token_limit = $6,
+                priority = COALESCE($7, priority),
                 updated_at = NOW()
-             WHERE id = $7 AND team_id = $8",
+             WHERE id = $8 AND team_id = $9",
         )
         .bind(config_name)
         .bind(protocol)
@@ -473,14 +559,17 @@ async fn set_ai_config(
         .bind(&encrypted_key)
         .bind(&payload.model_name)
         .bind(member_token_limit)
+        .bind(priority)
         .bind(config_id)
         .bind(team_id)
         .execute(&state.db)
         .await?;
     } else {
+        let insert_priority = priority.unwrap_or(1000);
         sqlx::query(
-            "INSERT INTO team_ai_configs (team_id, config_name, protocol, base_url, api_key, model_name, member_token_limit, is_active)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, true)",
+            "INSERT INTO team_ai_configs (
+                team_id, config_name, protocol, base_url, api_key, model_name, member_token_limit, priority, is_active
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true)",
         )
         .bind(team_id)
         .bind(config_name)
@@ -489,6 +578,7 @@ async fn set_ai_config(
         .bind(&encrypted_key)
         .bind(&payload.model_name)
         .bind(member_token_limit)
+        .bind(insert_priority)
         .execute(&state.db)
         .await?;
     }
@@ -505,7 +595,19 @@ async fn get_team_ai_models(
     check_membership(&state.db, team_id, user_id).await?;
 
     let models = sqlx::query_as::<_, TeamAiModelInfo>(
-        "SELECT id, config_name, model_name, protocol, base_url FROM team_ai_configs WHERE team_id = $1 AND is_active = true ORDER BY created_at ASC",
+        "SELECT
+            id AS config_id,
+            CASE
+                WHEN config_name IS NULL OR config_name = '' THEN model_name
+                WHEN model_name IS NULL OR model_name = '' THEN config_name
+                ELSE config_name || ' / ' || model_name
+            END AS display_name,
+            model_name,
+            protocol,
+            priority
+         FROM team_ai_configs
+         WHERE team_id = $1 AND is_active = true
+         ORDER BY priority ASC, created_at ASC",
     )
     .bind(team_id)
     .fetch_all(&state.db)
@@ -523,7 +625,11 @@ async fn get_team_ai_usage(
     check_admin(&state.db, team_id, user_id).await?;
 
     let usage = sqlx::query_as::<_, TeamUsageRow>(
-        "SELECT u.username, SUM(l.prompt_tokens) as prompt_tokens, SUM(l.completion_tokens) as completion_tokens, COUNT(*) as request_count
+        "SELECT
+            u.username,
+            SUM(l.prompt_tokens)::BIGINT as prompt_tokens,
+            SUM(l.completion_tokens)::BIGINT as completion_tokens,
+            COUNT(*) as request_count
          FROM team_ai_usage_logs l JOIN users u ON l.user_id = u.id
          WHERE l.team_id = $1
          GROUP BY u.username
@@ -537,6 +643,248 @@ async fn get_team_ai_usage(
     Ok(Json(serde_json::json!({ "usage": usage })))
 }
 
+async fn get_team_ai_quota(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+    Path(team_id): Path<Uuid>,
+    Query(query): Query<MonthQuery>,
+) -> Result<Json<serde_json::Value>> {
+    let user_id = parse_user_id(&claims)?;
+    check_admin(&state.db, team_id, user_id).await?;
+    ensure_team_quota_tables(&state.db).await?;
+
+    let month_key = normalize_month_key(query.month.as_deref())?;
+
+    let monthly_limit_tokens: i64 = sqlx::query_scalar(
+        "SELECT monthly_limit_tokens FROM team_ai_quota_policy WHERE team_id = $1",
+    )
+    .bind(team_id)
+    .fetch_optional(&state.db)
+    .await?
+    .unwrap_or(0);
+
+    let adjusted_members: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT FROM team_ai_member_quota_adjustments WHERE team_id = $1 AND month_key = $2",
+    )
+    .bind(team_id)
+    .bind(&month_key)
+    .fetch_one(&state.db)
+    .await?;
+
+    Ok(Json(serde_json::json!({
+        "team_id": team_id,
+        "month": month_key,
+        "monthly_limit_tokens": monthly_limit_tokens,
+        "adjusted_members": adjusted_members,
+    })))
+}
+
+async fn set_team_ai_quota_policy(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+    Path(team_id): Path<Uuid>,
+    Json(payload): Json<SetTeamAiQuotaPolicyRequest>,
+) -> Result<Json<serde_json::Value>> {
+    let user_id = parse_user_id(&claims)?;
+    check_admin(&state.db, team_id, user_id).await?;
+    ensure_team_quota_tables(&state.db).await?;
+
+    if payload.monthly_limit_tokens < 0 {
+        return Err(Error::BadRequest("monthly_limit_tokens must be >= 0".into()));
+    }
+
+    let monthly_limit_tokens: i64 = sqlx::query_scalar(
+        "INSERT INTO team_ai_quota_policy (team_id, monthly_limit_tokens, updated_at)
+         VALUES ($1, $2, NOW())
+         ON CONFLICT (team_id) DO UPDATE
+         SET monthly_limit_tokens = EXCLUDED.monthly_limit_tokens, updated_at = NOW()
+         RETURNING monthly_limit_tokens",
+    )
+    .bind(team_id)
+    .bind(payload.monthly_limit_tokens)
+    .fetch_one(&state.db)
+    .await?;
+
+    Ok(Json(serde_json::json!({
+        "message": "Team AI quota policy updated",
+        "team_id": team_id,
+        "monthly_limit_tokens": monthly_limit_tokens,
+    })))
+}
+
+async fn patch_team_member_ai_quota(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+    Path((team_id, target_user_id)): Path<(Uuid, Uuid)>,
+    Json(payload): Json<PatchTeamMemberQuotaRequest>,
+) -> Result<Json<serde_json::Value>> {
+    let user_id = parse_user_id(&claims)?;
+    check_admin(&state.db, team_id, user_id).await?;
+    ensure_team_quota_tables(&state.db).await?;
+
+    let is_member: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM team_members WHERE team_id = $1 AND user_id = $2)",
+    )
+    .bind(team_id)
+    .bind(target_user_id)
+    .fetch_one(&state.db)
+    .await?;
+    if !is_member {
+        return Err(Error::NotFound("Target user is not a team member".into()));
+    }
+
+    let month_key = normalize_month_key(payload.month.as_deref())?;
+
+    let extra_tokens: i64 = sqlx::query_scalar(
+        "INSERT INTO team_ai_member_quota_adjustments (
+            team_id, user_id, month_key, extra_tokens, updated_by, updated_at
+         ) VALUES ($1, $2, $3, GREATEST($4, 0), $5, NOW())
+         ON CONFLICT (team_id, user_id, month_key) DO UPDATE
+         SET
+            extra_tokens = GREATEST(
+                team_ai_member_quota_adjustments.extra_tokens + EXCLUDED.extra_tokens,
+                0
+            ),
+            updated_by = EXCLUDED.updated_by,
+            updated_at = NOW()
+         RETURNING extra_tokens",
+    )
+    .bind(team_id)
+    .bind(target_user_id)
+    .bind(&month_key)
+    .bind(payload.extra_delta_tokens)
+    .bind(user_id)
+    .fetch_one(&state.db)
+    .await?;
+
+    let base_tokens: i64 = sqlx::query_scalar(
+        "SELECT monthly_limit_tokens FROM team_ai_quota_policy WHERE team_id = $1",
+    )
+    .bind(team_id)
+    .fetch_optional(&state.db)
+    .await?
+    .unwrap_or(0);
+
+    let used_tokens: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(
+            SUM(COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)),
+            0
+        )::BIGINT
+         FROM team_ai_usage_logs
+         WHERE team_id = $1
+           AND user_id = $2
+           AND created_at >= TO_DATE($3 || '-01', 'YYYY-MM-DD')
+           AND created_at < (TO_DATE($3 || '-01', 'YYYY-MM-DD') + INTERVAL '1 month')",
+    )
+    .bind(team_id)
+    .bind(target_user_id)
+    .bind(&month_key)
+    .fetch_one(&state.db)
+    .await?;
+
+    let effective_limit_tokens = base_tokens.saturating_add(extra_tokens);
+    let remaining_tokens = if effective_limit_tokens <= 0 {
+        None
+    } else {
+        Some((effective_limit_tokens - used_tokens).max(0))
+    };
+
+    Ok(Json(serde_json::json!({
+        "message": "Team member AI quota updated",
+        "team_id": team_id,
+        "user_id": target_user_id,
+        "month": month_key,
+        "base_tokens": base_tokens,
+        "extra_tokens": extra_tokens,
+        "used_tokens": used_tokens,
+        "effective_limit_tokens": effective_limit_tokens,
+        "remaining_tokens": remaining_tokens,
+    })))
+}
+
+async fn get_team_ai_quota_members(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+    Path(team_id): Path<Uuid>,
+    Query(query): Query<MonthQuery>,
+) -> Result<Json<serde_json::Value>> {
+    let user_id = parse_user_id(&claims)?;
+    check_admin(&state.db, team_id, user_id).await?;
+    ensure_team_quota_tables(&state.db).await?;
+
+    let month_key = normalize_month_key(query.month.as_deref())?;
+    let monthly_limit_tokens: i64 = sqlx::query_scalar(
+        "SELECT monthly_limit_tokens FROM team_ai_quota_policy WHERE team_id = $1",
+    )
+    .bind(team_id)
+    .fetch_optional(&state.db)
+    .await?
+    .unwrap_or(0);
+
+    let rows = sqlx::query_as::<_, TeamQuotaMemberRow>(
+        "SELECT
+            tm.user_id,
+            u.username,
+            tm.role,
+            COALESCE(usage.used_tokens, 0)::BIGINT AS used_tokens,
+            COALESCE(adj.extra_tokens, 0) AS extra_tokens
+         FROM team_members tm
+         JOIN users u ON u.id = tm.user_id
+         LEFT JOIN (
+            SELECT
+                user_id,
+                COALESCE(
+                    SUM(COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)),
+                    0
+                )::BIGINT AS used_tokens
+            FROM team_ai_usage_logs
+            WHERE team_id = $1
+              AND created_at >= TO_DATE($2 || '-01', 'YYYY-MM-DD')
+              AND created_at < (TO_DATE($2 || '-01', 'YYYY-MM-DD') + INTERVAL '1 month')
+            GROUP BY user_id
+         ) usage ON usage.user_id = tm.user_id
+         LEFT JOIN team_ai_member_quota_adjustments adj
+            ON adj.team_id = $1
+           AND adj.user_id = tm.user_id
+           AND adj.month_key = $2
+         WHERE tm.team_id = $1
+         ORDER BY COALESCE(usage.used_tokens, 0) DESC, u.username ASC",
+    )
+    .bind(team_id)
+    .bind(&month_key)
+    .fetch_all(&state.db)
+    .await?;
+
+    let members: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|row| {
+            let effective_limit_tokens = monthly_limit_tokens.saturating_add(row.extra_tokens);
+            let remaining_tokens = if effective_limit_tokens <= 0 {
+                None
+            } else {
+                Some((effective_limit_tokens - row.used_tokens).max(0))
+            };
+            serde_json::json!({
+                "user_id": row.user_id,
+                "username": row.username,
+                "role": row.role,
+                "used_tokens": row.used_tokens,
+                "base_tokens": monthly_limit_tokens,
+                "extra_tokens": row.extra_tokens,
+                "effective_limit_tokens": effective_limit_tokens,
+                "remaining_tokens": remaining_tokens,
+            })
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({
+        "team_id": team_id,
+        "month": month_key,
+        "monthly_limit_tokens": monthly_limit_tokens,
+        "members": members,
+    })))
+}
+
 // ── 单条 AI 配置操作 ──
 
 async fn patch_ai_config(
@@ -548,16 +896,26 @@ async fn patch_ai_config(
     let user_id = parse_user_id(&claims)?;
     check_admin(&state.db, team_id, user_id).await?;
 
-    if let Some(active) = payload.is_active {
-        sqlx::query(
-            "UPDATE team_ai_configs SET is_active = $1, updated_at = NOW() WHERE id = $2 AND team_id = $3",
-        )
-        .bind(active)
-        .bind(config_id)
-        .bind(team_id)
-        .execute(&state.db)
-        .await?;
+    if let Some(priority) = payload.priority {
+        if priority < 0 {
+            return Err(Error::BadRequest("priority must be >= 0".into()));
+        }
     }
+
+    sqlx::query(
+        "UPDATE team_ai_configs
+         SET
+            is_active = COALESCE($1, is_active),
+            priority = COALESCE($2, priority),
+            updated_at = NOW()
+         WHERE id = $3 AND team_id = $4",
+    )
+    .bind(payload.is_active)
+    .bind(payload.priority)
+    .bind(config_id)
+    .bind(team_id)
+    .execute(&state.db)
+    .await?;
 
     Ok(Json(serde_json::json!({ "message": "AI config updated" })))
 }
@@ -603,6 +961,7 @@ struct TeamAiConfigRowWithKey {
     api_key: String,
     model_name: String,
     member_token_limit: i64,
+    priority: i32,
     is_active: bool,
     created_at: chrono::DateTime<chrono::Utc>,
 }
@@ -616,20 +975,22 @@ struct SetAiConfigRequest {
     api_key: String,
     model_name: String,
     member_token_limit: Option<i64>,
+    priority: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
 struct PatchAiConfigRequest {
     is_active: Option<bool>,
+    priority: Option<i32>,
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
 struct TeamAiModelInfo {
-    id: Uuid,
-    config_name: String,
+    config_id: Uuid,
+    display_name: String,
     model_name: String,
     protocol: String,
-    base_url: String,
+    priority: i32,
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
@@ -638,4 +999,29 @@ struct TeamUsageRow {
     prompt_tokens: Option<i64>,
     completion_tokens: Option<i64>,
     request_count: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MonthQuery {
+    month: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SetTeamAiQuotaPolicyRequest {
+    monthly_limit_tokens: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchTeamMemberQuotaRequest {
+    month: Option<String>,
+    extra_delta_tokens: i64,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct TeamQuotaMemberRow {
+    user_id: Uuid,
+    username: String,
+    role: String,
+    used_tokens: i64,
+    extra_tokens: i64,
 }

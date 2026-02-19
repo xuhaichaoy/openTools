@@ -123,6 +123,9 @@ pub async fn ai_chat(
         let final_request = if let Some(ref tid) = config.team_id {
             let mut r = request_body.clone();
             r["team_id"] = serde_json::json!(tid);
+            if let Some(ref tcid) = config.team_config_id {
+                r["team_config_id"] = serde_json::json!(tcid);
+            }
             r
         } else {
             request_body
@@ -161,6 +164,9 @@ pub async fn ai_chat(
 
         if let Some(ref tid) = config.team_id {
             request_body["team_id"] = serde_json::json!(tid);
+            if let Some(ref tcid) = config.team_config_id {
+                request_body["team_config_id"] = serde_json::json!(tcid);
+            }
         }
 
         let response = client
