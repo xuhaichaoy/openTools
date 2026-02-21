@@ -4,6 +4,12 @@ import { invoke } from "@tauri-apps/api/core";
 import type { AIConfig, AIRequestMessage } from "@/core/ai/types";
 import { handleError } from "@/core/errors";
 import { getRoutedConfig } from "@/core/ai/router";
+import {
+  appendMemoryCandidates,
+  buildMemoryPromptBlock,
+  extractMemoryCandidates,
+  recallMemories,
+} from "@/core/ai/memory-store";
 
 export function useAiCompletion(onAccept?: (text: string) => void) {
   const [completion, setCompletion] = useState("");
@@ -44,9 +50,27 @@ Continuation:`;
       const completionConfig = { ...config, max_tokens: 50, temperature: 0.3 };
 
       const messages: AIRequestMessage[] = [{ role: "user", content: prompt }];
+      let enrichedMessages: AIRequestMessage[] = messages;
+
+      if (completionConfig.enable_long_term_memory) {
+        if (completionConfig.enable_memory_auto_save) {
+          const candidates = extractMemoryCandidates(prompt);
+          if (candidates.length > 0) {
+            await appendMemoryCandidates(candidates);
+          }
+        }
+
+        if (completionConfig.enable_memory_auto_recall) {
+          const recalled = await recallMemories(prompt, { topK: 6 });
+          const promptBlock = buildMemoryPromptBlock(recalled);
+          if (promptBlock) {
+            enrichedMessages = [{ role: "system", content: promptBlock }, ...messages];
+          }
+        }
+      }
 
       const result = await invoke<string>("ai_chat", {
-        messages,
+        messages: enrichedMessages,
         config: getRoutedConfig(completionConfig),
       });
 

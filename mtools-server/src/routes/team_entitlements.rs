@@ -27,6 +27,13 @@ async fn get_team_entitlements(
     let user_id = parse_user_id(&claims)?;
     let team_entitlement =
         entitlement::resolve_team_entitlement(&state.db, team_id, user_id).await?;
+    if !team_entitlement.is_member {
+        return Err(Error::unauthorized_code(
+            "TEAM_ACCESS_DENIED",
+            "Not a team member",
+            Some(serde_json::json!({ "team_id": team_id })),
+        ));
+    }
 
     Ok(Json(serde_json::json!({
         "team_plan": team_entitlement.team_plan,
@@ -35,6 +42,10 @@ async fn get_team_entitlements(
         "status": team_entitlement.status,
         "is_member": team_entitlement.is_member,
         "role": team_entitlement.role,
-        "can_team_server_storage": team_entitlement.is_team_active,
+        "can_team_server_storage": team_entitlement.can_team_sync,
+        "team_sync_status": team_entitlement.team_sync_status,
+        "days_to_expire": team_entitlement.days_to_expire,
+        "team_sync_stop_at": team_entitlement.team_sync_stop_at,
+        "can_team_sync": team_entitlement.can_team_sync,
     })))
 }

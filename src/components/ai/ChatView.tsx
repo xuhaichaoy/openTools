@@ -63,12 +63,24 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
     currentConversationId,
     createConversation,
     stopStreaming,
+    memoryCandidates,
+    loadMemoryCandidates,
+    confirmMemoryCandidate,
+    dismissMemoryCandidate,
   } = useAIStore();
 
   const { toast } = useToast();
   const { onMouseDown } = useDragWindow();
   const conversation = getCurrentConversation();
   const messages = useMemo(() => conversation?.messages ?? [], [conversation]);
+  const visibleMemoryCandidates = useMemo(() => {
+    const filtered = memoryCandidates.filter(
+      (candidate) =>
+        !candidate.conversation_id ||
+        candidate.conversation_id === currentConversationId,
+    );
+    return filtered.slice(0, 3);
+  }, [currentConversationId, memoryCandidates]);
 
   // 暴露控制接口给父组件
   useImperativeHandle(ref, () => ({
@@ -94,6 +106,10 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
   useEffect(() => {
     setTimeout(() => inputRef.current?.focus(), 100);
   }, []);
+
+  useEffect(() => {
+    loadMemoryCandidates();
+  }, [loadMemoryCandidates]);
 
   // 自动滚动到底部
   useEffect(() => {
@@ -494,6 +510,45 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
         </div>
 
         {/* 输入区域 — 提取为独立组件 */}
+        {visibleMemoryCandidates.length > 0 && (
+          <div className="px-2 pb-1">
+            <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-2 space-y-2">
+              <div className="text-[10px] text-[var(--color-text-secondary)]">
+                检测到可保存的长期记忆（需你确认）
+              </div>
+              {visibleMemoryCandidates.map((candidate) => (
+                <div
+                  key={candidate.id}
+                  className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5"
+                >
+                  <div className="text-xs text-[var(--color-text)] break-words">
+                    {candidate.content}
+                  </div>
+                  <div className="flex justify-end gap-2 mt-1">
+                    <button
+                      onClick={async () => {
+                        await dismissMemoryCandidate(candidate.id);
+                      }}
+                      className="text-[10px] px-2 py-0.5 rounded-md border border-[var(--color-border)] hover:bg-[var(--color-bg-hover)]"
+                    >
+                      忽略
+                    </button>
+                    <button
+                      onClick={async () => {
+                        await confirmMemoryCandidate(candidate.id);
+                        toast("success", "已保存为长期记忆");
+                      }}
+                      className="text-[10px] px-2 py-0.5 rounded-md bg-indigo-500 text-white hover:bg-indigo-600"
+                    >
+                      记住
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         <ChatInput
           input={input}
           setInput={setInput}

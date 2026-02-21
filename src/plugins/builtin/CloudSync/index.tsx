@@ -1,393 +1,450 @@
-import React, { useState, useCallback, useEffect } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Cloud,
   RefreshCw,
   Check,
-  X,
   Loader2,
-  Github,
-  Server,
-  Settings2,
   ArrowUpFromLine,
   ArrowDownToLine,
   AlertCircle,
   Zap,
+  CloudOff,
 } from "lucide-react";
 import type { PluginContext } from "@/core/plugin-system/context";
-import { useAuthStore } from "@/store/auth-store";
-import { useBookmarkStore } from "@/store/bookmark-store";
-import { useSnippetStore } from "@/store/snippet-store";
+import {
+  getExpiryHint,
+  getPersonalSyncPolicy,
+  isSyncAllowed,
+  type PersonalSyncPolicy,
+} from "@/core/sync/policy";
+import { normalizeSyncVersion, nowSyncVersion } from "@/core/sync/version";
+import { bookmarksDb, useBookmarkStore } from "@/store/bookmark-store";
+import { snippetsDb, useSnippetStore } from "@/store/snippet-store";
 import { useWorkflowStore } from "@/store/workflow-store";
 import { marksDb, tagsDb } from "@/core/database/marks";
+import { aiMemoryDb } from "@/core/ai/memory-store";
+import { useAIStore } from "@/store/ai-store";
+import { useAuthStore } from "@/store/auth-store";
 import { getServerUrl } from "@/store/server-store";
-
-function getServerUrlV1(): string {
-  return `${getServerUrl()}/v1`;
-}
-
-interface SyncProvider {
-  id: string;
-  name: string;
-  icon: React.ReactNode;
-  color: string;
-}
-
-const PROVIDERS: SyncProvider[] = [
-  {
-    id: "github",
-    name: "GitHub",
-    icon: <Github className="w-5 h-5" />,
-    color: "text-gray-800 bg-gray-100",
-  },
-  {
-    id: "gitee",
-    name: "Gitee",
-    icon: <Server className="w-5 h-5" />,
-    color: "text-red-600 bg-red-50",
-  },
-  {
-    id: "gitlab",
-    name: "GitLab",
-    icon: <Server className="w-5 h-5" />,
-    color: "text-orange-600 bg-orange-50",
-  },
-  {
-    id: "webdav",
-    name: "WebDAV",
-    icon: <Cloud className="w-5 h-5" />,
-    color: "text-blue-600 bg-blue-50",
-  },
-  {
-    id: "mtools",
-    name: "mTools Cloud",
-    icon: <Zap className="w-5 h-5" />,
-    color: "text-amber-600 bg-amber-50",
-  },
-];
-
-interface SyncConfig {
-  provider: string;
-  token: string;
-  repo: string;
-  branch: string;
-  webdavUrl?: string;
-  webdavUsername?: string;
-  webdavPassword?: string;
-  webdavPath?: string;
-  autoSync: boolean;
-}
-
-const defaultConfig: SyncConfig = {
-  provider: "",
-  token: "",
-  repo: "",
-  branch: "main",
-  autoSync: false,
-};
+import { handleError } from "@/core/errors";
+import type { Workflow } from "@/core/workflows/types";
 
 interface CloudSyncPluginProps {
   onBack?: () => void;
   context?: PluginContext;
 }
 
+interface SyncRow {
+  data_id: string;
+  content: any;
+  version: number;
+  deleted: boolean;
+}
+
+interface SyncPullResponse {
+  items: SyncRow[];
+  latest_version: number;
+}
+
+function getServerUrlV1(): string {
+  return `${getServerUrl()}/v1`;
+}
+
+function mapCloudItems(items: SyncRow[]): any[] {
+  const now = Date.now();
+  return items.map((row) => ({
+    ...row.content,
+    id: row.data_id,
+    deleted: row.deleted,
+    _version: row.version,
+    _dirty: false,
+    _syncedAt: now,
+  }));
+}
+
+async function hasAnyLocalData(includeAIMemory: boolean): Promise<boolean> {
+  const [bookmarks, snippets, marks, tags, workflows, memories] = await Promise.all([
+    bookmarksDb.getAll(),
+    snippetsDb.getAll(),
+    marksDb.getAll(),
+    tagsDb.getAll(),
+    invoke<Workflow[]>("workflow_list").catch(() => []),
+    includeAIMemory ? aiMemoryDb.getAll() : Promise.resolve([]),
+  ]);
+
+  return (
+    bookmarks.some((item) => !item.deleted) ||
+    snippets.some((item) => !item.deleted) ||
+    workflows.length > 0 ||
+    marks.some((item) => !item.deleted) ||
+    tags.some((item) => !item.deleted) ||
+    memories.some((item) => !item.deleted)
+  );
+}
+
 const CloudSyncPlugin: React.FC<CloudSyncPluginProps> = ({
   onBack,
   context,
 }) => {
-  const storage = context?.storage;
-  const [config, setConfig] = useState<SyncConfig>(defaultConfig);
   const [connected, setConnected] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [testing, setTesting] = useState(false);
   const [lastSync, setLastSync] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [showConfig, setShowConfig] = useState(true);
+  const [policy, setPolicy] = useState<PersonalSyncPolicy | null>(null);
 
-  // 加载保存的配置
-  useEffect(() => {
-    if (storage) {
-      const saved = storage.getItem("sync-config");
-      if (saved) {
-        try {
-          const parsed = JSON.parse(saved);
-          setConfig(parsed);
-          setShowConfig(false);
-        } catch {
-          // ignore
-        }
-      }
+  const { token, isLoggedIn } = useAuthStore();
+
+  const refreshPolicy = useCallback(async () => {
+    if (!isLoggedIn) {
+      setPolicy(null);
+      return null;
     }
-  }, [storage]);
+    const next = await getPersonalSyncPolicy();
+    setPolicy(next);
+    return next;
+  }, [isLoggedIn]);
 
-  const saveConfig = useCallback(
-    (newConfig: SyncConfig) => {
-      setConfig(newConfig);
-      if (storage) {
-        storage.setItem("sync-config", JSON.stringify(newConfig));
-      }
-    },
-    [storage],
-  );
+  useEffect(() => {
+    if (!context) return;
+    const value = context.storage.getItem("cloud-sync-last");
+    if (value) setLastSync(value);
+  }, [context]);
+
+  useEffect(() => {
+    if (!isLoggedIn) {
+      setConnected(false);
+      return;
+    }
+    refreshPolicy().catch((e) => {
+      handleError(e, { context: "加载同步状态", silent: true });
+    });
+  }, [isLoggedIn, refreshPolicy]);
+
+  const syncBlockedHint = useMemo(() => {
+    if (!isLoggedIn) return "请先登录账号";
+    if (!policy) return null;
+    if (isSyncAllowed(policy)) return null;
+    return getExpiryHint(policy, "个人云同步") || "个人云同步不可用";
+  }, [isLoggedIn, policy]);
+
+  const canOperate =
+    connected && !syncing && isLoggedIn && (!policy || isSyncAllowed(policy));
 
   const handleTestConnection = useCallback(async () => {
     setTesting(true);
     setError(null);
+
     try {
-      if (config.provider === "webdav") {
-        const ok = await invoke<boolean>("webdav_test", {
-          url: config.webdavUrl || "",
-          username: config.webdavUsername || "",
-          password: config.webdavPassword || "",
-          path: config.webdavPath || "/",
-        });
-        setConnected(ok);
-      } else if (config.provider !== "mtools") {
-        const status = await invoke<{
-          provider: string;
-          connected: boolean;
-        }>("git_sync_status", {
-          provider: config.provider,
-          token: config.token,
-          repo: config.repo,
-        });
-        setConnected(status.connected);
-        if (!status.connected) {
-          setError("连接失败，请检查 Token 和仓库名");
-        }
-      } else {
-        const { token } = useAuthStore.getState();
-        if (!token) {
-          setError("请先登录账号");
-          setConnected(false);
-          return;
-        }
-        const ok = await invoke<boolean>("mtools_sync_test", {
-          token,
-          baseUrl: getServerUrl(),
-        });
-        setConnected(ok);
-        if (!ok) setError("无法连接到 mTools 服务器");
+      if (!token) {
+        setConnected(false);
+        setError("请先登录账号");
+        return;
       }
+
+      const nextPolicy = await refreshPolicy();
+      if (nextPolicy && !isSyncAllowed(nextPolicy)) {
+        setConnected(false);
+        setError(getExpiryHint(nextPolicy, "个人云同步") || "同步不可用");
+        return;
+      }
+
+      const ok = await invoke<boolean>("mtools_sync_test", {
+        token,
+        baseUrl: getServerUrl(),
+      });
+      setConnected(ok);
+      if (!ok) setError("无法连接到 mTools 服务器");
     } catch (e) {
-      setError(String(e));
       setConnected(false);
+      setError(String(e));
     } finally {
       setTesting(false);
     }
-  }, [config]);
+  }, [token, refreshPolicy]);
 
   const handlePush = useCallback(async () => {
     setSyncing(true);
     setError(null);
+
     try {
-      if (config.provider === "webdav") {
-        // WebDAV 同步
-        await invoke("webdav_create_dir", {
-          url: config.webdavUrl,
-          username: config.webdavUsername,
-          password: config.webdavPassword,
-          path: `${config.webdavPath || ""}/51toolbox`,
-        });
-      } else if (config.provider !== "mtools") {
-        await invoke("git_sync_push", {
-          provider: config.provider,
-          token: config.token,
-          repo: config.repo,
-          branch: config.branch,
-        });
-      } else if (config.provider === "mtools") {
-        const { token } = useAuthStore.getState();
-        if (!token) throw new Error("未登录");
+      if (!canOperate || !token) {
+        throw new Error(syncBlockedHint || "同步不可用");
+      }
+      const latestPolicy = await refreshPolicy();
+      if (latestPolicy && !isSyncAllowed(latestPolicy)) {
+        throw new Error(
+          getExpiryHint(latestPolicy, "个人云同步") || "个人云同步不可用",
+        );
+      }
 
-        // 1. 同步书签
-        const bookmarks = useBookmarkStore.getState().bookmarks;
+      const aiConfig = useAIStore.getState().config;
+      const memorySyncEnabled =
+        aiConfig.enable_long_term_memory && aiConfig.enable_memory_sync;
+
+      const [bookmarks, snippets, marks, tags, memories] = await Promise.all([
+        bookmarksDb.getAll(),
+        snippetsDb.getAll(),
+        marksDb.getAll(),
+        tagsDb.getAll(),
+        memorySyncEnabled ? aiMemoryDb.getAll() : Promise.resolve([]),
+      ]);
+      const workflows = useWorkflowStore
+        .getState()
+        .workflows.filter((w) => !w.builtin);
+
+      await invoke("mtools_sync_push", {
+        token,
+        baseUrl: getServerUrlV1(),
+        request: {
+          data_type: "bookmarks",
+          items: bookmarks.map((b) => ({
+            data_id: b.id,
+            content: b,
+            version: normalizeSyncVersion(
+              (b as any)._version ?? (b as any).version,
+              nowSyncVersion(),
+            ),
+            deleted: b.deleted || false,
+          })),
+        },
+      });
+
+      await invoke("mtools_sync_push", {
+        token,
+        baseUrl: getServerUrlV1(),
+        request: {
+          data_type: "snippets",
+          items: snippets.map((s) => ({
+            data_id: s.id,
+            content: s,
+            version: normalizeSyncVersion(
+              (s as any)._version ?? (s as any).version,
+              nowSyncVersion(),
+            ),
+            deleted: s.deleted || false,
+          })),
+        },
+      });
+
+      await invoke("mtools_sync_push", {
+        token,
+        baseUrl: getServerUrlV1(),
+        request: {
+          data_type: "workflows",
+          items: workflows.map((w) => ({
+            data_id: w.id,
+            content: w,
+            version: normalizeSyncVersion(
+              (w as any).version ?? w.created_at,
+              nowSyncVersion(),
+            ),
+            deleted: false,
+          })),
+        },
+      });
+
+      await invoke("mtools_sync_push", {
+        token,
+        baseUrl: getServerUrlV1(),
+        request: {
+          data_type: "marks",
+          items: marks.map((m) => ({
+            data_id: m.id,
+            content: m,
+            version: normalizeSyncVersion(
+              (m as any)._version ?? m.version,
+              nowSyncVersion(),
+            ),
+            deleted: m.deleted || false,
+          })),
+        },
+      });
+
+      await invoke("mtools_sync_push", {
+        token,
+        baseUrl: getServerUrlV1(),
+        request: {
+          data_type: "tags",
+          items: tags.map((t) => ({
+            data_id: t.id,
+            content: t,
+            version: normalizeSyncVersion(
+              (t as any)._version ?? t.version,
+              nowSyncVersion(),
+            ),
+            deleted: t.deleted || false,
+          })),
+        },
+      });
+
+      if (memorySyncEnabled) {
         await invoke("mtools_sync_push", {
           token,
           baseUrl: getServerUrlV1(),
           request: {
-            data_type: "bookmarks",
-            items: bookmarks.map((b) => ({
-              data_id: b.id,
-              content: b,
-              version: b.version || 1,
-              deleted: b.deleted || false,
-            })),
-          },
-        });
-
-        // 2. 同步代码片段
-        const snippets = useSnippetStore.getState().snippets;
-        await invoke("mtools_sync_push", {
-          token,
-          baseUrl: getServerUrlV1(),
-          request: {
-            data_type: "snippets",
-            items: snippets.map((s) => ({
-              data_id: s.id,
-              content: s,
-              version: s.version || 1,
-              deleted: s.deleted || false,
-            })),
-          },
-        });
-
-        // 3. 同步工作流
-        const workflows = useWorkflowStore.getState().workflows.filter(w => !w.builtin);
-        await invoke("mtools_sync_push", {
-          token,
-          baseUrl: getServerUrlV1(),
-          request: {
-            data_type: "workflows",
-            items: workflows.map((w) => ({
-              data_id: w.id,
-              content: w,
-              version: (w as any).version || 1,
-              deleted: false,
-            })),
-          },
-        });
-
-        // 4. 同步 Marks (笔记)
-        const marks = await marksDb.getAll();
-        await invoke("mtools_sync_push", {
-          token,
-          baseUrl: getServerUrlV1(),
-          request: {
-            data_type: "marks",
-            items: marks.map((m) => ({
-              data_id: m.id,
-              content: m,
-              version: m.version || 1,
-              deleted: m.deleted || false,
-            })),
-          },
-        });
-
-        // 5. 同步 Tags
-        const tags = await tagsDb.getAll();
-        await invoke("mtools_sync_push", {
-          token,
-          baseUrl: getServerUrlV1(),
-          request: {
-            data_type: "tags",
-            items: tags.map((t) => ({
-              data_id: t.id,
-              content: t,
-              version: t.version || 1,
-              deleted: t.deleted || false,
+            data_type: "ai_memory",
+            items: memories.map((memory) => ({
+              data_id: memory.id,
+              content: memory,
+              version: normalizeSyncVersion(
+                (memory as any)._version ?? memory.updated_at,
+                nowSyncVersion(),
+              ),
+              deleted: memory.deleted || false,
             })),
           },
         });
       }
-      setLastSync(new Date().toLocaleString("zh-CN"));
+
+      const syncAt = new Date().toLocaleString("zh-CN");
+      setLastSync(syncAt);
+      if (context) {
+        context.storage.setItem("cloud-sync-last", syncAt);
+      }
     } catch (e) {
       setError(`推送失败: ${e}`);
     } finally {
       setSyncing(false);
     }
-  }, [config]);
+  }, [canOperate, context, refreshPolicy, syncBlockedHint, token]);
 
   const handlePull = useCallback(async () => {
     setSyncing(true);
     setError(null);
+
     try {
-      if (config.provider === "webdav") {
-        // WebDAV pull not implemented yet
-      } else if (config.provider !== "mtools") {
-        await invoke("git_sync_pull", {
-          provider: config.provider,
-          token: config.token,
-          repo: config.repo,
-          branch: config.branch,
-        });
-      } else if (config.provider === "mtools") {
-        const { token } = useAuthStore.getState();
-        if (!token) throw new Error("未登录");
+      if (!canOperate || !token) {
+        throw new Error(syncBlockedHint || "同步不可用");
+      }
+      const latestPolicy = await refreshPolicy();
+      if (latestPolicy && !isSyncAllowed(latestPolicy)) {
+        throw new Error(
+          getExpiryHint(latestPolicy, "个人云同步") || "个人云同步不可用",
+        );
+      }
 
-        // 1. 拉取书签
-        const bookmarkResp = await invoke<any>("mtools_sync_pull", {
+      const aiConfig = useAIStore.getState().config;
+      const memorySyncEnabled =
+        aiConfig.enable_long_term_memory && aiConfig.enable_memory_sync;
+      const hasLocalData = await hasAnyLocalData(memorySyncEnabled);
+      if (hasLocalData) {
+        const confirmed = window.confirm(
+          memorySyncEnabled
+            ? "从云端拉取会覆盖当前本地同步数据（书签/短语/工作流/笔记/标签/AI记忆）。是否继续？"
+            : "从云端拉取会覆盖当前本地同步数据（书签/短语/工作流/笔记/标签）。是否继续？",
+        );
+        if (!confirmed) return;
+      }
+
+      const bookmarkResp = await invoke<SyncPullResponse>("mtools_sync_pull", {
+        token,
+        baseUrl: getServerUrlV1(),
+        dataType: "bookmarks",
+      });
+      const bookmarkItems = mapCloudItems(bookmarkResp.items || []);
+      await bookmarksDb.setAll(bookmarkItems as any);
+      useBookmarkStore.setState({ bookmarks: bookmarkItems as any, loaded: true });
+
+      const snippetResp = await invoke<SyncPullResponse>("mtools_sync_pull", {
+        token,
+        baseUrl: getServerUrlV1(),
+        dataType: "snippets",
+      });
+      const snippetItems = mapCloudItems(snippetResp.items || []);
+      await snippetsDb.setAll(snippetItems as any);
+      useSnippetStore.setState({ snippets: snippetItems as any, loaded: true });
+
+      const marksResp = await invoke<SyncPullResponse>("mtools_sync_pull", {
+        token,
+        baseUrl: getServerUrlV1(),
+        dataType: "marks",
+      });
+      await marksDb.setAll(mapCloudItems(marksResp.items || []) as any);
+      marksDb.invalidateCache();
+
+      const tagsResp = await invoke<SyncPullResponse>("mtools_sync_pull", {
+        token,
+        baseUrl: getServerUrlV1(),
+        dataType: "tags",
+      });
+      await tagsDb.setAll(mapCloudItems(tagsResp.items || []) as any);
+      tagsDb.invalidateCache();
+
+      if (memorySyncEnabled) {
+        const memoryResp = await invoke<SyncPullResponse>("mtools_sync_pull", {
           token,
           baseUrl: getServerUrlV1(),
-          dataType: "bookmarks",
+          dataType: "ai_memory",
         });
-        if (bookmarkResp.items && bookmarkResp.items.length > 0) {
-            const items = bookmarkResp.items.map((i: any) => i.content);
-            localStorage.setItem("mtools-bookmarks", JSON.stringify(items));
-            useBookmarkStore.setState({ bookmarks: items, loaded: true });
-        }
+        await aiMemoryDb.setAll(mapCloudItems(memoryResp.items || []) as any);
+        aiMemoryDb.invalidateCache();
+      }
 
-        // 2. 拉取代码片段
-        const snippetResp = await invoke<any>("mtools_sync_pull", {
-          token,
-          baseUrl: getServerUrlV1(),
-          dataType: "snippets",
-        });
-        if (snippetResp.items && snippetResp.items.length > 0) {
-            const items = snippetResp.items.map((i: any) => i.content);
-            localStorage.setItem("mtools-snippets", JSON.stringify(items));
-            useSnippetStore.setState({ snippets: items, loaded: true });
-        }
+      const workflowResp = await invoke<SyncPullResponse>("mtools_sync_pull", {
+        token,
+        baseUrl: getServerUrlV1(),
+        dataType: "workflows",
+      });
 
-        // 3. 拉取工作流
-        const workflowResp = await invoke<any>("mtools_sync_pull", {
-          token,
-          baseUrl: getServerUrlV1(),
-          dataType: "workflows",
-        });
-        if (workflowResp.items && workflowResp.items.length > 0) {
-            for (const item of workflowResp.items) {
-                await invoke("workflow_create", { workflow: item.content });
-            }
-            useWorkflowStore.getState().loadWorkflows();
-        }
+      const existingCustom = useWorkflowStore
+        .getState()
+        .workflows.filter((w) => !w.builtin);
+      const existingById = new Map(existingCustom.map((wf) => [wf.id, wf]));
+      const cloudItems = workflowResp.items || [];
+      const cloudActiveItems = cloudItems.filter((item) => !item.deleted);
+      const cloudActiveIdSet = new Set(cloudActiveItems.map((item) => item.data_id));
 
-        // 4. 拉取 Marks
-        const marksResp = await invoke<any>("mtools_sync_pull", {
-          token,
-          baseUrl: getServerUrlV1(),
-          dataType: "marks",
-        });
-        if (marksResp.items && marksResp.items.length > 0) {
-            // 这里简单全量同步，后续应做增量合并
-            const items = marksResp.items.map((i: any) => i.content);
-            const { writeTextFile } = await import("@tauri-apps/plugin-fs");
-            const { BaseDirectory: BD } = await import("@tauri-apps/plugin-fs");
-            await writeTextFile("mtools-db/marks.json", JSON.stringify(items, null, 2), {
-                baseDir: BD.AppData,
-            });
-            marksDb.invalidateCache();
-        }
-
-        // 5. 拉取 Tags
-        const tagsResp = await invoke<any>("mtools_sync_pull", {
-          token,
-          baseUrl: getServerUrlV1(),
-          dataType: "tags",
-        });
-        if (tagsResp.items && tagsResp.items.length > 0) {
-            const items = tagsResp.items.map((i: any) => i.content);
-            const { writeTextFile } = await import("@tauri-apps/plugin-fs");
-            const { BaseDirectory: BD } = await import("@tauri-apps/plugin-fs");
-            await writeTextFile("mtools-db/tags.json", JSON.stringify(items, null, 2), {
-                baseDir: BD.AppData,
-            });
-            tagsDb.invalidateCache();
+      // 删除云端不存在（或已删除）的本地工作流
+      for (const localWorkflow of existingCustom) {
+        if (cloudActiveIdSet.has(localWorkflow.id)) continue;
+        try {
+          await invoke("workflow_delete", { id: localWorkflow.id });
+        } catch (e) {
+          handleError(e, {
+            context: `删除本地工作流 ${localWorkflow.id}`,
+            silent: true,
+          });
         }
       }
-      setLastSync(new Date().toLocaleString("zh-CN"));
+
+      // 对云端工作流做增量更新/创建，避免“先全删后重建”的数据丢失窗口
+      for (const item of cloudActiveItems) {
+        const workflowPayload = {
+          ...item.content,
+          id: item.data_id,
+          builtin: false,
+        };
+        try {
+          if (existingById.has(item.data_id)) {
+            await invoke("workflow_update", { workflow: workflowPayload });
+          } else {
+            await invoke("workflow_create", { workflow: workflowPayload });
+          }
+        } catch (e) {
+          handleError(e, {
+            context: `拉取工作流 ${item.data_id}`,
+            silent: true,
+          });
+        }
+      }
+      await useWorkflowStore.getState().loadWorkflows();
+
+      const syncAt = new Date().toLocaleString("zh-CN");
+      setLastSync(syncAt);
+      if (context) {
+        context.storage.setItem("cloud-sync-last", syncAt);
+      }
     } catch (e) {
       setError(`拉取失败: ${e}`);
     } finally {
       setSyncing(false);
     }
-  }, [config]);
-
-  const isWebDAV = config.provider === "webdav";
+  }, [canOperate, context, refreshPolicy, syncBlockedHint, token]);
 
   return (
     <div className="flex flex-col h-full bg-[var(--color-bg)] text-[var(--color-text)]">
-      {/* 头部 */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--color-border)]">
         <div className="flex items-center gap-2">
           {onBack && (
@@ -406,131 +463,62 @@ const CloudSyncPlugin: React.FC<CloudSyncPluginProps> = ({
             </span>
           )}
         </div>
-        <button
-          onClick={() => setShowConfig(!showConfig)}
-          className="p-1.5 rounded-md hover:bg-[var(--color-bg-secondary)]"
-        >
-          <Settings2 className="w-4 h-4" />
-        </button>
       </div>
 
       <div className="flex-1 overflow-auto p-4 space-y-4">
-        {/* 配置区域 */}
-        {showConfig && (
-          <div className="space-y-3 p-4 bg-[var(--color-bg-secondary)] rounded-lg">
-            <h3 className="text-sm font-medium">同步配置</h3>
-
-            {/* 平台选择 */}
-            <div className="grid grid-cols-4 gap-2">
-              {PROVIDERS.map((p) => (
-                <button
-                  key={p.id}
-                  onClick={() => saveConfig({ ...config, provider: p.id })}
-                  className={`flex flex-col items-center gap-1 p-2 rounded-lg border transition-colors ${
-                    config.provider === p.id
-                      ? "border-sky-500 bg-sky-500/10"
-                      : "border-[var(--color-border)] hover:bg-[var(--color-bg-tertiary)]"
-                  }`}
-                >
-                  {p.icon}
-                  <span className="text-xs">{p.name}</span>
-                </button>
-              ))}
-            </div>
-
-            {config.provider && !isWebDAV && (
-              <>
-                <input
-                  type="password"
-                  value={config.token}
-                  onChange={(e) =>
-                    saveConfig({ ...config, token: e.target.value })
-                  }
-                  placeholder="Access Token"
-                  className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg text-sm"
-                />
-                <input
-                  type="text"
-                  value={config.repo}
-                  onChange={(e) =>
-                    saveConfig({ ...config, repo: e.target.value })
-                  }
-                  placeholder="owner/repo"
-                  className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg text-sm"
-                />
-                <input
-                  type="text"
-                  value={config.branch}
-                  onChange={(e) =>
-                    saveConfig({ ...config, branch: e.target.value })
-                  }
-                  placeholder="分支 (默认 main)"
-                  className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg text-sm"
-                />
-              </>
+        <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-3 space-y-3">
+          <div className="flex items-center gap-2 text-xs">
+            <Zap className="w-4 h-4 text-amber-500" />
+            当前同步通道：mTools Cloud
+          </div>
+          <div className="text-[10px] text-[var(--color-text-secondary)] break-all">
+            服务地址：{getServerUrlV1()}
+          </div>
+          <button
+            onClick={handleTestConnection}
+            disabled={testing || syncing || !isLoggedIn}
+            className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-sky-500 text-white rounded-lg hover:bg-sky-600 text-sm font-medium disabled:opacity-50"
+          >
+            {testing ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <RefreshCw className="w-4 h-4" />
             )}
+            测试连接
+          </button>
+        </div>
 
-            {isWebDAV && (
-              <>
-                <input
-                  type="text"
-                  value={config.webdavUrl || ""}
-                  onChange={(e) =>
-                    saveConfig({ ...config, webdavUrl: e.target.value })
-                  }
-                  placeholder="WebDAV URL (如 https://dav.example.com)"
-                  className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg text-sm"
-                />
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={config.webdavUsername || ""}
-                    onChange={(e) =>
-                      saveConfig({ ...config, webdavUsername: e.target.value })
-                    }
-                    placeholder="用户名"
-                    className="flex-1 px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg text-sm"
-                  />
-                  <input
-                    type="password"
-                    value={config.webdavPassword || ""}
-                    onChange={(e) =>
-                      saveConfig({ ...config, webdavPassword: e.target.value })
-                    }
-                    placeholder="密码"
-                    className="flex-1 px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg text-sm"
-                  />
-                </div>
-                <input
-                  type="text"
-                  value={config.webdavPath || ""}
-                  onChange={(e) =>
-                    saveConfig({ ...config, webdavPath: e.target.value })
-                  }
-                  placeholder="远程路径 (如 /backup)"
-                  className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg text-sm"
-                />
-              </>
-            )}
-
-            {config.provider && (
-              <button
-                onClick={handleTestConnection}
-                disabled={testing}
-                className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-sky-500 text-white rounded-lg hover:bg-sky-600 text-sm font-medium disabled:opacity-50"
-              >
-                {testing ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <RefreshCw className="w-4 h-4" />
-                )}
-                测试连接
-              </button>
-            )}
+        {!isLoggedIn && (
+          <div className="flex items-start gap-2 p-3 bg-orange-500/10 text-orange-600 rounded-lg text-sm">
+            <CloudOff className="w-4 h-4 shrink-0 mt-0.5" />
+            请先登录后使用云同步
           </div>
         )}
 
-        {/* 错误提示 */}
+        {policy?.status === "expiring_soon" && (
+          <div className="flex items-start gap-2 p-3 bg-amber-500/10 text-amber-700 rounded-lg text-sm">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+            <div>
+              <div>会员即将到期，云同步将自动停止。</div>
+              <div className="text-xs mt-1 opacity-80">
+                {policy.daysToExpire !== null
+                  ? `预计 ${policy.daysToExpire} 天后到期`
+                  : "请及时续费"}
+                {policy.stopAt
+                  ? `（${new Date(policy.stopAt).toLocaleString("zh-CN")}）`
+                  : ""}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {syncBlockedHint && isLoggedIn && (
+          <div className="flex items-start gap-2 p-3 bg-orange-500/10 text-orange-600 rounded-lg text-sm">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+            {syncBlockedHint}
+          </div>
+        )}
+
         {error && (
           <div className="flex items-start gap-2 p-3 bg-red-500/10 text-red-500 rounded-lg text-sm">
             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
@@ -538,72 +526,43 @@ const CloudSyncPlugin: React.FC<CloudSyncPluginProps> = ({
           </div>
         )}
 
-        {/* 同步操作 */}
-        {config.provider && (
-          <div className="space-y-3">
-            <div className="flex gap-2">
-              <button
-                onClick={handlePush}
-                disabled={syncing || !connected}
-                className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-[var(--color-bg-secondary)] rounded-lg hover:bg-[var(--color-bg-tertiary)] text-sm font-medium disabled:opacity-50 transition-colors"
-              >
-                {syncing ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <ArrowUpFromLine className="w-4 h-4" />
-                )}
-                推送到云端
-              </button>
-              <button
-                onClick={handlePull}
-                disabled={syncing || !connected}
-                className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-[var(--color-bg-secondary)] rounded-lg hover:bg-[var(--color-bg-tertiary)] text-sm font-medium disabled:opacity-50 transition-colors"
-              >
-                {syncing ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <ArrowDownToLine className="w-4 h-4" />
-                )}
-                从云端拉取
-              </button>
-            </div>
+        <div className="space-y-3">
+          <div className="flex gap-2">
+            <button
+              onClick={handlePush}
+              disabled={!canOperate}
+              className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-[var(--color-bg-secondary)] rounded-lg hover:bg-[var(--color-bg-tertiary)] text-sm font-medium disabled:opacity-50 transition-colors"
+            >
+              {syncing ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <ArrowUpFromLine className="w-4 h-4" />
+              )}
+              推送到云端
+            </button>
+            <button
+              onClick={handlePull}
+              disabled={!canOperate}
+              className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-[var(--color-bg-secondary)] rounded-lg hover:bg-[var(--color-bg-tertiary)] text-sm font-medium disabled:opacity-50 transition-colors"
+            >
+              {syncing ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <ArrowDownToLine className="w-4 h-4" />
+              )}
+              从云端拉取（覆盖本地）
+            </button>
+          </div>
 
-            {/* 自动同步 */}
-            <label className="flex items-center justify-between p-3 bg-[var(--color-bg-secondary)] rounded-lg cursor-pointer">
-              <div>
-                <p className="text-sm font-medium">自动同步</p>
-                <p className="text-xs text-[var(--color-text-secondary)]">
-                  笔记变更时自动推送
-                </p>
-              </div>
-              <input
-                type="checkbox"
-                checked={config.autoSync}
-                onChange={(e) =>
-                  saveConfig({ ...config, autoSync: e.target.checked })
-                }
-                className="rounded"
-              />
-            </label>
-
-            {/* 上次同步时间 */}
+          <div className="text-xs text-[var(--color-text-secondary)] rounded-lg border border-[var(--color-border)] p-3 bg-[var(--color-bg-secondary)]">
+            手动拉取会按数据集覆盖本地内容；当本地存在数据时会先弹出二次确认。
             {lastSync && (
-              <p className="text-xs text-[var(--color-text-secondary)] text-center">
-                上次同步: {lastSync}
-              </p>
+              <div className="mt-1 text-[10px] text-[var(--color-text-secondary)]">
+                上次同步：{lastSync}
+              </div>
             )}
           </div>
-        )}
-
-        {!config.provider && (
-          <div className="text-center text-[var(--color-text-secondary)] py-12">
-            <Cloud className="w-10 h-10 mx-auto mb-2 opacity-20" />
-            <p className="text-sm">选择同步平台开始配置</p>
-            <p className="text-xs mt-1 opacity-60">
-              支持 GitHub、Gitee、GitLab 和 WebDAV
-            </p>
-          </div>
-        )}
+        </div>
       </div>
     </div>
   );

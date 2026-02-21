@@ -9,6 +9,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { handleError } from "@/core/errors";
+import { normalizeSyncVersion, nowSyncVersion } from "@/core/sync/version";
 
 /** 同步元数据接口 — 可选，由 SyncableCollection 使用 */
 export interface SyncMeta {
@@ -177,10 +178,10 @@ export class SyncableCollection<
 > extends JsonCollection<T> {
   /** 新增一条，自动标记 dirty */
   override async create(item: T): Promise<T> {
-    const now = Date.now();
+    const now = nowSyncVersion();
     const syncItem = {
       ...item,
-      _version: item._version ?? now,
+      _version: normalizeSyncVersion(item._version, now),
       _dirty: true,
       _syncedAt: item._syncedAt ?? undefined,
     };
@@ -192,9 +193,10 @@ export class SyncableCollection<
     id: string,
     partial: Partial<T>,
   ): Promise<T | undefined> {
+    const nextVersion = nowSyncVersion();
     const merged = {
       ...partial,
-      _version: Date.now(),
+      _version: nextVersion,
       _dirty: true,
     } as Partial<T>;
     return super.update(id, merged);
@@ -202,9 +204,10 @@ export class SyncableCollection<
 
   /** 软删除（标记 deleted + dirty） */
   async softDelete(id: string): Promise<T | undefined> {
+    const nextVersion = nowSyncVersion();
     return this.update(id, {
       deleted: true,
-      _version: Date.now(),
+      _version: nextVersion,
       _dirty: true,
     } as Partial<T>);
   }
@@ -245,10 +248,10 @@ export class SyncableCollection<
 
     for (const cloud of cloudItems) {
       const idx = all.findIndex((i) => i.id === cloud.data_id);
-      const cloudVersion = cloud.version;
+      const cloudVersion = normalizeSyncVersion(cloud.version, 0);
 
       if (idx >= 0) {
-        const localVersion = all[idx]._version ?? 0;
+        const localVersion = normalizeSyncVersion(all[idx]._version ?? 0, 0);
         if (cloudVersion > localVersion) {
           all[idx] = {
             ...all[idx],

@@ -43,7 +43,6 @@ base64 = "0.22"
 xcap = "0.8"
 arboard = "3"
 url = "2"
-reqwest_dav = "0.2"
 percent-encoding = "2.3"
 ort = { version = "=2.0.0-rc.9", features = ["load-dynamic", "ndarray"] }
 ort-sys = "=2.0.0-rc.9"

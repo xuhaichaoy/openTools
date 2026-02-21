@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { api } from "@/core/api/client";
 import { handleError } from "@/core/errors";
+import { getTeamSyncPolicy, type SyncStatus } from "@/core/sync/policy";
 import { useAuthStore } from "@/store/auth-store";
 import { TeamMembersSection, type TeamMember } from "./TeamMembersSection";
 import { TeamAIConfigSection } from "./TeamAIConfigSection";
@@ -41,8 +42,49 @@ function getTeamSubscriptionLabel(team: Team): string {
   const active = isTeamSubscriptionActive(team);
 
   if (!active) return "已到期";
+  const days = deriveDaysToExpire(team.subscription_expires_at);
+  if (days !== null && days > 0 && days <= 3) return "即将到期";
   if (plan === "trial") return "试用中";
   return "已开通";
+}
+
+function sortTeamsByExpiryStatus(items: Team[]): Team[] {
+  const toTimestamp = (value?: string | null) => {
+    const ts = value ? new Date(value).getTime() : 0;
+    return Number.isFinite(ts) ? ts : 0;
+  };
+
+  return [...items].sort((a, b) => {
+    const aActive = isTeamSubscriptionActive(a);
+    const bActive = isTeamSubscriptionActive(b);
+    if (aActive !== bActive) {
+      return aActive ? -1 : 1;
+    }
+    return toTimestamp(b.created_at) - toTimestamp(a.created_at);
+  });
+}
+
+function deriveDaysToExpire(expiresAt?: string | null): number | null {
+  if (!expiresAt) return null;
+  const expireMs = new Date(expiresAt).getTime();
+  if (!Number.isFinite(expireMs)) return null;
+  const diffMs = expireMs - Date.now();
+  if (diffMs <= 0) return 0;
+  return Math.ceil(diffMs / (24 * 60 * 60 * 1000));
+}
+
+function getFallbackSyncStatus(team: Team): SyncStatus {
+  const active = isTeamSubscriptionActive(team);
+  if (!active) return "expired";
+  const days = deriveDaysToExpire(team.subscription_expires_at);
+  if (days !== null && days > 0 && days <= 3) return "expiring_soon";
+  return "active";
+}
+
+function getSyncStatusText(status: SyncStatus): string {
+  if (status === "expiring_soon") return "即将到期";
+  if (status === "expired") return "已到期";
+  return "正常";
 }
 
 export function TeamTabContainer() {
@@ -52,12 +94,20 @@ export function TeamTabContainer() {
   const [newTeamName, setNewTeamName] = useState("");
   const [selectedTeam, setSelectedTeam] = useState<Team | null>(null);
   const [members, setMembers] = useState<TeamMember[]>([]);
+  const [selectedTeamSyncStatus, setSelectedTeamSyncStatus] =
+    useState<SyncStatus>("active");
+  const [selectedTeamDaysToExpire, setSelectedTeamDaysToExpire] = useState<
+    number | null
+  >(null);
+  const [selectedTeamSyncStopAt, setSelectedTeamSyncStopAt] = useState<
+    string | null
+  >(null);
 
   useEffect(() => {
     const fetchTeams = async () => {
       try {
         const res = await api.get<Team[]>("/teams");
-        setTeams(res);
+        setTeams(sortTeamsByExpiryStatus(res));
       } catch (err) {
         handleError(err, { context: "获取团队列表" });
       } finally {
@@ -73,7 +123,7 @@ export function TeamTabContainer() {
 
     try {
       const team = await api.post<Team>("/teams", { name: newTeamName });
-      setTeams([team, ...teams]);
+      setTeams(sortTeamsByExpiryStatus([team, ...teams]));
       setNewTeamName("");
       setShowCreate(false);
     } catch (err) {
@@ -92,18 +142,37 @@ export function TeamTabContainer() {
 
   const handleViewTeam = async (team: Team) => {
     setSelectedTeam(team);
+    setSelectedTeamSyncStatus(getFallbackSyncStatus(team));
+    setSelectedTeamDaysToExpire(deriveDaysToExpire(team.subscription_expires_at));
+    setSelectedTeamSyncStopAt(team.subscription_expires_at ?? null);
+
     await fetchMembers(team.id);
+    try {
+      const policy = await getTeamSyncPolicy(team.id);
+      setSelectedTeamSyncStatus(policy.status);
+      setSelectedTeamDaysToExpire(policy.daysToExpire);
+      setSelectedTeamSyncStopAt(policy.stopAt);
+    } catch (err) {
+      handleError(err, { context: "获取团队同步状态", silent: true });
+    }
   };
 
   if (selectedTeam) {
     return (
-      <TeamDetail
-        team={selectedTeam}
-        members={members}
-        onBack={() => setSelectedTeam(null)}
-        onMembersChange={() => fetchMembers(selectedTeam.id)}
-      />
-    );
+        <TeamDetail
+          team={selectedTeam}
+          members={members}
+          syncStatus={selectedTeamSyncStatus}
+          daysToExpire={selectedTeamDaysToExpire}
+          syncStopAt={selectedTeamSyncStopAt}
+          onBack={() => {
+            setSelectedTeam(null);
+            setSelectedTeamDaysToExpire(null);
+            setSelectedTeamSyncStopAt(null);
+          }}
+          onMembersChange={() => fetchMembers(selectedTeam.id)}
+        />
+      );
   }
 
   return (
@@ -156,6 +225,9 @@ export function TeamTabContainer() {
                       : "已加入"}
                     {" · "}
                     {getTeamSubscriptionLabel(team)}
+                  </p>
+                  <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5 font-mono break-all">
+                    团队 ID: {team.id}
                   </p>
                 </div>
               </div>
@@ -212,11 +284,17 @@ export function TeamTabContainer() {
 function TeamDetail({
   team,
   members,
+  syncStatus,
+  daysToExpire,
+  syncStopAt,
   onBack,
   onMembersChange,
 }: {
   team: Team;
   members: TeamMember[];
+  syncStatus: SyncStatus;
+  daysToExpire: number | null;
+  syncStopAt: string | null;
   onBack: () => void;
   onMembersChange: () => void;
 }) {
@@ -224,7 +302,7 @@ function TeamDetail({
     "members" | "ai-config" | "resources" | "usage"
   >("members");
   const { user } = useAuthStore();
-  const teamActive = isTeamSubscriptionActive(team);
+  const teamActive = syncStatus !== "expired";
   const isOwnerOrAdmin =
     team &&
     user &&
@@ -253,12 +331,30 @@ function TeamDetail({
         <div className="flex-1">
           <h2 className="text-sm font-semibold">{team.name}</h2>
           <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
-            {members.length} 名成员 · {getTeamSubscriptionLabel(team)} · 创建于 {new Date(team.created_at).toLocaleDateString()}
+            {members.length} 名成员 · 同步状态：{getSyncStatusText(syncStatus)} · 创建于{" "}
+            {new Date(team.created_at).toLocaleDateString()}
+          </p>
+          <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5 font-mono break-all">
+            团队 ID: {team.id}
           </p>
         </div>
       </div>
 
-      {!teamActive && (
+      {syncStatus === "expiring_soon" && (
+        <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-[var(--space-compact-3)] py-2.5">
+          <div className="text-xs font-semibold text-amber-600">团队同步即将到期</div>
+          <div className="text-[10px] text-amber-600/90 mt-1">
+            {daysToExpire !== null
+              ? `预计 ${daysToExpire} 天后停止团队云同步。`
+              : "团队云同步即将停止。"}
+            {syncStopAt
+              ? ` 到期时间：${new Date(syncStopAt).toLocaleString()}`
+              : ""}
+          </div>
+        </div>
+      )}
+
+      {syncStatus === "expired" && (
         <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-[var(--space-compact-3)] py-2.5">
           <div className="text-xs font-semibold text-amber-600">团队已到期</div>
           <div className="text-[10px] text-amber-600/90 mt-1">

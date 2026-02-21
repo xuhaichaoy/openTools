@@ -31,6 +31,15 @@ export function mergeCloudAIConfig(
       cloudConfig.enable_rag_auto_search ?? localConfig.enable_rag_auto_search,
     enable_native_tools:
       cloudConfig.enable_native_tools ?? localConfig.enable_native_tools,
+    enable_long_term_memory:
+      cloudConfig.enable_long_term_memory ?? localConfig.enable_long_term_memory,
+    enable_memory_auto_recall:
+      cloudConfig.enable_memory_auto_recall ??
+      localConfig.enable_memory_auto_recall,
+    enable_memory_auto_save:
+      cloudConfig.enable_memory_auto_save ?? localConfig.enable_memory_auto_save,
+    enable_memory_sync:
+      cloudConfig.enable_memory_sync ?? localConfig.enable_memory_sync,
     source: cloudSource,
     team_id: cloudSource === "team" ? cloudTeamId ?? localConfig.team_id : undefined,
     team_config_id:

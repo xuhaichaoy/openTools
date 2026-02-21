@@ -22,6 +22,16 @@ import {
   prepareEditMessages,
   startStreamingChat,
 } from "@/core/services/ai-chat-service";
+import {
+  appendMemoryCandidates,
+  buildMemoryPromptBlock,
+  confirmMemoryCandidate as confirmAIMemoryCandidate,
+  dismissMemoryCandidate as dismissAIMemoryCandidate,
+  extractMemoryCandidates,
+  listMemoryCandidates,
+  recallMemories,
+  type AIMemoryCandidate,
+} from "@/core/ai/memory-store";
 
 import type {
   ToolCallInfo,
@@ -55,6 +65,7 @@ interface AIState {
 
   /** 自有 Key 模型列表 */
   ownKeys: OwnKeyModelConfig[];
+  memoryCandidates: AIMemoryCandidate[];
 
   setConfig: (config: AIConfig) => void;
   loadConfig: () => Promise<void>;
@@ -78,6 +89,9 @@ interface AIState {
   editAndResend: (messageId: string, newContent: string) => Promise<void>;
   stopStreaming: () => void;
   confirmTool: (approved: boolean) => Promise<void>;
+  loadMemoryCandidates: () => Promise<void>;
+  confirmMemoryCandidate: (id: string) => Promise<void>;
+  dismissMemoryCandidate: (id: string) => Promise<void>;
   loadHistory: () => Promise<void>;
   persistHistory: () => Promise<void>;
 }
@@ -94,7 +108,14 @@ function nativeToolsSupportedOnCurrentPlatform(): boolean {
 
 function normalizeConfig(config: AIConfig): AIConfig {
   const source = config.source || "own_key";
-  const normalized: AIConfig = { ...config, source };
+  const normalized: AIConfig = {
+    ...config,
+    source,
+    enable_long_term_memory: config.enable_long_term_memory ?? true,
+    enable_memory_auto_recall: config.enable_memory_auto_recall ?? true,
+    enable_memory_auto_save: config.enable_memory_auto_save ?? true,
+    enable_memory_sync: config.enable_memory_sync ?? true,
+  };
 
   if (source !== "team") {
     normalized.team_id = undefined;
@@ -120,6 +141,10 @@ export const useAIStore = create<AIState>((set, get) => ({
     system_prompt: "",
     enable_rag_auto_search: true,
     enable_native_tools: nativeToolsSupportedOnCurrentPlatform(),
+    enable_long_term_memory: true,
+    enable_memory_auto_recall: true,
+    enable_memory_auto_save: true,
+    enable_memory_sync: true,
     source: "own_key",
   },
   conversations: [],
@@ -128,6 +153,7 @@ export const useAIStore = create<AIState>((set, get) => ({
   historyLoaded: false,
   pendingToolConfirm: null,
   ownKeys: [],
+  memoryCandidates: [],
 
   setConfig: (config) => set({ config: normalizeConfig(config) }),
 
@@ -299,6 +325,35 @@ export const useAIStore = create<AIState>((set, get) => ({
     set({ pendingToolConfirm: null });
   },
 
+  loadMemoryCandidates: async () => {
+    try {
+      const candidates = await listMemoryCandidates();
+      set({ memoryCandidates: candidates });
+    } catch (e) {
+      handleError(e, { context: "加载长期记忆候选", silent: true });
+    }
+  },
+
+  confirmMemoryCandidate: async (id: string) => {
+    try {
+      await confirmAIMemoryCandidate(id);
+      const candidates = await listMemoryCandidates();
+      set({ memoryCandidates: candidates });
+    } catch (e) {
+      handleError(e, { context: "确认长期记忆候选" });
+    }
+  },
+
+  dismissMemoryCandidate: async (id: string) => {
+    try {
+      await dismissAIMemoryCandidate(id);
+      const candidates = await listMemoryCandidates();
+      set({ memoryCandidates: candidates });
+    } catch (e) {
+      handleError(e, { context: "忽略长期记忆候选", silent: true });
+    }
+  },
+
   stopStreaming: () => {
     const { currentConversationId } = get();
     if (!currentConversationId) return;
@@ -404,6 +459,21 @@ export const useAIStore = create<AIState>((set, get) => ({
       ),
     }));
 
+    if (state.config.enable_long_term_memory && state.config.enable_memory_auto_save) {
+      try {
+        const candidates = extractMemoryCandidates(content, {
+          conversationId: conversationId ?? undefined,
+        });
+        if (candidates.length > 0) {
+          await appendMemoryCandidates(candidates);
+          const nextCandidates = await listMemoryCandidates();
+          set({ memoryCandidates: nextCandidates });
+        }
+      } catch (e) {
+        handleError(e, { context: "提取长期记忆候选", silent: true });
+      }
+    }
+
     // 构造 API 消息
     const conversation = get().conversations.find(
       (c) => c.id === conversationId,
@@ -415,6 +485,24 @@ export const useAIStore = create<AIState>((set, get) => ({
         content: m.content,
         ...(m.images && m.images.length > 0 ? { images: m.images } : {}),
       }));
+
+    if (state.config.enable_long_term_memory && state.config.enable_memory_auto_recall) {
+      try {
+        const memories = await recallMemories(content, {
+          conversationId: conversationId ?? undefined,
+          topK: 6,
+        });
+        const memoryPrompt = buildMemoryPromptBlock(memories);
+        if (memoryPrompt) {
+          apiMessages.unshift({
+            role: "system",
+            content: memoryPrompt,
+          });
+        }
+      } catch (e) {
+        handleError(e, { context: "召回长期记忆", silent: true });
+      }
+    }
 
     if (!conversationId) {
       handleError(new Error("Failed to create conversation"), { context: "AI" });

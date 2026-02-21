@@ -13,6 +13,10 @@ describe("mergeCloudAIConfig", () => {
       system_prompt: "",
       enable_rag_auto_search: true,
       enable_native_tools: true,
+      enable_long_term_memory: true,
+      enable_memory_auto_recall: true,
+      enable_memory_auto_save: true,
+      enable_memory_sync: true,
       source: "own_key" as const,
       active_own_key_id: "key-1",
     };
@@ -43,6 +47,10 @@ describe("mergeCloudAIConfig", () => {
       system_prompt: "",
       enable_rag_auto_search: true,
       enable_native_tools: true,
+      enable_long_term_memory: true,
+      enable_memory_auto_recall: true,
+      enable_memory_auto_save: true,
+      enable_memory_sync: true,
       source: "own_key" as const,
       active_own_key_id: "key-local",
     };
@@ -53,6 +61,7 @@ describe("mergeCloudAIConfig", () => {
       team_config_id: "cfg-2",
       active_own_key_id: "key-cloud",
       enable_advanced_tools: true,
+      enable_memory_auto_recall: false,
     };
 
     const merged = mergeCloudAIConfig(local, cloud, 101);
@@ -62,6 +71,7 @@ describe("mergeCloudAIConfig", () => {
     expect(merged.team_config_id).toBe("cfg-2");
     expect(merged.active_own_key_id).toBe("key-cloud");
     expect(merged.enable_advanced_tools).toBe(true);
+    expect(merged.enable_memory_auto_recall).toBe(false);
     expect((merged as any)._syncVersion).toBe(101);
   });
 });

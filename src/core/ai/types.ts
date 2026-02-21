@@ -48,6 +48,14 @@ export interface AIConfig {
   enable_rag_auto_search: boolean;
   /** 启用本机原生应用工具（日历、提醒事项、备忘录、邮件、快捷指令等） */
   enable_native_tools: boolean;
+  /** 启用长期记忆能力（总开关） */
+  enable_long_term_memory: boolean;
+  /** 对话前自动召回长期记忆 */
+  enable_memory_auto_recall: boolean;
+  /** 对话后自动提取长期记忆候选 */
+  enable_memory_auto_save: boolean;
+  /** 允许长期记忆参与云同步 */
+  enable_memory_sync: boolean;
   source?: "own_key" | "team" | "platform";
   team_id?: string;
   team_config_id?: string;

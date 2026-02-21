@@ -8,6 +8,11 @@
 import { create } from "zustand";
 import { api, assertResponseShape } from "@/core/api/client";
 import { handleError } from "@/core/errors";
+import {
+  getExpiryHint,
+  getTeamSyncPolicy,
+  isSyncAllowed,
+} from "@/core/sync/policy";
 import type { Workflow } from "@/core/workflows/types";
 
 export interface Team {
@@ -26,8 +31,12 @@ export interface TeamEntitlements {
   team_plan: "trial" | "pro";
   is_team_active: boolean;
   can_team_server_storage?: boolean;
+  can_team_sync?: boolean;
   expires_at: string | null;
   status: "trial_active" | "pro_active" | "expired";
+  team_sync_status?: "active" | "expiring_soon" | "expired";
+  days_to_expire?: number | null;
+  team_sync_stop_at?: string | null;
   is_member: boolean;
   role: "owner" | "admin" | "member" | null;
 }
@@ -121,6 +130,12 @@ export interface SharedResource {
   username: string;
 }
 
+async function ensureTeamSyncWritable(teamId: string): Promise<void> {
+  const policy = await getTeamSyncPolicy(teamId);
+  if (isSyncAllowed(policy)) return;
+  throw new Error(getExpiryHint(policy, "团队云同步") ?? "团队云同步已禁用");
+}
+
 function isSharedResource(input: unknown): input is SharedResource {
   if (!input || typeof input !== "object") return false;
   const item = input as Record<string, unknown>;
@@ -155,10 +170,22 @@ function isTeamEntitlements(input: unknown): input is TeamEntitlements {
     typeof item.is_team_active === "boolean" &&
     (typeof item.can_team_server_storage === "boolean" ||
       item.can_team_server_storage === undefined) &&
+    (typeof item.can_team_sync === "boolean" ||
+      item.can_team_sync === undefined) &&
     (typeof item.expires_at === "string" || item.expires_at === null) &&
     (item.status === "trial_active" ||
       item.status === "pro_active" ||
       item.status === "expired") &&
+    (item.team_sync_status === "active" ||
+      item.team_sync_status === "expiring_soon" ||
+      item.team_sync_status === "expired" ||
+      item.team_sync_status === undefined) &&
+    (typeof item.days_to_expire === "number" ||
+      item.days_to_expire === null ||
+      item.days_to_expire === undefined) &&
+    (typeof item.team_sync_stop_at === "string" ||
+      item.team_sync_stop_at === null ||
+      item.team_sync_stop_at === undefined) &&
     typeof item.is_member === "boolean" &&
     (item.role === "owner" ||
       item.role === "admin" ||
@@ -236,6 +263,7 @@ export const useTeamStore = create<TeamState>((set, get) => ({
   },
 
   async shareResource(teamId, resourceType, resourceId, resourceName) {
+    await ensureTeamSyncWritable(teamId);
     await api.post(`/teams/${teamId}/share`, {
       resource_type: resourceType,
       resource_id: resourceId,
@@ -244,6 +272,7 @@ export const useTeamStore = create<TeamState>((set, get) => ({
   },
 
   async unshareResource(teamId, resourceDbId) {
+    await ensureTeamSyncWritable(teamId);
     await api.delete(`/teams/${teamId}/resources/${resourceDbId}`);
   },
 
@@ -287,6 +316,7 @@ export const useTeamStore = create<TeamState>((set, get) => ({
   },
 
   async createWorkflowTemplate(teamId, payload) {
+    await ensureTeamSyncWritable(teamId);
     const path = `/teams/${teamId}/workflow-templates`;
     const result = await api.post<unknown>(path, payload);
     return assertResponseShape(

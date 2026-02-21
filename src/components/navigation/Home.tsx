@@ -199,7 +199,7 @@ export function Home({ onNavigate, onBack }: HomeProps) {
       id: "cloud-sync",
       icon: <CloudSyncIcon className="w-5 h-5" />,
       title: "云同步",
-      description: "GitHub/Gitee/GitLab/WebDAV",
+      description: "mTools Cloud",
       color: "text-sky-400 bg-sky-400/10",
       action: () => onNavigate("cloud-sync"),
     },

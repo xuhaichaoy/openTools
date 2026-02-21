@@ -3,6 +3,11 @@ import { useAIStore } from "@/store/ai-store";
 import { useRAGStore } from "@/store/rag-store";
 import type { OwnKeyModelConfig } from "@/core/ai/types";
 import { useTeamStore } from "@/store/team-store";
+import {
+  deleteMemory,
+  listConfirmedMemories,
+  type AIMemoryItem,
+} from "@/core/ai/memory-store";
 import { api } from "@/core/api/client";
 import { handleError } from "@/core/errors";
 import { maskApiKey } from "@/utils/mask";
@@ -71,10 +76,55 @@ interface TeamModelInfo {
 }
 
 type AIModelSource = "own_key" | "team" | "platform";
+type AIConfigPanel = "source" | "abilities" | "prompt";
+
+function toTime(value?: string | null): number {
+  if (!value) return 0;
+  const ts = new Date(value).getTime();
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+function isTeamActive(team: { subscription_plan?: "trial" | "pro"; subscription_expires_at?: string | null }): boolean {
+  const now = Date.now();
+  const expiresAt = team.subscription_expires_at;
+  if (team.subscription_plan === "pro") {
+    return !expiresAt || toTime(expiresAt) > now;
+  }
+  return !!expiresAt && toTime(expiresAt) > now;
+}
+
+function pickDefaultTeamId(
+  teams: Array<{
+    id: string;
+    created_at?: string;
+    subscription_plan?: "trial" | "pro";
+    subscription_expires_at?: string | null;
+  }>,
+): string | null {
+  if (teams.length === 0) return null;
+
+  const sorted = [...teams].sort(
+    (a, b) => toTime(b.created_at) - toTime(a.created_at),
+  );
+
+  const proActive = sorted.find(
+    (team) => team.subscription_plan === "pro" && isTeamActive(team),
+  );
+  if (proActive) return proActive.id;
+
+  const anyActive = sorted.find((team) => isTeamActive(team));
+  if (anyActive) return anyActive.id;
+
+  return sorted[0].id;
+}
 
 export function AIModelTab() {
   const { config, setConfig, saveConfig, ownKeys, loadOwnKeys, saveOwnKeys, selectOwnKeyModel } =
     useAIStore();
+  const [savedMemories, setSavedMemories] = useState<AIMemoryItem[]>([]);
+  const [loadingMemories, setLoadingMemories] = useState(false);
+  const [deletingMemoryId, setDeletingMemoryId] = useState<string | null>(null);
+  const [activePanel, setActivePanel] = useState<AIConfigPanel>("source");
   const nativeToolsSupported =
     navigator.platform.toLowerCase().includes("mac");
   const promptRingStyle: CSSProperties & Record<"--tw-ring-color", string> = {
@@ -84,6 +134,23 @@ export function AIModelTab() {
   useEffect(() => {
     loadOwnKeys();
   }, [loadOwnKeys]);
+
+  const loadSavedMemories = async () => {
+    setLoadingMemories(true);
+    try {
+      const items = await listConfirmedMemories();
+      setSavedMemories(items);
+    } catch (e) {
+      handleError(e, { context: "加载长期记忆列表", silent: true });
+    } finally {
+      setLoadingMemories(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!config.enable_long_term_memory) return;
+    loadSavedMemories();
+  }, [config.enable_long_term_memory]);
 
   const handleSourceChange = (source: AIModelSource) => {
     const newConfig = { ...config, source };
@@ -123,221 +190,424 @@ export function AIModelTab() {
     },
   ];
 
+  const sourceLabelMap: Record<AIModelSource, string> = {
+    own_key: "自有 Key",
+    team: "团队共享",
+    platform: "平台服务",
+  };
+  const currentSource = (config.source || "own_key") as AIModelSource;
+  const memorySubSwitchCount =
+    Number(config.enable_memory_auto_recall) +
+    Number(config.enable_memory_auto_save) +
+    Number(config.enable_memory_sync);
+
   return (
     <div className="max-w-xl mx-auto space-y-[var(--space-compact-3)]">
       <div>
-        <h2 className="text-sm font-semibold">AI 模型来源配置</h2>
-        <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">
-          根据需要选择不同的 AI 模型来源，每个模型可独立配置。
-        </p>
+        <h2 className="text-sm font-semibold">AI 配置中心</h2>
       </div>
 
-      <div className="grid gap-2">
-        {sources.map((src) => {
-          const active = config.source === src.id;
-          return (
-            <button
-              key={src.id}
-              onClick={() => handleSourceChange(src.id)}
-              className={`flex items-center gap-3 p-3 rounded-xl border-2 transition-all text-left ${
-                active
-                  ? "border-[#F28F36] bg-[#F28F36]/5"
-                  : "border-[var(--color-border)] hover:border-[#F28F36]/30 bg-[var(--color-bg)]"
-              }`}
-            >
-              <div
-                className="p-2 rounded-lg shrink-0"
-                style={{
-                  background: active ? BRAND : "var(--color-bg-secondary)",
-                  color: active ? "white" : BRAND,
-                }}
-              >
-                <src.icon className="w-4 h-4" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center justify-between">
-                  <h3 className="font-semibold text-xs">{src.label}</h3>
-                  {active && (
-                    <span
-                      className="text-[10px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded"
-                      style={{
-                        color: BRAND,
-                        background: `${BRAND}15`,
-                      }}
-                    >
-                      当前
-                    </span>
-                  )}
+      <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-3 flex flex-wrap gap-2 text-[10px]">
+        <span className="px-2 py-1 rounded bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]">
+          当前来源：{sourceLabelMap[currentSource]}
+        </span>
+        <span className="px-2 py-1 rounded bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]">
+          高级工具：{config.enable_advanced_tools ? "开" : "关"}
+        </span>
+        <span className="px-2 py-1 rounded bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]">
+          长期记忆：{config.enable_long_term_memory ? `开 (${memorySubSwitchCount}/3)` : "关"}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-3 gap-2">
+        {[
+          { id: "source" as const, label: "模型来源", icon: Key },
+          { id: "abilities" as const, label: "能力开关", icon: ShieldAlert },
+          { id: "prompt" as const, label: "提示词", icon: MessageSquare },
+        ].map((panel) => (
+          <button
+            key={panel.id}
+            onClick={() => setActivePanel(panel.id)}
+            className={`flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs border transition-colors ${
+              activePanel === panel.id
+                ? "bg-[#F28F36]/10 border-[#F28F36]/40 text-[#F28F36]"
+                : "bg-[var(--color-bg)] border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+            }`}
+          >
+            <panel.icon className="w-3.5 h-3.5" />
+            {panel.label}
+          </button>
+        ))}
+      </div>
+
+      {activePanel === "source" && (
+        <>
+          <div className="grid gap-2">
+            {sources.map((src) => {
+              const active = config.source === src.id;
+              return (
+                <button
+                  key={src.id}
+                  onClick={() => handleSourceChange(src.id)}
+                  className={`flex items-center gap-3 p-3 rounded-xl border-2 transition-all text-left ${
+                    active
+                      ? "border-[#F28F36] bg-[#F28F36]/5"
+                      : "border-[var(--color-border)] hover:border-[#F28F36]/30 bg-[var(--color-bg)]"
+                  }`}
+                >
+                  <div
+                    className="p-2 rounded-lg shrink-0"
+                    style={{
+                      background: active ? BRAND : "var(--color-bg-secondary)",
+                      color: active ? "white" : BRAND,
+                    }}
+                  >
+                    <src.icon className="w-4 h-4" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between">
+                      <h3 className="font-semibold text-xs">{src.label}</h3>
+                      {active && (
+                        <span
+                          className="text-[10px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded"
+                          style={{
+                            color: BRAND,
+                            background: `${BRAND}15`,
+                          }}
+                        >
+                          当前
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
+                      {src.description}
+                    </p>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+
+          {config.source === "own_key" && (
+            <>
+              <OwnKeySection
+                ownKeys={ownKeys}
+                activeId={config.active_own_key_id}
+                onSave={saveOwnKeys}
+                onSelect={selectOwnKeyModel}
+              />
+              <details className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-[var(--space-compact-3)]">
+                <summary className="text-xs font-semibold cursor-pointer select-none">
+                  Embedding API（知识库向量化）配置
+                </summary>
+                <div className="mt-3">
+                  <EmbeddingConfigSection />
                 </div>
-                <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
-                  {src.description}
-                </p>
-              </div>
-            </button>
-          );
-        })}
-      </div>
+              </details>
+            </>
+          )}
 
-      {/* 自有 Key 配置区域 */}
-      {config.source === "own_key" && (
-        <OwnKeySection
-          ownKeys={ownKeys}
-          activeId={config.active_own_key_id}
-          onSave={saveOwnKeys}
-          onSelect={selectOwnKeyModel}
-        />
+          {config.source === "team" && (
+            <TeamSourceSection
+              teamId={config.team_id}
+              onTeamChange={(teamId) =>
+                updateAndSave({ team_id: teamId, team_config_id: undefined })
+              }
+            />
+          )}
+
+          {config.source === "platform" && (
+            <div
+              className="p-4 text-center rounded-xl border border-dashed"
+              style={{
+                background: `${BRAND}08`,
+                borderColor: `${BRAND}30`,
+              }}
+            >
+              <Zap
+                className="w-6 h-6 mx-auto mb-2 opacity-40"
+                style={{ color: BRAND }}
+              />
+              <p className="text-[10px] text-[var(--color-text-secondary)]">
+                当前来源由 mTools
+                服务器集中管理。您的请求将通过服务器中转以实现计费或共享 Key 使用。
+              </p>
+            </div>
+          )}
+        </>
       )}
 
-      {/* 团队共享区域 */}
-      {config.source === "team" && (
-        <TeamSourceSection
-          teamId={config.team_id}
-          onTeamChange={(teamId) =>
-            updateAndSave({ team_id: teamId, team_config_id: undefined })
-          }
-        />
-      )}
-
-      {config.source === "platform" && (
-        <div
-          className="p-4 text-center rounded-xl border border-dashed"
-          style={{
-            background: `${BRAND}08`,
-            borderColor: `${BRAND}30`,
-          }}
-        >
-          <Zap
-            className="w-6 h-6 mx-auto mb-2 opacity-40"
-            style={{ color: BRAND }}
-          />
-          <p className="text-[10px] text-[var(--color-text-secondary)]">
-            当前来源由 mTools
-            服务器集中管理。您的请求将通过服务器中转以实现计费或共享 Key 使用。
-          </p>
-        </div>
-      )}
-
-       {/* Embedding API 配置 */}
-       {config.source === "own_key" && (
-        <EmbeddingConfigSection />
-      )}
-
-      {/* 高级工具 */}
-      <div className="bg-[var(--color-bg)] rounded-xl p-[var(--space-compact-3)] border border-[var(--color-border)] space-y-[var(--space-compact-2)]">
-        <div className="flex items-center gap-2">
-          <ShieldAlert className="w-3.5 h-3.5 text-amber-500" />
-          <span className="text-xs font-semibold">高级工具</span>
-        </div>
-
-        <label className="flex items-center justify-between cursor-pointer">
-          <div className="flex-1 pr-3">
-            <span className="text-xs text-[var(--color-text)]">
-              启用高级工具
-            </span>
-            <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
-              开启后 AI 可执行 shell
-              命令、读写本地文件、获取系统信息等。危险操作会弹窗确认。
-            </p>
+      {activePanel === "abilities" && (
+        <div className="bg-[var(--color-bg)] rounded-xl p-[var(--space-compact-3)] border border-[var(--color-border)] space-y-[var(--space-compact-2)]">
+          <div className="flex items-center gap-2">
+            <ShieldAlert className="w-3.5 h-3.5 text-amber-500" />
+            <span className="text-xs font-semibold">能力开关</span>
           </div>
-          <Toggle
-            checked={config.enable_advanced_tools}
-            onChange={() =>
-              updateAndSave({
-                enable_advanced_tools: !config.enable_advanced_tools,
-              })
-            }
-            color="#f59e0b"
-          />
-        </label>
 
-        {config.enable_advanced_tools && (
-          <div className="text-[10px] text-amber-600 bg-amber-500/5 rounded-lg px-3 py-2 border border-amber-500/10">
-            已启用高级工具：执行命令、读写文件、列出目录、获取系统信息、打开网址、打开文件/目录、获取进程列表。其中执行命令、写入文件、打开路径为危险操作，执行前需要你确认。
-          </div>
-        )}
-
-        {nativeToolsSupported ? (
           <label className="flex items-center justify-between cursor-pointer">
             <div className="flex-1 pr-3">
-              <div className="flex items-center gap-1.5">
-                <Smartphone className="w-3 h-3 text-emerald-400" />
-                <span className="text-xs text-[var(--color-text)]">
-                  本机原生应用工具
-                </span>
-              </div>
+              <span className="text-xs text-[var(--color-text)]">
+                启用高级工具
+              </span>
               <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
-                开启后 AI 可调用日历、提醒事项、备忘录、邮件、快捷指令、打开应用等本机能力。
+                开启后 AI 可执行 shell 命令、读写本地文件、获取系统信息等。危险操作会弹窗确认。
               </p>
             </div>
             <Toggle
-              checked={config.enable_native_tools}
+              checked={config.enable_advanced_tools}
               onChange={() =>
                 updateAndSave({
-                  enable_native_tools: !config.enable_native_tools,
+                  enable_advanced_tools: !config.enable_advanced_tools,
+                })
+              }
+              color="#f59e0b"
+            />
+          </label>
+
+          {config.enable_advanced_tools && (
+            <div className="text-[10px] text-amber-600 bg-amber-500/5 rounded-lg px-3 py-2 border border-amber-500/10">
+              已启用高级工具：执行命令、读写文件、列出目录、获取系统信息、打开网址、打开文件/目录、获取进程列表。其中执行命令、写入文件、打开路径为危险操作，执行前需要你确认。
+            </div>
+          )}
+
+          {nativeToolsSupported ? (
+            <label className="flex items-center justify-between cursor-pointer">
+              <div className="flex-1 pr-3">
+                <div className="flex items-center gap-1.5">
+                  <Smartphone className="w-3 h-3 text-emerald-400" />
+                  <span className="text-xs text-[var(--color-text)]">
+                    本机原生应用工具
+                  </span>
+                </div>
+                <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
+                  开启后 AI 可调用日历、提醒事项、备忘录、邮件、快捷指令、打开应用等本机能力。
+                </p>
+              </div>
+              <Toggle
+                checked={config.enable_native_tools}
+                onChange={() =>
+                  updateAndSave({
+                    enable_native_tools: !config.enable_native_tools,
+                  })
+                }
+              />
+            </label>
+          ) : (
+            <div className="flex items-center justify-between">
+              <div className="flex-1 pr-3">
+                <div className="flex items-center gap-1.5">
+                  <Smartphone className="w-3 h-3 text-[var(--color-text-secondary)]" />
+                  <span className="text-xs text-[var(--color-text-secondary)]">
+                    本机原生应用工具（仅 macOS）
+                  </span>
+                </div>
+                <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
+                  当前平台不支持该能力，已自动关闭。
+                </p>
+              </div>
+            </div>
+          )}
+
+          <label className="flex items-center justify-between cursor-pointer">
+            <div className="flex-1 pr-3">
+              <div className="flex items-center gap-1.5">
+                <BookOpen className="w-3 h-3 text-indigo-400" />
+                <span className="text-xs text-[var(--color-text)]">
+                  对话时自动检索知识库
+                </span>
+              </div>
+              <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
+                开启后，每次对话会自动从 RAG 知识库中检索相关内容并注入上下文，提升回答准确性。
+              </p>
+            </div>
+            <Toggle
+              checked={config.enable_rag_auto_search}
+              onChange={() =>
+                updateAndSave({
+                  enable_rag_auto_search: !config.enable_rag_auto_search,
                 })
               }
             />
           </label>
-        ) : (
-          <div className="flex items-center justify-between">
-            <div className="flex-1 pr-3">
-              <div className="flex items-center gap-1.5">
-                <Smartphone className="w-3 h-3 text-[var(--color-text-secondary)]" />
-                <span className="text-xs text-[var(--color-text-secondary)]">
-                  本机原生应用工具（仅 macOS）
-                </span>
-              </div>
-              <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
-                当前平台不支持该能力，已自动关闭。
-              </p>
-            </div>
-          </div>
-        )}
 
-        <label className="flex items-center justify-between cursor-pointer">
-          <div className="flex-1 pr-3">
+          <div className="pt-2 border-t border-[var(--color-border)]/50 space-y-2">
             <div className="flex items-center gap-1.5">
-              <BookOpen className="w-3 h-3 text-indigo-400" />
-              <span className="text-xs text-[var(--color-text)]">
-                对话时自动检索知识库
-              </span>
+              <Database className="w-3 h-3 text-cyan-400" />
+              <span className="text-xs text-[var(--color-text)]">长期记忆</span>
             </div>
-            <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
-              开启后，每次对话会自动从 RAG
-              知识库中检索相关内容并注入上下文，提升回答准确性。
-            </p>
-          </div>
-          <Toggle
-            checked={config.enable_rag_auto_search}
-            onChange={() =>
-              updateAndSave({
-                enable_rag_auto_search: !config.enable_rag_auto_search,
-              })
-            }
-          />
-        </label>
-      </div>
 
-      {/* 自定义系统提示词 */}
-      <div className="bg-[var(--color-bg)] rounded-xl p-[var(--space-compact-3)] border border-[var(--color-border)] space-y-2">
-        <div className="flex items-center gap-2">
-          <MessageSquare className="w-3.5 h-3.5 text-indigo-400" />
-          <span className="text-xs font-semibold">自定义系统提示词</span>
+            <label className="flex items-center justify-between cursor-pointer">
+              <div className="flex-1 pr-3">
+                <span className="text-xs text-[var(--color-text)]">启用长期记忆</span>
+                <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
+                  允许 AI 记录你确认后的稳定偏好与长期事实，用于跨会话复用。
+                </p>
+              </div>
+              <Toggle
+                checked={config.enable_long_term_memory}
+                onChange={() =>
+                  updateAndSave({
+                    enable_long_term_memory: !config.enable_long_term_memory,
+                  })
+                }
+              />
+            </label>
+
+            <label
+              className={`flex items-center justify-between ${
+                config.enable_long_term_memory ? "cursor-pointer" : "opacity-50"
+              }`}
+            >
+              <div className="flex-1 pr-3">
+                <span className="text-xs text-[var(--color-text)]">自动召回记忆</span>
+                <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
+                  发送消息前自动注入最相关的长期记忆。
+                </p>
+              </div>
+              <Toggle
+                checked={config.enable_memory_auto_recall}
+                onChange={() => {
+                  if (!config.enable_long_term_memory) return;
+                  updateAndSave({
+                    enable_memory_auto_recall: !config.enable_memory_auto_recall,
+                  });
+                }}
+              />
+            </label>
+
+            <label
+              className={`flex items-center justify-between ${
+                config.enable_long_term_memory ? "cursor-pointer" : "opacity-50"
+              }`}
+            >
+              <div className="flex-1 pr-3">
+                <span className="text-xs text-[var(--color-text)]">自动提取候选</span>
+                <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
+                  从明确的“记住”类指令中提取候选，需你手动确认后生效。
+                </p>
+              </div>
+              <Toggle
+                checked={config.enable_memory_auto_save}
+                onChange={() => {
+                  if (!config.enable_long_term_memory) return;
+                  updateAndSave({
+                    enable_memory_auto_save: !config.enable_memory_auto_save,
+                  });
+                }}
+              />
+            </label>
+
+            <label
+              className={`flex items-center justify-between ${
+                config.enable_long_term_memory ? "cursor-pointer" : "opacity-50"
+              }`}
+            >
+              <div className="flex-1 pr-3">
+                <span className="text-xs text-[var(--color-text)]">记忆参与云同步</span>
+                <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
+                  开启后长期记忆会随个人同步策略在多设备间同步。
+                </p>
+              </div>
+              <Toggle
+                checked={config.enable_memory_sync}
+                onChange={() => {
+                  if (!config.enable_long_term_memory) return;
+                  updateAndSave({
+                    enable_memory_sync: !config.enable_memory_sync,
+                  });
+                }}
+              />
+            </label>
+
+            <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-2.5 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
+                  已确认记忆（{savedMemories.length}）
+                </span>
+                <button
+                  onClick={loadSavedMemories}
+                  className="text-[10px] px-2 py-0.5 rounded border border-[var(--color-border)] hover:bg-[var(--color-bg-hover)]"
+                >
+                  刷新
+                </button>
+              </div>
+
+              {loadingMemories ? (
+                <div className="flex items-center gap-2 text-[10px] text-[var(--color-text-secondary)]">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  读取中...
+                </div>
+              ) : savedMemories.length === 0 ? (
+                <div className="text-[10px] text-[var(--color-text-secondary)]">
+                  暂无已确认记忆
+                </div>
+              ) : (
+                <div className="space-y-1.5 max-h-44 overflow-auto pr-1">
+                  {savedMemories.slice(0, 20).map((memory) => (
+                    <div
+                      key={memory.id}
+                      className="rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5"
+                    >
+                      <div className="text-[11px] text-[var(--color-text)] break-words">
+                        {memory.content}
+                      </div>
+                      <div className="mt-1 flex items-center justify-between gap-2">
+                        <span className="text-[10px] text-[var(--color-text-secondary)]">
+                          {memory.kind} · 使用 {memory.use_count || 0} 次
+                        </span>
+                        <button
+                          onClick={async () => {
+                            setDeletingMemoryId(memory.id);
+                            try {
+                              await deleteMemory(memory.id);
+                              await loadSavedMemories();
+                            } catch (e) {
+                              handleError(e, { context: "删除长期记忆" });
+                            } finally {
+                              setDeletingMemoryId(null);
+                            }
+                          }}
+                          disabled={deletingMemoryId === memory.id}
+                          className="text-[10px] px-2 py-0.5 rounded border border-red-500/30 text-red-500 hover:bg-red-500/10 disabled:opacity-50 flex items-center gap-1"
+                        >
+                          {deletingMemoryId === memory.id ? (
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                          ) : (
+                            <Trash2 className="w-3 h-3" />
+                          )}
+                          删除
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
         </div>
-        <textarea
-          className="w-full bg-[var(--color-bg-secondary)] text-[var(--color-text)] text-xs rounded-lg px-3 py-2 outline-none border-0 focus:ring-2 resize-none min-h-[80px] max-h-[160px] leading-relaxed"
-          style={promptRingStyle}
-          value={config.system_prompt}
-          onChange={(e) =>
-            setConfig({ ...config, system_prompt: e.target.value })
-          }
-          onBlur={() => saveConfig(config)}
-          placeholder="可选。在默认系统提示词之后追加你自己的指令，例如「回答风格偏口语化」「回答末尾附上英文翻译」等..."
-        />
-        <p className="text-[10px] text-[var(--color-text-secondary)]">
-          留空则使用默认提示词；填写后会追加到默认提示词之后
-        </p>
-      </div>
+      )}
+
+      {activePanel === "prompt" && (
+        <div className="bg-[var(--color-bg)] rounded-xl p-[var(--space-compact-3)] border border-[var(--color-border)] space-y-2">
+          <div className="flex items-center gap-2">
+            <MessageSquare className="w-3.5 h-3.5 text-indigo-400" />
+            <span className="text-xs font-semibold">自定义系统提示词</span>
+          </div>
+          <textarea
+            className="w-full bg-[var(--color-bg-secondary)] text-[var(--color-text)] text-xs rounded-lg px-3 py-2 outline-none border-0 focus:ring-2 resize-none min-h-[140px] max-h-[220px] leading-relaxed"
+            style={promptRingStyle}
+            value={config.system_prompt}
+            onChange={(e) =>
+              setConfig({ ...config, system_prompt: e.target.value })
+            }
+            onBlur={() => saveConfig(config)}
+            placeholder="可选。在默认系统提示词之后追加你自己的指令，例如「回答风格偏口语化」「回答末尾附上英文翻译」等..."
+          />
+          <p className="text-[10px] text-[var(--color-text-secondary)]">
+            留空则使用默认提示词；填写后会追加到默认提示词之后。建议将可长期复用的内容写入“长期记忆”而不是提示词。
+          </p>
+        </div>
+      )}
     </div>
   );
 }
@@ -744,7 +1014,10 @@ function TeamSourceSection({
   // 自动选中第一个团队
   useEffect(() => {
     if (loaded && teams.length > 0 && !teamId) {
-      onTeamChange(teams[0].id);
+      const defaultTeamId = pickDefaultTeamId(teams);
+      if (defaultTeamId) {
+        onTeamChange(defaultTeamId);
+      }
     }
   }, [loaded, teams, teamId, onTeamChange]);
 
@@ -811,6 +1084,11 @@ function TeamSourceSection({
             </select>
             <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-[var(--color-text-secondary)] pointer-events-none" />
           </div>
+          {teamId && (
+            <div className="mt-1 text-[10px] text-[var(--color-text-secondary)] font-mono break-all">
+              团队 ID: {teamId}
+            </div>
+          )}
         </div>
       ) : (
         <div className="text-center py-4">

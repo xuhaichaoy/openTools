@@ -1,13 +1,18 @@
 import { useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ErrorLevel, handleError } from "@/core/errors";
-import { api, ApiError } from "@/core/api/client";
+import {
+  getExpiryHint,
+  getPersonalSyncPolicy,
+  isSyncAllowed,
+} from "@/core/sync/policy";
 import { useAuthStore } from "@/store/auth-store";
 import { useBookmarkStore, bookmarksDb } from "@/store/bookmark-store";
 import { useSnippetStore, snippetsDb } from "@/store/snippet-store";
 import { useWorkflowStore } from "@/store/workflow-store";
 import { useAIStore } from "@/store/ai-store";
 import { marksDb, tagsDb } from "@/core/database/marks";
+import { aiMemoryDb } from "@/core/ai/memory-store";
 import {
   syncSyncableCollection,
   pullData,
@@ -15,30 +20,21 @@ import {
   getLastSyncVersion,
   setLastSyncVersion,
 } from "@/core/sync/engine";
+import { normalizeSyncVersion, nowSyncVersion } from "@/core/sync/version";
 import type { Workflow } from "@/core/workflows/types";
 import { mergeCloudAIConfig, type AIConfigWithVersion } from "./sync-ai-config";
 
 const SYNC_INTERVAL_MS = 60_000;
+const PERSONAL_EXPIRY_REMINDER_KEY = "mtools-sync-personal-expiry-reminded-on";
 
-interface PersonalEntitlementsResponse {
-  can_personal_sync?: boolean;
-  can_personal_server_storage?: boolean;
-}
-
-async function canSyncPersonalData(): Promise<boolean> {
-  try {
-    const entitlements = await api.get<PersonalEntitlementsResponse>(
-      "/users/entitlements",
-    );
-    return !!(
-      entitlements.can_personal_sync ?? entitlements.can_personal_server_storage
-    );
-  } catch (error) {
-    if (error instanceof ApiError && error.code === "PLAN_REQUIRED") {
-      return false;
-    }
-    throw error;
+function shouldNotifyToday(storageKey: string): boolean {
+  const today = new Date().toISOString().slice(0, 10);
+  const lastNotified = localStorage.getItem(storageKey);
+  if (lastNotified === today) {
+    return false;
   }
+  localStorage.setItem(storageKey, today);
+  return true;
 }
 
 export function SyncManager() {
@@ -54,23 +50,32 @@ export function SyncManager() {
       isSyncing.current = true;
 
       try {
-        const allowPersonalSync = await canSyncPersonalData();
-        if (!allowPersonalSync) {
+        const personalPolicy = await getPersonalSyncPolicy();
+        if (!isSyncAllowed(personalPolicy)) {
           if (!syncBlockedNotified.current) {
             syncBlockedNotified.current = true;
-            handleError(
-              new ApiError({
-                status: 403,
-                code: "PLAN_REQUIRED",
-                message: "个人云同步需要会员，仅本地可用",
-                path: "/users/entitlements",
-              }),
-              { context: "数据同步", level: ErrorLevel.Warning },
-            );
+            const hint =
+              getExpiryHint(personalPolicy, "个人云同步") ??
+              "个人云同步需要会员，仅本地可用";
+            handleError(new Error(hint), {
+              context: "数据同步",
+              level: ErrorLevel.Warning,
+            });
           }
           return;
         }
         syncBlockedNotified.current = false;
+        if (
+          personalPolicy.status === "expiring_soon" &&
+          shouldNotifyToday(PERSONAL_EXPIRY_REMINDER_KEY)
+        ) {
+          const hint =
+            getExpiryHint(personalPolicy, "个人云同步") ?? "个人云同步即将到期";
+          handleError(new Error(hint), {
+            context: "数据同步",
+            level: ErrorLevel.Warning,
+          });
+        }
 
         // 1. 同步书签（SyncableCollection — dirty 追踪）
         await syncSyncableCollection({
@@ -96,16 +101,25 @@ export function SyncManager() {
           db: tagsDb,
         });
 
+        // 5. 同步长期记忆（受 AI 配置开关控制）
+        const aiConfig = useAIStore.getState().config;
+        if (aiConfig.enable_long_term_memory && aiConfig.enable_memory_sync) {
+          await syncSyncableCollection({
+            dataType: "ai_memory",
+            db: aiMemoryDb,
+          });
+        }
+
         // 刷新 Zustand Store，确保 UI 拿到同步后的最新数据
         const freshBookmarks = await bookmarksDb.getAll();
         useBookmarkStore.setState({ bookmarks: freshBookmarks });
         const freshSnippets = await snippetsDb.getAll();
         useSnippetStore.setState({ snippets: freshSnippets });
 
-        // 5. 同步工作流（自定义工作流，通过 Tauri 后端持久化）
+        // 6. 同步工作流（自定义工作流，通过 Tauri 后端持久化）
         await syncWorkflows();
 
-        // 6. 同步 AI 配置
+        // 7. 同步 AI 配置
         await syncAIConfig();
       } catch (err) {
         handleError(err, { context: "数据同步" });
@@ -157,7 +171,10 @@ async function syncWorkflows() {
         }
       } else if (localIdx >= 0) {
         // 存在则更新（云端版本更新时）
-        const localVersion = (customWorkflows[localIdx] as any).version ?? 0;
+        const localVersion = normalizeSyncVersion(
+          (customWorkflows[localIdx] as any).version ?? 0,
+          0,
+        );
         if (localVersion < cloudItem.version) {
           try {
             await invoke("workflow_update", { workflow: cloudWorkflow });
@@ -186,7 +203,10 @@ async function syncWorkflows() {
       return {
         data_id: id,
         content,
-        version: (w as any).version ?? w.created_at ?? Date.now(),
+        version: normalizeSyncVersion(
+          (w as any).version ?? w.created_at,
+          nowSyncVersion(),
+        ),
         deleted: false,
       };
     });
@@ -195,12 +215,13 @@ async function syncWorkflows() {
 
   // 3. 更新版本号
   const allVersions = customWorkflows.map(
-    (w) => (w as any).version ?? w.created_at ?? 0,
+    (w) => normalizeSyncVersion((w as any).version ?? w.created_at ?? 0, 0),
   );
+  const cloudLatest = normalizeSyncVersion(cloudData?.latest_version ?? 0, 0);
   const newMax = Math.max(
     lastVersion,
     ...allVersions,
-    cloudData?.latest_version ?? 0,
+    cloudLatest,
   );
   await setLastSyncVersion(dataType, newMax);
 }
@@ -212,7 +233,10 @@ async function syncAIConfig() {
   const lastVersion = await getLastSyncVersion(dataType);
 
   const config = useAIStore.getState().config;
-  const localVersion = (config as any)._syncVersion ?? 0;
+  const localVersion = normalizeSyncVersion(
+    (config as any)._syncVersion ?? 0,
+    0,
+  );
 
   // 1. PULL
   const cloudData = await pullData(dataType, lastVersion);
@@ -241,6 +265,10 @@ async function syncAIConfig() {
     enable_advanced_tools: config.enable_advanced_tools,
     enable_rag_auto_search: config.enable_rag_auto_search,
     enable_native_tools: config.enable_native_tools,
+    enable_long_term_memory: config.enable_long_term_memory,
+    enable_memory_auto_recall: config.enable_memory_auto_recall,
+    enable_memory_auto_save: config.enable_memory_auto_save,
+    enable_memory_sync: config.enable_memory_sync,
     source: config.source,
     team_id: config.team_id,
     team_config_id: config.team_config_id,
@@ -251,16 +279,17 @@ async function syncAIConfig() {
     {
       data_id: "default",
       content: syncContent,
-      version: localVersion > 0 ? localVersion : Date.now(),
+      version: localVersion > 0 ? localVersion : nowSyncVersion(),
       deleted: false,
     },
   ]);
 
   // 3. 更新版本号
+  const cloudLatest = normalizeSyncVersion(cloudData?.latest_version ?? 0, 0);
   const newMax = Math.max(
     lastVersion,
     localVersion,
-    cloudData?.latest_version ?? 0,
+    cloudLatest,
   );
   await setLastSyncVersion(dataType, newMax);
 }

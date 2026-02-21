@@ -2,6 +2,7 @@ import { api } from "@/core/api/client";
 import { load } from "@tauri-apps/plugin-store";
 import type { SyncableCollection, SyncMeta } from "@/core/database/index";
 import { handleError } from "@/core/errors";
+import { normalizeSyncVersion, nowSyncVersion } from "@/core/sync/version";
 
 export interface SyncItem {
   data_id: string;
@@ -35,12 +36,13 @@ async function getSyncVersionStore() {
 
 export async function getLastSyncVersion(dataType: string): Promise<number> {
   const store = await getSyncVersionStore();
-  return (await store.get<number>(`version_${dataType}`)) ?? 0;
+  const version = (await store.get<number>(`version_${dataType}`)) ?? 0;
+  return normalizeSyncVersion(version, 0);
 }
 
 export async function setLastSyncVersion(dataType: string, version: number): Promise<void> {
   const store = await getSyncVersionStore();
-  await store.set(`version_${dataType}`, version);
+  await store.set(`version_${dataType}`, normalizeSyncVersion(version, 0));
   await store.save();
 }
 
@@ -92,7 +94,7 @@ export async function syncSyncableCollection<T extends { id: string } & SyncMeta
       return {
         data_id: id,
         content,
-        version: _version ?? Date.now(),
+        version: normalizeSyncVersion(_version, nowSyncVersion()),
         deleted: content.deleted ?? false,
       };
     });
@@ -105,11 +107,12 @@ export async function syncSyncableCollection<T extends { id: string } & SyncMeta
 
   // 3. 更新版本号
   const allItems = await db.getAll();
-  const allVersions = allItems.map((i) => i._version ?? 0);
+  const allVersions = allItems.map((i) => normalizeSyncVersion(i._version ?? 0, 0));
+  const cloudLatest = normalizeSyncVersion(cloudData?.latest_version ?? 0, 0);
   const newMax = Math.max(
     lastVersion,
     ...allVersions,
-    cloudData?.latest_version ?? 0,
+    cloudLatest,
   );
   await setLastSyncVersion(dataType, newMax);
 }

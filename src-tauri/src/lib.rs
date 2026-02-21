@@ -339,11 +339,6 @@ pub fn run() {
             commands::clipboard::clipboard_history_delete,
             commands::clipboard::clipboard_history_write,
             // ── Cloud Sync ──
-            commands::webdav::webdav_test,
-            commands::webdav::webdav_create_dir,
-            commands::git_sync::git_sync_push,
-            commands::git_sync::git_sync_pull,
-            commands::git_sync::git_sync_status,
             commands::mtools_sync::mtools_sync_test,
             commands::mtools_sync::mtools_sync_push,
             commands::mtools_sync::mtools_sync_pull,

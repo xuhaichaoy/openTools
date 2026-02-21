@@ -8,6 +8,12 @@ import {
 import { invoke } from '@tauri-apps/api/core'
 import { useAIStore } from '@/store/ai-store'
 import { getRoutedConfig } from '@/core/ai/router'
+import {
+  appendMemoryCandidates,
+  buildMemoryPromptBlock,
+  extractMemoryCandidates,
+  recallMemories,
+} from '@/core/ai/memory-store'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useDragWindow } from '@/hooks/useDragWindow'
@@ -54,10 +60,37 @@ export function ContextActionPanel({ selectedText, onBack }: ContextActionPanelP
     }
   }, [chatHistory, isLoading])
 
+  const injectMemoryContext = async (
+    messages: { role: string; content: string }[],
+  ): Promise<{ role: string; content: string }[]> => {
+    if (!config.enable_long_term_memory) return messages
+
+    const lastUser = [...messages]
+      .reverse()
+      .find((item) => item.role === 'user' && item.content?.trim())
+    if (!lastUser) return messages
+
+    const userText = lastUser.content.trim()
+
+    if (config.enable_memory_auto_save) {
+      const candidates = extractMemoryCandidates(userText)
+      if (candidates.length > 0) {
+        await appendMemoryCandidates(candidates)
+      }
+    }
+
+    if (!config.enable_memory_auto_recall) return messages
+    const recalled = await recallMemories(userText, { topK: 6 })
+    const prompt = buildMemoryPromptBlock(recalled)
+    if (!prompt) return messages
+    return [{ role: 'system', content: prompt }, ...messages]
+  }
+
   /** 调用 AI 接口（附带完整对话历史） */
   const callAI = async (messages: { role: string; content: string }[]): Promise<string> => {
+    const enrichedMessages = await injectMemoryContext(messages)
     const response = await invoke<string>('ai_chat', {
-      messages,
+      messages: enrichedMessages,
       config: getRoutedConfig(config),
     })
     return response

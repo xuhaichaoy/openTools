@@ -10,12 +10,18 @@ import type {
   MToolsAI,
   AIToolCall,
 } from "@/core/plugin-system/plugin-interface";
-import { handleError, ErrorLevel } from "@/core/errors";
+import { handleError } from "@/core/errors";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useAIStore } from "@/store/ai-store";
 import type { AIConfig } from "@/core/ai/types";
 import { getRoutedConfig } from "@/core/ai/router";
+import {
+  appendMemoryCandidates,
+  buildMemoryPromptBlock,
+  extractMemoryCandidates,
+  recallMemories,
+} from "@/core/ai/memory-store";
 
 const generateId = () =>
   Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
@@ -23,6 +29,46 @@ const generateId = () =>
 /** 获取当前 AI 配置 */
 function getConfig(): AIConfig {
   return useAIStore.getState().config;
+}
+
+interface SimpleAIMessage {
+  role: string;
+  content?: string;
+}
+
+async function injectMemoryForMessages(
+  messages: SimpleAIMessage[],
+  config: AIConfig,
+  conversationId?: string,
+): Promise<SimpleAIMessage[]> {
+  if (!config.enable_long_term_memory) return messages;
+
+  const lastUser = [...messages]
+    .reverse()
+    .find((item) => item.role === "user" && item.content?.trim());
+  if (!lastUser?.content) return messages;
+
+  const userText = lastUser.content.trim();
+
+  if (config.enable_memory_auto_save) {
+    const candidates = extractMemoryCandidates(userText, {
+      conversationId,
+    });
+    if (candidates.length > 0) {
+      await appendMemoryCandidates(candidates);
+    }
+  }
+
+  if (!config.enable_memory_auto_recall) return messages;
+
+  const recalled = await recallMemories(userText, {
+    conversationId,
+    topK: 6,
+  });
+  const memoryPrompt = buildMemoryPromptBlock(recalled);
+  if (!memoryPrompt) return messages;
+
+  return [{ role: "system", content: memoryPrompt }, ...messages];
 }
 
 /**
@@ -83,11 +129,17 @@ export function createMToolsAI(): MToolsAI {
         };
 
         try {
-          await invoke("ai_chat_stream", {
-            messages: options.messages.map((m) => ({
+          const enrichedMessages = await injectMemoryForMessages(
+            options.messages.map((m) => ({
               role: m.role,
               content: m.content,
             })),
+            config,
+            conversationId,
+          );
+
+          await invoke("ai_chat_stream", {
+            messages: enrichedMessages,
             config: routed,
             conversationId,
           });
@@ -146,11 +198,17 @@ export function createMToolsAI(): MToolsAI {
         };
 
         try {
-          await invoke("ai_chat_stream", {
-            messages: options.messages.map((m) => ({
+          const enrichedMessages = await injectMemoryForMessages(
+            options.messages.map((m) => ({
               role: m.role,
               content: m.content,
             })),
+            config,
+            conversationId,
+          );
+
+          await invoke("ai_chat_stream", {
+            messages: enrichedMessages,
             config: routed,
             conversationId,
           });
@@ -265,14 +323,33 @@ export function createMToolsAI(): MToolsAI {
         };
 
         try {
-          await invoke("ai_agent_stream", {
-            messages: options.messages.map((m) => ({
+          const baseMessages = options.messages.map((m) => ({
+            role: m.role,
+            content: m.content ?? "",
+            ...(m.tool_calls ? { tool_calls: m.tool_calls } : {}),
+            ...(m.tool_call_id ? { tool_call_id: m.tool_call_id } : {}),
+            ...(m.name ? { name: m.name } : {}),
+          }));
+
+          const enrichedPlainMessages = await injectMemoryForMessages(
+            baseMessages.map((m) => ({
               role: m.role,
               content: m.content,
-              ...(m.tool_calls ? { tool_calls: m.tool_calls } : {}),
-              ...(m.tool_call_id ? { tool_call_id: m.tool_call_id } : {}),
-              ...(m.name ? { name: m.name } : {}),
             })),
+            config,
+            conversationId,
+          );
+          const hasInjectedSystem = enrichedPlainMessages.length > baseMessages.length;
+          const injectedSystemPrompt =
+            hasInjectedSystem && enrichedPlainMessages[0]?.role === "system"
+              ? enrichedPlainMessages[0].content
+              : undefined;
+          const finalMessages = injectedSystemPrompt
+            ? [{ role: "system", content: injectedSystemPrompt }, ...baseMessages]
+            : baseMessages;
+
+          await invoke("ai_agent_stream", {
+            messages: finalMessages,
             config: routed,
             tools: options.tools,
             conversationId,

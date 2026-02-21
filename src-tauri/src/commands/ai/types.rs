@@ -49,6 +49,18 @@ pub struct AIConfig {
     /// 启用本机原生应用工具（日历、提醒事项、备忘录、邮件、快捷指令等）
     #[serde(default = "default_true")]
     pub enable_native_tools: bool,
+    /// 启用长期记忆（总开关）
+    #[serde(default = "default_true")]
+    pub enable_long_term_memory: bool,
+    /// 自动召回长期记忆
+    #[serde(default = "default_true")]
+    pub enable_memory_auto_recall: bool,
+    /// 自动提取长期记忆候选
+    #[serde(default = "default_true")]
+    pub enable_memory_auto_save: bool,
+    /// 长期记忆参与云同步
+    #[serde(default = "default_true")]
+    pub enable_memory_sync: bool,
     /// AI 来源：own_key / team / platform
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
@@ -82,6 +94,10 @@ impl Default for AIConfig {
             system_prompt: String::new(),
             enable_rag_auto_search: true,
             enable_native_tools: true,
+            enable_long_term_memory: true,
+            enable_memory_auto_recall: true,
+            enable_memory_auto_save: true,
+            enable_memory_sync: true,
             source: Some("own_key".to_string()),
             team_id: None,
             team_config_id: None,

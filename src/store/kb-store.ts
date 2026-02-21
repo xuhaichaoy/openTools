@@ -8,7 +8,11 @@
 import { create } from "zustand";
 import { api } from "@/core/api/client";
 import { handleError } from "@/core/errors";
-import { useTeamStore } from "@/store/team-store";
+import {
+  getExpiryHint,
+  getTeamSyncPolicy,
+  isSyncAllowed,
+} from "@/core/sync/policy";
 
 export interface KbCloudDoc {
   id: string;
@@ -62,6 +66,12 @@ interface KbState {
   downloadTeamDocUrl: (teamId: string, docId: string) => string;
 }
 
+async function ensureTeamSyncWritable(teamId: string): Promise<void> {
+  const policy = await getTeamSyncPolicy(teamId);
+  if (isSyncAllowed(policy)) return;
+  throw new Error(getExpiryHint(policy, "团队云同步") ?? "团队云同步已禁用");
+}
+
 export const useKbStore = create<KbState>((set, get) => ({
   personalDocs: [],
   teamDocs: {},
@@ -109,6 +119,7 @@ export const useKbStore = create<KbState>((set, get) => ({
   },
 
   createTeamDoc: async (teamId, name, content, format = "md", tags = [], description) => {
+    await ensureTeamSyncWritable(teamId);
     const doc = await api.post<KbCloudDoc>(`/teams/${teamId}/kb`, {
       name,
       content,
@@ -130,6 +141,7 @@ export const useKbStore = create<KbState>((set, get) => ({
   },
 
   uploadTeamDoc: async (teamId, file) => {
+    await ensureTeamSyncWritable(teamId);
     const formData = new FormData();
     formData.append("file", file);
     const doc = await api.upload<KbCloudDoc>(`/teams/${teamId}/kb/upload`, formData);
@@ -147,6 +159,7 @@ export const useKbStore = create<KbState>((set, get) => ({
   },
 
   updateTeamDoc: async (teamId, docId, payload) => {
+    await ensureTeamSyncWritable(teamId);
     const doc = await api.patch<KbCloudDoc>(`/teams/${teamId}/kb/${docId}`, payload);
     const prev = get().teamDocs[teamId] || [];
     set({
@@ -166,6 +179,7 @@ export const useKbStore = create<KbState>((set, get) => ({
   },
 
   deleteTeamDoc: async (teamId, docId) => {
+    await ensureTeamSyncWritable(teamId);
     await api.delete(`/teams/${teamId}/kb/${docId}`);
     const prev = get().teamDocs[teamId] || [];
     set({

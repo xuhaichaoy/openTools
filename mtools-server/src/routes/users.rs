@@ -36,6 +36,9 @@ async fn get_my_entitlements(
         "personal_plan_expires_at": personal.personal_plan_expires_at,
         "can_personal_sync": personal.can_personal_sync,
         "can_personal_server_storage": personal.can_personal_sync,
+        "personal_sync_status": personal.personal_sync_status,
+        "days_to_expire": personal.days_to_expire,
+        "personal_sync_stop_at": personal.personal_sync_stop_at,
     })))
 }
 
