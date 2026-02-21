@@ -7,8 +7,8 @@
 
 import type { PluginPermission, PluginInstance } from "./types";
 
-/** API 方法到所需权限的映射 */
-const METHOD_PERMISSIONS: Record<string, PluginPermission> = {
+/** 核心 API 方法到所需权限的映射 */
+const CORE_METHOD_PERMISSIONS: Record<string, PluginPermission> = {
   // 剪贴板
   clipboard_read: "clipboard",
   clipboard_write: "clipboard",
@@ -35,6 +35,54 @@ const METHOD_PERMISSIONS: Record<string, PluginPermission> = {
   // 系统
   system_action: "system",
 };
+
+/** plugin_api_call 支持的方法（前后端保持一致） */
+const PLUGIN_API_METHODS = [
+  "hideMainWindow",
+  "showMainWindow",
+  "setExpendHeight",
+  "copyText",
+  "showNotification",
+  "shellOpenExternal",
+  "shellOpenPath",
+  "shellShowItemInFolder",
+  "getPath",
+  "copyImage",
+  "screenCapture",
+  "setSubInput",
+  "removeSubInput",
+  "redirect",
+  "getFeatures",
+  "dbStorage.setItem",
+  "dbStorage.getItem",
+  "dbStorage.removeItem",
+  "outPlugin",
+  "mtools_action",
+] as const;
+
+/** plugin_api_call 方法到所需权限映射（无映射表示默认允许） */
+const PLUGIN_API_METHOD_PERMISSIONS: Record<string, PluginPermission> = {
+  copyText: "clipboard",
+  copyImage: "clipboard",
+  showNotification: "notification",
+  shellOpenExternal: "shell",
+  shellOpenPath: "shell",
+  shellShowItemInFolder: "shell",
+  getPath: "filesystem",
+  screenCapture: "system",
+};
+
+/** 全量权限映射（核心 API + plugin_api_call） */
+const METHOD_PERMISSIONS: Record<string, PluginPermission> = {
+  ...CORE_METHOD_PERMISSIONS,
+  ...PLUGIN_API_METHOD_PERMISSIONS,
+};
+
+const KNOWN_PLUGIN_API_METHODS = new Set<string>(PLUGIN_API_METHODS);
+
+export function isKnownPluginApiMethod(method: string): boolean {
+  return KNOWN_PLUGIN_API_METHODS.has(method);
+}
 
 /**
  * 检查插件是否有权调用指定 API 方法

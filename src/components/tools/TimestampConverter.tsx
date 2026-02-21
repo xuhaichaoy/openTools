@@ -3,9 +3,9 @@ import { ArrowLeft, Copy, Check, RefreshCw, ArrowRightLeft } from 'lucide-react'
 import { useDragWindow } from '@/hooks/useDragWindow'
 
 export function TimestampConverter({ onBack }: { onBack?: () => void }) {
-  const [timestamp, setTimestamp] = useState(String(Math.floor(Date.now() / 1000)))
+  const [timestamp, setTimestamp] = useState(() => String(Math.floor(Date.now() / 1000)))
   const [datetime, setDatetime] = useState('')
-  const [now, setNow] = useState(Date.now())
+  const [now, setNow] = useState(() => Date.now())
   const [copied, setCopied] = useState('')
 
   // 实时时钟
@@ -16,17 +16,19 @@ export function TimestampConverter({ onBack }: { onBack?: () => void }) {
 
   // 时间戳 → 日期
   useEffect(() => {
+    let nextDatetime = ''
     const ts = Number(timestamp)
     if (!isNaN(ts) && ts > 0) {
       // 自动判断秒/毫秒
       const msTs = ts > 9999999999 ? ts : ts * 1000
       const date = new Date(msTs)
       if (!isNaN(date.getTime())) {
-        setDatetime(formatDate(date))
-        return
+        nextDatetime = formatDate(date)
       }
     }
-    setDatetime('')
+    queueMicrotask(() => {
+      setDatetime((prev) => (prev === nextDatetime ? prev : nextDatetime))
+    })
   }, [timestamp])
 
   const handleDatetimeToTs = () => {

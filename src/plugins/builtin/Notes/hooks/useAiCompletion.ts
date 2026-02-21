@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-import { AIConfig, ChatMessage } from "@/core/ai/types";
+import type { AIConfig, AIRequestMessage } from "@/core/ai/types";
 import { handleError } from "@/core/errors";
 import { getRoutedConfig } from "@/core/ai/router";
 
@@ -43,7 +43,7 @@ Continuation:`;
       // We use a modified config for speed (low tokens)
       const completionConfig = { ...config, max_tokens: 50, temperature: 0.3 };
 
-      const messages: ChatMessage[] = [{ role: "user", content: prompt }];
+      const messages: AIRequestMessage[] = [{ role: "user", content: prompt }];
 
       const result = await invoke<string>("ai_chat", {
         messages,

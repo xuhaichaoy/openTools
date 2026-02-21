@@ -1,26 +1,26 @@
 import { lazy } from "react";
 import type { MToolsPlugin } from "@/core/plugin-system/plugin-interface";
 import {
-  Bot,
-  Wrench,
-  Database,
-  Puzzle,
-  Pipette,
-  Camera,
-  QrCode,
-  Search,
-  Cloud,
-  FileText,
-  Languages,
-  Workflow,
-  BookOpen,
-  ScanText,
-  Zap,
-  ClipboardList,
-  TextCursorInput,
-  Bookmark,
-  User,
-} from "lucide-react";
+  AiCenterIcon,
+  DevToolboxIcon,
+  DataForgeIcon,
+  PluginsIcon,
+  ColorIcon,
+  ScreenCaptureIcon,
+  QrCodeIcon,
+  ImageSearchIcon,
+  CloudSyncIcon,
+  NoteHubIcon,
+  ScreenTranslateIcon,
+  WorkflowsIcon,
+  KnowledgeBaseIcon,
+  OcrIcon,
+  SystemActionsIcon,
+  ClipboardHistoryIcon,
+  SnippetsIcon,
+  BookmarksIcon,
+  ManagementCenterIcon,
+} from "@/components/icons/animated";
 
 import { createElement } from "react";
 
@@ -107,8 +107,12 @@ export function isBuiltinPluginInstallRequired(pluginId: string): boolean {
   return marketInstallRequiredBuiltinPluginIdSet.has(pluginId);
 }
 
-export function resolveBuiltinPlugins(installedPluginIds: string[] = []): MToolsPlugin[] {
-  const installedSet = new Set(installedPluginIds.map((id) => id.toLowerCase()));
+export function resolveBuiltinPlugins(
+  installedPluginIds: string[] = [],
+): MToolsPlugin[] {
+  const installedSet = new Set(
+    installedPluginIds.map((id) => id.toLowerCase()),
+  );
   return builtinPlugins.filter((plugin) => {
     // 迁移到官方市场的插件不再以内置方式注册
     if (isBuiltinPluginInstallRequired(plugin.id)) {
@@ -127,7 +131,7 @@ export const builtinPlugins: MToolsPlugin[] = [
     tier: "extension",
     name: "开发工具箱",
     description: "JSON 格式化、时间戳转换、Base64 编解码",
-    icon: createElement(Wrench, { className: "w-6 h-6" }),
+    icon: createElement(DevToolboxIcon, { className: "w-6 h-6" }),
     color: "text-yellow-500 bg-yellow-500/10",
     category: "工具",
     keywords: [
@@ -251,7 +255,7 @@ export const builtinPlugins: MToolsPlugin[] = [
     tier: "core",
     name: "截图",
     description: "截图录屏，选区后直接 OCR / 贴图 / 编辑 / 保存 / 复制",
-    icon: createElement(Camera, { className: "w-6 h-6" }),
+    icon: createElement(ScreenCaptureIcon, { className: "w-6 h-6" }),
     color: "text-sky-500 bg-sky-500/10",
     category: "工具",
     keywords: [
@@ -288,7 +292,7 @@ export const builtinPlugins: MToolsPlugin[] = [
     tier: "core",
     name: "OCR",
     description: "图片文字识别（支持截图直达）",
-    icon: createElement(ScanText, { className: "w-6 h-6" }),
+    icon: createElement(OcrIcon, { className: "w-6 h-6" }),
     color: "text-amber-500 bg-amber-500/10",
     category: "工具",
     keywords: ["ocr", "文字识别", "提取文字", "图片转文字"],
@@ -302,7 +306,7 @@ export const builtinPlugins: MToolsPlugin[] = [
     tier: "core",
     name: "翻译",
     description: "屏幕翻译、实时翻译、多语言",
-    icon: createElement(Languages, { className: "w-6 h-6" }),
+    icon: createElement(ScreenTranslateIcon, { className: "w-6 h-6" }),
     color: "text-teal-500 bg-teal-500/10",
     category: "工具",
     keywords: [
@@ -323,7 +327,7 @@ export const builtinPlugins: MToolsPlugin[] = [
     tier: "extension",
     name: "笔记中心",
     description: "速记录入、AI 生成笔记、Markdown 编辑器",
-    icon: createElement(FileText, { className: "w-6 h-6" }),
+    icon: createElement(NoteHubIcon, { className: "w-6 h-6" }),
     color: "text-lime-500 bg-lime-500/10",
     category: "工具",
     keywords: [
@@ -367,7 +371,7 @@ export const builtinPlugins: MToolsPlugin[] = [
     tier: "core",
     name: "AI 助手",
     description: "AI 对话、智能 Agent（支持文件操作和 Shell）",
-    icon: createElement(Bot, { className: "w-6 h-6" }),
+    icon: createElement(AiCenterIcon, { className: "w-6 h-6" }),
     color: "text-indigo-500 bg-indigo-500/10",
     category: "AI",
     keywords: ["ai", "对话", "chat", "助手", "agent", "智能", "react", "自动"],
@@ -383,7 +387,7 @@ export const builtinPlugins: MToolsPlugin[] = [
     tier: "extension",
     name: "工作流",
     description: "AI 驱动的自动化工作流",
-    icon: createElement(Workflow, { className: "w-6 h-6" }),
+    icon: createElement(WorkflowsIcon, { className: "w-6 h-6" }),
     color: "text-amber-500 bg-amber-500/10",
     category: "AI",
     keywords: ["工作流", "workflow", "自动化", "流程", "automation"],
@@ -397,7 +401,7 @@ export const builtinPlugins: MToolsPlugin[] = [
     tier: "extension",
     name: "知识库",
     description: "文档导入、RAG 检索增强",
-    icon: createElement(BookOpen, { className: "w-6 h-6" }),
+    icon: createElement(KnowledgeBaseIcon, { className: "w-6 h-6" }),
     color: "text-emerald-500 bg-emerald-500/10",
     category: "AI",
     keywords: ["知识库", "knowledge", "rag", "文档", "检索", "document"],
@@ -412,7 +416,7 @@ export const builtinPlugins: MToolsPlugin[] = [
     tier: "extension",
     name: "颜色",
     description: "屏幕取色、调色板、HEX/RGB/HSL",
-    icon: createElement(Pipette, { className: "w-6 h-6" }),
+    icon: createElement(ColorIcon, { className: "w-6 h-6" }),
     color: "text-pink-500 bg-pink-500/10",
     category: "工具",
     keywords: ["颜色", "color", "取色", "调色板", "hex", "rgb", "hsl"],
@@ -424,7 +428,7 @@ export const builtinPlugins: MToolsPlugin[] = [
     tier: "extension",
     name: "二维码",
     description: "二维码/条形码识别与生成",
-    icon: createElement(QrCode, { className: "w-6 h-6" }),
+    icon: createElement(QrCodeIcon, { className: "w-6 h-6" }),
     color: "text-violet-500 bg-violet-500/10",
     category: "工具",
     keywords: ["二维码", "qrcode", "条形码", "扫码", "生成"],
@@ -436,7 +440,7 @@ export const builtinPlugins: MToolsPlugin[] = [
     tier: "extension",
     name: "数据工坊",
     description: "AI 驱动的数据导入导出平台",
-    icon: createElement(Database, { className: "w-6 h-6" }),
+    icon: createElement(DataForgeIcon, { className: "w-6 h-6" }),
     color: "text-purple-500 bg-purple-500/10",
     category: "数据",
     keywords: ["数据", "data", "导入", "导出", "工坊", "forge"],
@@ -448,7 +452,7 @@ export const builtinPlugins: MToolsPlugin[] = [
     tier: "extension",
     name: "以图搜图",
     description: "反向图片搜索 + AI 图片理解",
-    icon: createElement(Search, { className: "w-6 h-6" }),
+    icon: createElement(ImageSearchIcon, { className: "w-6 h-6" }),
     color: "text-indigo-500 bg-indigo-500/10",
     category: "工具",
     keywords: ["以图搜图", "图片搜索", "image search", "识图", "搜图"],
@@ -461,7 +465,7 @@ export const builtinPlugins: MToolsPlugin[] = [
     tier: "core",
     name: "插件",
     description: "兼容 uTools / Rubick 格式",
-    icon: createElement(Puzzle, { className: "w-6 h-6" }),
+    icon: createElement(PluginsIcon, { className: "w-6 h-6" }),
     color: "text-orange-500 bg-orange-500/10",
     category: "系统",
     keywords: ["插件", "plugin", "utools", "rubick"],
@@ -473,7 +477,7 @@ export const builtinPlugins: MToolsPlugin[] = [
     tier: "extension",
     name: "云同步",
     description: "GitHub/Gitee/GitLab/WebDAV 同步",
-    icon: createElement(Cloud, { className: "w-6 h-6" }),
+    icon: createElement(CloudSyncIcon, { className: "w-6 h-6" }),
     color: "text-sky-500 bg-sky-500/10",
     category: "系统",
     keywords: ["同步", "sync", "云", "github", "gitee", "webdav", "备份"],
@@ -487,7 +491,7 @@ export const builtinPlugins: MToolsPlugin[] = [
     tier: "core",
     name: "系统操作",
     description: "锁屏、深色模式、清空回收站、休眠等系统级操作",
-    icon: createElement(Zap, { className: "w-6 h-6" }),
+    icon: createElement(SystemActionsIcon, { className: "w-6 h-6" }),
     color: "text-amber-500 bg-amber-500/10",
     category: "系统",
     keywords: [
@@ -551,7 +555,7 @@ export const builtinPlugins: MToolsPlugin[] = [
     tier: "core",
     name: "剪贴板",
     description: "剪贴板历史管理，快速搜索与复用",
-    icon: createElement(ClipboardList, { className: "w-6 h-6" }),
+    icon: createElement(ClipboardHistoryIcon, { className: "w-6 h-6" }),
     color: "text-cyan-500 bg-cyan-500/10",
     category: "工具",
     keywords: [
@@ -613,7 +617,7 @@ export const builtinPlugins: MToolsPlugin[] = [
     tier: "extension",
     name: "快捷短语",
     description: "文本片段管理，支持静态模板和 AI 动态生成",
-    icon: createElement(TextCursorInput, { className: "w-6 h-6" }),
+    icon: createElement(SnippetsIcon, { className: "w-6 h-6" }),
     color: "text-emerald-500 bg-emerald-500/10",
     category: "工具",
     keywords: [
@@ -694,7 +698,7 @@ export const builtinPlugins: MToolsPlugin[] = [
     tier: "extension",
     name: "网页书签",
     description: "书签管理，支持从 Chrome/Firefox 导入",
-    icon: createElement(Bookmark, { className: "w-6 h-6" }),
+    icon: createElement(BookmarksIcon, { className: "w-6 h-6" }),
     color: "text-blue-500 bg-blue-500/10",
     category: "工具",
     keywords: [
@@ -752,7 +756,7 @@ export const builtinPlugins: MToolsPlugin[] = [
     searchable: false,
     name: "管理中心",
     description: "账号、数据同步及团队管理",
-    icon: createElement(User, { className: "w-6 h-6" }),
+    icon: createElement(ManagementCenterIcon, { className: "w-6 h-6" }),
     color: "text-indigo-500 bg-indigo-500/10",
     category: "系统",
     keywords: ["账号", "登录", "管理", "中心", "同步", "团队"],

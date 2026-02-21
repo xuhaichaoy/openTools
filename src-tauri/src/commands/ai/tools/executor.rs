@@ -37,6 +37,7 @@ pub async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<Str
         }
         "run_shell_command" => {
             let command = args_value["command"].as_str().unwrap_or("echo hello");
+            crate::commands::system::validate_shell_command(command)?;
             let output = tokio::process::Command::new("sh")
                 .arg("-c")
                 .arg(command)
@@ -191,6 +192,7 @@ pub async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<Str
         }
         "read_file" => {
             let path = args_value["path"].as_str().unwrap_or("").to_string();
+            crate::commands::system::validate_path_access(app, &path)?;
             let max_bytes = args_value["max_bytes"].as_u64().unwrap_or(102400) as usize;
             let file_path = std::path::Path::new(&path);
             if !file_path.exists() {
@@ -216,6 +218,7 @@ pub async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<Str
         }
         "write_file" => {
             let path = args_value["path"].as_str().unwrap_or("").to_string();
+            crate::commands::system::validate_path_access(app, &path)?;
             let content = args_value["content"].as_str().unwrap_or("").to_string();
             let file_path = std::path::Path::new(&path);
             if let Some(parent) = file_path.parent() {
@@ -226,6 +229,7 @@ pub async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<Str
         }
         "list_directory" => {
             let path = args_value["path"].as_str().unwrap_or(".").to_string();
+            crate::commands::system::validate_path_access(app, &path)?;
             let dir_path = std::path::Path::new(&path);
             if !dir_path.exists() {
                 return Err(format!("目录不存在: {}", path));
@@ -298,6 +302,7 @@ pub async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<Str
             if path.is_empty() {
                 return Err("路径不能为空".to_string());
             }
+            crate::commands::system::validate_path_access(app, &path)?;
             open::that(&path).map_err(|e| format!("打开失败: {}", e))?;
             Ok(format!("已打开: {}", path))
         }

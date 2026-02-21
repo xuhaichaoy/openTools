@@ -16,6 +16,10 @@
   --color-success: #10b981;
   --color-error: #ef4444;
   --color-warning: #f59e0b;
+  --space-compact-1: 0.375rem;
+  --space-compact-2: 0.5rem;
+  --space-compact-3: 0.75rem;
+  --space-compact-4: 1rem;
 }
 
 /* Dark Theme overrides */
@@ -33,6 +37,10 @@
   --color-success: #22c55e;
   --color-error: #ef4444;
   --color-warning: #f59e0b;
+  --space-compact-1: 0.375rem;
+  --space-compact-2: 0.5rem;
+  --space-compact-3: 0.75rem;
+  --space-compact-4: 1rem;
 }
 
 @layer base {

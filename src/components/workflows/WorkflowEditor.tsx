@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useMemo, useEffect } from 'react'
 import { ArrowLeft, Save, Play } from 'lucide-react'
 import type { Workflow, WorkflowNode, WorkflowEdge, WorkflowTrigger } from '@/core/workflows/types'
 import { stepsToGraph, graphToSteps } from '@/core/workflows/graph-utils'
@@ -25,15 +25,13 @@ export function WorkflowEditor({ workflow, onSave, onTest, onBack }: WorkflowEdi
   const [triggerEnabled, setTriggerEnabled] = useState(workflow?.trigger.enabled !== false)
   const { onMouseDown } = useDragWindow()
 
-  // 初始化节点和边：优先用 nodes/edges，否则从 steps 转换
-  const getInitialGraph = () => {
+  const initialGraph = useMemo(() => {
     if (workflow?.nodes && workflow.nodes.length > 0) {
       return { nodes: workflow.nodes, edges: workflow.edges || [] }
     }
     if (workflow?.steps && workflow.steps.length > 0) {
       return stepsToGraph(workflow.steps)
     }
-    // 新建：只有开始和结束节点
     return {
       nodes: [
         { id: '__start__', type: 'start' as const, label: '开始', config: {}, position: { x: 200, y: 50 } },
@@ -41,11 +39,14 @@ export function WorkflowEditor({ workflow, onSave, onTest, onBack }: WorkflowEdi
       ],
       edges: [{ id: 'e-start-end', source: '__start__', target: '__end__' }],
     }
-  }
+  }, [workflow])
+  const currentNodesRef = useRef<WorkflowNode[]>(initialGraph.nodes)
+  const currentEdgesRef = useRef<WorkflowEdge[]>(initialGraph.edges)
 
-  const initialGraph = useRef(getInitialGraph())
-  const currentNodesRef = useRef<WorkflowNode[]>(initialGraph.current.nodes)
-  const currentEdgesRef = useRef<WorkflowEdge[]>(initialGraph.current.edges)
+  useEffect(() => {
+    currentNodesRef.current = initialGraph.nodes
+    currentEdgesRef.current = initialGraph.edges
+  }, [initialGraph])
 
   const handleCanvasChange = useCallback((nodes: WorkflowNode[], edges: WorkflowEdge[]) => {
     currentNodesRef.current = nodes
@@ -218,8 +219,8 @@ export function WorkflowEditor({ workflow, onSave, onTest, onBack }: WorkflowEdi
       {/* 画布区域 */}
       <div className="flex-1 overflow-hidden relative">
         <WorkflowCanvas
-          initialNodes={initialGraph.current.nodes}
-          initialEdges={initialGraph.current.edges}
+          initialNodes={initialGraph.nodes}
+          initialEdges={initialGraph.edges}
           onChange={handleCanvasChange}
         />
       </div>

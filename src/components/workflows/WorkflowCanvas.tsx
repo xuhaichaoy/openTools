@@ -150,8 +150,7 @@ function CanvasInner({ initialNodes, initialEdges, onChange }: WorkflowCanvasPro
   const [rfEdges, setRfEdges, onEdgesChange] = useEdgesState(toRFEdges(initialEdges))
 
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
-
-  const selectedWfNode = selectedNodeId ? wfNodesRef.current.get(selectedNodeId) || null : null
+  const [selectedWfNode, setSelectedWfNode] = useState<WorkflowNode | null>(null)
 
   // 稳定引用 onChange，避免 useEffect 无限循环
   const onChangeRef = useRef(onChange)
@@ -197,13 +196,16 @@ function CanvasInner({ initialNodes, initialEdges, onChange }: WorkflowCanvasPro
   const onNodeClick = useCallback((_: React.MouseEvent, node: RFNode) => {
     if (node.type === 'start' || node.type === 'end') {
       setSelectedNodeId(null)
+      setSelectedWfNode(null)
       return
     }
     setSelectedNodeId(node.id)
+    setSelectedWfNode(wfNodesRef.current.get(node.id) || null)
   }, [])
 
   const onPaneClick = useCallback(() => {
     setSelectedNodeId(null)
+    setSelectedWfNode(null)
   }, [])
 
   // 添加节点（从面板点击或拖拽）
@@ -242,6 +244,7 @@ function CanvasInner({ initialNodes, initialEdges, onChange }: WorkflowCanvasPro
       ])
 
       setSelectedNodeId(id)
+      setSelectedWfNode(wfNode)
     },
     [rfNodes, setRfNodes],
   )
@@ -277,6 +280,7 @@ function CanvasInner({ initialNodes, initialEdges, onChange }: WorkflowCanvasPro
         setRfNodes((nds) => nds.filter((n) => n.id !== selectedNodeId))
         setRfEdges((eds) => eds.filter((e) => e.source !== selectedNodeId && e.target !== selectedNodeId))
         setSelectedNodeId(null)
+        setSelectedWfNode(null)
       }
     },
     [selectedNodeId, setRfNodes, setRfEdges],
@@ -291,6 +295,7 @@ function CanvasInner({ initialNodes, initialEdges, onChange }: WorkflowCanvasPro
 
       const updated = { ...existing, ...updates }
       wfNodesRef.current.set(selectedNodeId, updated)
+      setSelectedWfNode(updated)
 
       // 同步到 React Flow 节点的 data
       setRfNodes((nds) =>
@@ -373,7 +378,10 @@ function CanvasInner({ initialNodes, initialEdges, onChange }: WorkflowCanvasPro
         <NodeConfigPanel
           node={selectedWfNode}
           onUpdate={updateSelectedNode}
-          onClose={() => setSelectedNodeId(null)}
+          onClose={() => {
+            setSelectedNodeId(null)
+            setSelectedWfNode(null)
+          }}
         />
       )}
     </div>

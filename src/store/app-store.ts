@@ -1,6 +1,15 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { tauriPersistStorage } from '@/core/storage'
+import {
+  MAIN_VIEW_ID,
+  createRootViewStack,
+  getTopViewEntry,
+  popViewEntry,
+  pushViewEntry,
+  replaceTopViewEntry,
+  type ViewEntry,
+} from '@/core/navigation/view-stack'
 
 export type AppMode = 'search' | 'ai'
 
@@ -12,11 +21,6 @@ export interface EmbedRequest {
   pluginId: string
   featureCode: string
   title?: string
-}
-
-export interface ViewEntry {
-  viewId: string
-  params?: Record<string, unknown>
 }
 
 export interface AppState {
@@ -54,6 +58,8 @@ export interface AppState {
   requestNavigate: (viewId: string) => void
   /** 消费导航请求 */
   consumeNavigate: () => string | null
+  /** 仅重置搜索态，不修改视图栈 */
+  resetSearchState: () => void
   reset: () => void
 
   // ── 视图栈导航 ──
@@ -71,80 +77,73 @@ export interface AppState {
   resetToMain: () => void
 }
 
-const DEFAULT_VIEW = 'main'
-
 export const useAppStore = create<AppState>()(
   persist(
     (set, get) => ({
-  mode: 'search',
-  searchValue: '',
-  selectedIndex: 0,
-  windowExpanded: false,
-  recentTools: [] as string[],
-  aiInitialMode: 'ask' as AIInitialMode,
-  pendingEmbed: null as EmbedRequest | null,
-  pendingNavigate: null as string | null,
-  viewStack: [{ viewId: DEFAULT_VIEW }] as ViewEntry[],
+      mode: 'search',
+      searchValue: '',
+      selectedIndex: 0,
+      windowExpanded: false,
+      recentTools: [] as string[],
+      aiInitialMode: 'ask' as AIInitialMode,
+      pendingEmbed: null as EmbedRequest | null,
+      pendingNavigate: null as string | null,
+      viewStack: createRootViewStack(),
 
-  setMode: (mode) => set({ mode }),
-  setSearchValue: (value) => {
-    let mode: AppMode = 'search'
-    if (value.startsWith('ai ') || value.startsWith('AI ')) {
-      mode = 'ai'
-    }
-    set({ searchValue: value, mode, selectedIndex: 0 })
-  },
-  setSelectedIndex: (index) => set({ selectedIndex: index }),
-  setWindowExpanded: (expanded) => set({ windowExpanded: expanded }),
-  addRecentTool: (viewId) => set((state) => {
-    const filtered = state.recentTools.filter((id) => id !== viewId)
-    const updated = [viewId, ...filtered].slice(0, MAX_RECENT_TOOLS)
-    return { recentTools: updated }
-  }),
-  setAiInitialMode: (mode) => set({ aiInitialMode: mode }),
-  consumeAiInitialMode: () => {
-    const current = get().aiInitialMode
-    if (current !== 'ask') set({ aiInitialMode: 'ask' })
-    return current
-  },
-  requestEmbed: (req) => set({ pendingEmbed: req }),
-  consumeEmbed: () => {
-    const current = get().pendingEmbed
-    if (current) set({ pendingEmbed: null })
-    return current
-  },
-  requestNavigate: (viewId) => set({ pendingNavigate: viewId }),
-  consumeNavigate: () => {
-    const current = get().pendingNavigate
-    if (current) set({ pendingNavigate: null })
-    return current
-  },
-  reset: () => set({ mode: 'search', searchValue: '', selectedIndex: 0, windowExpanded: false, viewStack: [{ viewId: DEFAULT_VIEW }] }),
+      setMode: (mode) => set({ mode }),
+      setSearchValue: (value) => {
+        let mode: AppMode = 'search'
+        if (value.startsWith('ai ') || value.startsWith('AI ')) {
+          mode = 'ai'
+        }
+        set({ searchValue: value, mode, selectedIndex: 0 })
+      },
+      setSelectedIndex: (index) => set({ selectedIndex: index }),
+      setWindowExpanded: (expanded) => set({ windowExpanded: expanded }),
+      addRecentTool: (viewId) =>
+        set((state) => {
+          const filtered = state.recentTools.filter((id) => id !== viewId)
+          const updated = [viewId, ...filtered].slice(0, MAX_RECENT_TOOLS)
+          return { recentTools: updated }
+        }),
+      setAiInitialMode: (mode) => set({ aiInitialMode: mode }),
+      consumeAiInitialMode: () => {
+        const current = get().aiInitialMode
+        if (current !== 'ask') set({ aiInitialMode: 'ask' })
+        return current
+      },
+      requestEmbed: (req) => set({ pendingEmbed: req }),
+      consumeEmbed: () => {
+        const current = get().pendingEmbed
+        if (current) set({ pendingEmbed: null })
+        return current
+      },
+      requestNavigate: (viewId) => set({ pendingNavigate: viewId }),
+      consumeNavigate: () => {
+        const current = get().pendingNavigate
+        if (current) set({ pendingNavigate: null })
+        return current
+      },
+      resetSearchState: () =>
+        set({ mode: 'search', searchValue: '', selectedIndex: 0, windowExpanded: false }),
+      reset: () =>
+        set({
+          mode: 'search',
+          searchValue: '',
+          selectedIndex: 0,
+          windowExpanded: false,
+          viewStack: createRootViewStack(),
+        }),
 
-  // ── 视图栈导航 ──
-  currentView: () => {
-    const stack = get().viewStack
-    const top = stack[stack.length - 1]
-    return top?.viewId ?? DEFAULT_VIEW
-  },
-  currentViewEntry: () => {
-    const stack = get().viewStack
-    return stack[stack.length - 1] ?? { viewId: DEFAULT_VIEW }
-  },
-  pushView: (viewId, params) => set((state) => {
-    const top = state.viewStack[state.viewStack.length - 1]
-    if (top?.viewId === viewId) return state
-    return { viewStack: [...state.viewStack, { viewId, params }] }
-  }),
-  popView: () => set((state) => {
-    if (state.viewStack.length <= 1) return state
-    return { viewStack: state.viewStack.slice(0, -1) }
-  }),
-  replaceView: (viewId, params) => set((state) => {
-    if (state.viewStack.length <= 1) return { viewStack: [{ viewId, params }] }
-    return { viewStack: [...state.viewStack.slice(0, -1), { viewId, params }] }
-  }),
-  resetToMain: () => set({ viewStack: [{ viewId: DEFAULT_VIEW }] }),
+      // ── 视图栈导航 ──
+      currentView: () => getTopViewEntry(get().viewStack).viewId ?? MAIN_VIEW_ID,
+      currentViewEntry: () => getTopViewEntry(get().viewStack),
+      pushView: (viewId, params) =>
+        set((state) => ({ viewStack: pushViewEntry(state.viewStack, { viewId, params }) })),
+      popView: () => set((state) => ({ viewStack: popViewEntry(state.viewStack) })),
+      replaceView: (viewId, params) =>
+        set((state) => ({ viewStack: replaceTopViewEntry(state.viewStack, { viewId, params }) })),
+      resetToMain: () => set({ viewStack: createRootViewStack() }),
     }),
     {
       name: "mtools-app",

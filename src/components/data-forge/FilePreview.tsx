@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react'
-import { FileSpreadsheet, FileText, FileJson, X, Download, Eye, ExternalLink, Table } from 'lucide-react'
+import { useState, useEffect, useCallback } from 'react'
+import { FileSpreadsheet, FileText, FileJson, X, Eye, ExternalLink, Table } from 'lucide-react'
 import { handleError } from '@/core/errors'
 import { invoke } from '@tauri-apps/api/core'
 
@@ -23,29 +23,7 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
   const fileName = filePath.split('/').pop() || filePath
   const ext = fileName.split('.').pop()?.toLowerCase() || ''
 
-  useEffect(() => {
-    loadFile()
-  }, [filePath])
-
-  const loadFile = async () => {
-    setLoading(true)
-    setError(null)
-    try {
-      // 读取文件前 100KB 用于预览
-      const text = await invoke<string>('preview_file', { filePath, maxBytes: 102400 })
-
-      if (ext === 'csv') {
-        parseCSV(text)
-      } else {
-        setContent(text)
-      }
-    } catch (e) {
-      setError(`无法预览文件: ${e}`)
-    }
-    setLoading(false)
-  }
-
-  const parseCSV = (text: string) => {
+  const parseCSV = useCallback((text: string) => {
     const lines = text.split('\n').filter((l) => l.trim())
     if (lines.length === 0) {
       setCsvData({ headers: [], rows: [], totalRows: 0 })
@@ -62,7 +40,32 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
       rows,
       totalRows: lines.length - 1,
     })
-  }
+  }, [])
+
+  const loadFile = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      // 读取文件前 100KB 用于预览
+      const text = await invoke<string>('preview_file', { filePath, maxBytes: 102400 })
+
+      if (ext === 'csv') {
+        parseCSV(text)
+      } else {
+        setCsvData(null)
+        setContent(text)
+      }
+    } catch (e) {
+      setError(`无法预览文件: ${e}`)
+    }
+    setLoading(false)
+  }, [ext, filePath, parseCSV])
+
+  useEffect(() => {
+    queueMicrotask(() => {
+      void loadFile()
+    })
+  }, [loadFile])
 
   const handleOpenInExplorer = async () => {
     try {

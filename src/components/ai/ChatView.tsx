@@ -1,4 +1,11 @@
-import { useState, useRef, useEffect, useImperativeHandle, forwardRef } from "react";
+import {
+  useState,
+  useRef,
+  useEffect,
+  useImperativeHandle,
+  forwardRef,
+  useMemo,
+} from "react";
 import {
   Plus,
   Bot,
@@ -61,7 +68,7 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
   const { toast } = useToast();
   const { onMouseDown } = useDragWindow();
   const conversation = getCurrentConversation();
-  const messages = conversation?.messages || [];
+  const messages = useMemo(() => conversation?.messages ?? [], [conversation]);
 
   // 暴露控制接口给父组件
   useImperativeHandle(ref, () => ({

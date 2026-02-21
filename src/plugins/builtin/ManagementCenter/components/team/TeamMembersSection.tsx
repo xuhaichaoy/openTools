@@ -49,8 +49,8 @@ export function TeamMembersSection({
       setInviteEmail("");
       onMembersChange();
       setTimeout(() => setInviteSuccess(""), 3000);
-    } catch (err: any) {
-      setInviteError(err?.message || "邀请失败");
+    } catch (err: unknown) {
+      setInviteError(err instanceof Error ? err.message : "邀请失败");
     } finally {
       setInviting(false);
     }
@@ -80,7 +80,7 @@ export function TeamMembersSection({
   };
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-[var(--space-compact-2)]">
       <div className="flex items-center justify-between">
         <h3 className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
           成员列表 ({members.length})
@@ -103,7 +103,7 @@ export function TeamMembersSection({
       )}
 
       {showInvite && (
-        <div className="bg-[var(--color-bg)] rounded-lg border border-[#F28F36]/20 p-5 space-y-3 animate-in slide-in-from-top-2 duration-200">
+        <div className="bg-[var(--color-bg)] rounded-lg border border-[#F28F36]/20 p-[var(--space-compact-4)] space-y-[var(--space-compact-2)] animate-in slide-in-from-top-2 duration-200">
           <div className="flex gap-2">
             <input
               type="email"
@@ -146,7 +146,7 @@ export function TeamMembersSection({
         {members.map((member) => (
           <div
             key={member.user_id}
-            className="flex items-center justify-between px-3 py-2.5 border-b border-[var(--color-border)] last:border-0"
+            className="flex items-center justify-between px-[var(--space-compact-3)] py-2 border-b border-[var(--color-border)] last:border-0"
           >
             <div className="flex items-center gap-2.5">
               <div className="w-7 h-7 rounded-full bg-[var(--color-bg-secondary)] flex items-center justify-center text-[10px] font-bold text-[#F28F36]">

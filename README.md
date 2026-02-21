@@ -52,6 +52,13 @@ pnpm tauri:dev
 pnpm tauri:build
 ```
 
+### 质量门禁
+
+```bash
+# 前端构建 + 前端测试 + Rust 测试
+pnpm quality:check
+```
+
 ### 项目结构
 
 ```

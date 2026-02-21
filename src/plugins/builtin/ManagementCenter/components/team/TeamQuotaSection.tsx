@@ -92,8 +92,8 @@ export function TeamQuotaSection({
         policyRes.monthly_limit_tokens ?? membersRes.monthly_limit_tokens ?? 0,
       );
       setQuotaMembers(membersRes.members || []);
-    } catch (err: any) {
-      const msg = err?.message || "获取团队月额度配置失败";
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "获取团队月额度配置失败";
       setLoadError(msg);
     } finally {
       setLoading(false);
@@ -147,7 +147,7 @@ export function TeamQuotaSection({
   };
 
   return (
-    <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-4 space-y-3">
+    <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-[var(--space-compact-3)] space-y-[var(--space-compact-2)]">
       <div>
         <h3 className="text-xs font-semibold">团队月额度策略</h3>
         <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">

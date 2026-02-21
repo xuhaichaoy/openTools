@@ -16,6 +16,18 @@ export interface ChatMessage {
   images?: string[];
 }
 
+/**
+ * AI IPC 请求使用的消息类型（与 UI ChatMessage 分离，避免耦合 id/timestamp 等展示字段）。
+ */
+export interface AIRequestMessage {
+  role: "system" | "user" | "assistant" | "tool";
+  content?: string;
+  tool_calls?: ToolCallInfo[];
+  tool_call_id?: string;
+  name?: string;
+  images?: string[];
+}
+
 export interface Conversation {
   id: string;
   title: string;

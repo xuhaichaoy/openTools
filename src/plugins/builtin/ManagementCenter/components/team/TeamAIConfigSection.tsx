@@ -185,7 +185,7 @@ export function TeamAIConfigSection({
 
   if (!teamActive) {
     return (
-      <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-4">
+      <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-[var(--space-compact-3)]">
         <h3 className="text-xs font-semibold">团队 AI 模型配置</h3>
         <p className="text-[10px] text-[var(--color-text-secondary)] mt-1">
           团队已到期，团队 AI 配置与配额能力不可用，续费后恢复。
@@ -195,8 +195,8 @@ export function TeamAIConfigSection({
   }
 
   return (
-    <div className="space-y-3">
-      <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-4 space-y-3">
+    <div className="space-y-[var(--space-compact-2)]">
+      <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-[var(--space-compact-3)] space-y-[var(--space-compact-2)]">
         <div>
           <h3 className="text-xs font-semibold">团队 AI 模型配置</h3>
           <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
@@ -211,7 +211,7 @@ export function TeamAIConfigSection({
             {configs.map((item, index) => (
               <div
                 key={item.id || item.config_id || index}
-                className="flex items-center justify-between py-2.5"
+                className="flex items-center justify-between py-2"
               >
                 <div className="flex items-center gap-2.5">
                   <Cpu className="w-3.5 h-3.5 text-[#F28F36]" />
@@ -297,7 +297,7 @@ export function TeamAIConfigSection({
         )}
 
         {isOwnerOrAdmin && (
-          <div className="pt-3 border-t border-[var(--color-border)] space-y-2">
+          <div className="pt-2 border-t border-[var(--color-border)] space-y-2">
             <h4 className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
               {form.id ? "编辑配置" : "添加新配置"}
             </h4>

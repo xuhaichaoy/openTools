@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, type CSSProperties } from "react";
 import {
   User,
   Database,
@@ -19,9 +19,11 @@ import {
   Moon,
   Info,
 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { handleError } from "@/core/errors";
 import { useAuthStore } from "@/store/auth-store";
+import type { User as AuthUser } from "@/store/auth-store";
 import { api } from "@/core/api/client";
 import type { MToolsPluginProps } from "@/core/plugin-system/plugin-interface";
 import { AIModelTab } from "./components/AIModelTab";
@@ -53,7 +55,7 @@ export default function ManagementCenter({ onBack }: MToolsPluginProps) {
   const [activeTab, setActiveTab] = useState<TabId>("account");
   const { onMouseDown } = useDragWindow();
 
-  const navItems: { id: TabId; icon: any; label: string; group: string }[] = [
+  const navItems: { id: TabId; icon: LucideIcon; label: string; group: string }[] = [
     { id: "account", icon: User, label: "我的账号", group: "个人中心" },
     { id: "data", icon: Database, label: "我的数据", group: "个人中心" },
     { id: "team", icon: Users, label: "团队空间", group: "个人中心" },
@@ -70,7 +72,7 @@ export default function ManagementCenter({ onBack }: MToolsPluginProps) {
     <div className="flex flex-col h-full bg-[var(--color-bg)] text-[var(--color-text)]">
       {/* 可拖拽顶栏 */}
       <div
-        className="h-11 flex items-center px-3 border-b border-[var(--color-border)] cursor-grab active:cursor-grabbing shrink-0"
+        className="h-10 flex items-center px-3 border-b border-[var(--color-border)] cursor-grab active:cursor-grabbing shrink-0"
         onMouseDown={onMouseDown}
       >
         <h1 className="text-xs font-semibold text-[var(--color-text-secondary)]">
@@ -80,8 +82,8 @@ export default function ManagementCenter({ onBack }: MToolsPluginProps) {
 
       <div className="flex flex-1 overflow-hidden">
       {/* Sidebar */}
-      <div className="w-[160px] border-r border-[var(--color-border)] flex flex-col pt-3 shrink-0">
-        <nav className="flex-1 px-1.5 space-y-4 overflow-y-auto">
+      <div className="w-[156px] border-r border-[var(--color-border)] flex flex-col pt-[var(--space-compact-2)] shrink-0">
+        <nav className="flex-1 px-1.5 space-y-[var(--space-compact-2)] overflow-y-auto">
           {groups.map((group) => (
             <div key={group}>
               <div className="px-2 mb-1 text-[10px] font-semibold text-[var(--color-text-secondary)] opacity-50 uppercase tracking-widest">
@@ -114,7 +116,7 @@ export default function ManagementCenter({ onBack }: MToolsPluginProps) {
           ))}
         </nav>
 
-        <div className="p-2 border-t border-[var(--color-border)]">
+        <div className="p-[var(--space-compact-2)] border-t border-[var(--color-border)]">
           <button
             onClick={onBack}
             className="w-full flex items-center justify-center py-1.5 text-[10px] font-medium text-[var(--color-text-secondary)] hover:text-[var(--color-text)] transition-colors"
@@ -126,7 +128,7 @@ export default function ManagementCenter({ onBack }: MToolsPluginProps) {
 
       {/* Content Area */}
       <div className="flex-1 flex flex-col overflow-hidden">
-        <div className="flex-1 overflow-y-auto p-5">
+        <div className="flex-1 overflow-y-auto p-[var(--space-compact-3)]">
           {activeTab === "account" && (
             <AccountTab onNavigate={setActiveTab} />
           )}
@@ -183,9 +185,9 @@ function AccountTab({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
     : 1;
 
   return (
-    <div className="max-w-xl mx-auto space-y-4">
+    <div className="max-w-xl mx-auto space-y-2">
       {/* Profile Header */}
-      <div className="bg-[var(--color-bg)] rounded-xl p-4 border border-[var(--color-border)] flex items-center gap-4">
+      <div className="bg-[var(--color-bg)] rounded-xl p-[var(--space-compact-3)] border border-[var(--color-border)] flex items-center gap-[var(--space-compact-3)]">
         <div
           className="w-12 h-12 rounded-xl flex items-center justify-center border overflow-hidden shrink-0"
           style={{ background: `${BRAND}15`, borderColor: `${BRAND}30` }}
@@ -229,8 +231,8 @@ function AccountTab({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
       </div>
 
       {/* Energy & Stats */}
-      <div className="grid grid-cols-2 gap-3">
-        <div className="bg-[var(--color-bg)] rounded-xl p-4 border border-[var(--color-border)]">
+      <div className="grid grid-cols-2 gap-2">
+        <div className="bg-[var(--color-bg)] rounded-xl p-3 border border-[var(--color-border)]">
           <div className="flex items-center justify-between mb-1.5">
             <span className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
               AI 能量
@@ -257,7 +259,7 @@ function AccountTab({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
           </button>
         </div>
 
-        <div className="bg-[var(--color-bg)] rounded-xl p-4 border border-[var(--color-border)]">
+        <div className="bg-[var(--color-bg)] rounded-xl p-3 border border-[var(--color-border)]">
           <div className="flex items-center justify-between mb-1.5">
             <span className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
               代金券
@@ -286,7 +288,7 @@ function AccountTab({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
         {/* "支付记录" 和 "设备管理" 功能未上线，暂时隐藏入口 */}
         <button
           onClick={logout}
-          className="w-full flex items-center gap-2 px-4 py-2.5 hover:bg-red-500/5 transition-colors"
+          className="w-full flex items-center gap-2 px-3 py-2 hover:bg-red-500/5 transition-colors"
         >
           <LogOut className="w-3.5 h-3.5 text-red-500" />
           <span className="text-xs font-medium text-red-500">退出登录</span>
@@ -308,6 +310,9 @@ function EditProfileModal({ onClose }: { onClose: () => void }) {
   const [avatarUrl, setAvatarUrl] = useState(user?.avatar_url || "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const inputRingStyle: CSSProperties & Record<"--tw-ring-color", string> = {
+    "--tw-ring-color": `${BRAND}40`,
+  };
 
   const handleSave = async () => {
     if (!username.trim()) {
@@ -317,20 +322,18 @@ function EditProfileModal({ onClose }: { onClose: () => void }) {
     setSaving(true);
     setError("");
     try {
-      const updatedUser = await api.patch<typeof user>("/users/me", {
+      const updatedUser = await api.patch<AuthUser>("/users/me", {
         username: username.trim(),
         avatar_url: avatarUrl.trim() || null,
       });
-      if (updatedUser) {
-        login(
-          updatedUser as any,
-          useAuthStore.getState().token!,
-          useAuthStore.getState().refreshToken || undefined,
-        );
-      }
+      login(
+        updatedUser,
+        useAuthStore.getState().token!,
+        useAuthStore.getState().refreshToken || undefined,
+      );
       onClose();
-    } catch (err: any) {
-      setError(err?.message || "保存失败");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "保存失败");
     } finally {
       setSaving(false);
     }
@@ -338,8 +341,8 @@ function EditProfileModal({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-      <div className="bg-[var(--color-bg)] w-[420px] max-h-[85vh] overflow-y-auto rounded-xl p-5 border border-[var(--color-border)] shadow-xl">
-        <div className="flex items-center justify-between mb-4">
+      <div className="bg-[var(--color-bg)] w-[420px] max-h-[85vh] overflow-y-auto rounded-xl p-[var(--space-compact-3)] border border-[var(--color-border)] shadow-xl">
+        <div className="flex items-center justify-between mb-3">
           <h3 className="text-sm font-semibold">修改资料</h3>
           <button
             onClick={onClose}
@@ -349,7 +352,7 @@ function EditProfileModal({ onClose }: { onClose: () => void }) {
           </button>
         </div>
 
-        <div className="space-y-3">
+        <div className="space-y-2">
           <AvatarPicker value={avatarUrl} onChange={setAvatarUrl} />
 
           <div>
@@ -362,7 +365,7 @@ function EditProfileModal({ onClose }: { onClose: () => void }) {
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               className="mt-1 w-full bg-[var(--color-bg-secondary)] border-0 rounded-lg px-3 py-2 text-xs focus:ring-2 transition-all text-[var(--color-text)]"
-              style={{ "--tw-ring-color": `${BRAND}40` } as any}
+              style={inputRingStyle}
             />
           </div>
 
@@ -444,14 +447,14 @@ function GeneralSettingsTab() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-12">
+      <div className="flex items-center justify-center py-10">
         <Loader2 className="w-4 h-4 animate-spin" style={{ color: BRAND }} />
       </div>
     );
   }
 
   return (
-    <div className="max-w-xl mx-auto space-y-4">
+    <div className="max-w-xl mx-auto space-y-2">
       <div>
         <h2 className="text-sm font-semibold">通用设置</h2>
         <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">
@@ -504,7 +507,7 @@ function GeneralSettingsTab() {
       </div>
 
       {/* 主题设置 */}
-      <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-4">
+      <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-[var(--space-compact-3)]">
         <div className="flex items-center gap-2 mb-3">
           <Sun className="w-3.5 h-3.5" style={{ color: BRAND }} />
           <span className="text-xs font-medium">主题设置</span>
@@ -546,7 +549,7 @@ function GeneralSettingsTab() {
       </div>
 
       {/* 快捷键说明 */}
-      <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-4">
+      <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-[var(--space-compact-3)]">
         <div className="flex items-center gap-2 mb-3">
           <Info className="w-3.5 h-3.5" style={{ color: BRAND }} />
           <span className="text-xs font-medium">快捷键说明</span>
@@ -597,7 +600,7 @@ function SettingRow({
   action: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center justify-between px-4 py-3">
+    <div className="flex items-center justify-between px-3 py-2">
       <div>
         <div className="text-xs font-medium">{label}</div>
         <div className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
@@ -636,14 +639,14 @@ function ToggleSwitch({
 
 function PaymentRecordsTab() {
   return (
-    <div className="max-w-xl mx-auto space-y-4">
+    <div className="max-w-xl mx-auto space-y-2">
       <div>
         <h2 className="text-sm font-semibold">支付记录</h2>
         <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">
           您的订单和交易记录
         </p>
       </div>
-      <div className="text-center py-12 bg-[var(--color-bg)] rounded-xl border border-dashed border-[var(--color-border)]">
+      <div className="text-center py-10 bg-[var(--color-bg)] rounded-xl border border-dashed border-[var(--color-border)]">
         <CreditCard className="w-8 h-8 text-[var(--color-text-secondary)] mx-auto mb-2 opacity-20" />
         <p className="text-xs text-[var(--color-text-secondary)]">暂无支付记录</p>
         <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5 opacity-60">
@@ -658,7 +661,7 @@ function PaymentRecordsTab() {
 
 function DevicesTab() {
   return (
-    <div className="max-w-xl mx-auto space-y-4">
+    <div className="max-w-xl mx-auto space-y-2">
       <div>
         <h2 className="text-sm font-semibold">设备管理</h2>
         <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">
@@ -667,7 +670,7 @@ function DevicesTab() {
       </div>
 
       <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] overflow-hidden">
-        <div className="flex items-center justify-between px-4 py-3">
+        <div className="flex items-center justify-between px-3 py-2">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-lg bg-emerald-500/10 flex items-center justify-center">
               <Smartphone className="w-4 h-4 text-emerald-500" />
@@ -700,13 +703,13 @@ function ActionItem({
   onClick,
 }: {
   label: string;
-  icon: any;
+  icon: LucideIcon;
   onClick?: () => void;
 }) {
   return (
     <button
       onClick={onClick}
-      className="w-full flex items-center justify-between px-4 py-2.5 border-b border-[var(--color-border)] hover:bg-[var(--color-bg-secondary)] transition-colors group last:border-0"
+      className="w-full flex items-center justify-between px-[var(--space-compact-3)] py-2 border-b border-[var(--color-border)] hover:bg-[var(--color-bg-secondary)] transition-colors group last:border-0"
     >
       <div className="flex items-center gap-2">
         <Icon className="w-3.5 h-3.5 text-[var(--color-text-secondary)]" />
@@ -721,7 +724,7 @@ function PlaceholderTab({ title }: { title: string }) {
   return (
     <div className="h-full flex flex-col items-center justify-center text-center">
       <div
-        className="w-12 h-12 rounded-xl flex items-center justify-center mb-4"
+        className="w-12 h-12 rounded-xl flex items-center justify-center mb-3"
         style={{ background: `${BRAND}15` }}
       >
         <Database className="w-6 h-6" style={{ color: BRAND }} />

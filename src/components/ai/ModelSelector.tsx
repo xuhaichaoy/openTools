@@ -20,12 +20,22 @@ export function ModelSelector() {
   const ref = useRef<HTMLDivElement>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
 
+  const applyConfigPatch = useCallback(
+    (patch: Partial<typeof config>) => {
+      void saveConfig({
+        ...useAIStore.getState().config,
+        ...patch,
+      });
+    },
+    [saveConfig],
+  );
+
   // 加载 ownKeys（首次）
   useEffect(() => {
     if (config.source === "own_key" && ownKeys.length === 0) {
-      loadOwnKeys();
+      void loadOwnKeys();
     }
-  }, [config.source]);
+  }, [config.source, ownKeys.length, loadOwnKeys]);
 
   // 加载团队模型
   useEffect(() => {
@@ -49,7 +59,9 @@ export function ModelSelector() {
         cancelled = true;
       };
     } else {
-      setTeamModels([]);
+      queueMicrotask(() => {
+        setTeamModels((prev) => (prev.length === 0 ? prev : []));
+      });
     }
   }, [config.source, config.team_id]);
 
@@ -59,10 +71,7 @@ export function ModelSelector() {
 
     if (teamModels.length === 0) {
       if (config.team_config_id) {
-        saveConfig({
-          ...config,
-          team_config_id: undefined,
-        });
+        applyConfigPatch({ team_config_id: undefined });
       }
       return;
     }
@@ -81,8 +90,7 @@ export function ModelSelector() {
       config.model !== fallback.model_name ||
       config.protocol !== nextProtocol
     ) {
-      saveConfig({
-        ...config,
+      applyConfigPatch({
         team_config_id: fallback.config_id,
         model: fallback.model_name,
         protocol: nextProtocol,
@@ -95,7 +103,7 @@ export function ModelSelector() {
     config.model,
     config.protocol,
     teamModels,
-    saveConfig,
+    applyConfigPatch,
   ]);
 
   // 点击外部关闭
@@ -147,20 +155,17 @@ export function ModelSelector() {
   };
 
   const handleSelectTeamModel = (m: TeamModelInfo) => {
-    const newConfig = {
-      ...config,
+    applyConfigPatch({
       team_config_id: m.config_id,
       model: m.model_name,
       protocol: (m.protocol || "openai") as "openai" | "anthropic",
-    };
-    saveConfig(newConfig);
+    });
     setOpen(false);
   };
 
   const handleCustomModel = (val: string) => {
     if (!val) return;
-    const newConfig = { ...config, model: val };
-    saveConfig(newConfig);
+    applyConfigPatch({ model: val });
     setOpen(false);
   };
 

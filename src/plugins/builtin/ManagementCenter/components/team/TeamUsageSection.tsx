@@ -21,7 +21,7 @@ export function TeamUsageSection({
 }) {
   if (!teamActive) {
     return (
-      <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-4">
+      <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-[var(--space-compact-3)]">
         <p className="text-[10px] text-[var(--color-text-secondary)] italic text-center py-6">
           团队已到期，用量统计不可用
         </p>
@@ -31,7 +31,7 @@ export function TeamUsageSection({
 
   if (!isOwnerOrAdmin) {
     return (
-      <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-4">
+      <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-[var(--space-compact-3)]">
         <p className="text-[10px] text-[var(--color-text-secondary)] italic text-center py-6">
           仅管理员可查看用量统计
         </p>
@@ -40,9 +40,9 @@ export function TeamUsageSection({
   }
 
   return (
-    <div className="space-y-3">
-      <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-4">
-        <h3 className="text-xs font-semibold mb-3">AI 用量统计</h3>
+    <div className="space-y-[var(--space-compact-2)]">
+      <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-[var(--space-compact-3)]">
+        <h3 className="text-xs font-semibold mb-2">AI 用量统计</h3>
         <TeamUsageStats teamId={teamId} />
       </div>
     </div>
@@ -94,7 +94,7 @@ function TeamUsageStats({ teamId }: { teamId: string }) {
   const totalRequests = usage.reduce((sum, row) => sum + (row.request_count || 0), 0);
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-[var(--space-compact-3)]">
       <div className="grid grid-cols-2 gap-2">
         <div className="bg-[var(--color-bg-secondary)] rounded-lg p-3 text-center">
           <div className="text-lg font-bold text-[#F28F36]">
@@ -122,7 +122,7 @@ function TeamUsageStats({ teamId }: { teamId: string }) {
         {usage.map((row, idx) => {
           const tokens = (row.prompt_tokens || 0) + (row.completion_tokens || 0);
           return (
-            <div key={idx} className="flex items-center justify-between py-2.5">
+            <div key={idx} className="flex items-center justify-between py-2">
               <div className="flex items-center gap-2.5">
                 <div className="w-6 h-6 rounded-full bg-[var(--color-bg-secondary)] flex items-center justify-center text-[10px] font-bold text-[#F28F36]">
                   {(row.username || "?")[0]?.toUpperCase()}

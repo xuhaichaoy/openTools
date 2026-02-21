@@ -14,7 +14,10 @@ interface ServerState {
 let storePromise: ReturnType<typeof load> | null = null;
 function getStore() {
   if (!storePromise) {
-    storePromise = load("server-settings.json", { autoSave: true });
+    storePromise = load("server-settings.json", {
+      defaults: {},
+      autoSave: true,
+    });
   }
   return storePromise;
 }

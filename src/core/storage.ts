@@ -24,7 +24,7 @@ const storeCache = new Map<string, ReturnType<typeof load>>();
 export function getTauriStore(filename: string): Promise<Store> {
   let cached = storeCache.get(filename);
   if (!cached) {
-    cached = load(filename, { autoSave: true });
+    cached = load(filename, { defaults: {}, autoSave: true });
     storeCache.set(filename, cached);
   }
   return cached;

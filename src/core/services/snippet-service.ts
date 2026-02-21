@@ -29,7 +29,14 @@ export interface Snippet extends SyncMeta {
   updatedAt: number;
 }
 
-export type CreateSnippetDTO = Omit<Snippet, "id" | "createdAt" | "lastUsedAt" | "useCount">;
+export interface CreateSnippetDTO {
+  title: string;
+  content: string;
+  keyword?: string;
+  category?: string;
+  isDynamic?: boolean;
+  dynamicPrompt?: string;
+}
 
 // ── 数据库实例 ──
 
@@ -83,8 +90,13 @@ export class SnippetService {
   async create(data: CreateSnippetDTO): Promise<{ id: string; snippets: Snippet[] }> {
     const id = generateSnippetId();
     const snippet: Snippet = {
-      ...data,
       id,
+      title: data.title,
+      content: data.content,
+      keyword: data.keyword ?? "",
+      category: data.category ?? "",
+      isDynamic: data.isDynamic ?? false,
+      dynamicPrompt: data.dynamicPrompt ?? "",
       createdAt: Date.now(),
       lastUsedAt: 0,
       useCount: 0,

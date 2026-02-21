@@ -48,7 +48,8 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "plugins/**/*"
+      "plugins/**/*",
+      "resources/ocr/**/*"
     ]
   },
   "plugins": {

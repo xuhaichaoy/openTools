@@ -4,7 +4,10 @@
  */
 
 import { usePluginStore } from "@/store/plugin-store";
-import { checkPermission } from "@/core/plugin-system/permission-guard";
+import {
+  checkPermission,
+  isKnownPluginApiMethod,
+} from "@/core/plugin-system/permission-guard";
 
 /** 生成随机桥接 Token */
 export function createBridgeToken(): string {
@@ -36,6 +39,7 @@ export function getAllowedEmbedCommands(pluginId: string): Set<string> {
 
   const base = new Set<string>([
     "plugin_api_call",
+    "plugin_action_callback",
     "open_url",
     "plugin_start_color_picker",
   ]);
@@ -45,26 +49,7 @@ export function getAllowedEmbedCommands(pluginId: string): Set<string> {
 /** 验证插件 API 方法名是否在白名单中 */
 export function isAllowedPluginApiMethod(method: unknown): method is string {
   if (typeof method !== "string") return false;
-  const allowed = new Set<string>([
-    "hideMainWindow",
-    "showMainWindow",
-    "setExpendHeight",
-    "copyText",
-    "showNotification",
-    "shellOpenExternal",
-    "shellOpenPath",
-    "shellShowItemInFolder",
-    "getPath",
-    "copyImage",
-    "setSubInput",
-    "removeSubInput",
-    "redirect",
-    "dbStorage.setItem",
-    "dbStorage.getItem",
-    "dbStorage.removeItem",
-    "outPlugin",
-  ]);
-  return allowed.has(method);
+  return isKnownPluginApiMethod(method);
 }
 
 /** 验证插件 API 调用参数格式 */
@@ -72,14 +57,14 @@ export function isValidPluginApiCallArgs(args: Record<string, unknown>): args is
   pluginId: string;
   method: string;
   args: string;
-  callId: number;
+  callId?: number;
 } {
   return (
     typeof args.pluginId === "string" &&
     typeof args.method === "string" &&
     typeof args.args === "string" &&
-    typeof args.callId === "number" &&
-    Number.isFinite(args.callId)
+    (args.callId === undefined ||
+      (typeof args.callId === "number" && Number.isFinite(args.callId)))
   );
 }
 

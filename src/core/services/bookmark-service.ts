@@ -29,7 +29,13 @@ export interface Bookmark extends SyncMeta {
   updatedAt: number;
 }
 
-export type CreateBookmarkDTO = Omit<Bookmark, "id" | "createdAt" | "lastVisitedAt" | "visitCount">;
+export interface CreateBookmarkDTO {
+  title: string;
+  url: string;
+  keyword?: string;
+  category?: string;
+  favicon?: string;
+}
 
 // ── 数据库实例 ──
 
@@ -156,8 +162,11 @@ export class BookmarkService {
   async create(data: CreateBookmarkDTO): Promise<{ id: string; bookmarks: Bookmark[] }> {
     const id = generateBookmarkId();
     const bookmark: Bookmark = {
-      ...data,
       id,
+      title: data.title,
+      url: data.url,
+      keyword: data.keyword ?? "",
+      category: data.category ?? "",
       favicon: data.favicon || getFaviconUrl(data.url),
       createdAt: Date.now(),
       lastVisitedAt: 0,

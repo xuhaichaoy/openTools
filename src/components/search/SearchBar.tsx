@@ -1,4 +1,4 @@
-import { useRef, useEffect, useCallback, useState } from "react";
+import { useRef, useEffect, useState } from "react";
 import { Search, Bot, X, User } from "lucide-react";
 import { handleError } from "@/core/errors";
 import { useAppStore } from "@/store/app-store";
@@ -22,7 +22,7 @@ export function SearchBar({
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const measureRef = useRef<HTMLSpanElement>(null);
-  const { mode, setMode, searchValue, setSearchValue, reset } = useAppStore();
+  const { mode, setMode, searchValue, setSearchValue, resetSearchState } = useAppStore();
   const [pendingImages, setPendingImages] = useState<
     { path: string; preview: string }[]
   >([]);
@@ -50,47 +50,44 @@ export function SearchBar({
     }
   }, [searchValue]);
 
-  const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
-      const { selectedIndex, setSelectedIndex } = useAppStore.getState();
-      if (e.key === "Escape") {
-        if (searchValue) {
-          reset();
-        } else {
-          invoke("hide_window");
-        }
-        e.preventDefault();
-      } else if (e.key === "Backspace" && !searchValue) {
-        if (pendingImages.length > 0) {
-          e.preventDefault();
-          const newImages = [...pendingImages];
-          newImages.pop();
-          setPendingImages(newImages);
-          if (newImages.length === 0 && mode === "ai") {
-            setMode("search");
-          }
-        }
-      } else if (e.key === "Enter") {
-        const paths = pendingImages.map((img) => img.path);
-        // 如果有图片，强制使用 AI 模式提交
-        if (paths.length > 0) {
-          onSubmit?.(searchValue, "ai", paths);
-        } else {
-          onSubmit?.(searchValue, mode);
-        }
-        setPendingImages([]);
-        e.preventDefault();
-      } else if (e.key === "ArrowDown") {
-        e.preventDefault();
-        const max = (resultCount || 1) - 1;
-        setSelectedIndex(Math.min(selectedIndex + 1, max));
-      } else if (e.key === "ArrowUp") {
-        e.preventDefault();
-        setSelectedIndex(Math.max(selectedIndex - 1, 0));
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    const { selectedIndex, setSelectedIndex } = useAppStore.getState();
+    if (e.key === "Escape") {
+      if (searchValue) {
+        resetSearchState();
+      } else {
+        invoke("hide_window");
       }
-    },
-    [searchValue, mode, reset, onSubmit, resultCount],
-  );
+      e.preventDefault();
+    } else if (e.key === "Backspace" && !searchValue) {
+      if (pendingImages.length > 0) {
+        e.preventDefault();
+        const newImages = [...pendingImages];
+        newImages.pop();
+        setPendingImages(newImages);
+        if (newImages.length === 0 && mode === "ai") {
+          setMode("search");
+        }
+      }
+    } else if (e.key === "Enter") {
+      const paths = pendingImages.map((img) => img.path);
+      // 如果有图片，强制使用 AI 模式提交
+      if (paths.length > 0) {
+        onSubmit?.(searchValue, "ai", paths);
+      } else {
+        onSubmit?.(searchValue, mode);
+      }
+      setPendingImages([]);
+      e.preventDefault();
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      const max = (resultCount || 1) - 1;
+      setSelectedIndex(Math.min(selectedIndex + 1, max));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setSelectedIndex(Math.max(selectedIndex - 1, 0));
+    }
+  };
 
   const { onMouseDown: handleDrag } = useDragWindow();
 

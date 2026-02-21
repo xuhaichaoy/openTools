@@ -60,7 +60,9 @@ export function useFileSearch(searchValue: string): FileSearchResult[] {
       isAppPrefix ||
       (isPrefix && !isFilePrefix)
     ) {
-      setFileResults([]);
+      queueMicrotask(() => {
+        setFileResults([]);
+      });
       return;
     }
 

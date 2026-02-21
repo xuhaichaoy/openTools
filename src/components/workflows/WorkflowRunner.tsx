@@ -9,18 +9,22 @@ interface WorkflowRunnerProps {
 }
 
 export function WorkflowRunner({ execution, stepNames, onClose }: WorkflowRunnerProps) {
-  const [elapsedTick, setElapsedTick] = useState(0)
+  const [nowTs, setNowTs] = useState(() => Date.now())
   const isRunning = execution.status === 'running'
 
   useEffect(() => {
-    if (!isRunning) return
-    const t = setInterval(() => setElapsedTick((n) => n + 1), 1000)
+    if (!isRunning) {
+      queueMicrotask(() => setNowTs(Date.now()))
+      return
+    }
+    queueMicrotask(() => setNowTs(Date.now()))
+    const t = setInterval(() => setNowTs(Date.now()), 1000)
     return () => clearInterval(t)
   }, [isRunning])
 
   const elapsed = execution.endTime
     ? ((execution.endTime - execution.startTime) / 1000).toFixed(1)
-    : ((Date.now() - execution.startTime) / 1000).toFixed(1)
+    : ((nowTs - execution.startTime) / 1000).toFixed(1)
 
   return (
     <div className="bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-xl p-4 space-y-3">

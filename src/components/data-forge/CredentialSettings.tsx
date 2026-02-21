@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { Eye, EyeOff, Save, Check, ShieldCheck, Terminal } from 'lucide-react'
 import { handleError } from '@/core/errors'
 import { invoke } from '@tauri-apps/api/core'
@@ -17,30 +17,32 @@ export function CredentialSettings() {
   const [pythonPath, setPythonPath] = useState('')
   const [pythonDetecting, setPythonDetecting] = useState(false)
 
-  useEffect(() => {
-    loadCredentials()
-    detectPython()
-  }, [])
-
-  const loadCredentials = async () => {
+  const loadCredentials = useCallback(async () => {
     try {
       const creds = await invoke<CredentialItem[]>('dataforge_get_credentials')
       setCredentials(creds)
     } catch (e) {
       handleError(e, { context: '加载凭证' })
     }
-  }
+  }, [])
 
-  const detectPython = async () => {
+  const detectPython = useCallback(async () => {
     setPythonDetecting(true)
     try {
       const path = await invoke<string>('get_python_path')
       setPythonPath(path)
-    } catch (e) {
+    } catch {
       setPythonPath('未检测到')
     }
     setPythonDetecting(false)
-  }
+  }, [])
+
+  useEffect(() => {
+    queueMicrotask(() => {
+      void loadCredentials()
+      void detectPython()
+    })
+  }, [loadCredentials, detectPython])
 
   const handleSave = async (key: string) => {
     const value = editValues[key]

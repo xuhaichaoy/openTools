@@ -1,6 +1,12 @@
 import { useAppStore } from "@/store/app-store";
 import { registry } from "@/core/plugin-system/registry";
-import { Globe, Terminal, ScanText, Languages, MessageCircle, Puzzle } from "lucide-react";
+import { Globe, Terminal } from "lucide-react";
+import {
+  PluginsIcon,
+  OcrIcon,
+  ScreenTranslateIcon,
+  AiCenterIcon,
+} from "@/components/icons/animated";
 import { useMemo } from "react";
 import { usePluginStore } from "@/store/plugin-store";
 import { isBuiltinPluginInstallRequired } from "@/plugins/builtin";
@@ -10,7 +16,8 @@ interface DashboardProps {
 }
 
 export function Dashboard({ onNavigate }: DashboardProps) {
-  const { setSelectedIndex, setSearchValue, recentTools, addRecentTool } = useAppStore();
+  const { setSelectedIndex, setSearchValue, recentTools, addRecentTool } =
+    useAppStore();
   const { plugins, openPlugin } = usePluginStore();
 
   const allTools = useMemo(() => {
@@ -28,11 +35,19 @@ export function Dashboard({ onNavigate }: DashboardProps) {
 
     const externalTools = plugins
       .filter((plugin) => {
-        if (plugin.isBuiltin || !plugin.enabled || plugin.manifest.features.length === 0) {
+        if (
+          plugin.isBuiltin ||
+          !plugin.enabled ||
+          plugin.manifest.features.length === 0
+        ) {
           return false;
         }
         const slug = plugin.slug?.toLowerCase();
-        if (plugin.source === "official" && slug && isBuiltinPluginInstallRequired(slug)) {
+        if (
+          plugin.source === "official" &&
+          slug &&
+          isBuiltinPluginInstallRequired(slug)
+        ) {
           return false;
         }
         return true;
@@ -41,16 +56,17 @@ export function Dashboard({ onNavigate }: DashboardProps) {
         const primaryFeature = plugin.manifest.features[0];
         return {
           id: `ext-${plugin.id}`,
-          icon: <Puzzle className="w-6 h-6" />,
+          icon: <PluginsIcon className="w-6 h-6" />,
           title: plugin.manifest.pluginName,
           recentKey: `plugin:${plugin.id}`,
           action: () => {
             addRecentTool(`plugin:${plugin.id}`);
             openPlugin(plugin.id, primaryFeature.code);
           },
-          color: plugin.source === "official"
-            ? "text-orange-500 bg-orange-500/10"
-            : "text-cyan-500 bg-cyan-500/10",
+          color:
+            plugin.source === "official"
+              ? "text-orange-500 bg-orange-500/10"
+              : "text-cyan-500 bg-cyan-500/10",
         };
       });
 
@@ -71,7 +87,7 @@ export function Dashboard({ onNavigate }: DashboardProps) {
   const quickActions = [
     {
       id: "screenshot-ocr",
-      icon: <ScanText className="w-6 h-6" />,
+      icon: <OcrIcon className="w-6 h-6" />,
       title: "截图 OCR",
       action: () => {
         addRecentTool("ocr");
@@ -81,7 +97,7 @@ export function Dashboard({ onNavigate }: DashboardProps) {
     },
     {
       id: "screenshot-translate",
-      icon: <Languages className="w-6 h-6" />,
+      icon: <ScreenTranslateIcon className="w-6 h-6" />,
       title: "截图翻译",
       action: () => {
         addRecentTool("screen-translate");
@@ -91,7 +107,7 @@ export function Dashboard({ onNavigate }: DashboardProps) {
     },
     {
       id: "ai-chat",
-      icon: <MessageCircle className="w-6 h-6" />,
+      icon: <AiCenterIcon className="w-6 h-6" />,
       title: "AI 问答",
       action: () => {
         addRecentTool("ai-center");

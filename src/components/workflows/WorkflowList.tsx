@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { ArrowLeft, Plus, Play, Pencil, Trash2, RefreshCw, Loader2, Share2, Download } from 'lucide-react'
 import { handleError } from '@/core/errors'
 import { useWorkflowStore } from '@/store/workflow-store'
@@ -34,16 +34,28 @@ export function WorkflowList({ onBack }: { onBack?: () => void }) {
   const { toast } = useToast()
   const { onMouseDown } = useDragWindow()
 
-  useEffect(() => {
-    handleRefresh()
-    if (isLoggedIn) loadTeams()
-  }, [isLoggedIn])
+  const toWorkflowInput = (
+    raw: Workflow,
+  ): Omit<Workflow, 'id' | 'builtin' | 'created_at'> => {
+    const workflowBody: Partial<Workflow> = { ...raw }
+    delete workflowBody.id
+    delete workflowBody.builtin
+    delete workflowBody.created_at
+    return workflowBody as Omit<Workflow, 'id' | 'builtin' | 'created_at'>
+  }
 
-  const handleRefresh = async () => {
+  const handleRefresh = useCallback(async () => {
     setLoading(true)
     await loadWorkflows()
     setLoading(false)
-  }
+  }, [loadWorkflows])
+
+  useEffect(() => {
+    void handleRefresh()
+    if (isLoggedIn) {
+      void loadTeams()
+    }
+  }, [isLoggedIn, handleRefresh, loadTeams])
 
   const handleCreate = async (data: Omit<Workflow, 'id' | 'builtin' | 'created_at'>) => {
     try {
@@ -93,8 +105,7 @@ export function WorkflowList({ onBack }: { onBack?: () => void }) {
     if (!activeTeamId) return
     setSharingId(workflow.id)
     try {
-      const { id: _id, builtin: _builtin, created_at: _createdAt, ...workflowBody } =
-        workflow
+      const workflowBody = toWorkflowInput(workflow)
       await createWorkflowTemplate(activeTeamId, {
         name: workflow.name,
         description: workflow.description,
@@ -132,12 +143,7 @@ export function WorkflowList({ onBack }: { onBack?: () => void }) {
 
       const detail = await getWorkflowTemplate(activeTeamId, template.id)
       const rawWorkflow = detail.workflow_json as Partial<Workflow>
-      const {
-        id: _id,
-        builtin: _builtin,
-        created_at: _createdAt,
-        ...workflowBody
-      } = rawWorkflow as Workflow
+      const workflowBody = toWorkflowInput(rawWorkflow as Workflow)
 
       if (!workflowBody.name || !workflowBody.trigger) {
         throw new Error('模板内容缺失，无法导入')

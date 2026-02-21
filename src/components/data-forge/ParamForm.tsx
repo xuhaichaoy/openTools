@@ -21,15 +21,17 @@ function buildInitialValues(params: ScriptParam[]): Record<string, unknown> {
   return initial
 }
 
-export function ParamForm({ params, onSubmit, onChange, isRunning, formId }: ParamFormProps) {
+export function ParamForm({ params, onSubmit, onChange, formId }: ParamFormProps) {
   const [values, setValues] = useState<Record<string, unknown>>(() => buildInitialValues(params))
 
   // 当 params 变化时（切换脚本）重置表单值
   useEffect(() => {
     const newValues = buildInitialValues(params)
-    setValues(newValues)
-    onChange?.(newValues)
-  }, [params])
+    queueMicrotask(() => {
+      setValues(newValues)
+      onChange?.(newValues)
+    })
+  }, [params, onChange])
 
   const updateValue = (name: string, value: unknown) => {
     setValues((prev) => {

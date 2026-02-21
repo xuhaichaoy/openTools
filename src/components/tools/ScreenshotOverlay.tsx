@@ -28,38 +28,10 @@ export function ScreenshotOverlay({
   const [shiftDown, setShiftDown] = useState(false);
   const bgImageRef = useRef<HTMLImageElement | null>(null);
 
-  // 加载背景图片
-  useEffect(() => {
-    const img = new Image();
-    img.onload = () => {
-      bgImageRef.current = img;
-      drawCanvas();
-    };
-    img.src = imageSrc;
-  }, [imageSrc]);
-
-  // 键盘事件
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onCancel();
-      if (e.key === "Enter" && hasSelection) confirmSelection();
-      if (e.key === "Shift") setShiftDown(true);
-    };
-    const handleKeyUp = (e: KeyboardEvent) => {
-      if (e.key === "Shift") setShiftDown(false);
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    window.addEventListener("keyup", handleKeyUp);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-      window.removeEventListener("keyup", handleKeyUp);
-    };
-  }, [hasSelection, onCancel]);
-
   // 获取选区矩形（归一化，确保 width/height 为正）
   const getSelectionRect = useCallback(() => {
-    let x = Math.min(startPos.x, currentPos.x);
-    let y = Math.min(startPos.y, currentPos.y);
+    const x = Math.min(startPos.x, currentPos.x);
+    const y = Math.min(startPos.y, currentPos.y);
     let w = Math.abs(currentPos.x - startPos.x);
     let h = Math.abs(currentPos.y - startPos.y);
 
@@ -72,6 +44,13 @@ export function ScreenshotOverlay({
 
     return { x, y, width: w, height: h };
   }, [startPos, currentPos, shiftDown]);
+
+  const confirmSelection = useCallback(() => {
+    const rect = getSelectionRect();
+    if (rect.width > 5 && rect.height > 5) {
+      onConfirm(rect);
+    }
+  }, [getSelectionRect, onConfirm]);
 
   // 绘制 Canvas
   const drawCanvas = useCallback(() => {
@@ -138,6 +117,34 @@ export function ScreenshotOverlay({
     }
   }, [isDrawing, hasSelection, getSelectionRect]);
 
+  // 加载背景图片
+  useEffect(() => {
+    const img = new Image();
+    img.onload = () => {
+      bgImageRef.current = img;
+      drawCanvas();
+    };
+    img.src = imageSrc;
+  }, [imageSrc, drawCanvas]);
+
+  // 键盘事件
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+      if (e.key === "Enter" && hasSelection) confirmSelection();
+      if (e.key === "Shift") setShiftDown(true);
+    };
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.key === "Shift") setShiftDown(false);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+    };
+  }, [hasSelection, onCancel, confirmSelection]);
+
   // 选区变化时重绘
   useEffect(() => {
     drawCanvas();
@@ -161,13 +168,6 @@ export function ScreenshotOverlay({
     const rect = getSelectionRect();
     if (rect.width > 5 && rect.height > 5) {
       setHasSelection(true);
-    }
-  };
-
-  const confirmSelection = () => {
-    const rect = getSelectionRect();
-    if (rect.width > 5 && rect.height > 5) {
-      onConfirm(rect);
     }
   };
 

@@ -3,9 +3,10 @@
  * 从 App.tsx 提取的插件嵌入逻辑
  */
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useAppStore } from "@/store/app-store";
 import { getMToolsAI } from "@/core/ai/mtools-ai";
+import { MAIN_VIEW_ID, PLUGIN_EMBED_VIEW_ID } from "@/core/navigation/view-stack";
 import {
   createBridgeToken,
   isAllowedEmbedOrigin,
@@ -13,6 +14,7 @@ import {
   getAllowedEmbedCommands,
   isAllowedPluginApiMethod,
   isValidPluginApiCallArgs,
+  checkPluginApiPermission,
 } from "@/shell/PluginBridge";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -32,23 +34,19 @@ interface EmbedSecurity {
 
 export function usePluginEmbed(view: string, pushView: (v: string) => void) {
   const [embedTarget, setEmbedTarget] = useState<EmbedTarget | null>(null);
-  const [embedBridgeToken, setEmbedBridgeToken] = useState<string | null>(null);
+  const embedBridgeToken = useMemo(() => {
+    if (view !== PLUGIN_EMBED_VIEW_ID || !embedTarget) {
+      return null;
+    }
+    return createBridgeToken();
+  }, [view, embedTarget]);
   const embedSecurityRef = useRef<EmbedSecurity>({
-    view: "main",
+    view: MAIN_VIEW_ID,
     pluginId: null,
     token: null,
     source: null,
     origin: null,
   });
-
-  // 生成 bridge token
-  useEffect(() => {
-    if (view === "plugin-embed" && embedTarget) {
-      setEmbedBridgeToken(createBridgeToken());
-    } else {
-      setEmbedBridgeToken(null);
-    }
-  }, [view, embedTarget?.pluginId, embedTarget?.featureCode]);
 
   // 同步安全上下文
   useEffect(() => {
@@ -62,16 +60,28 @@ export function usePluginEmbed(view: string, pushView: (v: string) => void) {
   }, [view, embedTarget?.pluginId, embedBridgeToken]);
 
   // 监听 app-store 嵌入请求
-  const pendingEmbed = useAppStore((s) => s.pendingEmbed);
   useEffect(() => {
-    if (pendingEmbed) {
+    const openPendingEmbed = () => {
       const req = useAppStore.getState().consumeEmbed();
       if (req) {
         setEmbedTarget(req);
-        pushView("plugin-embed");
+        pushView(PLUGIN_EMBED_VIEW_ID);
       }
-    }
-  }, [pendingEmbed, pushView]);
+    };
+
+    queueMicrotask(openPendingEmbed);
+
+    const unsubscribe = useAppStore.subscribe((state, prevState) => {
+      if (
+        state.pendingEmbed &&
+        state.pendingEmbed !== prevState.pendingEmbed
+      ) {
+        openPendingEmbed();
+      }
+    });
+
+    return unsubscribe;
+  }, [pushView]);
 
   // PostMessage 桥接处理器
   useEffect(() => {
@@ -95,7 +105,7 @@ export function usePluginEmbed(view: string, pushView: (v: string) => void) {
         }
         const sec = embedSecurityRef.current;
         if (
-          sec.view !== "plugin-embed" ||
+          sec.view !== PLUGIN_EMBED_VIEW_ID ||
           !sec.pluginId ||
           !sec.token ||
           d.pluginId !== sec.pluginId ||
@@ -138,7 +148,7 @@ export function usePluginEmbed(view: string, pushView: (v: string) => void) {
               },
               targetOrigin,
             );
-          } catch (_) {
+          } catch {
             // iframe 可能已卸载
           }
         };
@@ -166,6 +176,32 @@ export function usePluginEmbed(view: string, pushView: (v: string) => void) {
               undefined,
               "Permission denied: plugin API method is not allowed.",
             );
+            return;
+          }
+          const denyReason = checkPluginApiPermission(
+            args.pluginId,
+            args.method,
+          );
+          if (denyReason) {
+            send(undefined, `Permission denied: ${denyReason}`);
+            return;
+          }
+        }
+
+        if (cmd === "plugin_action_callback") {
+          const callbackArgs = args as Record<string, unknown>;
+          const pluginId =
+            typeof callbackArgs.pluginId === "string" ? callbackArgs.pluginId : "";
+          const requestId =
+            typeof callbackArgs.requestId === "string"
+              ? callbackArgs.requestId
+              : "";
+          if (pluginId !== sec.pluginId) {
+            send(undefined, "Permission denied: plugin identity mismatch.");
+            return;
+          }
+          if (!requestId) {
+            send(undefined, "Invalid plugin_action_callback args payload.");
             return;
           }
         }

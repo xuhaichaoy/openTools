@@ -4,11 +4,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 cd "$ROOT_DIR"
-echo "[quality] npm run build"
-npm run build
+echo "[quality] pnpm build"
+pnpm build
 
-echo "[quality] npm run test"
-npm run test
+echo "[quality] pnpm test"
+pnpm test
+
+echo "[quality] pnpm lint"
+pnpm lint
 
 echo "[quality] cargo test (mtools-server)"
 (

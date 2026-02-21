@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type CSSProperties } from "react";
 import { Server, Check, AlertCircle, Loader2 } from "lucide-react";
 import { useServerStore } from "@/store/server-store";
 import { handleError } from "@/core/errors";
@@ -11,6 +11,9 @@ export function ServerConfigTab() {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<"ok" | "fail" | null>(null);
   const [saved, setSaved] = useState(false);
+  const inputRingStyle: CSSProperties & Record<"--tw-ring-color", string> = {
+    "--tw-ring-color": `${BRAND}30`,
+  };
 
   const handleTest = async () => {
     setTesting(true);
@@ -34,7 +37,7 @@ export function ServerConfigTab() {
   };
 
   return (
-    <div className="max-w-xl mx-auto space-y-4">
+    <div className="max-w-xl mx-auto space-y-[var(--space-compact-3)]">
       <div>
         <h2 className="text-sm font-semibold">服务器地址</h2>
         <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">
@@ -42,7 +45,7 @@ export function ServerConfigTab() {
         </p>
       </div>
 
-      <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-4 space-y-3">
+      <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-[var(--space-compact-3)] space-y-[var(--space-compact-2)]">
         <div>
           <label className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
             后端地址
@@ -57,7 +60,7 @@ export function ServerConfigTab() {
             }}
             placeholder="http://localhost:3000"
             className="mt-1 w-full bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-2 px-3 text-xs outline-none focus:ring-2 transition-all text-[var(--color-text)]"
-            style={{ "--tw-ring-color": `${BRAND}30` } as any}
+            style={inputRingStyle}
           />
         </div>
 
@@ -105,7 +108,7 @@ export function ServerConfigTab() {
         </div>
       </div>
 
-      <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-4">
+      <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-[var(--space-compact-3)]">
         <h3 className="text-xs font-semibold mb-1">关于私有部署</h3>
         <p className="text-[10px] text-[var(--color-text-secondary)] leading-relaxed">
           mTools 支持私有部署后端服务。使用 Docker Compose

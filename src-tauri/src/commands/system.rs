@@ -315,7 +315,7 @@ fn get_allowed_path_roots(app: &tauri::AppHandle) -> Vec<PathBuf> {
 }
 
 /// 校验文件路径是否在允许的根目录范围内
-fn validate_path_access(app: &tauri::AppHandle, path: &str) -> Result<(), String> {
+pub(crate) fn validate_path_access(app: &tauri::AppHandle, path: &str) -> Result<(), String> {
     // 阻止显式的路径遍历攻击
     if path.contains("..") {
         return Err("安全限制：路径不允许包含 '..'".to_string());
@@ -372,7 +372,7 @@ const BLOCKED_COMMAND_PATTERNS: &[&str] = &[
 ];
 
 /// 校验 Shell 命令是否安全
-fn validate_shell_command(command: &str) -> Result<(), String> {
+pub(crate) fn validate_shell_command(command: &str) -> Result<(), String> {
     let lower = command.to_lowercase();
     let trimmed = lower.trim();
     for pattern in BLOCKED_COMMAND_PATTERNS {

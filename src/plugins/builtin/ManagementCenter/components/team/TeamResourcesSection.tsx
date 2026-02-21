@@ -60,7 +60,7 @@ export function TeamResourcesSection({
 
   if (!teamActive) {
     return (
-      <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-4">
+      <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-[var(--space-compact-3)]">
         <h3 className="text-xs font-semibold">共享资源</h3>
         <p className="text-[10px] text-[var(--color-text-secondary)] mt-1">
           团队已到期，团队共享资源能力不可用，续费后恢复。
@@ -70,9 +70,9 @@ export function TeamResourcesSection({
   }
 
   return (
-    <div className="space-y-3">
-      <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-4">
-        <div className="flex items-center justify-between mb-3">
+    <div className="space-y-[var(--space-compact-2)]">
+      <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-[var(--space-compact-3)]">
+        <div className="flex items-center justify-between mb-2">
           <div>
             <h3 className="text-xs font-semibold">共享资源</h3>
             <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
@@ -94,7 +94,7 @@ export function TeamResourcesSection({
             {resources.map((resource) => (
               <div
                 key={resource.id}
-                className="flex items-center justify-between py-2.5"
+                className="flex items-center justify-between py-2"
               >
                 <div className="flex items-center gap-2.5">
                   {resource.resource_type === "knowledge_doc" ? (

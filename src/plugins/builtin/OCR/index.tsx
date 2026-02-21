@@ -1,16 +1,17 @@
 import React, { useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { readFile } from "@tauri-apps/plugin-fs";
 import {
   ScanText,
   Upload,
   Clipboard,
-  Camera,
   Copy,
   Check,
   Loader2,
-  ChevronDown,
   Globe,
+  FolderOpen,
+  RefreshCw,
+  AlertTriangle,
+  X,
 } from "lucide-react";
 import {
   emitPluginEvent,
@@ -33,6 +34,24 @@ interface OcrResult {
   rotation_angle: number;
 }
 
+interface OcrRuntimeInfo {
+  install_dir: string;
+  search_dirs: string[];
+  required_files: string[];
+  missing_required_files: string[];
+  runtime_library_loaded?: boolean;
+  runtime_library_path?: string | null;
+  runtime_library_error?: string | null;
+  runtime_search_dirs?: string[];
+  ready: boolean;
+}
+
+declare global {
+  interface Window {
+    __PENDING_OCR_IMAGE__?: string;
+  }
+}
+
 const LANGUAGES = [
   { code: "ch", name: "中文" },
   { code: "en", name: "English" },
@@ -50,7 +69,49 @@ const OCRPlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const [copied, setCopied] = useState(false);
   const [detectRotation, setDetectRotation] = useState(false);
   const [mergeParagraph, setMergeParagraph] = useState(true);
+  const [runtimeInfo, setRuntimeInfo] = useState<OcrRuntimeInfo | null>(null);
+  const [checkingModels, setCheckingModels] = useState(false);
+  const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const refreshRuntimeInfo =
+    useCallback(async (): Promise<OcrRuntimeInfo | null> => {
+      setCheckingModels(true);
+      try {
+        const info = await invoke<OcrRuntimeInfo>("ocr_get_runtime_info");
+        setRuntimeInfo(info);
+        return info;
+      } catch {
+        return null;
+      } finally {
+        setCheckingModels(false);
+      }
+    }, []);
+
+  const buildMissingModelMessage = useCallback(
+    (info: OcrRuntimeInfo | null) => {
+      if (info?.runtime_library_loaded === false) {
+        return `OCR 运行时缺失或加载失败。\n${info.runtime_library_error || ""}`;
+      }
+      const missing =
+        info?.missing_required_files?.join(" / ") ||
+        "ppocr_det.onnx / ppocr_rec.onnx";
+      const installDir = info?.install_dir || "(未知目录)";
+      return `OCR 模型缺失：${missing}。请先安装后重试。\n建议目录：${installDir}`;
+    },
+    [],
+  );
+
+  const handleOpenModelDir = useCallback(async () => {
+    try {
+      const installDir = await invoke<string>("ocr_open_model_dir");
+      setError(
+        `已打开模型目录，请将 ppocr_det.onnx、ppocr_rec.onnx（以及 macOS 下的 libonnxruntime.dylib）放入：${installDir}`,
+      );
+    } catch (e) {
+      setError(`打开模型目录失败: ${String(e)}`);
+    }
+  }, []);
 
   const doOcr = useCallback(
     async (base64: string) => {
@@ -71,12 +132,24 @@ const OCRPlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
           blocks: res.blocks,
         });
       } catch (e) {
-        setError(String(e));
+        const message = String(e);
+        if (message.includes("OCR models not loaded")) {
+          const info = await refreshRuntimeInfo();
+          setError(buildMissingModelMessage(info));
+        } else {
+          setError(message);
+        }
       } finally {
         setLoading(false);
       }
     },
-    [language, detectRotation, mergeParagraph],
+    [
+      language,
+      detectRotation,
+      mergeParagraph,
+      refreshRuntimeInfo,
+      buildMissingModelMessage,
+    ],
   );
 
   const handleFileSelect = useCallback(
@@ -140,15 +213,49 @@ const OCRPlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     return unsub;
   }, [doOcr]);
 
+  // 监听全局粘贴事件
+  React.useEffect(() => {
+    const handleGlobalPaste = async (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].type.startsWith("image/")) {
+          e.preventDefault();
+          const file = items[i].getAsFile();
+          if (file) {
+            const reader = new FileReader();
+            reader.onload = async (ev) => {
+              const dataUrl = ev.target?.result as string;
+              setImagePreview(dataUrl);
+              const base64 = dataUrl.split(",")[1];
+              await doOcr(base64);
+            };
+            reader.readAsDataURL(file);
+            return;
+          }
+        }
+      }
+    };
+
+    window.addEventListener("paste", handleGlobalPaste);
+    return () => window.removeEventListener("paste", handleGlobalPaste);
+  }, [doOcr]);
+
   // 兜底：如果先切页后发事件失败，则读取全局待处理图片
   React.useEffect(() => {
-    const pending = (window as any).__PENDING_OCR_IMAGE__ as string | undefined;
+    const pending = window.__PENDING_OCR_IMAGE__;
     if (!pending) return;
-    delete (window as any).__PENDING_OCR_IMAGE__;
+    delete window.__PENDING_OCR_IMAGE__;
     const dataUrl = `data:image/png;base64,${pending}`;
     setImagePreview(dataUrl);
     doOcr(pending);
   }, [doOcr]);
+
+  React.useEffect(() => {
+    void refreshRuntimeInfo();
+  }, [refreshRuntimeInfo]);
+
+  const modelReady = runtimeInfo?.ready ?? true;
 
   return (
     <div className="flex flex-col h-full bg-[var(--color-bg)] text-[var(--color-text)]">
@@ -192,19 +299,21 @@ const OCRPlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
       {/* 主体 */}
       <div className="flex-1 overflow-auto p-4 flex gap-4">
         {/* 左侧：图片输入 */}
-        <div className="flex-1 flex flex-col gap-3">
+        <div className="w-[320px] shrink-0 flex flex-col gap-3">
           {/* 操作按钮 */}
           <div className="flex gap-2">
             <button
               onClick={() => fileInputRef.current?.click()}
-              className="flex items-center gap-1.5 px-3 py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600 transition-colors text-sm font-medium"
+              disabled={!modelReady}
+              className="flex items-center gap-1.5 px-3 py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600 transition-colors text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Upload className="w-4 h-4" />
               选择图片
             </button>
             <button
               onClick={handlePaste}
-              className="flex items-center gap-1.5 px-3 py-2 bg-[var(--color-bg-secondary)] rounded-lg hover:bg-[var(--color-bg-tertiary)] transition-colors text-sm"
+              disabled={!modelReady}
+              className="flex items-center gap-1.5 px-3 py-2 bg-[var(--color-bg-secondary)] rounded-lg hover:bg-[var(--color-bg-tertiary)] transition-colors text-sm disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Clipboard className="w-4 h-4" />
               从剪贴板
@@ -214,9 +323,51 @@ const OCRPlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
               type="file"
               accept="image/*"
               onChange={handleFileSelect}
+              disabled={!modelReady}
               className="hidden"
             />
           </div>
+
+          {runtimeInfo && !runtimeInfo.ready && (
+            <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-[var(--color-text)]">
+              <div className="flex items-center gap-1.5 font-medium text-amber-600">
+                <AlertTriangle className="w-3.5 h-3.5" />
+                OCR 模型未安装
+              </div>
+              <div className="mt-1 text-[var(--color-text-secondary)]">
+                缺失: {runtimeInfo.missing_required_files.join("、")}
+              </div>
+              <div className="mt-1 break-all text-[10px] text-[var(--color-text-secondary)]">
+                目录: {runtimeInfo.install_dir}
+              </div>
+              {runtimeInfo.runtime_library_loaded === false &&
+                runtimeInfo.runtime_library_error && (
+                  <div className="mt-1 whitespace-pre-wrap break-all text-[10px] text-red-500">
+                    Runtime: {runtimeInfo.runtime_library_error}
+                  </div>
+                )}
+              <div className="mt-2 flex items-center gap-2">
+                <button
+                  onClick={handleOpenModelDir}
+                  className="flex items-center gap-1 rounded-md bg-[var(--color-bg-secondary)] px-2 py-1 text-[10px] hover:bg-[var(--color-bg-tertiary)]"
+                >
+                  <FolderOpen className="w-3 h-3" />
+                  打开模型目录
+                </button>
+                <button
+                  onClick={() => {
+                    void refreshRuntimeInfo();
+                  }}
+                  className="flex items-center gap-1 rounded-md bg-[var(--color-bg-secondary)] px-2 py-1 text-[10px] hover:bg-[var(--color-bg-tertiary)]"
+                >
+                  <RefreshCw
+                    className={`w-3 h-3 ${checkingModels ? "animate-spin" : ""}`}
+                  />
+                  重新检测
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* 选项 */}
           <div className="flex gap-4 text-sm text-[var(--color-text-secondary)]">
@@ -246,7 +397,9 @@ const OCRPlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
               <img
                 src={imagePreview}
                 alt="OCR input"
-                className="max-w-full max-h-full object-contain"
+                className="max-w-full max-h-full object-contain cursor-pointer hover:opacity-90 transition-opacity"
+                onClick={() => setIsPreviewOpen(true)}
+                title="点击查看大图"
               />
             ) : (
               <div className="text-center text-[var(--color-text-secondary)]">
@@ -320,6 +473,31 @@ const OCRPlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
           </div>
         </div>
       </div>
+
+      {/* 大图预览 */}
+      {isPreviewOpen && imagePreview && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-in fade-in"
+          onClick={() => setIsPreviewOpen(false)}
+        >
+          <div
+            className="relative max-w-full max-h-full flex items-center justify-center"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <img
+              src={imagePreview}
+              alt="Large preview"
+              className="max-w-[90vw] max-h-[90vh] object-contain rounded shadow-2xl"
+            />
+            <button
+              onClick={() => setIsPreviewOpen(false)}
+              className="absolute -top-3 -right-3 bg-black/50 hover:bg-black/80 text-white rounded-full p-1.5 transition-colors"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

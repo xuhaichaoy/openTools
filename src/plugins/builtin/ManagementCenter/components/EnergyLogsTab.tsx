@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Zap, Loader2, ArrowDown, ArrowUp } from "lucide-react";
 import { api } from "@/core/api/client";
 import { handleError } from "@/core/errors";
@@ -22,11 +22,7 @@ export function EnergyLogsTab() {
   const [offset, setOffset] = useState(0);
   const limit = 20;
 
-  useEffect(() => {
-    fetchLogs();
-  }, [offset]);
-
-  const fetchLogs = async () => {
+  const fetchLogs = useCallback(async () => {
     setLoading(true);
     try {
       const res = await api.get<{ logs: EnergyLog[] }>("/ai/energy/logs", {
@@ -39,10 +35,14 @@ export function EnergyLogsTab() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [limit, offset]);
+
+  useEffect(() => {
+    fetchLogs();
+  }, [fetchLogs]);
 
   return (
-    <div className="max-w-xl mx-auto space-y-4">
+    <div className="max-w-xl mx-auto space-y-[var(--space-compact-3)]">
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-sm font-semibold">能量流水</h2>
@@ -77,7 +77,7 @@ export function EnergyLogsTab() {
             {logs.map((log) => (
               <div
                 key={log.id}
-                className="flex items-center justify-between px-4 py-2.5 hover:bg-[var(--color-bg-secondary)] transition-colors"
+                className="flex items-center justify-between px-[var(--space-compact-3)] py-2 hover:bg-[var(--color-bg-secondary)] transition-colors"
               >
                 <div className="flex items-center gap-2.5">
                   {log.amount < 0 ? (

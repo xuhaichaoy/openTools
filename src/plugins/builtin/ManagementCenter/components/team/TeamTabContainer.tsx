@@ -107,7 +107,7 @@ export function TeamTabContainer() {
   }
 
   return (
-    <div className="max-w-xl mx-auto space-y-4">
+    <div className="max-w-xl mx-auto space-y-[var(--space-compact-3)]">
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-sm font-semibold">团队空间</h2>
@@ -125,12 +125,12 @@ export function TeamTabContainer() {
       </div>
 
       {loading ? (
-        <div className="flex flex-col items-center justify-center py-12 text-[var(--color-text-secondary)]">
+        <div className="flex flex-col items-center justify-center py-10 text-[var(--color-text-secondary)]">
           <Loader2 className="w-5 h-5 animate-spin mb-2" />
           <p className="text-xs">加载中...</p>
         </div>
       ) : teams.length === 0 ? (
-        <div className="text-center py-12 bg-[var(--color-bg)] rounded-xl border border-dashed border-[var(--color-border)]">
+        <div className="text-center py-10 bg-[var(--color-bg)] rounded-xl border border-dashed border-[var(--color-border)]">
           <Users className="w-8 h-8 text-[var(--color-text-secondary)] mx-auto mb-2 opacity-20" />
           <p className="text-xs text-[var(--color-text-secondary)]">
             您还没有加入任何团队
@@ -169,9 +169,9 @@ export function TeamTabContainer() {
 
       {showCreate && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-          <div className="bg-[var(--color-bg)] w-[340px] rounded-xl p-5 border border-[var(--color-border)] shadow-xl">
-            <h3 className="text-sm font-semibold mb-4 text-center">创建新团队</h3>
-            <div className="space-y-3">
+          <div className="bg-[var(--color-bg)] w-[340px] rounded-xl p-[var(--space-compact-4)] border border-[var(--color-border)] shadow-xl">
+            <h3 className="text-sm font-semibold mb-3 text-center">创建新团队</h3>
+            <div className="space-y-[var(--space-compact-2)]">
               <div>
                 <label className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
                   团队名称
@@ -233,15 +233,11 @@ function TeamDetail({
         member.user_id === user.id &&
         (member.role === "owner" || member.role === "admin"),
     );
-
-  useEffect(() => {
-    if (!teamActive && teamSection !== "members") {
-      setTeamSection("members");
-    }
-  }, [teamActive, teamSection]);
+  const effectiveTeamSection =
+    !teamActive && teamSection !== "members" ? "members" : teamSection;
 
   return (
-    <div className="max-w-xl mx-auto space-y-4">
+    <div className="max-w-xl mx-auto space-y-[var(--space-compact-3)]">
       <button
         onClick={onBack}
         className="flex items-center gap-1.5 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text)] transition-colors"
@@ -250,7 +246,7 @@ function TeamDetail({
         返回列表
       </button>
 
-      <div className="bg-[var(--color-bg)] rounded-xl p-4 border border-[var(--color-border)] flex items-center gap-3">
+      <div className="bg-[var(--color-bg)] rounded-xl p-[var(--space-compact-3)] border border-[var(--color-border)] flex items-center gap-3">
         <div className="w-10 h-10 rounded-lg bg-[#F28F36]/10 flex items-center justify-center border border-[#F28F36]/20">
           <Users className="w-5 h-5 text-[#F28F36]" />
         </div>
@@ -263,7 +259,7 @@ function TeamDetail({
       </div>
 
       {!teamActive && (
-        <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3">
+        <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-[var(--space-compact-3)] py-2.5">
           <div className="text-xs font-semibold text-amber-600">团队已到期</div>
           <div className="text-[10px] text-amber-600/90 mt-1">
             当前仅可查看团队基础信息与成员列表，团队业务能力需续费后恢复。
@@ -286,7 +282,7 @@ function TeamDetail({
             }}
             disabled={tab.requiresActive && !teamActive}
             className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-xs font-medium transition-all ${
-              teamSection === tab.id
+              effectiveTeamSection === tab.id
                 ? "bg-[#F28F36]/10 text-[#F28F36]"
                 : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)]"
             } ${
@@ -301,7 +297,7 @@ function TeamDetail({
         ))}
       </div>
 
-      {teamSection === "members" && (
+      {effectiveTeamSection === "members" && (
         <TeamMembersSection
           teamId={team.id}
           members={members}
@@ -311,7 +307,7 @@ function TeamDetail({
         />
       )}
 
-      {teamSection === "ai-config" && (
+      {effectiveTeamSection === "ai-config" && (
         <TeamAIConfigSection
           teamId={team.id}
           teamMembers={members}
@@ -320,7 +316,7 @@ function TeamDetail({
         />
       )}
 
-      {teamSection === "resources" && (
+      {effectiveTeamSection === "resources" && (
         <TeamResourcesSection
           teamId={team.id}
           isOwnerOrAdmin={!!isOwnerOrAdmin}
@@ -328,7 +324,7 @@ function TeamDetail({
         />
       )}
 
-      {teamSection === "usage" && (
+      {effectiveTeamSection === "usage" && (
         <TeamUsageSection
           teamId={team.id}
           isOwnerOrAdmin={!!isOwnerOrAdmin}

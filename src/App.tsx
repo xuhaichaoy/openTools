@@ -1,14 +1,9 @@
-import { useState, useCallback, useEffect, useMemo, Suspense, useRef } from "react";
-import { SearchBar } from "@/components/search/SearchBar";
-import { ResultList, type ResultItem } from "@/components/search/ResultList";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
+import { type ResultItem } from "@/components/search/ResultList";
 import { ScreenshotSelector } from "@/components/tools/ScreenshotSelector";
-import { ContextActionPanel } from "@/components/ai/ContextActionPanel";
-import { Home } from "@/components/navigation/Home";
-import { Dashboard } from "@/components/home/Dashboard";
 import { LoginModal } from "@/components/auth/LoginModal";
 import { SyncManager } from "@/components/auth/SyncManager";
-import { PluginEmbed } from "@/components/plugins/PluginEmbed";
-import { PluginErrorBoundary } from "@/components/plugins/PluginErrorBoundary";
+import { MainViewRouter } from "@/components/app/MainViewRouter";
 import { useWorkflowStore } from "@/store/workflow-store";
 import { usePluginStore } from "@/store/plugin-store";
 import { useBookmarkStore } from "@/store/bookmark-store";
@@ -18,9 +13,6 @@ import { useAgentStore } from "@/store/agent-store";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, emit } from "@tauri-apps/api/event";
 import {
-  Globe,
-  Puzzle,
-  Workflow as WorkflowIcon,
   File,
   Folder,
   FileImage,
@@ -32,6 +24,11 @@ import {
   AppWindow,
   Rocket,
 } from "lucide-react";
+import {
+  PluginsIcon,
+  WorkflowsIcon,
+  BookmarksIcon,
+} from "@/components/icons/animated";
 
 // 插件注册中心
 import { registry } from "@/core/plugin-system/registry";
@@ -51,7 +48,16 @@ import { updateWindowSize } from "@/shell/WindowSizeManager";
 
 import { handleError, ErrorLevel } from "@/core/errors";
 import { WINDOW_HEIGHT_EXPANDED } from "@/core/constants";
-import { isBuiltinPluginInstallRequired, resolveBuiltinPlugins } from "@/plugins/builtin";
+import {
+  isBuiltinPluginInstallRequired,
+  resolveBuiltinPlugins,
+} from "@/plugins/builtin";
+import {
+  CONTEXT_ACTION_VIEW_ID,
+  MAIN_VIEW_ID,
+  getTopViewEntry,
+  isShellViewId,
+} from "@/core/navigation/view-stack";
 
 // 初始化：注册所有内置插件
 registry.registerAll(resolveBuiltinPlugins());
@@ -72,11 +78,16 @@ function App() {
 
 /** 主应用组件 — 所有 hooks 在此无条件调用，符合 Rules of Hooks */
 function MainApp() {
-  const view = useAppStore((s) => {
-    const top = s.viewStack[s.viewStack.length - 1];
-    return typeof top === 'string' ? top : top?.viewId ?? 'main';
-  });
-  const { mode, searchValue, setWindowExpanded, reset, pushView, popView, resetToMain } = useAppStore();
+  const view = useAppStore((s) => getTopViewEntry(s.viewStack).viewId);
+  const {
+    mode,
+    searchValue,
+    setWindowExpanded,
+    resetSearchState,
+    pushView,
+    popView,
+    resetToMain,
+  } = useAppStore();
   const runtimePlugins = usePluginStore((s) => s.plugins);
 
   const [contextText, setContextText] = useState("");
@@ -84,7 +95,10 @@ function MainApp() {
   // ── 提取的 Hooks ──
   const fileResults = useFileSearch(searchValue);
   const appResults = useAppSearch(searchValue);
-  const { embedTarget, setEmbedTarget, embedBridgeToken } = usePluginEmbed(view, pushView);
+  const { embedTarget, setEmbedTarget, embedBridgeToken } = usePluginEmbed(
+    view,
+    pushView,
+  );
   useScreenshotHandler(pushView);
 
   const handleDirectColorPicker = useCallback(async () => {
@@ -99,9 +113,12 @@ function MainApp() {
   useEffect(() => {
     let cancelled = false;
 
-    useAIStore.getState().loadConfig().then(() => {
-      if (!cancelled) useAIStore.getState().loadOwnKeys();
-    });
+    useAIStore
+      .getState()
+      .loadConfig()
+      .then(() => {
+        if (!cancelled) useAIStore.getState().loadOwnKeys();
+      });
     useAIStore.getState().loadHistory();
     useAgentStore.getState().loadHistory();
     useWorkflowStore.getState().loadWorkflows();
@@ -153,7 +170,9 @@ function MainApp() {
   }, [runtimePlugins]);
 
   useEffect(() => {
-    registry.registerAll(resolveBuiltinPlugins(installedOfficialBuiltinPluginIds));
+    registry.registerAll(
+      resolveBuiltinPlugins(installedOfficialBuiltinPluginIds),
+    );
   }, [installedOfficialBuiltinPluginIds]);
 
   // 监听 app-store 导航请求
@@ -165,20 +184,20 @@ function MainApp() {
         pushView(viewId);
       }
     }
-  }, [pendingNavigate]);
+  }, [pendingNavigate, pushView]);
 
   // 监听 Rust 发来的上下文操作事件
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     listen<{ text: string }>("context-action", (event) => {
       setContextText(event.payload.text);
-      pushView("context-action");
+      pushView(CONTEXT_ACTION_VIEW_ID);
       invoke("resize_window", { height: WINDOW_HEIGHT_EXPANDED });
     }).then((fn) => {
       unlisten = fn;
     });
     return () => unlisten?.();
-  }, []);
+  }, [pushView]);
 
   // 监听工作流插件动作请求（后端 → 前端）
   useEffect(() => {
@@ -291,7 +310,14 @@ function MainApp() {
   }, []);
 
   const fileResultToItem = useCallback(
-    (f: { name: string; path: string; is_dir: boolean; size: number; modified: string | null; file_type: string }): ResultItem => {
+    (f: {
+      name: string;
+      path: string;
+      is_dir: boolean;
+      size: number;
+      modified: string | null;
+      file_type: string;
+    }): ResultItem => {
       const sizeStr = f.is_dir ? "文件夹" : formatFileSize(f.size);
       return {
         id: `file-${f.path}`,
@@ -332,7 +358,9 @@ function MainApp() {
         icon: <Rocket className="w-6 h-6" />,
         color: "text-green-500 bg-green-500/10",
         category: "应用",
-        action: () => { invoke("file_open", { path: a.path }); },
+        action: () => {
+          invoke("file_open", { path: a.path });
+        },
       }));
     }
 
@@ -340,7 +368,20 @@ function MainApp() {
     const workflowStore = useWorkflowStore.getState();
     const matchedWorkflow = workflowStore.matchByKeyword(searchValue);
     if (matchedWorkflow) {
-      return [{ id: `wf-${matchedWorkflow.id}`, title: `${matchedWorkflow.icon} 运行: ${matchedWorkflow.name}`, description: matchedWorkflow.description, icon: <WorkflowIcon className="w-6 h-6" />, color: "text-teal-500 bg-teal-500/10", category: "工作流", action: () => { workflowStore.executeWorkflow(matchedWorkflow.id); pushView("workflows"); } }];
+      return [
+        {
+          id: `wf-${matchedWorkflow.id}`,
+          title: `${matchedWorkflow.icon} 运行: ${matchedWorkflow.name}`,
+          description: matchedWorkflow.description,
+          icon: <WorkflowsIcon className="w-6 h-6" />,
+          color: "text-teal-500 bg-teal-500/10",
+          category: "工作流",
+          action: () => {
+            workflowStore.executeWorkflow(matchedWorkflow.id);
+            pushView("workflows");
+          },
+        },
+      ];
     }
 
     // 5) 搜索内置插件
@@ -394,7 +435,7 @@ function MainApp() {
         id: `plugin-${pr.plugin.id}-${code}`,
         title: pr.plugin.manifest.pluginName,
         description: pr.feature.explain,
-        icon: <Puzzle className="w-6 h-6" />,
+        icon: <PluginsIcon className="w-6 h-6" />,
         color: "text-orange-500 bg-orange-500/10",
         category: "插件",
         action: isColorPicker
@@ -402,9 +443,9 @@ function MainApp() {
           : isScreenCapture
             ? () => pushView("screen-capture")
             : () => {
-              if (openBuiltin()) return;
-              usePluginStore.getState().openPlugin(pr.plugin.id, code);
-            },
+                if (openBuiltin()) return;
+                usePluginStore.getState().openPlugin(pr.plugin.id, code);
+              },
       };
     });
 
@@ -416,7 +457,9 @@ function MainApp() {
       icon: <Rocket className="w-6 h-6" />,
       color: "text-green-500 bg-green-500/10",
       category: "应用",
-      action: () => { invoke("file_open", { path: a.path }); },
+      action: () => {
+        invoke("file_open", { path: a.path });
+      },
     }));
 
     const fileItems: ResultItem[] = fileResults.map(fileResultToItem);
@@ -432,7 +475,7 @@ function MainApp() {
       id: `bm-${bm.id}`,
       title: bm.title,
       description: bm.url,
-      icon: <Globe className="w-6 h-6" />,
+      icon: <BookmarksIcon className="w-6 h-6" />,
       color: "text-blue-500 bg-blue-500/10",
       category: "书签",
       action: () => {
@@ -454,12 +497,14 @@ function MainApp() {
     handleDirectColorPicker,
     fileResults,
     appResults,
+    fileResultToItem,
+    pushView,
   ]);
 
   // 窗口大小管理
   useEffect(() => {
     updateWindowSize(view, searchValue, getFilteredResults, setWindowExpanded);
-  }, [view, mode, searchValue, getFilteredResults]);
+  }, [view, mode, searchValue, getFilteredResults, setWindowExpanded]);
 
   const handleSubmit = useCallback(
     (value: string, currentMode: string, images?: string[]) => {
@@ -497,20 +542,20 @@ function MainApp() {
         results[selectedIndex].action!();
       }
     },
-    [getFilteredResults],
+    [getFilteredResults, pushView],
   );
 
   // ESC 返回上一级
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && view !== "main") {
+      if (e.key === "Escape" && view !== MAIN_VIEW_ID) {
         popView();
-        reset();
+        resetSearchState();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [view, reset, popView]);
+  }, [view, popView, resetSearchState]);
 
   const filteredResults = getFilteredResults();
 
@@ -519,8 +564,7 @@ function MainApp() {
   const prevPluginRef = useRef<typeof activePlugin>(null);
 
   useEffect(() => {
-    const shellViews = new Set(["main", "home", "plugin-embed", "context-action"]);
-    if (!activePlugin && !shellViews.has(view)) {
+    if (!activePlugin && !isShellViewId(view)) {
       resetToMain();
     }
   }, [activePlugin, view, resetToMain]);
@@ -530,7 +574,7 @@ function MainApp() {
       activePlugin
         ? createPluginContext(getMToolsAI(), new ScopedStorage(activePlugin.id))
         : null,
-    [activePlugin?.id],
+    [activePlugin],
   );
 
   // 插件生命周期钩子
@@ -547,84 +591,21 @@ function MainApp() {
 
   return (
     <div className="w-full h-full flex flex-col bg-[var(--color-bg)] text-[var(--color-text)] overflow-hidden rounded-xl border border-[var(--color-border)] shadow-2xl">
-      {view === "main" && (
-        <>
-          <div className="sticky top-0 z-10 pb-0 bg-[var(--color-bg)]/80 backdrop-blur-xl">
-            <SearchBar
-              onSubmit={handleSubmit}
-              resultCount={filteredResults.length}
-            />
-          </div>
-
-          <div className="flex-1 overflow-hidden">
-            {searchValue ? (
-              <div className="px-4 pb-4 h-full overflow-y-auto">
-                <ResultList items={filteredResults} />
-              </div>
-            ) : (
-              <Dashboard onNavigate={(v) => pushView(v)} />
-            )}
-          </div>
-        </>
-      )}
-
-      {activePlugin && activePlugin.viewId !== "home" && pluginContext && (
-        <Suspense
-          fallback={
-            <div className="h-full flex items-center justify-center text-[var(--color-text-secondary)]">
-              加载中...
-            </div>
-          }
-        >
-          <PluginErrorBoundary
-            pluginId={activePlugin.id}
-            onReset={() => resetToMain()}
-          >
-            <div className="h-full">
-              {activePlugin.render({
-                onBack: () => popView(),
-                context: pluginContext,
-              })}
-            </div>
-          </PluginErrorBoundary>
-        </Suspense>
-      )}
-
-      {view === "home" && (
-        <Home onNavigate={(v) => pushView(v)} onBack={() => popView()} />
-      )}
-
-      {view === "plugin-embed" && embedTarget && embedBridgeToken && (
-        <div className="h-full">
-          <PluginErrorBoundary
-            pluginId={embedTarget.pluginId}
-            onReset={() => {
-              resetToMain();
-              setEmbedTarget(null);
-            }}
-          >
-            <PluginEmbed
-              pluginId={embedTarget.pluginId}
-              featureCode={embedTarget.featureCode}
-              bridgeToken={embedBridgeToken}
-              title={embedTarget.title}
-              onBack={() => {
-                popView();
-                setEmbedTarget(null);
-              }}
-            />
-          </PluginErrorBoundary>
-        </div>
-      )}
-
-      {view === "context-action" && (
-        <div className="h-full">
-          <ContextActionPanel
-            selectedText={contextText}
-            onBack={() => popView()}
-          />
-        </div>
-      )}
+      <MainViewRouter
+        view={view}
+        searchValue={searchValue}
+        filteredResults={filteredResults}
+        handleSubmit={handleSubmit}
+        pushView={pushView}
+        popView={popView}
+        resetToMain={resetToMain}
+        activePlugin={activePlugin}
+        pluginContext={pluginContext}
+        embedTarget={embedTarget}
+        setEmbedTarget={setEmbedTarget}
+        embedBridgeToken={embedBridgeToken}
+        contextText={contextText}
+      />
 
       <LoginModal />
       <SyncManager />

@@ -105,12 +105,14 @@ export default function ClipboardHistoryPlugin({ onBack }: { onBack?: () => void
   }, []);
 
   // 搜索防抖
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleSearchChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const val = e.target.value;
       setSearch(val);
-      clearTimeout(debounceRef.current);
+      if (debounceRef.current) {
+        clearTimeout(debounceRef.current);
+      }
       debounceRef.current = setTimeout(() => load(val), 300);
     },
     [setSearch, load]

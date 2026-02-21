@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Database, Cloud, CloudOff, RefreshCw, Loader2 } from "lucide-react";
 import { useBookmarkStore } from "@/store/bookmark-store";
 import { useSnippetStore } from "@/store/snippet-store";
@@ -20,11 +20,7 @@ export function MyDataTab() {
   const [stats, setStats] = useState<DataStat[]>([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    loadStats();
-  }, []);
-
-  const loadStats = async () => {
+  const loadStats = useCallback(async () => {
     setLoading(true);
     try {
       const bookmarks = useBookmarkStore.getState().bookmarks;
@@ -35,22 +31,22 @@ export function MyDataTab() {
       setStats([
         {
           label: "书签",
-          count: bookmarks.filter((b: any) => !b.deleted).length,
+          count: bookmarks.filter((bookmark) => !bookmark.deleted).length,
           syncStatus: isLoggedIn ? "synced" : "local",
         },
         {
           label: "代码片段",
-          count: snippets.filter((s: any) => !s.deleted).length,
+          count: snippets.filter((snippet) => !snippet.deleted).length,
           syncStatus: isLoggedIn ? "synced" : "local",
         },
         {
           label: "工作流",
-          count: workflows.filter((w: any) => !w.builtin).length,
+          count: workflows.filter((workflow) => !workflow.builtin).length,
           syncStatus: isLoggedIn ? "synced" : "local",
         },
         {
           label: "笔记",
-          count: marks.filter((m: any) => !m.deleted).length,
+          count: marks.filter((mark) => !mark.deleted).length,
           syncStatus: isLoggedIn ? "synced" : "local",
         },
       ]);
@@ -59,10 +55,14 @@ export function MyDataTab() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [isLoggedIn]);
+
+  useEffect(() => {
+    loadStats();
+  }, [loadStats]);
 
   return (
-    <div className="max-w-xl mx-auto space-y-4">
+    <div className="max-w-xl mx-auto space-y-[var(--space-compact-3)]">
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-sm font-semibold">我的数据</h2>
@@ -122,11 +122,11 @@ export function MyDataTab() {
           />
         </div>
       ) : (
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-2 gap-[var(--space-compact-2)]">
           {stats.map((stat) => (
             <div
               key={stat.label}
-              className="bg-[var(--color-bg)] rounded-xl p-4 border border-[var(--color-border)] hover:border-[#F28F36]/20 transition-colors"
+              className="bg-[var(--color-bg)] rounded-xl p-[var(--space-compact-3)] border border-[var(--color-border)] hover:border-[#F28F36]/20 transition-colors"
             >
               <div className="flex items-center justify-between mb-2">
                 <span className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">

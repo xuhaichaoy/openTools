@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, type CSSProperties } from "react";
 import { useAIStore } from "@/store/ai-store";
 import { useRAGStore } from "@/store/rag-store";
 import type { OwnKeyModelConfig } from "@/core/ai/types";
@@ -70,15 +70,20 @@ interface TeamModelInfo {
   priority: number;
 }
 
+type AIModelSource = "own_key" | "team" | "platform";
+
 export function AIModelTab() {
   const { config, setConfig, saveConfig, ownKeys, loadOwnKeys, saveOwnKeys, selectOwnKeyModel } =
     useAIStore();
+  const promptRingStyle: CSSProperties & Record<"--tw-ring-color", string> = {
+    "--tw-ring-color": `${BRAND}30`,
+  };
 
   useEffect(() => {
     loadOwnKeys();
-  }, []);
+  }, [loadOwnKeys]);
 
-  const handleSourceChange = (source: "own_key" | "team" | "platform") => {
+  const handleSourceChange = (source: AIModelSource) => {
     const newConfig = { ...config, source };
     setConfig(newConfig);
     saveConfig(newConfig);
@@ -90,7 +95,12 @@ export function AIModelTab() {
     saveConfig(newConfig);
   };
 
-  const sources = [
+  const sources: {
+    id: AIModelSource;
+    label: string;
+    icon: typeof Key;
+    description: string;
+  }[] = [
     {
       id: "own_key",
       label: "自有 Key",
@@ -112,7 +122,7 @@ export function AIModelTab() {
   ];
 
   return (
-    <div className="max-w-xl mx-auto space-y-4">
+    <div className="max-w-xl mx-auto space-y-[var(--space-compact-3)]">
       <div>
         <h2 className="text-sm font-semibold">AI 模型来源配置</h2>
         <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">
@@ -126,7 +136,7 @@ export function AIModelTab() {
           return (
             <button
               key={src.id}
-              onClick={() => handleSourceChange(src.id as any)}
+              onClick={() => handleSourceChange(src.id)}
               className={`flex items-center gap-3 p-3 rounded-xl border-2 transition-all text-left ${
                 active
                   ? "border-[#F28F36] bg-[#F28F36]/5"
@@ -211,7 +221,7 @@ export function AIModelTab() {
       )}
 
       {/* 高级工具 */}
-      <div className="bg-[var(--color-bg)] rounded-xl p-4 border border-[var(--color-border)] space-y-3">
+      <div className="bg-[var(--color-bg)] rounded-xl p-[var(--space-compact-3)] border border-[var(--color-border)] space-y-[var(--space-compact-2)]">
         <div className="flex items-center gap-2">
           <ShieldAlert className="w-3.5 h-3.5 text-amber-500" />
           <span className="text-xs font-semibold">高级工具</span>
@@ -291,14 +301,14 @@ export function AIModelTab() {
       </div>
 
       {/* 自定义系统提示词 */}
-      <div className="bg-[var(--color-bg)] rounded-xl p-4 border border-[var(--color-border)] space-y-2">
+      <div className="bg-[var(--color-bg)] rounded-xl p-[var(--space-compact-3)] border border-[var(--color-border)] space-y-2">
         <div className="flex items-center gap-2">
           <MessageSquare className="w-3.5 h-3.5 text-indigo-400" />
           <span className="text-xs font-semibold">自定义系统提示词</span>
         </div>
         <textarea
           className="w-full bg-[var(--color-bg-secondary)] text-[var(--color-text)] text-xs rounded-lg px-3 py-2 outline-none border-0 focus:ring-2 resize-none min-h-[80px] max-h-[160px] leading-relaxed"
-          style={{ "--tw-ring-color": `${BRAND}30` } as any}
+          style={promptRingStyle}
           value={config.system_prompt}
           onChange={(e) =>
             setConfig({ ...config, system_prompt: e.target.value })
@@ -325,9 +335,14 @@ export function EmbeddingConfigSection() {
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
-    setEmbBaseUrl(ragConfig.embeddingBaseUrl || "");
-    setEmbApiKey(ragConfig.embeddingApiKey || "");
-    setEmbModel(ragConfig.embeddingModel || "text-embedding-3-small");
+    const nextBaseUrl = ragConfig.embeddingBaseUrl || "";
+    const nextApiKey = ragConfig.embeddingApiKey || "";
+    const nextModel = ragConfig.embeddingModel || "text-embedding-3-small";
+    queueMicrotask(() => {
+      setEmbBaseUrl(nextBaseUrl);
+      setEmbApiKey(nextApiKey);
+      setEmbModel(nextModel);
+    });
   }, [ragConfig.embeddingBaseUrl, ragConfig.embeddingApiKey, ragConfig.embeddingModel]);
 
   const handleSave = async () => {
@@ -341,7 +356,7 @@ export function EmbeddingConfigSection() {
   };
 
   return (
-    <div className="bg-[var(--color-bg)] rounded-xl p-4 border border-[var(--color-border)] space-y-3">
+    <div className="bg-[var(--color-bg)] rounded-xl p-[var(--space-compact-3)] border border-[var(--color-border)] space-y-[var(--space-compact-2)]">
       <div className="flex items-center gap-2">
         <Database className="w-3.5 h-3.5 text-emerald-400" />
         <span className="text-xs font-semibold">Embedding API 配置</span>
@@ -497,7 +512,7 @@ function OwnKeySection({
   };
 
   return (
-    <div className="bg-[var(--color-bg)] rounded-xl p-4 border border-[var(--color-border)] space-y-3">
+    <div className="bg-[var(--color-bg)] rounded-xl p-[var(--space-compact-3)] border border-[var(--color-border)] space-y-[var(--space-compact-2)]">
       <div className="flex items-center justify-between">
         <div>
           <h3 className="text-xs font-semibold">自有 Key 模型配置</h3>
@@ -706,28 +721,51 @@ function TeamSourceSection({
 
   useEffect(() => {
     if (!loaded) loadTeams();
-  }, [loaded]);
+  }, [loaded, loadTeams]);
 
   // 自动选中第一个团队
   useEffect(() => {
     if (loaded && teams.length > 0 && !teamId) {
       onTeamChange(teams[0].id);
     }
-  }, [loaded, teams, teamId]);
+  }, [loaded, teams, teamId, onTeamChange]);
 
   // 加载团队模型
   useEffect(() => {
     if (!teamId) return;
-    setLoadingModels(true);
-    api
-      .get<{ models: TeamModelInfo[] }>(`/teams/${teamId}/ai-models`)
-      .then((res) => setModels(res.models || []))
-      .catch((err) => handleError(err, { context: "获取团队模型" }))
-      .finally(() => setLoadingModels(false));
+    let cancelled = false;
+
+    const loadTeamModels = async () => {
+      setLoadingModels(true);
+      try {
+        const res = await api.get<{ models: TeamModelInfo[] }>(
+          `/teams/${teamId}/ai-models`,
+        );
+        if (!cancelled) {
+          setModels(res.models || []);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          handleError(err, { context: "获取团队模型" });
+        }
+      } finally {
+        if (!cancelled) {
+          setLoadingModels(false);
+        }
+      }
+    };
+
+    queueMicrotask(() => {
+      void loadTeamModels();
+    });
+
+    return () => {
+      cancelled = true;
+    };
   }, [teamId]);
 
   return (
-    <div className="bg-[var(--color-bg)] rounded-xl p-4 border border-[var(--color-border)] space-y-3">
+    <div className="bg-[var(--color-bg)] rounded-xl p-[var(--space-compact-3)] border border-[var(--color-border)] space-y-[var(--space-compact-2)]">
       <div>
         <h3 className="text-xs font-semibold">团队共享模型</h3>
         <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">

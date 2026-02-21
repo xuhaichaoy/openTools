@@ -264,6 +264,7 @@ pub fn run() {
             commands::plugin::lifecycle::plugin_dev_clear_trace_buffer,
             commands::plugin::api_bridge::plugin_open,
             commands::plugin::api_bridge::plugin_close,
+            commands::plugin::api_bridge::plugin_action_callback,
             commands::plugin::api_bridge::plugin_api_call,
             commands::plugin::api_bridge::plugin_get_embed_html,
             commands::plugin::api_bridge::plugin_dev_simulate_event,
@@ -300,6 +301,8 @@ pub fn run() {
             commands::ocr::ocr_detect,
             commands::ocr::ocr_detect_advanced,
             commands::ocr::ocr_list_models,
+            commands::ocr::ocr_get_runtime_info,
+            commands::ocr::ocr_open_model_dir,
             // ── RAG ──
             commands::rag::rag_list_docs,
             commands::rag::rag_import_doc,

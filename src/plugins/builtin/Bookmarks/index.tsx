@@ -77,11 +77,11 @@ export default function BookmarksPlugin({ onBack }: { onBack: () => void }) {
       if (b.visitCount !== a.visitCount) return b.visitCount - a.visitCount;
       return b.createdAt - a.createdAt;
     });
-  }, [searchBookmarks, searchQuery, selectedCategory, bookmarks]);
+  }, [searchBookmarks, searchQuery, selectedCategory]);
 
   const categories = useMemo(
     () => getCategories(),
-    [getCategories, bookmarks],
+    [getCategories],
   );
 
   const resetForm = useCallback(() => {
@@ -90,17 +90,21 @@ export default function BookmarksPlugin({ onBack }: { onBack: () => void }) {
     setShowForm(false);
   }, []);
 
-  const handleSave = useCallback(() => {
+  const handleSave = useCallback(async () => {
     if (!formData.title.trim() || !formData.url.trim()) return;
     let url = formData.url.trim();
     if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
 
-    if (editingId) {
-      updateBookmark(editingId, { ...formData, url });
-    } else {
-      addBookmark({ ...formData, url });
+    try {
+      if (editingId) {
+        await updateBookmark(editingId, { ...formData, url });
+      } else {
+        await addBookmark({ ...formData, url });
+      }
+      resetForm();
+    } catch (e) {
+      handleError(e, { context: "保存书签" });
     }
-    resetForm();
   }, [formData, editingId, updateBookmark, addBookmark, resetForm]);
 
   const handleEdit = useCallback((bm: Bookmark) => {
@@ -117,7 +121,7 @@ export default function BookmarksPlugin({ onBack }: { onBack: () => void }) {
 
   const handleOpen = useCallback(
     (bm: Bookmark) => {
-      markVisited(bm.id);
+      void markVisited(bm.id);
       invoke("open_url", { url: bm.url }).catch((e) =>
         handleError(e, { context: "打开书签" }),
       );
@@ -141,15 +145,15 @@ export default function BookmarksPlugin({ onBack }: { onBack: () => void }) {
       const file = e.target.files?.[0];
       if (!file) return;
       const reader = new FileReader();
-      reader.onload = () => {
+      reader.onload = async () => {
         const content = reader.result as string;
         let count = 0;
         if (importType === "html") {
-          count = importFromBrowserHTML(content);
+          count = await importFromBrowserHTML(content);
         } else if (importType === "chrome") {
-          count = importFromChromeJSON(content);
+          count = await importFromChromeJSON(content);
         } else {
-          count = importBookmarks(content);
+          count = await importBookmarks(content);
         }
         if (count > 0) {
           alert(`成功导入 ${count} 个书签`);

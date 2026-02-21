@@ -203,7 +203,7 @@ function isTeamWorkflowTemplateDetail(
   input: unknown,
 ): input is TeamWorkflowTemplateDetail {
   if (!isTeamWorkflowTemplateSummary(input)) return false;
-  const item = input as Record<string, unknown>;
+  const item = input as unknown as Record<string, unknown>;
   return typeof item.workflow_json === "object" && item.workflow_json !== null;
 }
 

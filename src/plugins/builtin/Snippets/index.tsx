@@ -72,9 +72,9 @@ export function Snippets({ onBack, context }: SnippetsProps) {
 
   const filteredSnippets = useMemo(() => {
     return searchSnippets(searchQuery);
-  }, [searchSnippets, searchQuery, snippets]);
+  }, [searchSnippets, searchQuery]);
 
-  const categories = useMemo(() => getCategories(), [getCategories, snippets]);
+  const categories = useMemo(() => getCategories(), [getCategories]);
 
   const resetForm = useCallback(() => {
     setFormData({
@@ -89,15 +89,19 @@ export function Snippets({ onBack, context }: SnippetsProps) {
     setShowForm(false);
   }, []);
 
-  const handleSave = useCallback(() => {
+  const handleSave = useCallback(async () => {
     if (!formData.title.trim()) return;
 
-    if (editingId) {
-      updateSnippet(editingId, formData);
-    } else {
-      addSnippet(formData);
+    try {
+      if (editingId) {
+        await updateSnippet(editingId, formData);
+      } else {
+        await addSnippet(formData);
+      }
+      resetForm();
+    } catch (e) {
+      handleError(e, { context: "保存快捷短语" });
     }
-    resetForm();
   }, [formData, editingId, updateSnippet, addSnippet, resetForm]);
 
   const handleEdit = useCallback((snippet: Snippet) => {
@@ -140,7 +144,7 @@ export function Snippets({ onBack, context }: SnippetsProps) {
       // 写入剪贴板
       try {
         await invoke("clipboard_history_write", { text });
-        markUsed(snippet.id);
+        await markUsed(snippet.id);
         setCopyFeedback(snippet.id);
         setTimeout(() => setCopyFeedback(null), 1500);
       } catch (e) {
@@ -170,8 +174,8 @@ export function Snippets({ onBack, context }: SnippetsProps) {
       const file = e.target.files?.[0];
       if (!file) return;
       const reader = new FileReader();
-      reader.onload = () => {
-        const count = importSnippets(reader.result as string);
+      reader.onload = async () => {
+        const count = await importSnippets(reader.result as string);
         if (count > 0) {
           alert(`成功导入 ${count} 条短语`);
         } else {

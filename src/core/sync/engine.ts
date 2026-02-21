@@ -25,7 +25,10 @@ export interface SyncPullResponse {
 let _syncVersionStore: Awaited<ReturnType<typeof load>> | null = null;
 async function getSyncVersionStore() {
   if (!_syncVersionStore) {
-    _syncVersionStore = await load("sync-versions.json", { autoSave: true });
+    _syncVersionStore = await load("sync-versions.json", {
+      defaults: {},
+      autoSave: true,
+    });
   }
   return _syncVersionStore;
 }
@@ -110,4 +113,3 @@ export async function syncSyncableCollection<T extends { id: string } & SyncMeta
   );
   await setLastSyncVersion(dataType, newMax);
 }
-

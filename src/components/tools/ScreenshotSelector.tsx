@@ -9,7 +9,6 @@ import { createPortal } from "react-dom";
 import { handleError } from "@/core/errors";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-// @ts-ignore
 import Screenshots from "react-screenshots";
 import "./react-screenshots.css";
 
@@ -18,6 +17,14 @@ interface ScreenshotData {
   base64?: string;
   width: number;
   height: number;
+}
+
+type ScreenshotAction = "pin" | "ocr";
+
+declare global {
+  interface Window {
+    __screenshot_action__?: ScreenshotAction;
+  }
 }
 
 // Pin 图标组件
@@ -63,11 +70,11 @@ function ToolbarExtension({
   onOcrClick: () => void;
 }) {
   const portalContainerRef = useRef<HTMLDivElement | null>(null);
-  const [mounted, setMounted] = useState(false);
+  const [portalContainer, setPortalContainer] = useState<HTMLDivElement | null>(
+    null,
+  );
 
   useEffect(() => {
-    let intervalId: ReturnType<typeof setInterval>;
-
     const tryInject = () => {
       // 如果已经注入且容器还在 DOM 中，跳过
       if (
@@ -83,7 +90,7 @@ function ToolbarExtension({
         !portalContainerRef.current.parentElement
       ) {
         portalContainerRef.current = null;
-        setMounted(false);
+        setPortalContainer(null);
       }
 
       // 全局搜索工具栏
@@ -109,24 +116,25 @@ function ToolbarExtension({
       container.setAttribute("data-custom-toolbar", "true");
       toolbar.insertBefore(container, insertBefore);
       portalContainerRef.current = container;
-      setMounted(true);
+      setPortalContainer(container);
     };
 
     // 每 150ms 轮询检查
-    intervalId = setInterval(tryInject, 150);
+    const intervalId = window.setInterval(tryInject, 150);
     // 立即尝试一次
     tryInject();
 
     return () => {
-      clearInterval(intervalId);
+      window.clearInterval(intervalId);
       if (portalContainerRef.current) {
         portalContainerRef.current.remove();
         portalContainerRef.current = null;
       }
+      setPortalContainer(null);
     };
   }, []);
 
-  if (!mounted || !portalContainerRef.current) return null;
+  if (!portalContainer) return null;
 
   return createPortal(
     <>
@@ -146,7 +154,7 @@ function ToolbarExtension({
         <OcrIcon />
       </div>
     </>,
-    portalContainerRef.current,
+    portalContainer,
   );
 }
 
@@ -229,28 +237,28 @@ export function ScreenshotSelector() {
   }, []);
 
   const onOk = useCallback(
-    (blob: Blob, _bounds?: any) => {
+    (blob: Blob) => {
       blobToFinish("copy", blob);
     },
     [blobToFinish],
   );
 
   const onSave = useCallback(
-    (blob: Blob, _bounds?: any) => {
+    (blob: Blob) => {
       blobToFinish("save", blob);
     },
     [blobToFinish],
   );
 
   const onPin = useCallback(
-    (blob: Blob, _bounds?: any) => {
+    (blob: Blob) => {
       blobToFinish("pin", blob);
     },
     [blobToFinish],
   );
 
   const onOcr = useCallback(
-    (blob: Blob, _bounds?: any) => {
+    (blob: Blob) => {
       blobToFinish("ocr", blob);
     },
     [blobToFinish],
@@ -258,12 +266,12 @@ export function ScreenshotSelector() {
 
   // Pin/OCR 按钮点击：piggyback on OK 按钮来 compose image
   const handleCustomButtonClick = useCallback(
-    (action: "pin" | "ocr") => {
-      const okButton = document.querySelector(
+    (action: ScreenshotAction) => {
+      const okButton = document.querySelector<HTMLElement>(
         '.screenshots-button[title="完成"]',
-      ) as HTMLElement;
+      );
       if (okButton) {
-        (window as any).__screenshot_action__ = action;
+        window.__screenshot_action__ = action;
         okButton.click();
       }
     },
@@ -279,16 +287,16 @@ export function ScreenshotSelector() {
 
   // 包装 onOk，支持通过 __screenshot_action__ 触发不同操作
   const wrappedOnOk = useCallback(
-    (blob: Blob, bounds?: any) => {
-      const action = (window as any).__screenshot_action__;
-      delete (window as any).__screenshot_action__;
+    (blob: Blob) => {
+      const action = window.__screenshot_action__;
+      delete window.__screenshot_action__;
 
       if (action === "pin") {
-        onPin(blob, bounds);
+        onPin(blob);
       } else if (action === "ocr") {
-        onOcr(blob, bounds);
+        onOcr(blob);
       } else {
-        onOk(blob, bounds);
+        onOk(blob);
       }
     },
     [onOk, onPin, onOcr],
