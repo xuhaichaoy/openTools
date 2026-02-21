@@ -506,7 +506,7 @@ nativePicker.addEventListener('input', function(e) {
   } catch (e) {}
 })();
 
-pickBtn.addEventListener('click', function() {
+pickBtn.addEventListener('click', async function() {
   if (pickBtn.disabled) return;
 
   function startPick() {
@@ -520,44 +520,63 @@ pickBtn.addEventListener('click', function() {
     if (sp) sp.textContent = '屏幕取色';
   }
 
-  // 方式 1：直接 Tauri IPC — 系统取色器，不截屏，直接返回 hex
-  if (window.__TAURI__ && window.__TAURI__.core) {
+  async function tryEyeDropper() {
+    if (!window.EyeDropper) return false;
     startPick();
-    window.__TAURI__.core.invoke('plugin_start_color_picker').then(function(hex) {
+    try {
+      var r = await new EyeDropper().open();
+      endPick();
+      if (r && r.sRGBHex) setColorFromHex(r.sRGBHex.toUpperCase());
+      return true;
+    } catch (_) {
+      endPick();
+      return false;
+    }
+  }
+
+  async function tryTauriNative() {
+    if (!(window.__TAURI__ && window.__TAURI__.core)) return false;
+    startPick();
+    try {
+      var hex = await window.__TAURI__.core.invoke('plugin_start_color_picker');
       endPick();
       if (hex) setColorFromHex(hex);
-    }).catch(function(err) {
+      return true;
+    } catch (err) {
       endPick();
-      alert('取色失败: ' + (err && err.toString ? err.toString() : JSON.stringify(err)));
-    });
-    return;
+      return false;
+    }
   }
 
-  // 方式 2：EyeDropper API
-  if (window.EyeDropper) {
-    new EyeDropper().open().then(function(r) {
-      setColorFromHex(r.sRGBHex.toUpperCase());
-    }).catch(function() {});
-    return;
-  }
-
-  // 方式 3：utools shim
-  if (window.utools && typeof window.utools.screenColorPick === 'function') {
+  function tryUtoolsShim() {
+    if (!(window.utools && typeof window.utools.screenColorPick === 'function')) return false;
     startPick();
     window.utools.screenColorPick(function(hex) {
       endPick();
       if (hex) setColorFromHex(hex);
     });
-    return;
+    return true;
   }
 
-  // 方式 4：BroadcastChannel
-  if (window.__mtoolsScreenPickBc) {
+  function tryBroadcastChannel() {
+    if (!window.__mtoolsScreenPickBc) return false;
     startPick();
     window.__mtoolsScreenPickBc.postMessage({ type: 'request-screen-pick' });
     setTimeout(endPick, 30000);
-    return;
+    return true;
   }
+
+  var isWindows = /win/i.test((navigator.platform || '').toLowerCase());
+  if (isWindows) {
+    if (await tryEyeDropper()) return;
+    if (await tryTauriNative()) return;
+  } else {
+    if (await tryTauriNative()) return;
+    if (await tryEyeDropper()) return;
+  }
+
+  if (tryUtoolsShim()) return;
+  if (tryBroadcastChannel()) return;
 
   alert('无可用取色方式');
 });

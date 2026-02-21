@@ -18,12 +18,15 @@ pub(super) async fn plugin_get_embed_html(
     if !plugin.enabled {
         return Err(format!("插件 {} 已被禁用", plugin_id));
     }
-    let _feature = plugin
+    let feature = plugin
         .manifest
         .features
         .iter()
         .find(|f| f.code == feature_code)
         .ok_or_else(|| format!("功能 {} 不存在", feature_code))?;
+    if !super::feature_supported_on_current_platform(feature) {
+        return Err(super::platform_not_supported_error(&feature_code));
+    }
 
     let main_file = plugin
         .manifest
@@ -37,10 +40,7 @@ pub(super) async fn plugin_get_embed_html(
     let html_content =
         std::fs::read_to_string(&main_path).map_err(|e| format!("读取插件文件失败: {}", e))?;
 
-    let base_url = format!(
-        "mtplugin://localhost{}/",
-        plugin.dir_path.replace('\\', "/")
-    );
+    let base_url = crate::mtplugin::build_mtplugin_base_url(&plugin.dir_path);
     let html_with_base = inject_base_tag(&html_content, &base_url);
     let bridge = generate_embed_bridge(&plugin_id, &bridge_token);
     let html_with_bridge = inject_embed_bridge(&html_with_base, &bridge);

@@ -10,6 +10,7 @@ import {
 import { useMemo } from "react";
 import { usePluginStore } from "@/store/plugin-store";
 import { isBuiltinPluginInstallRequired } from "@/plugins/builtin";
+import { getPrimarySupportedFeature } from "@/core/plugin-system/platform";
 
 interface DashboardProps {
   onNavigate: (view: string) => void;
@@ -35,11 +36,7 @@ export function Dashboard({ onNavigate }: DashboardProps) {
 
     const externalTools = plugins
       .filter((plugin) => {
-        if (
-          plugin.isBuiltin ||
-          !plugin.enabled ||
-          plugin.manifest.features.length === 0
-        ) {
+        if (plugin.isBuiltin || !plugin.enabled) {
           return false;
         }
         const slug = plugin.slug?.toLowerCase();
@@ -53,7 +50,8 @@ export function Dashboard({ onNavigate }: DashboardProps) {
         return true;
       })
       .map((plugin) => {
-        const primaryFeature = plugin.manifest.features[0];
+        const primaryFeature = getPrimarySupportedFeature(plugin);
+        if (!primaryFeature) return null;
         return {
           id: `ext-${plugin.id}`,
           icon: <PluginsIcon className="w-6 h-6" />,
@@ -68,7 +66,8 @@ export function Dashboard({ onNavigate }: DashboardProps) {
               ? "text-orange-500 bg-orange-500/10"
               : "text-cyan-500 bg-cyan-500/10",
         };
-      });
+      })
+      .filter((tool): tool is NonNullable<typeof tool> => tool !== null);
 
     return [...builtinTools, ...externalTools];
   }, [addRecentTool, onNavigate, openPlugin, plugins]);

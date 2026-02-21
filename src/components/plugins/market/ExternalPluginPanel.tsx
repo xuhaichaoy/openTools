@@ -12,6 +12,7 @@ import { PluginsIcon } from "@/components/icons/animated";
 import { PluginAppIcon } from "@/components/plugins/market/PluginIcon";
 import { isBuiltinPluginInstallRequired } from "@/plugins/builtin";
 import { FeaturedMarketPanel } from "@/components/plugins/market/FeaturedMarketPanel";
+import { getPrimarySupportedFeature } from "@/core/plugin-system/platform";
 import type {
   PluginInstance,
   PluginMarketApp,
@@ -76,8 +77,11 @@ export function ExternalPluginPanel({
   formatPackageSize,
 }: ExternalPluginPanelProps) {
   const selectedExternalPrimaryFeature =
-    selectedExternalPlugin?.manifest.features[0];
+    getPrimarySupportedFeature(selectedExternalPlugin);
   const selectedExternalSlug = selectedExternalPlugin?.slug?.toLowerCase();
+  const selectedExternalHasSupportedFeature = Boolean(
+    selectedExternalPrimaryFeature,
+  );
   const selectedExternalIsMigratedBuiltin = Boolean(
     selectedExternalPlugin &&
     selectedExternalPlugin.source === "official" &&
@@ -197,28 +201,35 @@ export function ExternalPluginPanel({
                 <div className="text-xs font-medium text-[var(--color-text)] mb-2">
                   可执行操作
                 </div>
+                {!selectedExternalHasSupportedFeature && (
+                  <div className="text-[11px] text-amber-300 mb-2">
+                    当前系统平台无可用功能入口
+                  </div>
+                )}
                 <div className="flex flex-wrap gap-2">
-                  <button
-                    disabled={
-                      !selectedExternalPlugin.enabled ||
-                      !selectedExternalPrimaryFeature
-                    }
-                    onClick={() => {
-                      if (
+                  {selectedExternalHasSupportedFeature && (
+                    <button
+                      disabled={
                         !selectedExternalPlugin.enabled ||
                         !selectedExternalPrimaryFeature
-                      )
-                        return;
-                      onOpenSelectedExternalPlugin(
-                        selectedExternalPlugin,
-                        selectedExternalPrimaryFeature.code,
-                      );
-                    }}
-                    className="px-2.5 py-1.5 rounded text-[11px] bg-orange-400/12 text-orange-300 hover:bg-orange-400/22 disabled:opacity-40 inline-flex items-center gap-1"
-                  >
-                    <Play className="w-3.5 h-3.5" />
-                    打开
-                  </button>
+                      }
+                      onClick={() => {
+                        if (
+                          !selectedExternalPlugin.enabled ||
+                          !selectedExternalPrimaryFeature
+                        )
+                          return;
+                        onOpenSelectedExternalPlugin(
+                          selectedExternalPlugin,
+                          selectedExternalPrimaryFeature.code,
+                        );
+                      }}
+                      className="px-2.5 py-1.5 rounded text-[11px] bg-orange-400/12 text-orange-300 hover:bg-orange-400/22 disabled:opacity-40 inline-flex items-center gap-1"
+                    >
+                      <Play className="w-3.5 h-3.5" />
+                      打开
+                    </button>
+                  )}
                   <button
                     onClick={() =>
                       onTogglePluginEnabled(
@@ -239,33 +250,35 @@ export function ExternalPluginPanel({
                     )}
                     {selectedExternalPlugin.enabled ? "已启用" : "已禁用"}
                   </button>
-                  <button
-                    disabled={
-                      !selectedExternalPlugin.enabled ||
-                      !selectedExternalPrimaryFeature ||
-                      selectedExternalIsMigratedBuiltin
-                    }
-                    onClick={() => {
-                      if (
+                  {selectedExternalHasSupportedFeature && (
+                    <button
+                      disabled={
+                        !selectedExternalPlugin.enabled ||
                         !selectedExternalPrimaryFeature ||
                         selectedExternalIsMigratedBuiltin
-                      )
-                        return;
-                      onRequestEmbed(
-                        selectedExternalPlugin,
-                        selectedExternalPrimaryFeature.code,
-                      );
-                    }}
-                    className="px-2.5 py-1.5 rounded text-[11px] bg-blue-400/12 text-blue-300 hover:bg-blue-400/22 disabled:opacity-40 inline-flex items-center gap-1"
-                    title={
-                      selectedExternalIsMigratedBuiltin
-                        ? "官方迁移插件请使用内置视图，不支持嵌入"
-                        : "嵌入"
-                    }
-                  >
-                    <ExternalLink className="w-3.5 h-3.5" />
-                    嵌入
-                  </button>
+                      }
+                      onClick={() => {
+                        if (
+                          !selectedExternalPrimaryFeature ||
+                          selectedExternalIsMigratedBuiltin
+                        )
+                          return;
+                        onRequestEmbed(
+                          selectedExternalPlugin,
+                          selectedExternalPrimaryFeature.code,
+                        );
+                      }}
+                      className="px-2.5 py-1.5 rounded text-[11px] bg-blue-400/12 text-blue-300 hover:bg-blue-400/22 disabled:opacity-40 inline-flex items-center gap-1"
+                      title={
+                        selectedExternalIsMigratedBuiltin
+                          ? "官方迁移插件请使用内置视图，不支持嵌入"
+                          : "嵌入"
+                      }
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      嵌入
+                    </button>
+                  )}
                   <button
                     disabled={
                       uninstallingPluginId === selectedExternalPlugin.id

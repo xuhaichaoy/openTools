@@ -87,6 +87,11 @@ function triggerPersist() {
   debouncedPersist(() => useAIStore.getState().persistHistory());
 }
 
+function nativeToolsSupportedOnCurrentPlatform(): boolean {
+  if (typeof navigator === "undefined") return true;
+  return navigator.platform.toLowerCase().includes("mac");
+}
+
 function normalizeConfig(config: AIConfig): AIConfig {
   const source = config.source || "own_key";
   const normalized: AIConfig = { ...config, source };
@@ -96,6 +101,9 @@ function normalizeConfig(config: AIConfig): AIConfig {
     normalized.team_config_id = undefined;
   } else if (!normalized.team_id) {
     normalized.team_config_id = undefined;
+  }
+  if (!nativeToolsSupportedOnCurrentPlatform()) {
+    normalized.enable_native_tools = false;
   }
 
   return normalized;
@@ -111,7 +119,7 @@ export const useAIStore = create<AIState>((set, get) => ({
     enable_advanced_tools: false,
     system_prompt: "",
     enable_rag_auto_search: true,
-    enable_native_tools: true,
+    enable_native_tools: nativeToolsSupportedOnCurrentPlatform(),
     source: "own_key",
   },
   conversations: [],

@@ -1,6 +1,6 @@
 use base64::Engine;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -371,6 +371,11 @@ const BLOCKED_COMMAND_PATTERNS: &[&str] = &[
     "format c:",
 ];
 
+const DEFAULT_FILE_RANGE_MAX_LINES: usize = 400;
+const DEFAULT_SEARCH_MAX_RESULTS: usize = 200;
+const MAX_FILE_BYTES_FOR_SEARCH: u64 = 2 * 1024 * 1024;
+const MAX_SEARCH_FILES: usize = 5000;
+
 /// 校验 Shell 命令是否安全
 pub(crate) fn validate_shell_command(command: &str) -> Result<(), String> {
     let lower = command.to_lowercase();
@@ -381,6 +386,174 @@ pub(crate) fn validate_shell_command(command: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct CodeSearchMatch {
+    path: String,
+    line: usize,
+    column: usize,
+    text: String,
+}
+
+fn should_skip_search_dir(name: &str) -> bool {
+    matches!(
+        name,
+        ".git" | "node_modules" | "target" | "dist" | "build" | ".next" | ".cache"
+    )
+}
+
+fn matches_file_pattern(path: &Path, file_pattern: Option<&str>) -> bool {
+    let Some(pattern) = file_pattern.map(|p| p.trim()).filter(|p| !p.is_empty()) else {
+        return true;
+    };
+
+    if pattern.starts_with("*.") && pattern.len() > 2 {
+        let ext = &pattern[2..].to_ascii_lowercase();
+        return path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case(ext))
+            .unwrap_or(false);
+    }
+
+    let path_text = path.to_string_lossy();
+    if pattern.contains('*') {
+        let core = pattern.replace('*', "");
+        return core.is_empty() || path_text.contains(&core);
+    }
+
+    path_text.contains(pattern)
+}
+
+fn search_file_for_query(
+    file_path: &Path,
+    root_path: &Path,
+    query: &str,
+    case_sensitive: bool,
+    max_results: usize,
+    matches: &mut Vec<CodeSearchMatch>,
+) {
+    let metadata = match file_path.metadata() {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    if metadata.len() > MAX_FILE_BYTES_FOR_SEARCH {
+        return;
+    }
+
+    let bytes = match std::fs::read(file_path) {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+    // 简单二进制文件过滤：包含 NUL 字节则跳过
+    if bytes.contains(&0) {
+        return;
+    }
+
+    let content = String::from_utf8_lossy(&bytes);
+    let needle = if case_sensitive {
+        query.to_string()
+    } else {
+        query.to_lowercase()
+    };
+
+    for (idx, line) in content.lines().enumerate() {
+        if matches.len() >= max_results {
+            break;
+        }
+
+        let haystack = if case_sensitive {
+            line.to_string()
+        } else {
+            line.to_lowercase()
+        };
+        if let Some(found) = haystack.find(&needle) {
+            let rel_path = file_path
+                .strip_prefix(root_path)
+                .unwrap_or(file_path)
+                .display()
+                .to_string();
+            let text = if line.chars().count() > 300 {
+                format!("{}…", line.chars().take(300).collect::<String>())
+            } else {
+                line.to_string()
+            };
+            matches.push(CodeSearchMatch {
+                path: rel_path,
+                line: idx + 1,
+                column: found + 1,
+                text,
+            });
+        }
+    }
+}
+
+fn collect_search_matches(
+    dir_path: &Path,
+    root_path: &Path,
+    query: &str,
+    case_sensitive: bool,
+    file_pattern: Option<&str>,
+    max_results: usize,
+    scanned_files: &mut usize,
+    matches: &mut Vec<CodeSearchMatch>,
+) -> Result<bool, String> {
+    let entries = std::fs::read_dir(dir_path).map_err(|e| format!("读取目录失败: {}", e))?;
+    for entry in entries {
+        if matches.len() >= max_results || *scanned_files >= MAX_SEARCH_FILES {
+            return Ok(true);
+        }
+
+        let entry = match entry {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            let name = entry.file_name();
+            if should_skip_search_dir(&name.to_string_lossy()) {
+                continue;
+            }
+            if collect_search_matches(
+                &path,
+                root_path,
+                query,
+                case_sensitive,
+                file_pattern,
+                max_results,
+                scanned_files,
+                matches,
+            )? {
+                return Ok(true);
+            }
+            continue;
+        }
+
+        if !file_type.is_file() || !matches_file_pattern(&path, file_pattern) {
+            continue;
+        }
+
+        *scanned_files += 1;
+        search_file_for_query(
+            &path,
+            root_path,
+            query,
+            case_sensitive,
+            max_results,
+            matches,
+        );
+    }
+
+    Ok(matches.len() >= max_results || *scanned_files >= MAX_SEARCH_FILES)
 }
 
 // ── Agent 文件系统 & Shell 工具 ──
@@ -442,6 +615,119 @@ pub async fn list_directory(app: tauri::AppHandle, path: String) -> Result<Strin
         }
     }
     serde_json::to_string_pretty(&entries).map_err(|e| format!("序列化失败: {}", e))
+}
+
+/// 按行范围读取文本文件（适合代码审阅）
+#[tauri::command]
+pub async fn read_text_file_range(
+    app: tauri::AppHandle,
+    path: String,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+    max_lines: Option<usize>,
+) -> Result<String, String> {
+    validate_path_access(&app, &path)?;
+
+    let p = std::path::Path::new(&path);
+    if !p.exists() {
+        return Err(format!("文件不存在: {}", path));
+    }
+
+    let content = std::fs::read_to_string(p).map_err(|e| format!("读取失败: {}", e))?;
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() {
+        return Ok("".to_string());
+    }
+
+    let max_lines = max_lines
+        .unwrap_or(DEFAULT_FILE_RANGE_MAX_LINES)
+        .clamp(1, 2000);
+    let start = start_line.unwrap_or(1).max(1);
+    let requested_end = end_line.unwrap_or(start + max_lines - 1);
+    if requested_end < start {
+        return Err("参数错误：end_line 不能小于 start_line".to_string());
+    }
+    let capped_end = requested_end.min(start + max_lines - 1);
+
+    let total_lines = lines.len();
+    if start > total_lines {
+        return Ok(format!(
+            "文件共 {} 行，请求起始行 {} 超出范围",
+            total_lines, start
+        ));
+    }
+
+    let start_idx = start - 1;
+    let end_idx = capped_end.min(total_lines);
+    let mut output: Vec<String> = Vec::new();
+    for (offset, line) in lines[start_idx..end_idx].iter().enumerate() {
+        let line_no = start + offset;
+        output.push(format!("{:>6} | {}", line_no, line));
+    }
+
+    if end_idx < total_lines {
+        output.push(format!(
+            "\n[已截断：显示到第 {} 行，文件总计 {} 行]",
+            end_idx, total_lines
+        ));
+    }
+
+    Ok(output.join("\n"))
+}
+
+/// 在目录下递归搜索文本内容（适合代码检索）
+#[tauri::command]
+pub async fn search_in_files(
+    app: tauri::AppHandle,
+    path: String,
+    query: String,
+    case_sensitive: Option<bool>,
+    max_results: Option<usize>,
+    file_pattern: Option<String>,
+) -> Result<String, String> {
+    if query.trim().is_empty() {
+        return Err("query 不能为空".to_string());
+    }
+
+    validate_path_access(&app, &path)?;
+
+    let root = PathBuf::from(&path);
+    if !root.exists() {
+        return Err(format!("目录不存在: {}", path));
+    }
+    if !root.is_dir() {
+        return Err(format!("不是目录: {}", path));
+    }
+
+    let case_sensitive = case_sensitive.unwrap_or(false);
+    let max_results = max_results
+        .unwrap_or(DEFAULT_SEARCH_MAX_RESULTS)
+        .clamp(1, 1000);
+    let mut scanned_files = 0usize;
+    let mut matches = Vec::<CodeSearchMatch>::new();
+
+    let truncated = collect_search_matches(
+        &root,
+        &root,
+        &query,
+        case_sensitive,
+        file_pattern.as_deref(),
+        max_results,
+        &mut scanned_files,
+        &mut matches,
+    )?;
+
+    let payload = serde_json::json!({
+        "root": root.display().to_string(),
+        "query": query,
+        "case_sensitive": case_sensitive,
+        "file_pattern": file_pattern,
+        "scanned_files": scanned_files,
+        "match_count": matches.len(),
+        "truncated": truncated,
+        "matches": matches,
+    });
+    serde_json::to_string_pretty(&payload).map_err(|e| format!("序列化失败: {}", e))
 }
 
 /// 执行 Shell 命令（受命令策略保护）

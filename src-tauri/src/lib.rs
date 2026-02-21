@@ -1,6 +1,7 @@
 mod commands;
 pub mod crypto;
 pub mod error;
+mod mtplugin;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -148,7 +149,7 @@ pub fn run() {
         // 用 mtplugin://localhost/绝对路径 替代 file:// URL
         .register_uri_scheme_protocol("mtplugin", |app, request| {
             let raw_path = request.uri().path();
-            let decoded = url_decode(raw_path);
+            let decoded = mtplugin::decode_mtplugin_request_path(raw_path);
             let file_path = PathBuf::from(&decoded);
 
             // 安全校验：规范化路径并拒绝包含 ".." 的路径遍历攻击
@@ -240,8 +241,10 @@ pub fn run() {
             commands::system::load_general_settings,
             commands::system::clean_old_chat_images,
             commands::system::read_text_file,
+            commands::system::read_text_file_range,
             commands::system::write_text_file,
             commands::system::list_directory,
+            commands::system::search_in_files,
             commands::system::run_shell_command,
             // ── File Search ──
             commands::file_search::file_search,
@@ -562,25 +565,4 @@ fn schedule_cleanup(app_handle: &tauri::AppHandle) {
             log::warn!("自动清理图片失败: {}", e);
         }
     });
-}
-
-/// URL percent-decode：将 %20 等还原为原始字符
-fn url_decode(input: &str) -> String {
-    let mut result = Vec::new();
-    let bytes = input.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(byte) =
-                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
-            {
-                result.push(byte);
-                i += 3;
-                continue;
-            }
-        }
-        result.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&result).to_string()
 }

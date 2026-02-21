@@ -128,6 +128,162 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
         },
       });
 
+      // 添加本地开发工具（代码读写/命令执行）
+      tools.push({
+        name: "list_directory",
+        description: "列出目录下的文件和子目录（用于定位项目结构）",
+        parameters: {
+          path: { type: "string", description: "目录路径（建议绝对路径）" },
+        },
+        execute: async (params) => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const path = String(params.path || ".");
+          return invoke("list_directory", { path });
+        },
+      });
+
+      tools.push({
+        name: "read_file",
+        description: "读取本地文本文件（代码、配置、日志等）",
+        parameters: {
+          path: { type: "string", description: "文件路径（建议绝对路径）" },
+        },
+        execute: async (params) => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const path = String(params.path || "");
+          if (!path.trim()) return { error: "path 不能为空" };
+          return invoke("read_text_file", { path });
+        },
+      });
+
+      tools.push({
+        name: "read_file_range",
+        description: "按行读取代码文件，返回行号，适合定位函数和分析上下文",
+        parameters: {
+          path: { type: "string", description: "文件路径（建议绝对路径）" },
+          start_line: {
+            type: "integer",
+            description: "起始行（可选，默认 1）",
+            required: false,
+          },
+          end_line: {
+            type: "integer",
+            description: "结束行（可选）",
+            required: false,
+          },
+          max_lines: {
+            type: "integer",
+            description: "最多返回行数（可选）",
+            required: false,
+          },
+        },
+        execute: async (params) => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const path = String(params.path || "");
+          if (!path.trim()) return { error: "path 不能为空" };
+          const start_line =
+            typeof params.start_line === "number"
+              ? Math.floor(params.start_line)
+              : undefined;
+          const end_line =
+            typeof params.end_line === "number"
+              ? Math.floor(params.end_line)
+              : undefined;
+          const max_lines =
+            typeof params.max_lines === "number"
+              ? Math.floor(params.max_lines)
+              : undefined;
+          return invoke("read_text_file_range", {
+            path,
+            start_line,
+            end_line,
+            max_lines,
+          });
+        },
+      });
+
+      tools.push({
+        name: "search_in_files",
+        description: "递归搜索项目中的文本，返回匹配文件和行号",
+        parameters: {
+          path: { type: "string", description: "目录路径（建议绝对路径）" },
+          query: { type: "string", description: "要搜索的关键词" },
+          case_sensitive: {
+            type: "boolean",
+            description: "是否区分大小写（可选）",
+            required: false,
+          },
+          max_results: {
+            type: "integer",
+            description: "最大结果数量（可选）",
+            required: false,
+          },
+          file_pattern: {
+            type: "string",
+            description: "文件过滤模式，如 *.ts、*.rs（可选）",
+            required: false,
+          },
+        },
+        execute: async (params) => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const path = String(params.path || "");
+          const query = String(params.query || "");
+          if (!path.trim()) return { error: "path 不能为空" };
+          if (!query.trim()) return { error: "query 不能为空" };
+          const case_sensitive =
+            typeof params.case_sensitive === "boolean"
+              ? params.case_sensitive
+              : undefined;
+          const max_results =
+            typeof params.max_results === "number"
+              ? Math.floor(params.max_results)
+              : undefined;
+          const file_pattern =
+            typeof params.file_pattern === "string"
+              ? params.file_pattern
+              : undefined;
+          return invoke("search_in_files", {
+            path,
+            query,
+            case_sensitive,
+            max_results,
+            file_pattern,
+          });
+        },
+      });
+
+      tools.push({
+        name: "write_file",
+        description: "写入本地文本文件（会覆盖目标文件）",
+        parameters: {
+          path: { type: "string", description: "文件路径（建议绝对路径）" },
+          content: { type: "string", description: "要写入的文本内容" },
+        },
+        dangerous: true,
+        execute: async (params) => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const path = String(params.path || "");
+          if (!path.trim()) return { error: "path 不能为空" };
+          const content = String(params.content || "");
+          return invoke("write_text_file", { path, content });
+        },
+      });
+
+      tools.push({
+        name: "run_shell_command",
+        description: "执行终端命令（用于构建、测试、格式化、搜索等）",
+        parameters: {
+          command: { type: "string", description: "命令行指令" },
+        },
+        dangerous: true,
+        execute: async (params) => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const command = String(params.command || "").trim();
+          if (!command) return { error: "command 不能为空" };
+          return invoke("run_shell_command", { command });
+        },
+      });
+
       // 添加提醒工具
       tools.push({
         name: "add_reminder",
@@ -534,8 +690,10 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
           verbose: true,
           dangerousToolPatterns: [
             "write_file",
+            "open_path",
             "shell",
             "run_shell",
+            "system-actions_",
             "native_calendar_create",
             "native_reminder_create",
             "native_notes_create",

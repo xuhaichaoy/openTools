@@ -37,21 +37,7 @@ pub async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<Str
         }
         "run_shell_command" => {
             let command = args_value["command"].as_str().unwrap_or("echo hello");
-            crate::commands::system::validate_shell_command(command)?;
-            let output = tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg(command)
-                .output()
-                .await
-                .map_err(|e| format!("执行失败: {}", e))?;
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            Ok(format!(
-                "exit_code: {}\nstdout:\n{}\nstderr:\n{}",
-                output.status.code().unwrap_or(-1),
-                stdout,
-                stderr
-            ))
+            crate::commands::system::run_shell_command(command.to_string()).await
         }
         "read_clipboard" => {
             use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -216,6 +202,23 @@ pub async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<Str
                 Ok(content)
             }
         }
+        "read_file_range" => {
+            let path = args_value["path"].as_str().unwrap_or("").to_string();
+            if path.trim().is_empty() {
+                return Err("path 不能为空".to_string());
+            }
+            let start_line = args_value["start_line"].as_u64().map(|v| v as usize);
+            let end_line = args_value["end_line"].as_u64().map(|v| v as usize);
+            let max_lines = args_value["max_lines"].as_u64().map(|v| v as usize);
+            crate::commands::system::read_text_file_range(
+                app.clone(),
+                path,
+                start_line,
+                end_line,
+                max_lines,
+            )
+            .await
+        }
         "write_file" => {
             let path = args_value["path"].as_str().unwrap_or("").to_string();
             crate::commands::system::validate_path_access(app, &path)?;
@@ -271,6 +274,28 @@ pub async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<Str
                 entries.join("\n")
             ))
         }
+        "search_in_files" => {
+            let path = args_value["path"].as_str().unwrap_or("").to_string();
+            if path.trim().is_empty() {
+                return Err("path 不能为空".to_string());
+            }
+            let query = args_value["query"].as_str().unwrap_or("").to_string();
+            if query.trim().is_empty() {
+                return Err("query 不能为空".to_string());
+            }
+            let case_sensitive = args_value["case_sensitive"].as_bool();
+            let max_results = args_value["max_results"].as_u64().map(|v| v as usize);
+            let file_pattern = args_value["file_pattern"].as_str().map(|s| s.to_string());
+            crate::commands::system::search_in_files(
+                app.clone(),
+                path,
+                query,
+                case_sensitive,
+                max_results,
+                file_pattern,
+            )
+            .await
+        }
         "get_system_info" => {
             let os = std::env::consts::OS;
             let arch = std::env::consts::ARCH;
@@ -307,11 +332,18 @@ pub async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<Str
             Ok(format!("已打开: {}", path))
         }
         "get_running_processes" => {
-            let output = tokio::process::Command::new("ps")
-                .args(["aux"])
-                .output()
-                .await
-                .map_err(|e| format!("获取进程列表失败: {}", e))?;
+            let output = if cfg!(target_os = "windows") {
+                tokio::process::Command::new("cmd")
+                    .args(["/C", "tasklist"])
+                    .output()
+                    .await
+            } else {
+                tokio::process::Command::new("ps")
+                    .args(["aux"])
+                    .output()
+                    .await
+            }
+            .map_err(|e| format!("获取进程列表失败: {}", e))?;
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let lines: Vec<&str> = stdout.lines().collect();
             let top_lines: Vec<&str> = lines.iter().take(31).copied().collect();

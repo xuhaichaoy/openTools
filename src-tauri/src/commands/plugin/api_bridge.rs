@@ -8,7 +8,7 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use self::api_methods::dispatch_plugin_api_call;
 use self::html_bridge::{generate_plugin_enter_script, generate_utools_shim, inject_base_tag};
 use super::lifecycle::{get_cached_plugins, push_dev_trace};
-use super::types::{PluginDevTraceItem, PluginInfo};
+use super::types::{PluginDevTraceItem, PluginFeature, PluginInfo};
 
 mod api_methods;
 mod dev_tools;
@@ -26,6 +26,46 @@ fn now_rfc3339() -> String {
 
 fn find_plugin<'a>(plugins: &'a [PluginInfo], plugin_id: &str) -> Option<&'a PluginInfo> {
     plugins.iter().find(|p| p.id == plugin_id)
+}
+
+fn current_platform_tag() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "darwin"
+    } else if cfg!(target_os = "windows") {
+        "win"
+    } else {
+        "linux"
+    }
+}
+
+fn normalize_platform_tag(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "mac" | "macos" | "darwin" | "osx" => "darwin".to_string(),
+        "win" | "windows" | "win32" => "win".to_string(),
+        "linux" => "linux".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn feature_supported_on_current_platform(feature: &PluginFeature) -> bool {
+    let Some(platforms) = feature.platform.as_ref() else {
+        return true;
+    };
+    if platforms.is_empty() {
+        return true;
+    }
+    let current = current_platform_tag();
+    platforms
+        .iter()
+        .any(|platform| normalize_platform_tag(platform) == current)
+}
+
+fn platform_not_supported_error(feature_code: &str) -> String {
+    format!(
+        "PLUGIN_PLATFORM_NOT_SUPPORTED: 功能 {} 不支持当前平台 {}",
+        feature_code,
+        current_platform_tag()
+    )
 }
 
 fn required_permission(method: &str) -> Option<&'static str> {
@@ -119,6 +159,9 @@ pub async fn plugin_open(
         .iter()
         .find(|f| f.code == feature_code)
         .ok_or_else(|| format!("功能 {} 不存在", feature_code))?;
+    if !feature_supported_on_current_platform(feature) {
+        return Err(platform_not_supported_error(&feature_code));
+    }
 
     let window_label = format!("plugin-{}-{}", plugin_id, feature_code);
 
@@ -161,10 +204,7 @@ pub async fn plugin_open(
     let html_content =
         std::fs::read_to_string(&main_path).map_err(|e| format!("读取插件文件失败: {}", e))?;
 
-    let base_url = format!(
-        "mtplugin://localhost{}/",
-        plugin.dir_path.replace('\\', "/")
-    );
+    let base_url = crate::mtplugin::build_mtplugin_base_url(&plugin.dir_path);
     let html_with_base = inject_base_tag(&html_content, &base_url);
 
     let json_html = serde_json::to_string(&html_with_base).map_err(|e| e.to_string())?;

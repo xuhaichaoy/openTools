@@ -1,9 +1,9 @@
 import type {
   PluginInstance,
-  PluginFeature,
   PluginCommand,
   PluginMatchResult,
 } from "./types";
+import { isFeatureSupportedOnCurrentPlatform } from "./platform";
 import { pinyinScore } from "@/utils/pinyin-search";
 import { handleError } from "@/core/errors";
 
@@ -81,16 +81,8 @@ export function matchPlugins(
     if (!plugin.enabled) continue;
 
     for (const feature of plugin.manifest.features) {
-      // 检查平台兼容性
-      if (feature.platform && feature.platform.length > 0) {
-        // 简化：Tauri 环境下当前平台
-        const currentPlatform = navigator.platform.startsWith("Mac")
-          ? "darwin"
-          : navigator.platform.startsWith("Win")
-            ? "win"
-            : "linux";
-        if (!feature.platform.includes(currentPlatform)) continue;
-      }
+      // 与打开链路保持一致：支持 mac/windows 别名归一
+      if (!isFeatureSupportedOnCurrentPlatform(feature)) continue;
 
       let bestScore = 0;
       let bestCmd: string | PluginCommand | null = null;

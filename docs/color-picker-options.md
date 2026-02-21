@@ -1,10 +1,10 @@
 # 屏幕取色方案（不截图的替代）
 
-## 1. EyeDropper API（推荐，仅 Windows 当前可用）
+## 1. EyeDropper API（推荐，Windows 优先）
 
 - **是什么**：浏览器标准 API，`new EyeDropper().open()` 后由系统/浏览器提供取色光标，点哪取哪，**不截屏**。
 - **Tauri 各平台**：
-  - **Windows**：WebView2 基于 Chromium，已支持。取色器插件里已**优先**使用，无需截屏。
+  - **Windows**：WebView2 基于 Chromium，已支持。当前实现里（React 取色器 + 内置插件页）均**优先使用 EyeDropper**，不可用时再降级到宿主取色能力。
   - **macOS**：WKWebView（Safari 内核）**不支持**，WebKit 有 [bug 229755](https://bugs.webkit.org/show_bug.cgi?id=229755) 在跟踪，未实现。
   - **Linux**：webkit2gtk 同样不支持。
 - **参考**：[MDN EyeDropper](https://developer.mozilla.org/en-US/docs/Web/API/EyeDropper_API)、[Chrome 能力说明](https://developer.chrome.com/docs/capabilities/web-apis/eyedropper)
@@ -24,9 +24,9 @@
 
 ## 小结
 
-| 方案           | 是否截图 | Windows     | macOS / Linux      |
-|----------------|----------|------------|--------------------|
-| EyeDropper API | 否       | ✅ 已优先用 | ❌ WebView 不支持  |
+| 方案           | 是否截图 | Windows              | macOS / Linux      |
+|----------------|----------|----------------------|--------------------|
+| EyeDropper API | 否       | ✅ 已优先用（有降级） | ❌ WebView 不支持  |
 | 实时 1 像素    | 否       | ✅ 可用     | ✅ 可用（1×1 捕获）|
 | 截全屏再取     | 是       | 可做       | ✅ 当前默认         |
 

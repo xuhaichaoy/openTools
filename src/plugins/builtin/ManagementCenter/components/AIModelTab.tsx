@@ -75,6 +75,8 @@ type AIModelSource = "own_key" | "team" | "platform";
 export function AIModelTab() {
   const { config, setConfig, saveConfig, ownKeys, loadOwnKeys, saveOwnKeys, selectOwnKeyModel } =
     useAIStore();
+  const nativeToolsSupported =
+    navigator.platform.toLowerCase().includes("mac");
   const promptRingStyle: CSSProperties & Record<"--tw-ring-color", string> = {
     "--tw-ring-color": `${BRAND}30`,
   };
@@ -254,27 +256,43 @@ export function AIModelTab() {
           </div>
         )}
 
-        <label className="flex items-center justify-between cursor-pointer">
-          <div className="flex-1 pr-3">
-            <div className="flex items-center gap-1.5">
-              <Smartphone className="w-3 h-3 text-emerald-400" />
-              <span className="text-xs text-[var(--color-text)]">
-                本机原生应用工具
-              </span>
+        {nativeToolsSupported ? (
+          <label className="flex items-center justify-between cursor-pointer">
+            <div className="flex-1 pr-3">
+              <div className="flex items-center gap-1.5">
+                <Smartphone className="w-3 h-3 text-emerald-400" />
+                <span className="text-xs text-[var(--color-text)]">
+                  本机原生应用工具
+                </span>
+              </div>
+              <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
+                开启后 AI 可调用日历、提醒事项、备忘录、邮件、快捷指令、打开应用等本机能力。
+              </p>
             </div>
-            <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
-              开启后 AI 可调用日历、提醒事项、备忘录、邮件、快捷指令、打开应用等本机能力。
-            </p>
+            <Toggle
+              checked={config.enable_native_tools}
+              onChange={() =>
+                updateAndSave({
+                  enable_native_tools: !config.enable_native_tools,
+                })
+              }
+            />
+          </label>
+        ) : (
+          <div className="flex items-center justify-between">
+            <div className="flex-1 pr-3">
+              <div className="flex items-center gap-1.5">
+                <Smartphone className="w-3 h-3 text-[var(--color-text-secondary)]" />
+                <span className="text-xs text-[var(--color-text-secondary)]">
+                  本机原生应用工具（仅 macOS）
+                </span>
+              </div>
+              <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
+                当前平台不支持该能力，已自动关闭。
+              </p>
+            </div>
           </div>
-          <Toggle
-            checked={config.enable_native_tools}
-            onChange={() =>
-              updateAndSave({
-                enable_native_tools: !config.enable_native_tools,
-              })
-            }
-          />
-        </label>
+        )}
 
         <label className="flex items-center justify-between cursor-pointer">
           <div className="flex-1 pr-3">

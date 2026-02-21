@@ -83,6 +83,66 @@ pub(super) fn generate_utools_shim(plugin_id: &str) -> String {
     }});
   }}
 
+  function __screenColorPick(callback) {{
+    var cb = typeof callback === 'function' ? callback : function() {{}};
+
+    function __isWindows() {{
+      return navigator.platform.toLowerCase().includes('win');
+    }}
+
+    function __pickByEyeDropper() {{
+      if (!window.EyeDropper) return Promise.resolve({{ status: 'failed' }});
+      return new EyeDropper()
+        .open()
+        .then(function(result) {{
+          if (result && result.sRGBHex) {{
+            return {{ status: 'picked', hex: String(result.sRGBHex).toUpperCase() }};
+          }}
+          return {{ status: 'failed' }};
+        }})
+        .catch(function(err) {{
+          var message = String(err || '').toLowerCase();
+          if (message.includes('abort') || message.includes('cancel') || message.includes('denied')) {{
+            return {{ status: 'cancelled' }};
+          }}
+          console.error('[mTools] EyeDropper 取色失败:', err);
+          return {{ status: 'failed' }};
+        }});
+    }}
+
+    function __pickByNative() {{
+      return __invoke('plugin_start_color_picker')
+        .then(function(hex) {{
+          if (hex) return {{ status: 'picked', hex: String(hex).toUpperCase() }};
+          return {{ status: 'cancelled' }};
+        }})
+        .catch(function(err) {{
+          console.error('[mTools] 原生取色失败:', err);
+          return {{ status: 'failed' }};
+        }});
+    }}
+
+    var flow = __isWindows()
+      ? __pickByEyeDropper().then(function(result) {{
+          return result.status === 'failed' ? __pickByNative() : result;
+        }})
+      : __pickByNative().then(function(result) {{
+          return result.status === 'failed' ? __pickByEyeDropper() : result;
+        }});
+
+    flow
+      .then(function(result) {{
+        if (result && result.status === 'picked') {{
+          cb(result.hex || null);
+        }} else {{
+          cb(null);
+        }}
+      }})
+      .catch(function() {{
+        cb(null);
+      }});
+  }}
+
   function __resolveActionHandler(actionName) {{
     if (window.mtools && window.mtools.actions && typeof window.mtools.actions[actionName] === 'function') {{
       return window.mtools.actions[actionName];
@@ -172,14 +232,7 @@ pub(super) fn generate_utools_shim(plugin_id: &str) -> String {
       __invoke('screenCapture');
     }},
     getFeatures() {{ return __invoke('getFeatures'); }},
-    screenColorPick(callback) {{
-      __invoke('plugin_start_color_picker').then(function(hex) {{
-        callback && callback(hex || null);
-      }}).catch(function(err) {{
-        console.error('[mTools] 取色失败:', err);
-        callback && callback(null);
-      }});
-    }},
+    screenColorPick(callback) {{ __screenColorPick(callback); }},
     getUser() {{ return {{ avatar: '', nickname: '本地用户', type: 'member' }}; }},
     getAppVersion() {{ return '0.1.0'; }},
     isDarkColors() {{ return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches; }},
@@ -296,6 +349,65 @@ pub(super) fn generate_embed_bridge(plugin_id: &str, bridge_token: &str) -> Stri
   function __apiInvoke(method, args) {{
     return __invoke('plugin_api_call', {{ pluginId: __pluginId, method: method, args: JSON.stringify(args || {{}}), callId: ++__callId }}).then(function(r) {{ return JSON.parse(r || 'null'); }});
   }}
+
+  function __screenColorPick(callback) {{
+    var cb = typeof callback === 'function' ? callback : function() {{}};
+
+    function __isWindows() {{
+      return /win/i.test(navigator.platform);
+    }}
+
+    function __pickByEyeDropper() {{
+      if (!window.EyeDropper) return Promise.resolve({{ status: 'failed' }});
+      return new EyeDropper()
+        .open()
+        .then(function(result) {{
+          if (result && result.sRGBHex) {{
+            return {{ status: 'picked', hex: String(result.sRGBHex).toUpperCase() }};
+          }}
+          return {{ status: 'failed' }};
+        }})
+        .catch(function(err) {{
+          var message = String(err || '').toLowerCase();
+          if (message.includes('abort') || message.includes('cancel') || message.includes('denied')) {{
+            return {{ status: 'cancelled' }};
+          }}
+          return {{ status: 'failed' }};
+        }});
+    }}
+
+    function __pickByNative() {{
+      return __invoke('plugin_start_color_picker')
+        .then(function(hex) {{
+          if (hex) return {{ status: 'picked', hex: String(hex).toUpperCase() }};
+          return {{ status: 'cancelled' }};
+        }})
+        .catch(function() {{
+          return {{ status: 'failed' }};
+        }});
+    }}
+
+    var flow = __isWindows()
+      ? __pickByEyeDropper().then(function(result) {{
+          return result.status === 'failed' ? __pickByNative() : result;
+        }})
+      : __pickByNative().then(function(result) {{
+          return result.status === 'failed' ? __pickByEyeDropper() : result;
+        }});
+
+    flow
+      .then(function(result) {{
+        if (result && result.status === 'picked') {{
+          cb(result.hex || null);
+        }} else {{
+          cb(null);
+        }}
+      }})
+      .catch(function() {{
+        cb(null);
+      }});
+  }}
+
   window.utools = window.rubick = {{
     hideMainWindow: function() {{ return __apiInvoke('hideMainWindow'); }},
     showMainWindow: function() {{ return __apiInvoke('showMainWindow'); }},
@@ -312,7 +424,7 @@ pub(super) fn generate_embed_bridge(plugin_id: &str, bridge_token: &str) -> Stri
     shellOpenPath: function(p) {{ return __apiInvoke('shellOpenPath', {{ path: p }}); }},
     shellShowItemInFolder: function(p) {{ return __apiInvoke('shellShowItemInFolder', {{ path: p }}); }},
     screenCapture: function(cb) {{ if (cb) cb(null); }},
-    screenColorPick: function(cb) {{ __invoke('plugin_start_color_picker').then(function(hex) {{ if (cb) cb(hex || null); }}).catch(function() {{ if (cb) cb(null); }}); }},
+    screenColorPick: function(cb) {{ __screenColorPick(cb); }},
     getUser: function() {{ return {{ avatar: '', nickname: '本地用户', type: 'member' }}; }},
     getAppVersion: function() {{ return '0.1.0'; }},
     isDarkColors: function() {{ return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches; }},

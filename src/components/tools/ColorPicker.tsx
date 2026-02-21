@@ -74,6 +74,16 @@ function getColorName(h: number, s: number, l: number): string {
   return name;
 }
 
+type EyeDropperResult = { sRGBHex: string };
+type EyeDropperLike = { open: () => Promise<EyeDropperResult> };
+type EyeDropperCtor = new () => EyeDropperLike;
+
+function getEyeDropperCtor(): EyeDropperCtor | null {
+  const maybeCtor = (window as Window & { EyeDropper?: EyeDropperCtor })
+    .EyeDropper;
+  return maybeCtor ?? null;
+}
+
 export function ColorPicker({ onBack }: { onBack: () => void }) {
   const [H, setH] = useState(260);
   const [S, setS] = useState(72);
@@ -155,12 +165,66 @@ export function ColorPicker({ onBack }: { onBack: () => void }) {
   }, [addToHistory]);
 
   const handleScreenPick = useCallback(async () => {
+    const isWindows = navigator.platform.toLowerCase().includes("win");
+
+    const pickWithEyeDropper = async (): Promise<"picked" | "failed" | "cancelled"> => {
+      const ctor = getEyeDropperCtor();
+      if (!ctor) return "failed";
+      try {
+        const result = await new ctor().open();
+        if (result?.sRGBHex) {
+          setColorFromHex(result.sRGBHex.toUpperCase());
+          return "picked";
+        }
+      } catch (e) {
+        const message = String(e).toLowerCase();
+        if (
+          message.includes("abort") ||
+          message.includes("cancel") ||
+          message.includes("denied")
+        ) {
+          return "cancelled";
+        }
+        // 用户取消或浏览器拦截时仅作为降级分支，不弹阻断错误
+        handleError(e, { context: "EyeDropper 取色", silent: true });
+      }
+      return "failed";
+    };
+
+    const pickWithNative = async () => {
+      try {
+        const result = await invoke<string>("plugin_start_color_picker");
+        if (result) {
+          setColorFromHex(result);
+          return true;
+        }
+      } catch (e) {
+        handleError(e, { context: "屏幕取色", silent: true });
+      }
+      return false;
+    };
+
     setPicking(true);
     try {
-      const result = await invoke<string>("plugin_start_color_picker");
-      if (result) setColorFromHex(result);
-    } catch (e) {
-      handleError(e, { context: "屏幕取色" });
+      let picked = false;
+      if (isWindows) {
+        const eyeResult = await pickWithEyeDropper();
+        if (eyeResult === "cancelled") return;
+        picked = eyeResult === "picked";
+        if (!picked) picked = await pickWithNative();
+      } else {
+        picked = await pickWithNative();
+        if (!picked) {
+          const eyeResult = await pickWithEyeDropper();
+          if (eyeResult === "cancelled") return;
+          picked = eyeResult === "picked";
+        }
+      }
+      if (!picked) {
+        handleError(new Error("当前环境不支持屏幕取色"), {
+          context: "屏幕取色",
+        });
+      }
     } finally {
       setPicking(false);
     }

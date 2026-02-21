@@ -19,6 +19,7 @@ import { getServerUrl } from "@/store/server-store";
 import { BuiltinPluginList } from "@/components/plugins/market/BuiltinPluginList";
 import { ExternalPluginPanel } from "@/components/plugins/market/ExternalPluginPanel";
 import { PluginDeveloperPanel } from "@/components/plugins/market/PluginDeveloperPanel";
+import { getPrimarySupportedFeature } from "@/core/plugin-system/platform";
 import type {
   PluginCompatMatrixItem,
   PluginDevTraceItem,
@@ -194,6 +195,15 @@ export function PluginMarket({ onBack }: { onBack: () => void }) {
     if (bytes < 1024 * 1024) return `${Math.round(bytes / 102.4) / 10}KB`;
     return `${Math.round(bytes / 1024 / 102.4) / 10}MB`;
   };
+
+  const resolveDefaultFeatureCode = useCallback((plugin?: PluginInstance) => {
+    if (!plugin) return "";
+    return (
+      getPrimarySupportedFeature(plugin)?.code ||
+      plugin.manifest.features[0]?.code ||
+      ""
+    );
+  }, []);
 
   const reportInstall = async (slug: string) => {
     try {
@@ -683,20 +693,26 @@ export function PluginMarket({ onBack }: { onBack: () => void }) {
     if (!simPluginId || !plugins.some((p) => p.id === simPluginId)) {
       const first = plugins[0];
       setSimPluginId(first.id);
-      setSimFeatureCode(first.manifest.features[0]?.code || "");
+      setSimFeatureCode(resolveDefaultFeatureCode(first));
     } else {
       const plugin = plugins.find((p) => p.id === simPluginId);
       if (
         plugin &&
         !plugin.manifest.features.some((f) => f.code === simFeatureCode)
       ) {
-        setSimFeatureCode(plugin.manifest.features[0]?.code || "");
+        setSimFeatureCode(resolveDefaultFeatureCode(plugin));
       }
     }
     if (!storagePluginId || !plugins.some((p) => p.id === storagePluginId)) {
       setStoragePluginId(plugins[0].id);
     }
-  }, [plugins, simPluginId, simFeatureCode, storagePluginId]);
+  }, [
+    plugins,
+    simPluginId,
+    simFeatureCode,
+    storagePluginId,
+    resolveDefaultFeatureCode,
+  ]);
 
   const handleOpenPluginDir = async () => {
     try {
@@ -758,7 +774,7 @@ export function PluginMarket({ onBack }: { onBack: () => void }) {
   const handleSimPluginChange = (pluginId: string) => {
     setSimPluginId(pluginId);
     const plugin = plugins.find((item) => item.id === pluginId);
-    setSimFeatureCode(plugin?.manifest.features[0]?.code || "");
+    setSimFeatureCode(resolveDefaultFeatureCode(plugin));
   };
 
   return (

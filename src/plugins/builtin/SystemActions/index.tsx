@@ -22,6 +22,7 @@ interface SystemAction {
 }
 
 const isMac = navigator.platform.toLowerCase().includes('mac')
+const isWindows = navigator.platform.toLowerCase().includes('win')
 
 const SYSTEM_ACTIONS: SystemAction[] = [
   {
@@ -108,6 +109,12 @@ export default function SystemActionsPlugin({ onBack }: { onBack: () => void }) 
   const [done, setDone] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const { onMouseDown } = useDragWindow()
+  const visibleActions = SYSTEM_ACTIONS.filter((action) => {
+    if (action.native) return true
+    if (isMac) return Boolean(action.macCommand)
+    if (isWindows) return Boolean(action.winCommand)
+    return false
+  })
 
   const handleExecute = async (action: SystemAction) => {
     setExecuting(action.id)
@@ -118,7 +125,11 @@ export default function SystemActionsPlugin({ onBack }: { onBack: () => void }) 
       if (action.native) {
         await action.native()
       } else {
-        const command = isMac ? action.macCommand : action.winCommand
+        const command = isMac
+          ? action.macCommand
+          : isWindows
+            ? action.winCommand
+            : undefined
         if (!command) {
           throw new Error('当前系统不支持此操作')
         }
@@ -158,35 +169,41 @@ export default function SystemActionsPlugin({ onBack }: { onBack: () => void }) 
 
       {/* 操作网格 */}
       <div className="flex-1 overflow-y-auto p-4">
-        <div className="grid grid-cols-3 gap-3">
-          {SYSTEM_ACTIONS.map((action) => {
-            const Icon = action.icon
-            const isRunning = executing === action.id
-            const isDone = done === action.id
-            return (
-              <button
-                key={action.id}
-                onClick={() => handleExecute(action)}
-                disabled={isRunning}
-                className="flex flex-col items-center gap-2 p-3 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)] hover:border-orange-400/50 transition-all hover:shadow-sm disabled:opacity-50"
-              >
-                <div className={`w-10 h-10 rounded-xl ${action.color} flex items-center justify-center`}>
-                  {isRunning ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : isDone ? (
-                    <Check className="w-5 h-5 text-green-400" />
-                  ) : (
-                    <Icon className="w-5 h-5" />
-                  )}
-                </div>
-                <div className="text-center">
-                  <div className="text-[11px] font-medium text-[var(--color-text)]">{action.label}</div>
-                  <div className="text-[9px] text-[var(--color-text-secondary)] mt-0.5">{action.description}</div>
-                </div>
-              </button>
-            )
-          })}
-        </div>
+        {visibleActions.length === 0 ? (
+          <div className="text-xs text-[var(--color-text-secondary)]">
+            当前系统暂无可用的系统操作能力。
+          </div>
+        ) : (
+          <div className="grid grid-cols-3 gap-3">
+            {visibleActions.map((action) => {
+              const Icon = action.icon
+              const isRunning = executing === action.id
+              const isDone = done === action.id
+              return (
+                <button
+                  key={action.id}
+                  onClick={() => handleExecute(action)}
+                  disabled={isRunning}
+                  className="flex flex-col items-center gap-2 p-3 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)] hover:border-orange-400/50 transition-all hover:shadow-sm disabled:opacity-50"
+                >
+                  <div className={`w-10 h-10 rounded-xl ${action.color} flex items-center justify-center`}>
+                    {isRunning ? (
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                    ) : isDone ? (
+                      <Check className="w-5 h-5 text-green-400" />
+                    ) : (
+                      <Icon className="w-5 h-5" />
+                    )}
+                  </div>
+                  <div className="text-center">
+                    <div className="text-[11px] font-medium text-[var(--color-text)]">{action.label}</div>
+                    <div className="text-[9px] text-[var(--color-text-secondary)] mt-0.5">{action.description}</div>
+                  </div>
+                </button>
+              )
+            })}
+          </div>
+        )}
       </div>
     </div>
   )

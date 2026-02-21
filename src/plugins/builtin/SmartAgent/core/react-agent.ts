@@ -20,7 +20,12 @@ import type { PluginAction } from "@/core/plugin-system/plugin-interface";
 export interface AgentTool {
   name: string;
   description: string;
-  parameters?: Record<string, { type: string; description?: string }>;
+  parameters?: Record<
+    string,
+    { type: string; description?: string; required?: boolean }
+  >;
+  /** 标记为高风险工具，执行前会触发确认弹窗 */
+  dangerous?: boolean;
   execute: (params: Record<string, unknown>) => Promise<unknown>;
 }
 
@@ -69,7 +74,9 @@ function toolToFunctionDef(tool: AgentTool): AIToolDefinition {
         type: param.type,
         ...(param.description ? { description: param.description } : {}),
       };
-      required.push(key);
+      if (param.required !== false) {
+        required.push(key);
+      }
     }
   }
 
@@ -461,9 +468,11 @@ Final Answer: [最终回答]
         });
 
         // 危险操作检查
-        const isDangerous = this.config.dangerousToolPatterns?.some((pattern) =>
-          toolName.toLowerCase().includes(pattern.toLowerCase()),
-        );
+        const isDangerous =
+          !!tool.dangerous ||
+          !!this.config.dangerousToolPatterns?.some((pattern) =>
+            toolName.toLowerCase().includes(pattern.toLowerCase()),
+          );
         if (isDangerous && this.config.confirmDangerousAction) {
           const confirmed = await this.config.confirmDangerousAction(
             toolName,
@@ -623,9 +632,11 @@ Final Answer: [最终回答]
         });
 
         // 危险操作检查
-        const isDangerous = this.config.dangerousToolPatterns?.some((pattern) =>
-          parsed.action!.toLowerCase().includes(pattern.toLowerCase()),
-        );
+        const isDangerous =
+          !!tool.dangerous ||
+          !!this.config.dangerousToolPatterns?.some((pattern) =>
+            parsed.action!.toLowerCase().includes(pattern.toLowerCase()),
+          );
         if (isDangerous && this.config.confirmDangerousAction) {
           const confirmed = await this.config.confirmDangerousAction(
             parsed.action!,
@@ -775,6 +786,28 @@ export function pluginActionToTool(
   action: PluginAction,
   ai: MToolsAI,
 ): AgentTool {
+  const actionName = action.name.toLowerCase();
+  const actionDesc = action.description.toLowerCase();
+  const dangerousKeywords = [
+    "shell",
+    "command",
+    "delete",
+    "remove",
+    "clear",
+    "lock",
+    "shutdown",
+    "reboot",
+    "sleep",
+    "write",
+    "file",
+    "trash",
+  ];
+  const dangerous =
+    pluginId.toLowerCase() === "system-actions" ||
+    dangerousKeywords.some(
+      (keyword) => actionName.includes(keyword) || actionDesc.includes(keyword),
+    );
+
   return {
     name: `${pluginId}_${action.name}`,
     description: `[${pluginName}] ${action.description}`,
@@ -786,6 +819,7 @@ export function pluginActionToTool(
           ]),
         )
       : undefined,
+    dangerous,
     execute: (params) => action.execute(params, { ai }),
   };
 }

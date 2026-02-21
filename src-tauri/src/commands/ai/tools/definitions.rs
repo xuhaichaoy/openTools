@@ -170,6 +170,35 @@ pub fn get_advanced_tools() -> Vec<serde_json::Value> {
         {
             "type": "function",
             "function": {
+                "name": "read_file_range",
+                "description": "按行范围读取文本文件，返回带行号内容，适合代码审阅。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "文件绝对路径"
+                        },
+                        "start_line": {
+                            "type": "integer",
+                            "description": "起始行号（从 1 开始），默认 1"
+                        },
+                        "end_line": {
+                            "type": "integer",
+                            "description": "结束行号（包含），默认按 max_lines 推断"
+                        },
+                        "max_lines": {
+                            "type": "integer",
+                            "description": "最多返回行数，默认 400，上限 2000"
+                        }
+                    },
+                    "required": ["path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "write_file",
                 "description": "写入内容到本地文件。如果文件不存在则创建，存在则覆盖。",
                 "parameters": {
@@ -202,6 +231,39 @@ pub fn get_advanced_tools() -> Vec<serde_json::Value> {
                         }
                     },
                     "required": ["path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_in_files",
+                "description": "递归搜索目录中的文本内容，返回匹配文件、行号和片段，适合代码定位。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "目录绝对路径"
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": "要搜索的关键词"
+                        },
+                        "case_sensitive": {
+                            "type": "boolean",
+                            "description": "是否区分大小写，默认 false"
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "description": "最大返回结果数，默认 200，上限 1000"
+                        },
+                        "file_pattern": {
+                            "type": "string",
+                            "description": "文件过滤模式，例如 *.ts、*.rs、src/*"
+                        }
+                    },
+                    "required": ["path", "query"]
                 }
             }
         },

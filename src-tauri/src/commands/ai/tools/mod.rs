@@ -38,6 +38,13 @@ pub fn get_system_prompt(
     enable_native: bool,
     custom_prompt: &str,
 ) -> String {
+    #[cfg(target_os = "macos")]
+    let native_tools_enabled = enable_native;
+    #[cfg(not(target_os = "macos"))]
+    let native_tools_enabled = false;
+    #[cfg(not(target_os = "macos"))]
+    let _ = enable_native;
+
     let mut base = String::from(
         "你是 mTools 的 AI 助手，一个强大的桌面效率工具。你可以：\n\
      1. 搜索和执行数据导入导出脚本（数据工坊）\n\
@@ -60,7 +67,7 @@ pub fn get_system_prompt(
      - 闲聊和打招呼不要调用任何知识库工具\n",
     );
 
-    if enable_native {
+    if native_tools_enabled {
         base.push_str("\n你拥有强大的本机应用交互能力：\n\
      - 日历：创建日程事件、查看今日/近期日程（native_calendar_create_event, native_calendar_list_events）\n\
      - 提醒事项：创建提醒、查看未完成提醒（native_reminder_create, native_reminder_list_incomplete）\n\
@@ -74,9 +81,10 @@ pub fn get_system_prompt(
 
     let mut prompt = if enable_advanced {
         format!(
-            "{}此外，你还拥有以下高级能力：\n\
+             "{}此外，你还拥有以下高级能力：\n\
              - 执行 shell 命令（run_shell_command）\n\
-             - 读写本地文件、列出目录（read_file / write_file / list_directory）\n\
+             - 读写本地文件、按行读取代码、列出目录（read_file / read_file_range / write_file / list_directory）\n\
+             - 递归搜索项目文本（search_in_files）\n\
              - 获取系统信息（get_system_info）\n\
              - 用默认浏览器打开 URL（open_url）\n\
              - 用系统默认程序打开文件/目录（open_path）\n\
