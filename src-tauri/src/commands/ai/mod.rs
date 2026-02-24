@@ -164,9 +164,12 @@ pub async fn ai_save_chat_image(
 
 /// 前端调用此命令取消流式生成
 #[tauri::command]
-pub async fn ai_stop_stream(app: AppHandle) -> Result<(), AppError> {
+pub async fn ai_stop_stream(
+    app: AppHandle,
+    conversation_id: Option<String>,
+) -> Result<(), AppError> {
     let state = app.state::<StreamCancellation>();
-    state.cancel();
+    state.cancel(conversation_id.as_deref());
     Ok(())
 }
 
@@ -323,7 +326,7 @@ pub async fn ai_chat_stream(
     let mut non_system_messages = strip_system_messages(messages);
 
     let cancellation = app.state::<StreamCancellation>();
-    cancellation.reset();
+    cancellation.reset(&conversation_id);
 
     // RAG 预检索：
     // - 用户显式开启自动检索时执行

@@ -8,12 +8,10 @@ interface AgentHeaderBarProps {
   scheduledTasksCount: number;
   showToolsWorkbench: boolean;
   showOrchestratorWorkbench: boolean;
-  planMode: boolean;
   hasAnySteps: boolean;
   onShowHistory: () => void;
   onToggleToolsWorkbench: () => void;
   onToggleOrchestratorWorkbench: () => void;
-  onTogglePlanMode: () => void;
   onClear: () => void;
 }
 
@@ -24,12 +22,10 @@ export function AgentHeaderBar({
   scheduledTasksCount,
   showToolsWorkbench,
   showOrchestratorWorkbench,
-  planMode,
   hasAnySteps,
   onShowHistory,
   onToggleToolsWorkbench,
   onToggleOrchestratorWorkbench,
-  onTogglePlanMode,
   onClear,
 }: AgentHeaderBarProps) {
   return (
@@ -81,17 +77,6 @@ export function AgentHeaderBar({
           }`}
         >
           编排 {scheduledTasksCount > 0 ? `(${scheduledTasksCount})` : ""}
-        </button>
-        <button
-          onClick={onTogglePlanMode}
-          className={`text-xs px-2 py-1 rounded ${
-            planMode
-              ? "bg-emerald-500/15 text-emerald-500"
-              : "bg-[var(--color-bg-secondary)] hover:bg-[var(--color-bg-tertiary)]"
-          }`}
-          title="Plan Mode：先输出计划，确认后执行"
-        >
-          Plan {planMode ? "On" : "Off"}
         </button>
         {hasAnySteps && (
           <button onClick={onClear} className="p-1 rounded hover:bg-[var(--color-bg-secondary)]">

@@ -247,6 +247,69 @@ describe("AgentRuntimeManager", () => {
     expect(invokeMock).not.toHaveBeenCalledWith("run_shell_command", expect.anything());
   });
 
+  it("should block write when allowed_roots is empty", async () => {
+    loadPolicyMock.mockResolvedValue({
+      allowed_roots: [],
+      force_readonly: false,
+      block_mode: false,
+      allow_unattended_host_fallback: false,
+    });
+    const manager = new AgentRuntimeManager();
+
+    await expect(
+      manager.writeTextFile("/Users/haichao/workspace/safe/demo.txt", "demo"),
+    ).rejects.toThrow("未配置 allowed_roots");
+
+    expect(invokeMock).not.toHaveBeenCalledWith("write_text_file", expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith("agent_container_write_file", expect.anything());
+  });
+
+  it("should allow interactive host write when allowed_roots is empty and user confirmed", async () => {
+    aiState.config.agent_runtime_mode = "container_preferred";
+    loadPolicyMock.mockResolvedValue({
+      allowed_roots: [],
+      force_readonly: false,
+      block_mode: false,
+      allow_unattended_host_fallback: false,
+    });
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "write_text_file") {
+        return Promise.resolve({
+          runtime: "host",
+          path: "/Users/haichao/Downloads/plan.md",
+          bytes: 4,
+          message: "ok",
+        });
+      }
+      return Promise.resolve({
+        runtime: "host",
+        exit_code: 0,
+        stdout: "",
+        stderr: "",
+      });
+    });
+    const manager = new AgentRuntimeManager();
+
+    const result = await manager.writeTextFile(
+      "/Users/haichao/Downloads/plan.md",
+      "demo",
+      {
+        allowInteractiveHostWriteWhenNoPolicyRoots: true,
+        confirmHostFallback: async () => true,
+      },
+    );
+
+    expect(result).toMatchObject({
+      runtime: "host",
+      path: "/Users/haichao/Downloads/plan.md",
+    });
+    expect(invokeMock).toHaveBeenCalledWith("write_text_file", {
+      path: "/Users/haichao/Downloads/plan.md",
+      content: "demo",
+    });
+    expect(invokeMock).not.toHaveBeenCalledWith("agent_container_write_file", expect.anything());
+  });
+
   it("should deny unattended host fallback when policy is not enabled", async () => {
     aiState.config.agent_runtime_mode = "container_preferred";
     const manager = new AgentRuntimeManager();

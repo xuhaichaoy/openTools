@@ -1,0 +1,84 @@
+import { useEffect, type Dispatch, type SetStateAction } from "react";
+import { pluginActionToTool, type AgentTool } from "../core/react-agent";
+import { registry } from "@/core/plugin-system/registry";
+import type { MToolsAI } from "@/core/plugin-system/plugin-interface";
+import type { AgentTask } from "@/store/agent-store";
+import type { RuntimeFallbackContext } from "@/core/agent/runtime";
+import {
+  createBuiltinAgentTools,
+  type AskUserQuestion,
+  type AskUserAnswers,
+  type BuiltinToolsResult,
+} from "../core/default-tools";
+import { shouldAutoCollapseProcess } from "../core/ui-state";
+
+interface UseAgentEffectsParams {
+  ai?: MToolsAI;
+  historyLoaded: boolean;
+  loadHistory: () => Promise<void>;
+  loadScheduledTasks: () => Promise<void>;
+  tasks: AgentTask[];
+  setCollapsedTaskProcesses: Dispatch<SetStateAction<Set<string>>>;
+  confirmHostFallback: (context: RuntimeFallbackContext) => Promise<boolean>;
+  askUser: (questions: AskUserQuestion[]) => Promise<AskUserAnswers>;
+  setAvailableTools: Dispatch<SetStateAction<AgentTool[]>>;
+  setResetPerRunState: Dispatch<SetStateAction<(() => void) | null>>;
+}
+
+export function useAgentEffects({
+  ai,
+  historyLoaded,
+  loadHistory,
+  loadScheduledTasks,
+  tasks,
+  setCollapsedTaskProcesses,
+  confirmHostFallback,
+  askUser,
+  setAvailableTools,
+  setResetPerRunState,
+}: UseAgentEffectsParams) {
+  useEffect(() => {
+    if (!historyLoaded) void loadHistory();
+    void loadScheduledTasks();
+  }, [historyLoaded, loadHistory, loadScheduledTasks]);
+
+  useEffect(() => {
+    setCollapsedTaskProcesses((prev) => {
+      const next = new Set(prev);
+      let changed = false;
+
+      const aliveIds = new Set(tasks.map((task) => task.id));
+      for (const taskId of next) {
+        if (!aliveIds.has(taskId)) {
+          next.delete(taskId);
+          changed = true;
+        }
+      }
+
+      for (const task of tasks) {
+        const shouldCollapse = shouldAutoCollapseProcess(task);
+        if (shouldCollapse && !next.has(task.id)) {
+          next.add(task.id);
+          changed = true;
+        } else if (!shouldCollapse && next.has(task.id)) {
+          next.delete(task.id);
+          changed = true;
+        }
+      }
+
+      return changed ? next : prev;
+    });
+  }, [tasks, setCollapsedTaskProcesses]);
+
+  useEffect(() => {
+    if (!ai) return;
+    const allActions = registry.getAllActions();
+    const tools: AgentTool[] = allActions.map(({ pluginId, pluginName, action }) =>
+      pluginActionToTool(pluginId, pluginName, action, ai),
+    );
+    const builtinResult: BuiltinToolsResult = createBuiltinAgentTools(confirmHostFallback, askUser);
+    tools.push(...builtinResult.tools);
+    setAvailableTools(tools);
+    setResetPerRunState(() => builtinResult.resetPerRunState);
+  }, [ai, confirmHostFallback, askUser, setAvailableTools, setResetPerRunState]);
+}

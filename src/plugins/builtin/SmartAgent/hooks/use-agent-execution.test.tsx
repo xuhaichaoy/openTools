@@ -24,7 +24,8 @@ const hoisted = vi.hoisted(() => ({
     currentSessionId: null as string | null,
   },
   latestHistorySteps: [] as Array<{ type: string; content: string; timestamp: number }>,
-  runMode: "success" as "success" | "abort",
+  latestOnStep: null as null | ((step: { type: string; content: string; timestamp: number; streaming?: boolean }) => void),
+  runMode: "success" as "success" | "abort" | "timeout",
 }));
 
 vi.mock("../core/react-agent", () => ({
@@ -33,16 +34,36 @@ vi.mock("../core/react-agent", () => ({
       _ai: unknown,
       _tools: unknown,
       _options: unknown,
-      _onStep: unknown,
+      onStep: ((step: { type: string; content: string; timestamp: number; streaming?: boolean }) => void) | undefined,
       historySteps: Array<{ type: string; content: string; timestamp: number }>,
+      _depth?: number,
     ) {
       hoisted.latestHistorySteps = historySteps;
+      hoisted.latestOnStep = onStep || null;
     }
 
-    async run() {
+    async run(_query: string, signal?: AbortSignal) {
       if (hoisted.runMode === "abort") {
         throw new Error("Aborted");
       }
+      if (hoisted.runMode === "timeout") {
+        await new Promise<void>((resolve, reject) => {
+          signal?.addEventListener(
+            "abort",
+            () => {
+              reject(new Error("Aborted"));
+            },
+            { once: true },
+          );
+        });
+        return "mock-timeout";
+      }
+      hoisted.latestOnStep?.({
+        type: "answer",
+        content: "streaming-answer",
+        timestamp: Date.now(),
+        streaming: true,
+      });
       return "mock-result";
     }
   },
@@ -83,6 +104,7 @@ describe("useAgentExecution", () => {
     container = document.createElement("div");
     root = createRoot(container);
     hoisted.latestHistorySteps = [];
+    hoisted.latestOnStep = null;
     hoisted.runMode = "success";
     hoisted.fakeStoreState = {
       sessions: [],
@@ -138,9 +160,9 @@ describe("useAgentExecution", () => {
           }}
           params={{
             ai: {} as never,
-            running: false,
             setRunning,
             setRunningPhase,
+            setExecutionWaitingStage: vi.fn(),
             availableTools: [] as AgentTool[],
             currentSessionId: "current",
             createSession: vi.fn(() => "new_session"),
@@ -164,7 +186,6 @@ describe("useAgentExecution", () => {
     });
 
     const historyContents = hoisted.latestHistorySteps.map((step) => step.content).join("\n");
-    expect(historyContents).toContain("TARGET_STEP");
     expect(historyContents).toContain("TARGET_ANSWER");
     expect(historyContents).not.toContain("CURRENT_STEP");
     expect(historyContents).not.toContain("CURRENT_ANSWER");
@@ -194,9 +215,9 @@ describe("useAgentExecution", () => {
           }}
           params={{
             ai: {} as never,
-            running: false,
             setRunning: vi.fn(),
             setRunningPhase: vi.fn(),
+            setExecutionWaitingStage: vi.fn(),
             availableTools: [] as AgentTool[],
             currentSessionId: "target",
             createSession: vi.fn(() => "target"),
@@ -222,5 +243,122 @@ describe("useAgentExecution", () => {
     const lastCall = updateTask.mock.calls.at(-1);
     expect(lastCall?.[2]?.status).toBe("cancelled");
     expect(lastCall?.[2]?.answer).toContain("停止");
+  });
+
+  it("updates answer during streaming answer steps", async () => {
+    hoisted.fakeStoreState = {
+      currentSessionId: "target",
+      sessions: [
+        {
+          id: "target",
+          createdAt: 1,
+          tasks: [],
+        },
+      ],
+    };
+
+    const updateTask = vi.fn();
+    let hookValue: ReturnType<typeof useAgentExecution> | null = null;
+
+    act(() => {
+      root.render(
+        <HookHarness
+          onReady={(value) => {
+            hookValue = value;
+          }}
+          params={{
+            ai: {} as never,
+            setRunning: vi.fn(),
+            setRunningPhase: vi.fn(),
+            setExecutionWaitingStage: vi.fn(),
+            availableTools: [] as AgentTool[],
+            currentSessionId: "target",
+            createSession: vi.fn(() => "target"),
+            addTask: vi.fn(() => "task_stream"),
+            updateTask,
+            inputRef: { current: document.createElement("textarea") },
+            scrollRef: {
+              current: {
+                scrollHeight: 100,
+                scrollTo: vi.fn(),
+              } as unknown as HTMLDivElement,
+            },
+            openDangerConfirm: vi.fn(async () => true),
+          }}
+        />,
+      );
+    });
+
+    await act(async () => {
+      await hookValue!.executeAgentTask("query", { sessionId: "target" });
+    });
+
+    const hasStreamingAnswerUpdate = updateTask.mock.calls.some(
+      (call) => call?.[2]?.answer === "streaming-answer",
+    );
+    expect(hasStreamingAnswerUpdate).toBe(true);
+    const lastCall = updateTask.mock.calls.at(-1);
+    expect(lastCall?.[2]?.answer).toBe("mock-result");
+  });
+
+  it("reports timeout error when execution exceeds timeout", async () => {
+    vi.useFakeTimers();
+    hoisted.runMode = "timeout";
+    hoisted.fakeStoreState = {
+      currentSessionId: "target",
+      sessions: [
+        {
+          id: "target",
+          createdAt: 1,
+          tasks: [],
+        },
+      ],
+    };
+
+    const updateTask = vi.fn();
+    let hookValue: ReturnType<typeof useAgentExecution> | null = null;
+
+    act(() => {
+      root.render(
+        <HookHarness
+          onReady={(value) => {
+            hookValue = value;
+          }}
+          params={{
+            ai: {} as never,
+            setRunning: vi.fn(),
+            setRunningPhase: vi.fn(),
+            setExecutionWaitingStage: vi.fn(),
+            availableTools: [] as AgentTool[],
+            currentSessionId: "target",
+            createSession: vi.fn(() => "target"),
+            addTask: vi.fn(() => "task_timeout"),
+            updateTask,
+            inputRef: { current: document.createElement("textarea") },
+            scrollRef: {
+              current: {
+                scrollHeight: 100,
+                scrollTo: vi.fn(),
+              } as unknown as HTMLDivElement,
+            },
+            openDangerConfirm: vi.fn(async () => true),
+          }}
+        />,
+      );
+    });
+
+    const runPromise = hookValue!.executeAgentTask("query", {
+      sessionId: "target",
+    });
+    await vi.advanceTimersByTimeAsync(650_000);
+    await act(async () => {
+      await runPromise;
+    });
+
+    const timeoutMessageCall = updateTask.mock.calls.find((call) =>
+      String(call?.[2]?.answer || "").includes("超时"),
+    );
+    expect(timeoutMessageCall).toBeTruthy();
+    vi.useRealTimers();
   });
 });

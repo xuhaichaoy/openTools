@@ -45,7 +45,7 @@ export function AICenter({
   );
   const chatRef = useRef<ChatViewHandle>(null);
   const agentRef = useRef<SmartAgentHandle>(null);
-  const [agentPlanMode, setAgentPlanMode] = useState(true);
+
   const { onMouseDown } = useDragWindow();
   const { conversations } = useAIStore();
   const { sessions, scheduledTasks } = useAgentStore();
@@ -184,24 +184,6 @@ export function AICenter({
                 </span>
               )}
             </button>
-            {/* Plan 模式 */}
-            <button
-              onClick={() => {
-                agentRef.current?.togglePlanMode();
-                const latest = agentRef.current?.getPlanMode();
-                if (typeof latest === "boolean") {
-                  setAgentPlanMode(latest);
-                }
-              }}
-              className={`text-[11px] px-2 py-1 rounded-md transition-all ${
-                agentPlanMode
-                  ? "bg-emerald-500/15 text-emerald-500"
-                  : "bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
-              }`}
-              title="Plan Mode：先输出计划，确认后执行"
-            >
-              Plan {agentPlanMode ? "On" : "Off"}
-            </button>
             {/* 新任务 */}
             <button
               onClick={() => agentRef.current?.newSession()}
@@ -231,7 +213,6 @@ export function AICenter({
               ref={agentRef}
               ai={ai}
               headless
-              onPlanModeChange={setAgentPlanMode}
             />
           )}
         </Suspense>

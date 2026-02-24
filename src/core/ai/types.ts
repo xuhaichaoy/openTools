@@ -71,6 +71,8 @@ export interface AIConfig {
   agent_retry_max?: number;
   /** Agent 重试退避基准毫秒（指数退避） */
   agent_retry_backoff_ms?: number;
+  /** Agent 单次执行最大迭代步数（默认 25） */
+  agent_max_iterations?: number;
   /** 本次请求的 RAG 行为覆盖（仅运行时，不持久化） */
   request_rag_mode?: "inherit" | "off" | "on";
   /** 禁用产品名触发的 RAG 兜底（仅运行时，不持久化） */

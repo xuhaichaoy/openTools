@@ -65,6 +65,45 @@ pub fn get_base_tools() -> Vec<serde_json::Value> {
         {
             "type": "function",
             "function": {
+                "name": "web_search",
+                "description": "联网搜索信息。在用户需要最新资讯、查询不确定的事实、搜索技术文档、了解实时信息时调用。返回搜索结果列表（标题、链接、摘要）。如需查看某条结果的完整内容，再用 web_fetch 获取对应链接。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "搜索关键词，简洁精确"
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "description": "最大返回结果数，默认5",
+                            "default": 5
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "web_fetch",
+                "description": "获取指定 URL 的网页内容（纯文本）。适用于查阅在线文档、阅读搜索结果中某条链接的详细内容。通常在 web_search 之后使用。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "要获取的完整 URL 地址（必须以 http:// 或 https:// 开头）"
+                        }
+                    },
+                    "required": ["url"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "list_knowledge_docs",
                 "description": "列出知识库中所有已索引文档的元数据。仅在需要了解知识库有哪些文档时调用，普通问答直接用 search_docs。",
                 "parameters": { "type": "object", "properties": {} }

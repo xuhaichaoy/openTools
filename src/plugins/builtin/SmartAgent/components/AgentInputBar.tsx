@@ -102,27 +102,28 @@ export function AgentInputBar({
           />
         </div>
 
-        {/* 发送/停止按钮 */}
-        {running ? (
-          <button
-            onClick={onStop}
-            className="p-2 rounded-full bg-red-500 text-white hover:bg-red-600 transition-all shadow-sm active:scale-95 shrink-0 self-end mb-0.5"
-            title="停止生成"
-          >
-            <span className="w-4 h-4 flex items-center justify-center font-bold text-xs">
-              ■
-            </span>
-          </button>
-        ) : (
+        {/* 停止/发送按钮 */}
+        <div className="flex items-center gap-1 shrink-0 self-end mb-0.5">
+          {running && (
+            <button
+              onClick={onStop}
+              className="p-2 rounded-full bg-red-500 text-white hover:bg-red-600 transition-all shadow-sm active:scale-95"
+              title="停止生成"
+            >
+              <span className="w-4 h-4 flex items-center justify-center font-bold text-xs">
+                ■
+              </span>
+            </button>
+          )}
           <button
             onClick={onRun}
-            disabled={running || (!input.trim() && pendingImagePreviews.length === 0) || !ai}
-            className="p-2 rounded-full bg-emerald-500 text-white hover:bg-emerald-600 disabled:opacity-40 disabled:hover:bg-emerald-500 disabled:cursor-not-allowed transition-all shadow-sm active:scale-95 shrink-0 self-end mb-0.5"
+            disabled={(!input.trim() && pendingImagePreviews.length === 0) || !ai}
+            className="p-2 rounded-full bg-emerald-500 text-white hover:bg-emerald-600 disabled:opacity-40 disabled:hover:bg-emerald-500 disabled:cursor-not-allowed transition-all shadow-sm active:scale-95"
             aria-label="发送"
           >
             <Send className="w-4 h-4" />
           </button>
-        )}
+        </div>
       </div>
       {!ai && (
         <p className="text-xs text-red-500 mt-1 px-1">

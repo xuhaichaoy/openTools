@@ -1,6 +1,8 @@
 pub mod anthropic;
 pub mod openai;
 
+use std::collections::HashSet;
+
 // ── 工具确认状态（用于危险工具执行前的用户确认） ──
 
 pub struct ToolConfirmationState {
@@ -10,27 +12,102 @@ pub struct ToolConfirmationState {
 // ── 流式取消状态 ──
 
 pub struct StreamCancellation {
-    pub cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub cancelled: std::sync::Arc<std::sync::Mutex<HashSet<String>>>,
+    pub active: std::sync::Arc<std::sync::Mutex<HashSet<String>>>,
 }
 
 impl StreamCancellation {
     pub fn new() -> Self {
         Self {
-            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cancelled: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
+            active: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
         }
     }
 
-    pub fn cancel(&self) {
-        self.cancelled
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+    pub fn reset(&self, conversation_id: &str) {
+        if let Ok(mut cancelled) = self.cancelled.lock() {
+            cancelled.remove(conversation_id);
+        }
+        if let Ok(mut active) = self.active.lock() {
+            active.insert(conversation_id.to_string());
+        }
     }
 
-    pub fn reset(&self) {
-        self.cancelled
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+    pub fn clear(&self, conversation_id: &str) {
+        if let Ok(mut active) = self.active.lock() {
+            active.remove(conversation_id);
+        }
+        if let Ok(mut cancelled) = self.cancelled.lock() {
+            cancelled.remove(conversation_id);
+        }
     }
 
-    pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(std::sync::atomic::Ordering::Relaxed)
+    pub fn cancel(&self, conversation_id: Option<&str>) {
+        if let Some(id) = conversation_id {
+            if let Ok(mut cancelled) = self.cancelled.lock() {
+                cancelled.insert(id.to_string());
+            }
+            return;
+        }
+
+        let active_ids = if let Ok(active) = self.active.lock() {
+            active.iter().cloned().collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        if let Ok(mut cancelled) = self.cancelled.lock() {
+            for id in active_ids {
+                cancelled.insert(id);
+            }
+        }
+    }
+
+    pub fn is_cancelled(&self, conversation_id: &str) -> bool {
+        self.cancelled
+            .lock()
+            .map(|cancelled| cancelled.contains(conversation_id))
+            .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StreamCancellation;
+
+    #[test]
+    fn cancel_specific_conversation_only_marks_target() {
+        let state = StreamCancellation::new();
+        state.reset("conv-a");
+        state.reset("conv-b");
+
+        state.cancel(Some("conv-a"));
+
+        assert!(state.is_cancelled("conv-a"));
+        assert!(!state.is_cancelled("conv-b"));
+    }
+
+    #[test]
+    fn cancel_without_id_marks_all_active_conversations() {
+        let state = StreamCancellation::new();
+        state.reset("conv-a");
+        state.reset("conv-b");
+
+        state.cancel(None);
+
+        assert!(state.is_cancelled("conv-a"));
+        assert!(state.is_cancelled("conv-b"));
+    }
+
+    #[test]
+    fn clear_removes_conversation_from_global_cancel_scope() {
+        let state = StreamCancellation::new();
+        state.reset("conv-a");
+        state.reset("conv-b");
+        state.clear("conv-a");
+
+        state.cancel(None);
+
+        assert!(!state.is_cancelled("conv-a"));
+        assert!(state.is_cancelled("conv-b"));
     }
 }

@@ -1,5 +1,4 @@
 import type { ReactNode } from "react";
-import type { PluginStorage } from "./storage";
 import type { PluginContext } from "./context";
 
 // ── AI SDK 接口 ──
@@ -37,12 +36,14 @@ export interface MToolsAI {
     model?: string;
     temperature?: number;
     requestPolicy?: AIRequestPolicy;
+    signal?: AbortSignal;
   }): Promise<{ content: string; usage?: { tokens: number } }>;
 
   /** 流式对话 */
   stream(options: {
     messages: { role: string; content: string }[];
     requestPolicy?: AIRequestPolicy;
+    signal?: AbortSignal;
     onChunk: (chunk: string) => void;
     onDone?: (full: string) => void;
   }): Promise<void>;
@@ -55,6 +56,7 @@ export interface MToolsAI {
   streamWithTools?(options: {
     messages: { role: string; content: string | null; tool_calls?: AIToolCall[]; tool_call_id?: string; name?: string }[];
     tools: AIToolDefinition[];
+    signal?: AbortSignal;
     onChunk: (chunk: string) => void;
     onDone?: (full: string) => void;
   }): Promise<

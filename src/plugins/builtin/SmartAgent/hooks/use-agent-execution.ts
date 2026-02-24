@@ -1,18 +1,25 @@
-import { useCallback, useRef, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
+import { useCallback, useEffect, useRef, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
 import { ReActAgent, type AgentStep, type AgentTool } from "../core/react-agent";
 import type { MToolsAI } from "@/core/plugin-system/plugin-interface";
 import { useAgentStore } from "@/store/agent-store";
 import { useAIStore } from "@/store/ai-store";
+import { useAgentMemoryStore } from "@/store/agent-memory-store";
 import { buildAgentFCCompatibilityKey } from "@/core/agent/fc-compatibility";
-import type { RunningPhase } from "../core/ui-state";
+import {
+  getExecutionWaitingStageLabel,
+  type ExecutionWaitingStage,
+  type RunningPhase,
+} from "../core/ui-state";
 
 type AgentStoreState = ReturnType<typeof useAgentStore.getState>;
+export const AGENT_EXECUTION_HEARTBEAT_INTERVAL_MS = 10_000;
+export const AGENT_EXECUTION_TIMEOUT_MS = 600_000;
 
 interface UseAgentExecutionParams {
   ai?: MToolsAI;
-  running: boolean;
   setRunning: Dispatch<SetStateAction<boolean>>;
   setRunningPhase: Dispatch<SetStateAction<RunningPhase | null>>;
+  setExecutionWaitingStage: Dispatch<SetStateAction<ExecutionWaitingStage | null>>;
   availableTools: AgentTool[];
   currentSessionId: string | null;
   createSession: AgentStoreState["createSession"];
@@ -21,6 +28,7 @@ interface UseAgentExecutionParams {
   inputRef: MutableRefObject<HTMLTextAreaElement | null>;
   scrollRef: MutableRefObject<HTMLDivElement | null>;
   openDangerConfirm: (toolName: string, params: Record<string, unknown>) => Promise<boolean>;
+  resetPerRunState: (() => void) | null;
 }
 
 interface UseAgentExecutionResult {
@@ -29,6 +37,7 @@ interface UseAgentExecutionResult {
     opts?: {
       sessionId?: string;
       taskId?: string;
+      systemHint?: string;
     },
   ) => Promise<void>;
   stopExecution: () => void;
@@ -36,9 +45,9 @@ interface UseAgentExecutionResult {
 
 export function useAgentExecution({
   ai,
-  running,
   setRunning,
   setRunningPhase,
+  setExecutionWaitingStage,
   availableTools,
   currentSessionId,
   createSession,
@@ -47,17 +56,27 @@ export function useAgentExecution({
   inputRef,
   scrollRef,
   openDangerConfirm,
+  resetPerRunState,
 }: UseAgentExecutionParams): UseAgentExecutionResult {
   const abortControllerRef = useRef<AbortController | null>(null);
+  const heartbeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const timeoutTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearTimers = useCallback(() => {
+    if (heartbeatTimerRef.current) { clearInterval(heartbeatTimerRef.current); heartbeatTimerRef.current = null; }
+    if (timeoutTimerRef.current) { clearTimeout(timeoutTimerRef.current); timeoutTimerRef.current = null; }
+  }, []);
 
   const stopExecution = useCallback(() => {
+    clearTimers();
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
       setRunning(false);
       setRunningPhase(null);
+      setExecutionWaitingStage(null);
     }
-  }, [setRunning, setRunningPhase]);
+  }, [clearTimers, setExecutionWaitingStage, setRunning, setRunningPhase]);
 
   const executeAgentTask = useCallback(
     async (
@@ -65,9 +84,18 @@ export function useAgentExecution({
       opts?: {
         sessionId?: string;
         taskId?: string;
+        systemHint?: string;
       },
     ) => {
-      if (!ai || !query.trim() || running) return;
+      if (!ai || !query.trim()) return;
+
+      resetPerRunState?.();
+
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+        abortControllerRef.current = null;
+        clearTimers();
+      }
 
       let sessionId = opts?.sessionId || currentSessionId;
       let taskId = opts?.taskId || "";
@@ -84,13 +112,27 @@ export function useAgentExecution({
         const session = snapshot.sessions.find((s) => s.id === sessionId);
         if (session) {
           for (const task of session.tasks) {
-            historySteps.push(...task.steps);
-            if (task.answer) {
+            const steps = task.steps || [];
+            const keySteps = steps.filter(
+              (s) => s.type === "action" || s.type === "observation" || s.type === "answer",
+            );
+            for (const step of keySteps.slice(-6)) {
               historySteps.push({
-                type: "answer",
-                content: task.answer,
-                timestamp: session.createdAt,
+                ...step,
+                timestamp: step.timestamp || session.createdAt,
               });
+            }
+            if (task.answer) {
+              const alreadyHasAnswer = keySteps.some(
+                (s) => s.type === "answer" && s.content === task.answer,
+              );
+              if (!alreadyHasAnswer) {
+                historySteps.push({
+                  type: "answer",
+                  content: task.answer,
+                  timestamp: session.createdAt,
+                });
+              }
             }
           }
         }
@@ -99,8 +141,13 @@ export function useAgentExecution({
 
       if (!sessionId || !taskId) return;
 
+      const setWaitingStageIfChanged = (stage: ExecutionWaitingStage | null) => {
+        setExecutionWaitingStage((prev) => (prev === stage ? prev : stage));
+      };
+
       setRunning(true);
       setRunningPhase("executing");
+      setWaitingStageIfChanged("model_first_token");
       if (inputRef.current) inputRef.current.style.height = "auto";
       updateTask(sessionId, taskId, {
         status: "running",
@@ -111,20 +158,100 @@ export function useAgentExecution({
 
       const abortController = new AbortController();
       abortControllerRef.current = abortController;
+      const runStartedAt = Date.now();
+      let lastProgressAt = runStartedAt;
+      let timeoutAborted = false;
+      clearTimers();
+      let lastHeartbeatStage: ExecutionWaitingStage | null = null;
       const existingTask = useAgentStore
         .getState()
         .sessions.find((s) => s.id === sessionId)
         ?.tasks.find((t) => t.id === taskId);
       const collectedSteps: AgentStep[] = existingTask?.steps ? [...existingTask.steps] : [];
       const fcCompatibilityKey = buildAgentFCCompatibilityKey(useAIStore.getState().config);
+      let scrollTimer: ReturnType<typeof setTimeout> | null = null;
+
+      const applyStep = (step: AgentStep, markProgress = true) => {
+        const findLastIdx = (pred: (s: AgentStep) => boolean) => {
+          for (let i = collectedSteps.length - 1; i >= 0; i--) {
+            if (pred(collectedSteps[i])) return i;
+          }
+          return -1;
+        };
+
+        const matchesStream = (s: AgentStep) =>
+          !!s.streaming && s.type === step.type && (s.streamId ?? "") === (step.streamId ?? "");
+
+        if (step.streaming) {
+          const lastIdx = findLastIdx(matchesStream);
+          if (lastIdx >= 0) {
+            collectedSteps[lastIdx] = step;
+          } else {
+            collectedSteps.push(step);
+          }
+        } else {
+          const streamIdx = findLastIdx(matchesStream);
+          if (streamIdx >= 0) {
+            collectedSteps.splice(streamIdx, 1);
+          }
+          collectedSteps.push(step);
+        }
+
+        if (markProgress) {
+          lastProgressAt = Date.now();
+        }
+
+        if (step.type === "answer" && step.streaming) {
+          setWaitingStageIfChanged("model_generating");
+        } else if (step.type === "action") {
+          setWaitingStageIfChanged("tool_waiting");
+        } else if (
+          step.type === "observation" &&
+          step.content.includes("等待用户确认执行")
+        ) {
+          setWaitingStageIfChanged("user_confirm");
+        } else if (step.type === "thought") {
+          setWaitingStageIfChanged("model_first_token");
+        }
+
+        updateTask(sessionId!, taskId, {
+          steps: [...collectedSteps],
+          ...(step.type === "answer" ? { answer: step.content } : {}),
+        });
+        if (scrollTimer) clearTimeout(scrollTimer);
+        scrollTimer = setTimeout(() => {
+          scrollTimer = null;
+          scrollRef.current?.scrollTo({
+            top: scrollRef.current.scrollHeight,
+            behavior: "smooth",
+          });
+        }, 120);
+      };
+
+      applyStep(
+        {
+          type: "thought",
+          content: "开始执行，正在请求模型...",
+          timestamp: Date.now(),
+        },
+        true,
+      );
+
+      const memoryStore = useAgentMemoryStore.getState();
+      if (!memoryStore.loaded) await memoryStore.load();
+      const userMemoryPrompt = memoryStore.getMemoriesForPrompt();
+
+      const aiConfig = useAIStore.getState().config;
 
       const agent = new ReActAgent(
         ai,
         availableTools,
         {
-          maxIterations: 8,
+          maxIterations: aiConfig.agent_max_iterations ?? 25,
+          temperature: aiConfig.temperature ?? 0.7,
           verbose: true,
           fcCompatibilityKey,
+          userMemoryPrompt: userMemoryPrompt || undefined,
           dangerousToolPatterns: [
             "write_file",
             "open_path",
@@ -137,75 +264,153 @@ export function useAgentExecution({
             "native_mail_create",
             "native_shortcuts_run",
           ],
-          confirmDangerousAction: openDangerConfirm,
+          confirmDangerousAction: async (toolName, params) => {
+            setWaitingStageIfChanged("user_confirm");
+            const confirmed = await openDangerConfirm(toolName, params);
+            setWaitingStageIfChanged(confirmed ? "tool_waiting" : "model_first_token");
+            return confirmed;
+          },
         },
         (step) => {
-          const findLastIdx = (pred: (s: AgentStep) => boolean) => {
-            for (let i = collectedSteps.length - 1; i >= 0; i--) {
-              if (pred(collectedSteps[i])) return i;
-            }
-            return -1;
-          };
-
-          if (step.streaming) {
-            const lastIdx = findLastIdx((s) => !!s.streaming && s.type === step.type);
-            if (lastIdx >= 0) {
-              collectedSteps[lastIdx] = step;
-            } else {
-              collectedSteps.push(step);
-            }
-          } else {
-            const streamIdx = findLastIdx((s) => !!s.streaming && s.type === step.type);
-            if (streamIdx >= 0) {
-              collectedSteps.splice(streamIdx, 1);
-            }
-            collectedSteps.push(step);
-          }
-
-          updateTask(sessionId!, taskId, { steps: [...collectedSteps] });
-          setTimeout(() => {
-            scrollRef.current?.scrollTo({
-              top: scrollRef.current.scrollHeight,
-              behavior: "smooth",
-            });
-          }, 100);
+          applyStep(step, true);
         },
         historySteps,
       );
 
+      heartbeatTimerRef.current = setInterval(() => {
+        if (abortController.signal.aborted) return;
+        const now = Date.now();
+        const idleMs = now - lastProgressAt;
+        if (idleMs < AGENT_EXECUTION_HEARTBEAT_INTERVAL_MS) return;
+        const runningSec = Math.floor((now - runStartedAt) / 1000);
+        const idleSec = Math.floor(idleMs / 1000);
+        const latestStep = collectedSteps[collectedSteps.length - 1];
+        const waitingStage: ExecutionWaitingStage = (() => {
+          if (!latestStep || collectedSteps.length <= 1) return "model_first_token";
+          if (latestStep.type === "answer" && latestStep.streaming) {
+            return "model_generating";
+          }
+          if (
+            latestStep.type === "observation" &&
+            latestStep.content.includes("等待用户确认执行")
+          ) {
+            return "user_confirm";
+          }
+          if (latestStep.type === "action" && latestStep.toolName) {
+            return "tool_waiting";
+          }
+          return "model_first_token";
+        })();
+        setWaitingStageIfChanged(waitingStage);
+        if (waitingStage === lastHeartbeatStage) {
+          return;
+        }
+        lastHeartbeatStage = waitingStage;
+        applyStep(
+          {
+            type: "observation",
+            content: `当前正在等待：${getExecutionWaitingStageLabel(waitingStage)}（已运行 ${runningSec}s，最近 ${idleSec}s 无新进展）`,
+            timestamp: now,
+          },
+          false,
+        );
+      }, AGENT_EXECUTION_HEARTBEAT_INTERVAL_MS);
+
+      timeoutTimerRef.current = setTimeout(() => {
+        if (abortControllerRef.current !== abortController) return;
+        timeoutAborted = true;
+        abortController.abort();
+      }, AGENT_EXECUTION_TIMEOUT_MS);
+
+      const retryMax = aiConfig.agent_retry_max ?? 3;
+      const retryBackoffMs = aiConfig.agent_retry_backoff_ms ?? 5000;
+
       try {
-        const result = await agent.run(query, abortController.signal);
-        updateTask(sessionId, taskId, { answer: result, status: "success" });
+        const effectiveQuery = opts?.systemHint ? `${query}\n\n${opts.systemHint}` : query;
+        let lastError: Error | null = null;
+
+        for (let attempt = 0; attempt <= retryMax; attempt++) {
+          if (abortController.signal.aborted) throw new Error("Aborted");
+
+          if (attempt > 0) {
+            const delay = retryBackoffMs * Math.pow(2, attempt - 1);
+            applyStep({
+              type: "observation",
+              content: `API 错误，${Math.ceil(delay / 1000)} 秒后自动重试（第 ${attempt}/${retryMax} 次）...`,
+              timestamp: Date.now(),
+            }, false);
+            await new Promise((r) => setTimeout(r, delay));
+            if (abortController.signal.aborted) throw new Error("Aborted");
+            resetPerRunState?.();
+          }
+
+          try {
+            const result = await agent.run(effectiveQuery, abortController.signal);
+            updateTask(sessionId, taskId, { answer: result, status: "success" });
+            lastError = null;
+            break;
+          } catch (e) {
+            if ((e as Error).message === "Aborted") throw e;
+            lastError = e as Error;
+            const errMsg = String(e);
+            const isRetryable = /rate.?limit|429|503|500|timeout|ECONNRESET|network/i.test(errMsg);
+            if (!isRetryable || attempt >= retryMax) {
+              throw e;
+            }
+          }
+        }
+
+        if (lastError) throw lastError;
       } catch (e) {
         const aborted = (e as Error).message === "Aborted";
-        const msg = aborted ? "任务已通过用户请求停止。" : `Agent 执行失败: ${e}`;
+        const msg = aborted
+          ? timeoutAborted
+            ? `Agent 执行超时（${Math.floor(AGENT_EXECUTION_TIMEOUT_MS / 1000)} 秒）已自动停止，请拆分任务后重试。`
+            : "任务已通过用户请求停止。"
+          : `Agent 执行失败: ${e}`;
         updateTask(sessionId, taskId, {
           answer: msg,
-          status: aborted ? "cancelled" : "error",
-          last_error: aborted ? undefined : String(e),
+          status: aborted && !timeoutAborted ? "cancelled" : "error",
+          last_error: aborted && !timeoutAborted ? undefined : String(e),
         });
       } finally {
-        setRunning(false);
-        abortControllerRef.current = null;
-        setRunningPhase((prev) => (prev === "executing" ? null : prev));
+        if (abortControllerRef.current === abortController) {
+          clearTimers();
+          setRunning(false);
+          abortControllerRef.current = null;
+          setWaitingStageIfChanged(null);
+          setRunningPhase((prev) => (prev === "executing" ? null : prev));
+        }
         inputRef.current?.focus();
       }
     },
     [
       ai,
-      running,
       currentSessionId,
       createSession,
       addTask,
+      clearTimers,
       setRunning,
       setRunningPhase,
+      setExecutionWaitingStage,
       updateTask,
       inputRef,
       availableTools,
       openDangerConfirm,
       scrollRef,
+      resetPerRunState,
     ],
   );
+
+  useEffect(() => {
+    return () => {
+      clearTimers();
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+        abortControllerRef.current = null;
+      }
+    };
+  }, [clearTimers]);
 
   return {
     executeAgentTask,

@@ -9,7 +9,14 @@ import {
   MessageCircle,
   AlertCircle,
 } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import rehypeHighlight from "rehype-highlight";
 import type { AgentTask } from "@/store/agent-store";
+import {
+  getExecutionWaitingStageLabel,
+  type ExecutionWaitingStage,
+} from "../core/ui-state";
 
 const STEP_ICONS: Record<string, React.ReactNode> = {
   thought: <Brain className="w-3.5 h-3.5 text-[var(--color-text-secondary)]" />,
@@ -34,7 +41,8 @@ interface AgentTaskBlockProps {
   taskIdx: number;
   isLastTask: boolean;
   isRunning: boolean;
-  runningPhase?: "planning" | "executing" | null;
+  runningPhase?: "executing" | null;
+  executionWaitingStage?: ExecutionWaitingStage | null;
   processCollapsed: boolean;
   onToggleProcess: () => void;
   expandedSteps: Set<string>;
@@ -49,12 +57,20 @@ function formatClock(timestamp: number) {
   });
 }
 
+function summarizeStepText(content: string, maxLen = 56) {
+  const normalized = content.replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+  if (normalized.length <= maxLen) return normalized;
+  return `${normalized.slice(0, maxLen)}...`;
+}
+
 export function AgentTaskBlock({
   task,
   taskIdx,
   isLastTask,
   isRunning,
   runningPhase,
+  executionWaitingStage,
   processCollapsed,
   onToggleProcess,
   expandedSteps,
@@ -76,7 +92,7 @@ export function AgentTaskBlock({
   };
   const statusLabelMap: Record<string, string> = {
     success: "已完成",
-    running: runningPhase === "planning" ? "规划中" : "执行中",
+    running: "执行中",
     error: "失败",
     pending: "待执行",
     paused: "已暂停",
@@ -174,22 +190,65 @@ export function AgentTaskBlock({
       )}
 
       {effectiveStatus === "running" && (
-        <div className="flex items-center gap-2 rounded-md bg-[var(--color-bg-secondary)]/65 px-2 py-1 text-[var(--color-text-secondary)]">
-          <Loader2 className="w-4 h-4 animate-spin text-[var(--color-text-secondary)]" />
-          <span className="text-[12px]">
-            {runningPhase === "planning" ? "Agent 规划中..." : "Agent 执行中..."}
+        <div className="rounded-md bg-[var(--color-bg-secondary)]/65 px-2 py-1 text-[var(--color-text-secondary)] space-y-0.5">
+          <div className="flex items-center gap-2">
+            <Loader2 className="w-4 h-4 animate-spin text-[var(--color-text-secondary)]" />
+            <span className="text-[12px]">
+              Agent 执行中...
+            </span>
+          </div>
+          {lastStep?.content && (
+            <div className="text-[11px] text-[var(--color-text-secondary)] pl-6">
+              最近进展：{STEP_LABELS[lastStep.type]} · {summarizeStepText(lastStep.content)}
+            </div>
+          )}
+          {runningPhase === "executing" && executionWaitingStage && (
+            <div className="text-[11px] text-[var(--color-text-secondary)] pl-6">
+              当前正在等待：{getExecutionWaitingStageLabel(executionWaitingStage)}
+            </div>
+          )}
+          <span className="sr-only">
+            Agent 执行中...
           </span>
         </div>
       )}
 
-      {task.answer && effectiveStatus !== "running" && (
+      {task.answer && (
         <div className="rounded-lg bg-emerald-500/[0.08] px-2.5 py-2">
           <h4 className="text-[12px] font-semibold text-emerald-700 mb-1 flex items-center gap-1.5">
-            <MessageCircle className="w-4 h-4" />
-            回答
+            {effectiveStatus === "running" ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <MessageCircle className="w-4 h-4" />
+            )}
+            {effectiveStatus === "running" ? "回答（生成中）" : "回答"}
           </h4>
-          <div className="text-[13px] leading-relaxed whitespace-pre-wrap break-words">
-            {task.answer}
+          <div className="text-[13px] leading-relaxed break-words [&_p]:my-1.5 [&_ul]:my-1.5 [&_ol]:my-1.5 [&_li]:my-0.5 [&_h1]:text-[17px] [&_h1]:font-semibold [&_h1]:my-2 [&_h2]:text-[16px] [&_h2]:font-semibold [&_h2]:my-2 [&_h3]:text-[15px] [&_h3]:font-semibold [&_h3]:my-1.5 [&_hr]:my-2 [&_hr]:border-[var(--color-border)] [&_blockquote]:my-2 [&_blockquote]:border-l-2 [&_blockquote]:border-emerald-500/35 [&_blockquote]:pl-3 [&_blockquote]:text-[var(--color-text-secondary)] [&_table]:w-full [&_table]:border-collapse [&_th]:border [&_th]:border-[var(--color-border)] [&_th]:px-2 [&_th]:py-1 [&_td]:border [&_td]:border-[var(--color-border)] [&_td]:px-2 [&_td]:py-1 [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-[var(--color-code-bg)] [&_pre]:p-2 [&_pre]:text-[12px] [&_code]:rounded [&_code]:bg-[var(--color-code-bg)] [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-[12px]">
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              rehypePlugins={[rehypeHighlight]}
+              components={{
+                code({ className, children, ...props }) {
+                  if (!className) {
+                    return (
+                      <code className="bg-[var(--color-code-bg)]" {...props}>
+                        {children}
+                      </code>
+                    );
+                  }
+                  return (
+                    <code className={className} {...props}>
+                      {children}
+                    </code>
+                  );
+                },
+              }}
+            >
+              {task.answer}
+            </ReactMarkdown>
+            {effectiveStatus === "running" && (
+              <span className="inline-block w-1.5 h-4 bg-emerald-600 animate-pulse ml-1 align-middle" />
+            )}
           </div>
         </div>
       )}

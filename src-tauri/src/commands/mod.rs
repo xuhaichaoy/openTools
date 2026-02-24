@@ -1,6 +1,7 @@
 pub mod agent_orchestrator;
 pub mod agent_runtime;
 pub mod ai;
+pub mod ckg;
 pub mod clipboard;
 pub mod collection;
 pub mod data_forge;

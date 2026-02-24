@@ -776,3 +776,298 @@ pub async fn run_shell_command(command: String) -> Result<SystemShellResult, Str
         Err(e) => Err(format!("执行失败: {}", e)),
     }
 }
+
+/// Agent 用：获取 URL 网页内容（绕过 WebView CORS 限制）
+#[tauri::command]
+pub async fn web_fetch_url(url: String) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent("MTools-Agent/1.0")
+        .build()
+        .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
+
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {}", e))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("HTTP {}: {}", status.as_u16(), status.canonical_reason().unwrap_or("Unknown")));
+    }
+
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("读取响应失败: {}", e))?;
+
+    // 限制返回大小
+    if body.len() > 100_000 {
+        Ok(body[..100_000].to_string())
+    } else {
+        Ok(body)
+    }
+}
+
+/// 网络搜索（Tauri command + 内部可复用）
+#[tauri::command]
+pub async fn web_search(query: String, max_results: Option<usize>) -> Result<String, String> {
+    web_search_impl(query, max_results.unwrap_or(5)).await
+}
+
+/// 网络搜索实现：Bing (主) → DuckDuckGo (备) → 提示用户
+pub async fn web_search_impl(query: String, max_results: usize) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()
+        .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
+
+    let max_results = max_results.min(10).max(1);
+    let mut results: Vec<(String, String, String)> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+
+    // ── 引擎 1: Bing（国内可用） ──
+    if results.is_empty() {
+        match search_bing(&client, &query, max_results).await {
+            Ok(r) => results = r,
+            Err(e) => {
+                log::warn!("Bing 搜索失败: {}", e);
+                errors.push(format!("Bing: {}", e));
+            }
+        }
+    }
+
+    // ── 引擎 2: DuckDuckGo HTML Lite（备选） ──
+    if results.is_empty() {
+        match search_duckduckgo(&client, &query, max_results).await {
+            Ok(r) => results = r,
+            Err(e) => {
+                log::warn!("DuckDuckGo 搜索失败: {}", e);
+                errors.push(format!("DuckDuckGo: {}", e));
+            }
+        }
+    }
+
+    if results.is_empty() {
+        let error_detail = if errors.is_empty() {
+            String::new()
+        } else {
+            format!("\n搜索引擎状态: {}", errors.join("; "))
+        };
+        return Ok(format!(
+            "未找到与「{}」相关的搜索结果。{}",
+            query, error_detail
+        ));
+    }
+
+    let mut output = format!("搜索「{}」找到 {} 条结果：\n\n", query, results.len());
+    for (i, (title, url, snippet)) in results.iter().enumerate() {
+        output.push_str(&format!("{}. {}\n   链接: {}\n", i + 1, title, url));
+        if !snippet.is_empty() {
+            output.push_str(&format!("   摘要: {}\n", snippet));
+        }
+        output.push('\n');
+    }
+    output.push_str("如需查看某条结果的详细内容，可使用 web_fetch 工具获取对应链接。");
+
+    Ok(output)
+}
+
+/// Bing 搜索
+async fn search_bing(
+    client: &reqwest::Client,
+    query: &str,
+    max_results: usize,
+) -> Result<Vec<(String, String, String)>, String> {
+    let encoded = percent_encoding::utf8_percent_encode(query, percent_encoding::NON_ALPHANUMERIC).to_string();
+    let url = format!("https://www.bing.com/search?q={}&count={}", encoded, max_results);
+
+    let resp = client
+        .get(&url)
+        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
+        .header("Accept", "text/html,application/xhtml+xml")
+        .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status().as_u16()));
+    }
+
+    let html = resp.text().await.map_err(|e| format!("读取失败: {}", e))?;
+    let mut results = Vec::new();
+
+    // Bing 结构: <li class="b_algo"><h2><a href="URL">Title</a></h2> ... <p>Snippet</p></li>
+    for block in html.split("class=\"b_algo\"").skip(1).take(max_results) {
+        let title = extract_tag_content(block, "<h2", "</h2>")
+            .map(|h2| strip_html_tags(&h2))
+            .unwrap_or_default();
+        let url = extract_first_href(block).unwrap_or_default();
+        let snippet = extract_tag_content(block, "<p", "</p>")
+            .map(|p| strip_html_tags(&p))
+            .unwrap_or_default();
+
+        let title = title.trim().to_string();
+        let url = url.trim().to_string();
+        let snippet = snippet.trim().to_string();
+
+        if !title.is_empty() && url.starts_with("http") {
+            results.push((title, url, snippet));
+        }
+    }
+
+    if results.is_empty() {
+        return Err("解析结果为空".to_string());
+    }
+    Ok(results)
+}
+
+/// DuckDuckGo HTML Lite 搜索
+async fn search_duckduckgo(
+    client: &reqwest::Client,
+    query: &str,
+    max_results: usize,
+) -> Result<Vec<(String, String, String)>, String> {
+    let resp = client
+        .post("https://lite.duckduckgo.com/lite/")
+        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!("q={}", percent_encoding::utf8_percent_encode(query, percent_encoding::NON_ALPHANUMERIC)))
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status().as_u16()));
+    }
+
+    let html = resp.text().await.map_err(|e| format!("读取失败: {}", e))?;
+    let mut results = Vec::new();
+
+    // DuckDuckGo Lite: <a rel="nofollow" href="URL" class='result-link'>Title</a>
+    //                   <td class='result-snippet'>Snippet</td>
+    for block in html.split("class='result-link'").skip(1).take(max_results) {
+        // title is the text content right after the class marker, inside the <a> tag
+        let title = if let Some(end) = block.find("</a>") {
+            let inner = &block[..end];
+            if let Some(gt) = inner.rfind('>') {
+                strip_html_tags(&inner[gt + 1..]).trim().to_string()
+            } else {
+                strip_html_tags(inner).trim().to_string()
+            }
+        } else {
+            String::new()
+        };
+
+        // URL is in the href before the class marker - need to look back at previous content
+        // Actually, href="URL" comes before class='result-link' in the same <a> tag
+        // So we need to find it in the preceding text of the split
+        let url = String::new(); // will get from href below
+
+        // Try extracting href from the block (it may appear as href="..." before class)
+        // Let's find the actual URL by looking at result-link blocks differently
+        let snippet_text = if let Some(snippet_block) = block.split("class='result-snippet'").nth(1) {
+            extract_tag_content(snippet_block, "", "</td>")
+                .or_else(|| extract_tag_content(snippet_block, "", "</span>"))
+                .map(|s| strip_html_tags(&s).trim().to_string())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        if !title.is_empty() && !url.is_empty() {
+            results.push((title, url, snippet_text));
+        }
+    }
+
+    // Alternative parsing: split by "result-link" href
+    if results.is_empty() {
+        for block in html.split("class=\"result-link\"").chain(html.split("class='result-link'")).skip(1).take(max_results) {
+            let title_text = block.split("</a>").next()
+                .map(|s| {
+                    let clean = if let Some(pos) = s.rfind('>') { &s[pos + 1..] } else { s };
+                    strip_html_tags(clean).trim().to_string()
+                })
+                .unwrap_or_default();
+
+            // URL could be from uddg redirect or direct
+            let link = extract_first_href(block)
+                .and_then(|u| decode_search_redirect(&u))
+                .unwrap_or_default();
+
+            if !title_text.is_empty() && link.starts_with("http") {
+                results.push((title_text, link, String::new()));
+                if results.len() >= max_results { break; }
+            }
+        }
+    }
+
+    if results.is_empty() {
+        return Err("解析结果为空".to_string());
+    }
+    Ok(results)
+}
+
+fn decode_search_redirect(url: &str) -> Option<String> {
+    if url.contains("uddg=") {
+        let uddg_pos = url.find("uddg=")?;
+        let encoded = &url[uddg_pos + 5..];
+        let end = encoded.find('&').unwrap_or(encoded.len());
+        Some(percent_encoding::percent_decode_str(&encoded[..end]).decode_utf8_lossy().to_string())
+    } else if url.starts_with("/url?q=") {
+        let cleaned = &url[7..];
+        let end = cleaned.find('&').unwrap_or(cleaned.len());
+        Some(percent_encoding::percent_decode_str(&cleaned[..end]).decode_utf8_lossy().to_string())
+    } else if url.starts_with("http") {
+        Some(url.to_string())
+    } else {
+        None
+    }
+}
+
+/// 提取标签内容（从 start_tag 的 '>' 到 end_tag）
+fn extract_tag_content(text: &str, start_tag: &str, end_tag: &str) -> Option<String> {
+    let start = if start_tag.is_empty() {
+        0
+    } else {
+        text.find(start_tag)?
+    };
+    let after = &text[start..];
+    let content_start = after.find('>')? + 1;
+    let content = &after[content_start..];
+    let end = content.find(end_tag)?;
+    Some(content[..end].to_string())
+}
+
+/// 提取第一个 href 属性值
+fn extract_first_href(text: &str) -> Option<String> {
+    let href_pos = text.find("href=\"")?;
+    let after = &text[href_pos + 6..];
+    let end = after.find('"')?;
+    Some(after[..end].to_string())
+}
+
+fn strip_html_tags(html: &str) -> String {
+    let mut result = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => result.push(ch),
+            _ => {}
+        }
+    }
+    result
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#x27;", "'")
+        .replace("&apos;", "'")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
+}

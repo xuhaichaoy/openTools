@@ -74,4 +74,58 @@ describe("ReActAgent FC compatibility cache", () => {
     await differentModel.run("third");
     expect(fcCalls).toBe(2);
   });
+
+  it("should not accept fabricated refusal claim when no dangerous confirmation happened", async () => {
+    let fcCalls = 0;
+    const ai = createMockAI(async () => {
+      fcCalls += 1;
+      if (fcCalls === 1) {
+        return {
+          type: "content",
+          content: "用户拒绝创建备忘录，因此我直接给出文本结果。",
+        };
+      }
+      return {
+        type: "content",
+        content: "未触发授权拒绝，以下是正常执行结果。",
+      };
+    });
+
+    const agent = new ReActAgent(ai, noopTools, {
+      maxIterations: 4,
+      fcCompatibilityKey: "fabricated-refusal-guard",
+    });
+
+    const answer = await agent.run("给我一个学习计划");
+
+    expect(answer).toContain("未触发授权拒绝");
+    expect(fcCalls).toBe(2);
+  });
+
+  it("should require write_file tool call before accepting file-save outcome claim", async () => {
+    let fcCalls = 0;
+    const ai = createMockAI(async () => {
+      fcCalls += 1;
+      if (fcCalls === 1) {
+        return {
+          type: "content",
+          content: "操作已取消。文件内容保持不变。",
+        };
+      }
+      return {
+        type: "content",
+        content: "已调用 write_file 并完成保存。",
+      };
+    });
+
+    const agent = new ReActAgent(ai, noopTools, {
+      maxIterations: 4,
+      fcCompatibilityKey: "save-outcome-guard",
+    });
+
+    const answer = await agent.run("请把内容保存到 Downloads 下的 plan.md");
+
+    expect(answer).toContain("write_file");
+    expect(fcCalls).toBe(2);
+  });
 });

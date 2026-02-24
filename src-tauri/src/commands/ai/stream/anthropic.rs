@@ -84,6 +84,7 @@ pub async fn anthropic_stream_loop(
                     "error": &error_msg,
                 }),
             );
+            cancellation.clear(conversation_id);
             return Err(error_msg);
         }
 
@@ -97,7 +98,8 @@ pub async fn anthropic_stream_loop(
         let mut has_tool_use = false;
 
         while let Some(chunk) = stream.next().await {
-            if cancellation.is_cancelled() {
+            if cancellation.is_cancelled(conversation_id) {
+                cancellation.clear(conversation_id);
                 let _ = app.emit(
                     "ai-stream-done",
                     serde_json::json!({ "conversation_id": conversation_id }),
@@ -187,6 +189,7 @@ pub async fn anthropic_stream_loop(
                             "error": format!("流读取错误: {}", e),
                         }),
                     );
+                    cancellation.clear(conversation_id);
                     return Err(format!("流读取错误: {}", e));
                 }
             }
@@ -197,6 +200,7 @@ pub async fn anthropic_stream_loop(
                 "ai-stream-done",
                 serde_json::json!({ "conversation_id": conversation_id }),
             );
+            cancellation.clear(conversation_id);
             return Ok(());
         }
 
@@ -265,5 +269,6 @@ pub async fn anthropic_stream_loop(
         "ai-stream-done",
         serde_json::json!({ "conversation_id": conversation_id }),
     );
+    cancellation.clear(conversation_id);
     Ok(())
 }

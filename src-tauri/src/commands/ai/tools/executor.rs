@@ -53,6 +53,41 @@ pub async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<Str
                 .map_err(|e| e.to_string())?;
             Ok("已写入剪贴板".to_string())
         }
+        "web_search" => {
+            let query = args_value["query"].as_str().unwrap_or("").to_string();
+            if query.trim().is_empty() {
+                return Err("搜索关键词不能为空".to_string());
+            }
+            let max_results = args_value["max_results"].as_u64().unwrap_or(5) as usize;
+            let max_results = max_results.min(10).max(1);
+            crate::commands::system::web_search_impl(query, max_results).await
+        }
+        "web_fetch" => {
+            let url = args_value["url"].as_str().unwrap_or("").to_string();
+            if url.is_empty() {
+                return Err("url 不能为空".to_string());
+            }
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                return Err(format!("无效的 URL（必须以 http:// 或 https:// 开头）: {}", url));
+            }
+            let body = crate::commands::system::web_fetch_url(url.clone()).await?;
+            let trimmed = body.trim();
+            if trimmed.is_empty() {
+                Ok(format!("已获取 {} 但内容为空。", url))
+            } else {
+                let max_chars = 8000;
+                if trimmed.len() > max_chars {
+                    Ok(format!(
+                        "{}\n\n[内容已截断，共 {} 字符，显示前 {} 字符]",
+                        &trimmed[..max_chars],
+                        trimmed.len(),
+                        max_chars
+                    ))
+                } else {
+                    Ok(trimmed.to_string())
+                }
+            }
+        }
         "list_knowledge_docs" => {
             let summaries = crate::commands::rag::rag_list_doc_summaries(app.clone()).await?;
             if summaries.is_empty() {

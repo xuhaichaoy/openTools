@@ -31,6 +31,12 @@ export type ConfirmHostFallback = (
 export interface RuntimeExecuteOptions {
   confirmHostFallback?: ConfirmHostFallback;
   allowUnattendedHostFallback?: boolean;
+  /**
+   * 仅交互式场景生效：
+   * 当外部策略未配置 allowed_roots 时，允许在用户确认后降级宿主机默认权限写入。
+   * 后台任务请保持 false，避免无人值守突破策略边界。
+   */
+  allowInteractiveHostWriteWhenNoPolicyRoots?: boolean;
 }
 
 export interface RuntimeExecutionContext {

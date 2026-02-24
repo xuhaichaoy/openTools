@@ -251,6 +251,8 @@ pub fn run() {
             commands::system::load_chat_history,
             commands::system::save_agent_history,
             commands::system::load_agent_history,
+            commands::system::web_fetch_url,
+            commands::system::web_search,
             commands::system::save_general_settings,
             commands::system::load_general_settings,
             commands::system::clean_old_chat_images,
@@ -356,6 +358,12 @@ pub fn run() {
             commands::mtools_sync::mtools_sync_test,
             commands::mtools_sync::mtools_sync_push,
             commands::mtools_sync::mtools_sync_pull,
+            // ── CKG (Code Knowledge Graph) ──
+            commands::ckg::ckg_index_project,
+            commands::ckg::ckg_search_function,
+            commands::ckg::ckg_search_class,
+            commands::ckg::ckg_search_class_method,
+            commands::ckg::ckg_get_stats,
             // ── MCP / Translate / Collection ──
             commands::mcp::start_mcp_stdio_server,
             commands::mcp::stop_mcp_server,

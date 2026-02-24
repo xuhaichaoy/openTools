@@ -120,6 +120,10 @@ function normalizeConfig(config: AIConfig): AIConfig {
     typeof config.agent_retry_backoff_ms === "number"
       ? Math.max(500, Math.min(60000, Math.floor(config.agent_retry_backoff_ms)))
       : 5000;
+  const normalizedMaxIterations =
+    typeof config.agent_max_iterations === "number"
+      ? Math.max(5, Math.min(50, Math.floor(config.agent_max_iterations)))
+      : 25;
   const normalized: AIConfig = {
     ...config,
     source,
@@ -131,6 +135,7 @@ function normalizeConfig(config: AIConfig): AIConfig {
     agent_max_concurrency: normalizedConcurrency,
     agent_retry_max: normalizedRetryMax,
     agent_retry_backoff_ms: normalizedBackoffMs,
+    agent_max_iterations: normalizedMaxIterations,
     request_rag_mode: undefined,
     disable_force_rag: undefined,
   };
@@ -168,6 +173,7 @@ export const useAIStore = create<AIState>((set, get) => ({
     agent_max_concurrency: 2,
     agent_retry_max: 3,
     agent_retry_backoff_ms: 5000,
+    agent_max_iterations: 25,
   },
   conversations: [],
   currentConversationId: null,
@@ -379,7 +385,7 @@ export const useAIStore = create<AIState>((set, get) => ({
   stopStreaming: () => {
     const { currentConversationId } = get();
     if (!currentConversationId) return;
-    invoke("ai_stop_stream").catch(() => {});
+    invoke("ai_stop_stream", { conversationId: currentConversationId }).catch(() => {});
     set((state) => ({
       isStreaming: false,
       conversations: state.conversations.map((c) =>

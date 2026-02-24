@@ -54,6 +54,34 @@ function applyRequestPolicy(
   return next;
 }
 
+function attachAbortBridge(signal: AbortSignal | undefined, conversationId: string) {
+  let locallyAborted = false;
+  const stopRemoteStream = () => {
+    if (locallyAborted) return;
+    locallyAborted = true;
+    void invoke("ai_stop_stream", { conversationId }).catch(() => undefined);
+  };
+
+  const onAbort = () => {
+    stopRemoteStream();
+  };
+
+  if (signal) {
+    if (signal.aborted) {
+      stopRemoteStream();
+    } else {
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+  }
+
+  return {
+    isAborted: () => locallyAborted || !!signal?.aborted,
+    detach: () => {
+      signal?.removeEventListener("abort", onAbort);
+    },
+  };
+}
+
 interface SimpleAIMessage {
   role: string;
   content?: string;
@@ -117,45 +145,62 @@ export function createMToolsAI(): MToolsAI {
       );
       const routed = getRoutedConfig(effectiveConfig);
 
-      return new Promise(async (resolve, reject) => {
+      return new Promise((resolve, reject) => {
         let content = "";
-
-        const unlisten = await listen<{
-          conversation_id: string;
-          content: string;
-        }>("ai-stream-chunk", (event) => {
-          if (event.payload.conversation_id === conversationId) {
-            content += event.payload.content;
-          }
-        });
-
-        const unlistenDone = await listen<{ conversation_id: string }>(
-          "ai-stream-done",
-          (event) => {
-            if (event.payload.conversation_id === conversationId) {
-              cleanup();
-              resolve({ content });
-            }
-          },
-        );
-
-        const unlistenError = await listen<{
-          conversation_id: string;
-          error: string;
-        }>("ai-stream-error", (event) => {
-          if (event.payload.conversation_id === conversationId) {
-            cleanup();
-            reject(new Error(event.payload.error));
-          }
-        });
-
+        const abortBridge = attachAbortBridge(options.signal, conversationId);
+        let cleaned = false;
+        const unlisteners: Array<() => void> = [];
         const cleanup = () => {
-          unlisten();
-          unlistenDone();
-          unlistenError();
+          if (cleaned) return;
+          cleaned = true;
+          for (const fn of unlisteners) fn();
+          abortBridge.detach();
         };
 
-        try {
+        void (async () => {
+          unlisteners.push(await listen<{
+            conversation_id: string;
+            content: string;
+          }>("ai-stream-chunk", (event) => {
+            if (event.payload.conversation_id === conversationId) {
+              content += event.payload.content;
+            }
+          }));
+
+          unlisteners.push(await listen<{ conversation_id: string }>(
+            "ai-stream-done",
+            (event) => {
+              if (event.payload.conversation_id === conversationId) {
+                cleanup();
+                if (abortBridge.isAborted()) {
+                  reject(new Error("Aborted"));
+                  return;
+                }
+                resolve({ content });
+              }
+            },
+          ));
+
+          unlisteners.push(await listen<{
+            conversation_id: string;
+            error: string;
+          }>("ai-stream-error", (event) => {
+            if (event.payload.conversation_id === conversationId) {
+              cleanup();
+              if (abortBridge.isAborted()) {
+                reject(new Error("Aborted"));
+                return;
+              }
+              reject(new Error(event.payload.error));
+            }
+          }));
+
+          if (abortBridge.isAborted()) {
+            cleanup();
+            reject(new Error("Aborted"));
+            return;
+          }
+
           const enrichedMessages = await injectMemoryForMessages(
             options.messages.map((m) => ({
               role: m.role,
@@ -170,10 +215,14 @@ export function createMToolsAI(): MToolsAI {
             config: routed,
             conversationId,
           });
-        } catch (e) {
+        })().catch((e) => {
           cleanup();
+          if (abortBridge.isAborted()) {
+            reject(new Error("Aborted"));
+            return;
+          }
           reject(e);
-        }
+        });
       });
     },
 
@@ -187,45 +236,63 @@ export function createMToolsAI(): MToolsAI {
       const routed = getRoutedConfig(effectiveConfig);
       let fullContent = "";
 
-      return new Promise(async (resolve, reject) => {
-        const unlisten = await listen<{
-          conversation_id: string;
-          content: string;
-        }>("ai-stream-chunk", (event) => {
-          if (event.payload.conversation_id === conversationId) {
-            fullContent += event.payload.content;
-            options.onChunk(event.payload.content);
-          }
-        });
-
-        const unlistenDone = await listen<{ conversation_id: string }>(
-          "ai-stream-done",
-          (event) => {
-            if (event.payload.conversation_id === conversationId) {
-              cleanup();
-              options.onDone?.(fullContent);
-              resolve();
-            }
-          },
-        );
-
-        const unlistenError = await listen<{
-          conversation_id: string;
-          error: string;
-        }>("ai-stream-error", (event) => {
-          if (event.payload.conversation_id === conversationId) {
-            cleanup();
-            reject(new Error(event.payload.error));
-          }
-        });
-
+      return new Promise((resolve, reject) => {
+        const abortBridge = attachAbortBridge(options.signal, conversationId);
+        let cleaned = false;
+        const unlisteners: Array<() => void> = [];
         const cleanup = () => {
-          unlisten();
-          unlistenDone();
-          unlistenError();
+          if (cleaned) return;
+          cleaned = true;
+          for (const fn of unlisteners) fn();
+          abortBridge.detach();
         };
 
-        try {
+        void (async () => {
+          unlisteners.push(await listen<{
+            conversation_id: string;
+            content: string;
+          }>("ai-stream-chunk", (event) => {
+            if (event.payload.conversation_id === conversationId) {
+              fullContent += event.payload.content;
+              options.onChunk(event.payload.content);
+            }
+          }));
+
+          unlisteners.push(await listen<{ conversation_id: string }>(
+            "ai-stream-done",
+            (event) => {
+              if (event.payload.conversation_id === conversationId) {
+                cleanup();
+                if (abortBridge.isAborted()) {
+                  reject(new Error("Aborted"));
+                  return;
+                }
+                options.onDone?.(fullContent);
+                resolve();
+              }
+            },
+          ));
+
+          unlisteners.push(await listen<{
+            conversation_id: string;
+            error: string;
+          }>("ai-stream-error", (event) => {
+            if (event.payload.conversation_id === conversationId) {
+              cleanup();
+              if (abortBridge.isAborted()) {
+                reject(new Error("Aborted"));
+                return;
+              }
+              reject(new Error(event.payload.error));
+            }
+          }));
+
+          if (abortBridge.isAborted()) {
+            cleanup();
+            reject(new Error("Aborted"));
+            return;
+          }
+
           const enrichedMessages = await injectMemoryForMessages(
             options.messages.map((m) => ({
               role: m.role,
@@ -240,10 +307,14 @@ export function createMToolsAI(): MToolsAI {
             config: routed,
             conversationId,
           });
-        } catch (e) {
+        })().catch((e) => {
           cleanup();
+          if (abortBridge.isAborted()) {
+            reject(new Error("Aborted"));
+            return;
+          }
           reject(e);
-        }
+        });
       });
     },
 
@@ -294,64 +365,77 @@ export function createMToolsAI(): MToolsAI {
       let fullContent = "";
       let resolvedToolCalls: AIToolCall[] | null = null;
 
-      return new Promise(async (resolve, reject) => {
-        // 监听内容 chunk
-        const unlisten = await listen<{
-          conversation_id: string;
-          content: string;
-        }>("ai-stream-chunk", (event) => {
-          if (event.payload.conversation_id === conversationId) {
-            fullContent += event.payload.content;
-            options.onChunk(event.payload.content);
-          }
-        });
-
-        // 监听 Agent 专用 tool_calls 事件
-        const unlistenToolCalls = await listen<{
-          conversation_id: string;
-          tool_calls: AIToolCall[];
-        }>("ai-agent-tool-calls", (event) => {
-          if (event.payload.conversation_id === conversationId) {
-            resolvedToolCalls = event.payload.tool_calls;
-          }
-        });
-
-        // 监听完成
-        const unlistenDone = await listen<{ conversation_id: string }>(
-          "ai-stream-done",
-          (event) => {
-            if (event.payload.conversation_id === conversationId) {
-              cleanup();
-              if (resolvedToolCalls && resolvedToolCalls.length > 0) {
-                resolve({ type: "tool_calls", toolCalls: resolvedToolCalls });
-              } else {
-                options.onDone?.(fullContent);
-                resolve({ type: "content", content: fullContent });
-              }
-            }
-          },
-        );
-
-        // 监听错误
-        const unlistenError = await listen<{
-          conversation_id: string;
-          error: string;
-        }>("ai-stream-error", (event) => {
-          if (event.payload.conversation_id === conversationId) {
-            cleanup();
-            reject(new Error(event.payload.error));
-          }
-        });
-
+      return new Promise((resolve, reject) => {
+        const abortBridge = attachAbortBridge(options.signal, conversationId);
+        let cleaned = false;
+        const unlisteners: Array<() => void> = [];
         const cleanup = () => {
-          unlisten();
-          unlistenToolCalls();
-          unlistenDone();
-          unlistenError();
+          if (cleaned) return;
+          cleaned = true;
+          for (const fn of unlisteners) fn();
+          abortBridge.detach();
         };
 
-        try {
-          const baseMessages = options.messages.map((m) => ({
+        void (async () => {
+          unlisteners.push(await listen<{
+            conversation_id: string;
+            content: string;
+          }>("ai-stream-chunk", (event) => {
+            if (event.payload.conversation_id === conversationId) {
+              fullContent += event.payload.content;
+              options.onChunk(event.payload.content);
+            }
+          }));
+
+          unlisteners.push(await listen<{
+            conversation_id: string;
+            tool_calls: AIToolCall[];
+          }>("ai-agent-tool-calls", (event) => {
+            if (event.payload.conversation_id === conversationId) {
+              resolvedToolCalls = event.payload.tool_calls;
+            }
+          }));
+
+          unlisteners.push(await listen<{ conversation_id: string }>(
+            "ai-stream-done",
+            (event) => {
+              if (event.payload.conversation_id === conversationId) {
+                cleanup();
+                if (abortBridge.isAborted()) {
+                  reject(new Error("Aborted"));
+                  return;
+                }
+                if (resolvedToolCalls && resolvedToolCalls.length > 0) {
+                  resolve({ type: "tool_calls", toolCalls: resolvedToolCalls });
+                } else {
+                  options.onDone?.(fullContent);
+                  resolve({ type: "content", content: fullContent });
+                }
+              }
+            },
+          ));
+
+          unlisteners.push(await listen<{
+            conversation_id: string;
+            error: string;
+          }>("ai-stream-error", (event) => {
+            if (event.payload.conversation_id === conversationId) {
+              cleanup();
+              if (abortBridge.isAborted()) {
+                reject(new Error("Aborted"));
+                return;
+              }
+              reject(new Error(event.payload.error));
+            }
+          }));
+
+          if (abortBridge.isAborted()) {
+            cleanup();
+            reject(new Error("Aborted"));
+            return;
+          }
+
+          const finalMessages = options.messages.map((m) => ({
             role: m.role,
             content: m.content ?? "",
             ...(m.tool_calls ? { tool_calls: m.tool_calls } : {}),
@@ -359,33 +443,20 @@ export function createMToolsAI(): MToolsAI {
             ...(m.name ? { name: m.name } : {}),
           }));
 
-          const enrichedPlainMessages = await injectMemoryForMessages(
-            baseMessages.map((m) => ({
-              role: m.role,
-              content: m.content,
-            })),
-            config,
-            conversationId,
-          );
-          const hasInjectedSystem = enrichedPlainMessages.length > baseMessages.length;
-          const injectedSystemPrompt =
-            hasInjectedSystem && enrichedPlainMessages[0]?.role === "system"
-              ? enrichedPlainMessages[0].content
-              : undefined;
-          const finalMessages = injectedSystemPrompt
-            ? [{ role: "system", content: injectedSystemPrompt }, ...baseMessages]
-            : baseMessages;
-
           await invoke("ai_agent_stream", {
             messages: finalMessages,
             config: routed,
             tools: options.tools,
             conversationId,
           });
-        } catch (e) {
+        })().catch((e) => {
           cleanup();
+          if (abortBridge.isAborted()) {
+            reject(new Error("Aborted"));
+            return;
+          }
           reject(e);
-        }
+        });
       });
     },
   };

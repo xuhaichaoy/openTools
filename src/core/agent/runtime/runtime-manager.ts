@@ -18,7 +18,7 @@ function normalizePath(input: string) {
 }
 
 function isPathAllowed(path: string, allowedRoots: string[]) {
-  if (allowedRoots.length === 0) return true;
+  if (allowedRoots.length === 0) return false;
   const target = normalizePath(path);
   return allowedRoots.some((root) => {
     const normalizedRoot = normalizePath(root);
@@ -30,6 +30,26 @@ export class AgentRuntimeManager {
   private readonly hostAdapter = new HostRuntimeAdapter();
 
   private readonly containerAdapter = new ContainerRuntimeAdapter();
+
+  private async confirmInteractiveHostWrite(
+    options: RuntimeExecuteOptions,
+    path: string,
+  ) {
+    if (!options.allowInteractiveHostWriteWhenNoPolicyRoots) return false;
+    if (!options.confirmHostFallback) return false;
+    const mode = useAIStore.getState().config.agent_runtime_mode || "host";
+    const confirmed = await options.confirmHostFallback({
+      action: "write_file",
+      mode,
+      path,
+      reason:
+        "当前未配置 allowed_roots；若继续，将按宿主机默认目录权限写入（如 Home/Downloads）。",
+    });
+    if (!confirmed) {
+      throw new Error("用户拒绝在未配置 allowed_roots 时执行写文件");
+    }
+    return true;
+  }
 
   private async resolveAdapter(
     action: RuntimeActionName,
@@ -45,7 +65,7 @@ export class AgentRuntimeManager {
 
     const containerAvailability = await this.containerAdapter.getAvailability?.();
     const containerAvailable = containerAvailability?.available ?? false;
-    const hasAllowedRoots = policy.allowed_roots.length > 0;
+    const hasAllowedRoots = policy.allowed_roots.some((root) => !!root.trim());
 
     if (mode === "hybrid") {
       if (containerAvailable && hasAllowedRoots) {
@@ -129,7 +149,18 @@ export class AgentRuntimeManager {
     if (policy.force_readonly) {
       throw new Error("Agent 只读策略已开启，禁止写文件");
     }
-    if (!isPathAllowed(path, policy.allowed_roots)) {
+    const roots = policy.allowed_roots.filter((root) => !!root.trim());
+    if (roots.length === 0) {
+      const allowedInteractiveWrite = await this.confirmInteractiveHostWrite(
+        options,
+        path,
+      );
+      if (allowedInteractiveWrite) {
+        return this.hostAdapter.writeTextFile(path, content);
+      }
+      throw new Error("Agent 策略未配置 allowed_roots，禁止写文件");
+    }
+    if (!isPathAllowed(path, roots)) {
       throw new Error("Agent 策略禁止写入该路径（不在 allowed_roots）");
     }
 
@@ -137,7 +168,7 @@ export class AgentRuntimeManager {
       path,
     });
     return adapter.writeTextFile(path, content, {
-      allowedRoots: policy.allowed_roots,
+      allowedRoots: roots,
     });
   }
 }

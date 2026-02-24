@@ -1,13 +1,14 @@
 import React from "react";
 import { Bot } from "lucide-react";
 import type { AgentTask } from "@/store/agent-store";
-import type { RunningPhase } from "../core/ui-state";
+import type { ExecutionWaitingStage, RunningPhase } from "../core/ui-state";
 import { AgentTaskBlock } from "./AgentTaskBlock";
 
 interface AgentTaskTimelineProps {
   tasks: AgentTask[];
   busy: boolean;
   runningPhase: RunningPhase | null;
+  executionWaitingStage: ExecutionWaitingStage | null;
   scrollRef: React.RefObject<HTMLDivElement | null>;
   collapsedTaskProcesses: Set<string>;
   expandedSteps: Set<string>;
@@ -19,6 +20,7 @@ export function AgentTaskTimeline({
   tasks,
   busy,
   runningPhase,
+  executionWaitingStage,
   scrollRef,
   collapsedTaskProcesses,
   expandedSteps,
@@ -43,6 +45,7 @@ export function AgentTaskTimeline({
           isLastTask={taskIdx === tasks.length - 1}
           isRunning={busy}
           runningPhase={runningPhase}
+          executionWaitingStage={executionWaitingStage}
           processCollapsed={collapsedTaskProcesses.has(task.id)}
           onToggleProcess={() => onToggleTaskProcess(task.id)}
           expandedSteps={expandedSteps}

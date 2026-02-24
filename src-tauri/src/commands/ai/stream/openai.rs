@@ -68,6 +68,7 @@ pub async fn openai_stream_loop(
                 "error": format!("API 错误: {}", body),
             }),
         );
+        cancellation.clear(conversation_id);
         return Err(format!("API 错误: {}", body));
     }
 
@@ -78,7 +79,8 @@ pub async fn openai_stream_loop(
     let mut tc_args_buffer: HashMap<usize, String> = HashMap::new();
 
     while let Some(chunk) = stream.next().await {
-        if cancellation.is_cancelled() {
+        if cancellation.is_cancelled(conversation_id) {
+            cancellation.clear(conversation_id);
             let _ = app.emit(
                 "ai-stream-done",
                 serde_json::json!({ "conversation_id": conversation_id }),
@@ -151,7 +153,7 @@ pub async fn openai_stream_loop(
                             full_messages.extend(tool_messages);
 
                             for _round in 0..5 {
-                                if cancellation.is_cancelled() {
+                                if cancellation.is_cancelled(conversation_id) {
                                     break;
                                 }
                                 let mut follow_request = build_api_request(
@@ -303,6 +305,7 @@ pub async fn openai_stream_loop(
                             "ai-stream-done",
                             serde_json::json!({ "conversation_id": conversation_id }),
                         );
+                        cancellation.clear(conversation_id);
                         return Ok(());
                     }
 
@@ -361,6 +364,7 @@ pub async fn openai_stream_loop(
                         "error": format!("流读取错误: {}", e),
                     }),
                 );
+                cancellation.clear(conversation_id);
                 return Err(format!("流读取错误: {}", e));
             }
         }
@@ -370,5 +374,6 @@ pub async fn openai_stream_loop(
         "ai-stream-done",
         serde_json::json!({ "conversation_id": conversation_id }),
     );
+    cancellation.clear(conversation_id);
     Ok(())
 }
