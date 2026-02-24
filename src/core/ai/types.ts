@@ -63,6 +63,69 @@ export interface AIConfig {
   protocol?: "openai" | "anthropic";
   /** 当前激活的自有 Key 配置 ID */
   active_own_key_id?: string;
+  /** Agent 运行时模式（Sprint1 默认 host） */
+  agent_runtime_mode?: "host" | "hybrid" | "container_preferred";
+  /** Agent 最大并发任务数 */
+  agent_max_concurrency?: number;
+  /** Agent 失败重试次数上限 */
+  agent_retry_max?: number;
+  /** Agent 重试退避基准毫秒（指数退避） */
+  agent_retry_backoff_ms?: number;
+  /** 本次请求的 RAG 行为覆盖（仅运行时，不持久化） */
+  request_rag_mode?: "inherit" | "off" | "on";
+  /** 禁用产品名触发的 RAG 兜底（仅运行时，不持久化） */
+  disable_force_rag?: boolean;
+}
+
+export type AgentRuntimeMode = "host" | "hybrid" | "container_preferred";
+export type AgentScheduleType = "once" | "interval" | "cron";
+export type AgentTaskStatus =
+  | "pending"
+  | "running"
+  | "success"
+  | "error"
+  | "paused"
+  | "cancelled";
+export type AgentTaskResultStatus = "success" | "error" | "skipped";
+
+export interface AgentScheduledTask {
+  id: string;
+  session_id?: string;
+  query: string;
+  schedule_type?: AgentScheduleType;
+  schedule_value?: string;
+  status: AgentTaskStatus;
+  retry_count: number;
+  next_run_at?: number;
+  last_error?: string;
+  last_started_at?: number;
+  last_finished_at?: number;
+  last_duration_ms?: number;
+  last_result_status?: AgentTaskResultStatus;
+  last_skip_reason?: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface AgentTaskStatusPatch {
+  task_id: string;
+  status: AgentTaskStatus;
+  retry_count: number;
+  next_run_at?: number;
+  last_error?: string;
+  last_started_at?: number;
+  last_finished_at?: number;
+  last_duration_ms?: number;
+  last_result_status?: AgentTaskResultStatus;
+  last_skip_reason?: string;
+  updated_at: number;
+}
+
+export interface AgentTaskSkippedEvent {
+  task_id: string;
+  reason: "overlap_running";
+  skipped_at: number;
+  next_run_at?: number;
 }
 
 /** 自有 Key 模型配置项 */

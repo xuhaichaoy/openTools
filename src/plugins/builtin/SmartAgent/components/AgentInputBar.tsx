@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState } from "react";
+import React from "react";
 import { Send, X, ImagePlus } from "lucide-react";
 
 interface AgentInputBarProps {
@@ -42,13 +42,13 @@ export function AgentInputBar({
     <div className="p-2 pb-1 border-t border-[var(--color-border)]">
       <div className="relative flex items-end gap-1 bg-[var(--color-bg-secondary)] p-1 px-2 rounded-xl border border-[var(--color-border)] shadow-sm focus-within:shadow-md focus-within:border-emerald-500/30 transition-all">
         {/* 添加图片按钮 */}
-        {/* <button
+        <button
           onClick={() => fileInputRef.current?.click()}
           className="p-1.5 rounded-lg text-[var(--color-text-secondary)] hover:text-emerald-500 hover:bg-emerald-500/5 transition-colors shrink-0 self-center mb-0.5"
           title="添加图片"
         >
           <ImagePlus className="w-4 h-4" />
-        </button> */}
+        </button>
         <input
           ref={fileInputRef}
           type="file"

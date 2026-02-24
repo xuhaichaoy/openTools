@@ -21,6 +21,7 @@ interface AgentSessionListProps {
   currentSessionId: string | null;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
+  onDeleteAll: () => void;
   onRename: (id: string, title: string) => void;
   onNew: () => void;
   onClose: () => void;
@@ -31,6 +32,7 @@ export function AgentSessionList({
   currentSessionId,
   onSelect,
   onDelete,
+  onDeleteAll,
   onRename,
   onNew,
   onClose,
@@ -38,7 +40,9 @@ export function AgentSessionList({
   const [search, setSearch] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState("");
-  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState<
+    { type: "single"; id: string } | { type: "all" } | null
+  >(null);
   const editInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -76,23 +80,29 @@ export function AgentSessionList({
   return (
     <div className="flex flex-col h-full relative">
       {/* 删除确认 */}
-      {deleteConfirmId && (
+      {deleteConfirm && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 rounded-r-xl">
           <div className="w-[260px] bg-[var(--color-bg)] border border-[var(--color-border)] rounded-xl shadow-xl p-4 mx-3">
             <p className="text-sm text-[var(--color-text)] mb-4">
-              确定删除这个会话？
+              {deleteConfirm.type === "all"
+                ? "确定删除全部历史会话？"
+                : "确定删除这个会话？"}
             </p>
             <div className="flex justify-end gap-2">
               <button
-                onClick={() => setDeleteConfirmId(null)}
+                onClick={() => setDeleteConfirm(null)}
                 className="px-3 py-1.5 text-xs rounded-lg border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] transition-colors"
               >
                 取消
               </button>
               <button
                 onClick={() => {
-                  onDelete(deleteConfirmId);
-                  setDeleteConfirmId(null);
+                  if (deleteConfirm.type === "all") {
+                    onDeleteAll();
+                  } else {
+                    onDelete(deleteConfirm.id);
+                  }
+                  setDeleteConfirm(null);
                 }}
                 className="px-3 py-1.5 text-xs rounded-lg bg-red-500 text-white hover:bg-red-600 transition-colors"
               >
@@ -118,13 +128,24 @@ export function AgentSessionList({
               Agent 历史
             </span>
           </div>
-          <button
-            onClick={onNew}
-            className="flex items-center gap-1 px-2 py-1 text-[11px] rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 transition-colors"
-          >
-            <Plus className="w-3 h-3" />
-            新任务
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setDeleteConfirm({ type: "all" })}
+              disabled={sessions.length === 0}
+              className="flex items-center gap-1 px-2 py-1 text-[11px] rounded-lg border border-red-500/25 text-red-500 hover:bg-red-500/10 disabled:opacity-50 disabled:hover:bg-transparent transition-colors"
+              title="一键删除全部历史会话"
+            >
+              <Trash2 className="w-3 h-3" />
+              清空
+            </button>
+            <button
+              onClick={onNew}
+              className="flex items-center gap-1 px-2 py-1 text-[11px] rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 transition-colors"
+            >
+              <Plus className="w-3 h-3" />
+              新任务
+            </button>
+          </div>
         </div>
 
         <div className="relative">
@@ -233,7 +254,7 @@ export function AgentSessionList({
                         <Pencil className="w-3 h-3" />
                       </button>
                       <button
-                        onClick={() => setDeleteConfirmId(session.id)}
+                        onClick={() => setDeleteConfirm({ type: "single", id: session.id })}
                         className="p-1 rounded-md text-[var(--color-text-secondary)] hover:text-red-400 hover:bg-red-500/10 transition-colors"
                         title="删除"
                       >

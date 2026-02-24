@@ -46,6 +46,12 @@ pub struct AIConfig {
     /// 对话时自动检索知识库（RAG）
     #[serde(default)]
     pub enable_rag_auto_search: bool,
+    /// 本次请求 RAG 覆盖策略：inherit / off / on（仅运行时）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_rag_mode: Option<String>,
+    /// 禁用产品名触发的 RAG 兜底（仅运行时）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_force_rag: Option<bool>,
     /// 启用本机原生应用工具（日历、提醒事项、备忘录、邮件、快捷指令等）
     #[serde(default = "default_true")]
     pub enable_native_tools: bool,
@@ -76,10 +82,38 @@ pub struct AIConfig {
     /// 当前激活的自有 Key 配置 ID
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_own_key_id: Option<String>,
+    /// Agent 运行模式：host / hybrid / container_preferred
+    #[serde(default = "default_agent_runtime_mode")]
+    pub agent_runtime_mode: String,
+    /// Agent 最大并发任务数
+    #[serde(default = "default_agent_max_concurrency")]
+    pub agent_max_concurrency: u32,
+    /// Agent 重试次数上限
+    #[serde(default = "default_agent_retry_max")]
+    pub agent_retry_max: u32,
+    /// Agent 重试退避基准毫秒
+    #[serde(default = "default_agent_retry_backoff_ms")]
+    pub agent_retry_backoff_ms: u64,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_agent_runtime_mode() -> String {
+    "host".to_string()
+}
+
+fn default_agent_max_concurrency() -> u32 {
+    2
+}
+
+fn default_agent_retry_max() -> u32 {
+    3
+}
+
+fn default_agent_retry_backoff_ms() -> u64 {
+    5000
 }
 
 impl Default for AIConfig {
@@ -93,6 +127,8 @@ impl Default for AIConfig {
             enable_advanced_tools: false,
             system_prompt: String::new(),
             enable_rag_auto_search: true,
+            request_rag_mode: None,
+            disable_force_rag: None,
             enable_native_tools: true,
             enable_long_term_memory: true,
             enable_memory_auto_recall: true,
@@ -103,6 +139,10 @@ impl Default for AIConfig {
             team_config_id: None,
             protocol: None,
             active_own_key_id: None,
+            agent_runtime_mode: default_agent_runtime_mode(),
+            agent_max_concurrency: default_agent_max_concurrency(),
+            agent_retry_max: default_agent_retry_max(),
+            agent_retry_backoff_ms: default_agent_retry_backoff_ms(),
         }
     }
 }

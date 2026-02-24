@@ -1,4 +1,5 @@
 import { useState, useEffect, type CSSProperties } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useAIStore } from "@/store/ai-store";
 import { useRAGStore } from "@/store/rag-store";
 import type { OwnKeyModelConfig } from "@/core/ai/types";
@@ -75,6 +76,12 @@ interface TeamModelInfo {
   priority: number;
 }
 
+interface ContainerRuntimeAvailability {
+  available: boolean;
+  runtime: "docker";
+  message: string;
+}
+
 type AIModelSource = "own_key" | "team" | "platform";
 type AIConfigPanel = "source" | "abilities" | "prompt";
 
@@ -125,6 +132,9 @@ export function AIModelTab() {
   const [loadingMemories, setLoadingMemories] = useState(false);
   const [deletingMemoryId, setDeletingMemoryId] = useState<string | null>(null);
   const [activePanel, setActivePanel] = useState<AIConfigPanel>("source");
+  const [containerAvailability, setContainerAvailability] =
+    useState<ContainerRuntimeAvailability | null>(null);
+  const [checkingContainer, setCheckingContainer] = useState(false);
   const nativeToolsSupported =
     navigator.platform.toLowerCase().includes("mac");
   const promptRingStyle: CSSProperties & Record<"--tw-ring-color", string> = {
@@ -151,6 +161,32 @@ export function AIModelTab() {
     if (!config.enable_long_term_memory) return;
     loadSavedMemories();
   }, [config.enable_long_term_memory]);
+
+  const refreshContainerAvailability = async () => {
+    setCheckingContainer(true);
+    try {
+      const result = await invoke<ContainerRuntimeAvailability>(
+        "agent_container_available",
+      );
+      setContainerAvailability(result);
+    } catch (e) {
+      setContainerAvailability({
+        available: false,
+        runtime: "docker",
+        message: `容器状态检测失败: ${e}`,
+      });
+    } finally {
+      setCheckingContainer(false);
+    }
+  };
+
+  useEffect(() => {
+    if ((config.agent_runtime_mode || "host") === "host") {
+      setContainerAvailability(null);
+      return;
+    }
+    void refreshContainerAvailability();
+  }, [config.agent_runtime_mode]);
 
   const handleSourceChange = (source: AIModelSource) => {
     const newConfig = { ...config, source };
@@ -196,6 +232,14 @@ export function AIModelTab() {
     platform: "平台服务",
   };
   const currentSource = (config.source || "own_key") as AIModelSource;
+  const runtimeModeLabelMap: Record<
+    NonNullable<typeof config.agent_runtime_mode>,
+    string
+  > = {
+    host: "Host",
+    hybrid: "Hybrid",
+    container_preferred: "Container Preferred",
+  };
   const memorySubSwitchCount =
     Number(config.enable_memory_auto_recall) +
     Number(config.enable_memory_auto_save) +
@@ -216,6 +260,9 @@ export function AIModelTab() {
         </span>
         <span className="px-2 py-1 rounded bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]">
           长期记忆：{config.enable_long_term_memory ? `开 (${memorySubSwitchCount}/3)` : "关"}
+        </span>
+        <span className="px-2 py-1 rounded bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]">
+          Agent 运行：{runtimeModeLabelMap[config.agent_runtime_mode || "host"]}
         </span>
       </div>
 
@@ -369,6 +416,138 @@ export function AIModelTab() {
               已启用高级工具：执行命令、读写文件、列出目录、获取系统信息、打开网址、打开文件/目录、获取进程列表。其中执行命令、写入文件、打开路径为危险操作，执行前需要你确认。
             </div>
           )}
+
+          <div className="pt-2 border-t border-[var(--color-border)]/50 space-y-2">
+            <div className="flex items-center gap-1.5">
+              <Cpu className="w-3 h-3 text-indigo-400" />
+              <span className="text-xs text-[var(--color-text)]">
+                Agent 编排参数
+              </span>
+            </div>
+
+            <label className="block">
+              <span className="text-[10px] text-[var(--color-text-secondary)]">
+                运行模式
+              </span>
+              <select
+                className="w-full mt-1 bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg px-2 py-1.5 text-xs outline-none focus:ring-2 focus:ring-indigo-400/20"
+                value={config.agent_runtime_mode || "host"}
+                onChange={(e) =>
+                  updateAndSave({
+                    agent_runtime_mode: e.target.value as
+                      | "host"
+                      | "hybrid"
+                      | "container_preferred",
+                  })
+                }
+              >
+                <option value="host">Host（当前默认）</option>
+                <option value="hybrid">
+                  Hybrid（容器可用且允许路径时走容器，否则 Host）
+                </option>
+                <option value="container_preferred">
+                  Container Preferred（容器优先）
+                </option>
+              </select>
+            </label>
+
+            <div className="grid grid-cols-3 gap-2">
+              <label className="block">
+                <span className="text-[10px] text-[var(--color-text-secondary)]">
+                  最大并发
+                </span>
+                <input
+                  type="number"
+                  min={1}
+                  max={8}
+                  className="w-full mt-1 bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg px-2 py-1.5 text-xs outline-none focus:ring-2 focus:ring-indigo-400/20"
+                  value={config.agent_max_concurrency ?? 2}
+                  onChange={(e) =>
+                    updateAndSave({
+                      agent_max_concurrency: Math.max(
+                        1,
+                        Math.min(8, Number(e.target.value || 2)),
+                      ),
+                    })
+                  }
+                />
+              </label>
+
+              <label className="block">
+                <span className="text-[10px] text-[var(--color-text-secondary)]">
+                  重试次数
+                </span>
+                <input
+                  type="number"
+                  min={0}
+                  max={10}
+                  className="w-full mt-1 bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg px-2 py-1.5 text-xs outline-none focus:ring-2 focus:ring-indigo-400/20"
+                  value={config.agent_retry_max ?? 3}
+                  onChange={(e) =>
+                    updateAndSave({
+                      agent_retry_max: Math.max(
+                        0,
+                        Math.min(10, Number(e.target.value || 3)),
+                      ),
+                    })
+                  }
+                />
+              </label>
+
+              <label className="block">
+                <span className="text-[10px] text-[var(--color-text-secondary)]">
+                  退避毫秒
+                </span>
+                <input
+                  type="number"
+                  min={500}
+                  max={60000}
+                  step={100}
+                  className="w-full mt-1 bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg px-2 py-1.5 text-xs outline-none focus:ring-2 focus:ring-indigo-400/20"
+                  value={config.agent_retry_backoff_ms ?? 5000}
+                  onChange={(e) =>
+                    updateAndSave({
+                      agent_retry_backoff_ms: Math.max(
+                        500,
+                        Math.min(60000, Number(e.target.value || 5000)),
+                      ),
+                    })
+                  }
+                />
+              </label>
+            </div>
+            <p className="text-[10px] text-[var(--color-text-secondary)]">
+              Host 为默认模式；Hybrid 会在容器可用时优先容器、否则自动回退 Host；Container Preferred 优先容器执行，按策略回退或拒绝。
+            </p>
+            {(config.agent_runtime_mode || "host") !== "host" && (
+              <div className="text-[10px] text-[var(--color-text-secondary)] flex items-center gap-2">
+                <span>
+                  容器运行时:{" "}
+                  {checkingContainer
+                    ? "检测中..."
+                    : containerAvailability
+                      ? containerAvailability.available
+                        ? `可用 (${containerAvailability.runtime})`
+                        : `不可用 (${containerAvailability.runtime})`
+                      : "未知"}
+                </span>
+                <button
+                  onClick={() => void refreshContainerAvailability()}
+                  className="px-1.5 py-0.5 rounded border border-[var(--color-border)] hover:bg-[var(--color-bg-secondary)]"
+                >
+                  刷新
+                </button>
+              </div>
+            )}
+            {containerAvailability?.message && (
+              <p className="text-[10px] text-[var(--color-text-secondary)]">
+                {containerAvailability.message}
+              </p>
+            )}
+            <p className="text-[10px] text-[var(--color-text-secondary)]">
+              可选外部策略文件：~/.config/51toolbox/agent-policy.json（allowed_roots / force_readonly / block_mode / allow_unattended_host_fallback）。容器执行需配置 allowed_roots。
+            </p>
+          </div>
 
           {nativeToolsSupported ? (
             <label className="flex items-center justify-between cursor-pointer">

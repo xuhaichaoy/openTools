@@ -4,11 +4,11 @@ import {
   MessageCircle,
   Bot,
   History,
+  Clock3,
   Search,
   Download,
   Plus,
   Wrench,
-  Trash2,
 } from "lucide-react";
 import { useDragWindow } from "@/hooks/useDragWindow";
 import { ModelSelector } from "@/components/ai/ModelSelector";
@@ -45,9 +45,10 @@ export function AICenter({
   );
   const chatRef = useRef<ChatViewHandle>(null);
   const agentRef = useRef<SmartAgentHandle>(null);
+  const [agentPlanMode, setAgentPlanMode] = useState(true);
   const { onMouseDown } = useDragWindow();
   const { conversations } = useAIStore();
-  const { sessions } = useAgentStore();
+  const { sessions, scheduledTasks } = useAgentStore();
 
   const Loading = (
     <div className="h-full flex items-center justify-center text-[var(--color-text-secondary)]">
@@ -170,6 +171,37 @@ export function AICenter({
             >
               <Wrench className="w-3.5 h-3.5" />
             </button>
+            {/* 编排任务 */}
+            <button
+              onClick={() => agentRef.current?.toggleOrchestrator()}
+              className={`${iconBtn} relative`}
+              title="编排任务"
+            >
+              <Clock3 className="w-3.5 h-3.5" />
+              {scheduledTasks.length > 0 && (
+                <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 bg-amber-500 text-white text-[7px] rounded-full flex items-center justify-center font-medium">
+                  {scheduledTasks.length > 99 ? "99+" : scheduledTasks.length}
+                </span>
+              )}
+            </button>
+            {/* Plan 模式 */}
+            <button
+              onClick={() => {
+                agentRef.current?.togglePlanMode();
+                const latest = agentRef.current?.getPlanMode();
+                if (typeof latest === "boolean") {
+                  setAgentPlanMode(latest);
+                }
+              }}
+              className={`text-[11px] px-2 py-1 rounded-md transition-all ${
+                agentPlanMode
+                  ? "bg-emerald-500/15 text-emerald-500"
+                  : "bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+              }`}
+              title="Plan Mode：先输出计划，确认后执行"
+            >
+              Plan {agentPlanMode ? "On" : "Off"}
+            </button>
             {/* 新任务 */}
             <button
               onClick={() => agentRef.current?.newSession()}
@@ -195,7 +227,12 @@ export function AICenter({
             <ChatView ref={chatRef} headless hideModelSelector />
           )}
           {mode === "agent" && (
-            <SmartAgentPlugin ref={agentRef} ai={ai} headless />
+            <SmartAgentPlugin
+              ref={agentRef}
+              ai={ai}
+              headless
+              onPlanModeChange={setAgentPlanMode}
+            />
           )}
         </Suspense>
       </div>

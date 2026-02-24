@@ -54,6 +54,56 @@ fn should_force_rag_for_query(query: &str) -> bool {
     KNOWLEDGE_CUES.iter().any(|k| q.contains(k))
 }
 
+fn resolve_auto_rag_enabled(config: &AIConfig) -> bool {
+    match config
+        .request_rag_mode
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_lowercase)
+        .as_deref()
+    {
+        Some("on") => true,
+        Some("off") => false,
+        _ => config.enable_rag_auto_search,
+    }
+}
+
+fn resolve_force_rag_enabled(config: &AIConfig, query: &str) -> bool {
+    if config.disable_force_rag.unwrap_or(false) {
+        return false;
+    }
+    should_force_rag_for_query(query)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_auto_rag_enabled, resolve_force_rag_enabled, AIConfig};
+
+    #[test]
+    fn request_rag_mode_off_disables_auto_rag() {
+        let mut config = AIConfig::default();
+        config.enable_rag_auto_search = true;
+        config.request_rag_mode = Some("off".to_string());
+        assert!(!resolve_auto_rag_enabled(&config));
+    }
+
+    #[test]
+    fn request_rag_mode_on_enables_auto_rag() {
+        let mut config = AIConfig::default();
+        config.enable_rag_auto_search = false;
+        config.request_rag_mode = Some("on".to_string());
+        assert!(resolve_auto_rag_enabled(&config));
+    }
+
+    #[test]
+    fn disable_force_rag_blocks_product_fallback() {
+        let mut config = AIConfig::default();
+        config.disable_force_rag = Some(true);
+        let query = "51ToolBox 如何配置团队插件";
+        assert!(!resolve_force_rag_enabled(&config, query));
+    }
+}
+
 fn build_guarded_system_prompt(messages: &[ChatMessage], config: &AIConfig) -> String {
     let mut prompt = tools::get_system_prompt(
         config.enable_advanced_tools,
@@ -284,8 +334,9 @@ pub async fn ai_chat_stream(
         .find(|m| m.role == "user")
         .and_then(|m| m.content.as_ref())
     {
-        let force_rag = should_force_rag_for_query(user_query);
-        if config.enable_rag_auto_search || force_rag {
+        let auto_rag = resolve_auto_rag_enabled(&config);
+        let force_rag = resolve_force_rag_enabled(&config, user_query);
+        if auto_rag || force_rag {
             let rag_results = match super::rag::rag_search(
                 app.clone(),
                 user_query.clone(),
@@ -316,10 +367,12 @@ pub async fn ai_chat_stream(
                     }
                     system_prompt.push_str(&rag_context);
                     log::info!(
-                        "RAG 预检索：注入 {} 条知识库结果（auto={}, force={}）",
+                        "RAG 预检索：注入 {} 条知识库结果（auto={}, force={}, request_mode={:?}, disable_force={:?}）",
                         results.len(),
-                        config.enable_rag_auto_search,
-                        force_rag
+                        auto_rag,
+                        force_rag,
+                        config.request_rag_mode,
+                        config.disable_force_rag
                     );
                 }
                 Ok(_) => {}

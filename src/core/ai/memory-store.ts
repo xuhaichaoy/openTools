@@ -355,7 +355,7 @@ export function rankMemoriesForRecall(
     .filter(({ score }) => score > 0.08 || queryTokens.length === 0)
     .sort((a, b) => {
       if (b.score !== a.score) return b.score - a.score;
-      return (b.updated_at || 0) - (a.updated_at || 0);
+      return (b.item.updated_at || 0) - (a.item.updated_at || 0);
     })
     .slice(0, topK)
     .map(({ item }) => item);

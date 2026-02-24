@@ -53,6 +53,8 @@ export interface AgentConfig {
   dangerousToolPatterns?: string[];
   /** 强制使用文本 ReAct 模式（跳过 Function Calling） */
   forceTextMode?: boolean;
+  /** Function Calling 兼容性缓存 key（建议按模型/提供商组合） */
+  fcCompatibilityKey?: string;
 }
 
 const DEFAULT_CONFIG: AgentConfig = {
@@ -60,6 +62,14 @@ const DEFAULT_CONFIG: AgentConfig = {
   temperature: 0.7,
   verbose: true,
 };
+
+/** 仅缓存“不兼容 FC”的模型，避免重复探测。 */
+const fcIncompatibleCache = new Map<string, true>();
+
+function normalizeFCCompatibilityKey(key?: string): string | null {
+  const normalized = (key || "").trim().toLowerCase();
+  return normalized || null;
+}
 
 // ── 工具格式转换 ──
 
@@ -105,8 +115,49 @@ export class ReActAgent {
   private steps: AgentStep[] = [];
   private history: AgentStep[] = [];
   private onStep?: (step: AgentStep) => void;
-  /** Function Calling 是否可用（首次尝试后缓存结果） */
+  /** Function Calling 是否可用（当前实例内缓存） */
   private fcAvailable: boolean | null = null;
+  /** 跨实例模型兼容性缓存 key */
+  private fcCompatibilityKey: string | null = null;
+
+  private isQuickTimeQuery(userInput: string): boolean {
+    const q = userInput.trim();
+    if (!q) return false;
+    return /现在.*几点|当前.*时间|现在几号|今天几号|当前日期|what time|current time/i.test(
+      q,
+    );
+  }
+
+  private buildQuickAnswerFromTool(
+    userInput: string,
+    toolName: string,
+    toolOutput: unknown,
+  ): string | null {
+    if (toolName === "get_current_time" && this.isQuickTimeQuery(userInput)) {
+      if (toolOutput && typeof toolOutput === "object") {
+        const output = toolOutput as { time?: unknown; timestamp?: unknown };
+        if (typeof output.time === "string" && output.time.trim()) {
+          return `现在时间是 ${output.time}。`;
+        }
+        if (typeof output.timestamp === "number") {
+          return `现在时间是 ${new Date(output.timestamp).toLocaleString("zh-CN")}。`;
+        }
+      }
+      return `现在时间是 ${new Date().toLocaleString("zh-CN")}。`;
+    }
+
+    if (toolName === "calculate" && toolOutput && typeof toolOutput === "object") {
+      const output = toolOutput as { result?: unknown; expression?: unknown };
+      if (typeof output.result === "number") {
+        if (typeof output.expression === "string" && output.expression.trim()) {
+          return `${output.expression} = ${output.result}`;
+        }
+        return `计算结果：${output.result}`;
+      }
+    }
+
+    return null;
+  }
 
   constructor(
     ai: MToolsAI,
@@ -120,6 +171,15 @@ export class ReActAgent {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.onStep = onStep;
     this.history = history;
+    this.fcCompatibilityKey = normalizeFCCompatibilityKey(
+      this.config.fcCompatibilityKey,
+    );
+    if (
+      this.fcCompatibilityKey &&
+      fcIncompatibleCache.get(this.fcCompatibilityKey) === true
+    ) {
+      this.fcAvailable = false;
+    }
   }
 
   private addStep(step: AgentStep) {
@@ -507,6 +567,20 @@ Final Answer: [最终回答]
 
           if (signal?.aborted) throw new Error("Aborted");
 
+          const quickAnswer = this.buildQuickAnswerFromTool(
+            userInput,
+            toolName,
+            output,
+          );
+          if (quickAnswer) {
+            this.addStep({
+              type: "answer",
+              content: quickAnswer,
+              timestamp: Date.now(),
+            });
+            return quickAnswer;
+          }
+
           const outputStr =
             typeof output === "string"
               ? output
@@ -665,6 +739,20 @@ Final Answer: [最终回答]
 
           if (signal?.aborted) throw new Error("Aborted");
 
+          const quickAnswer = this.buildQuickAnswerFromTool(
+            userInput,
+            parsed.action,
+            output,
+          );
+          if (quickAnswer) {
+            this.addStep({
+              type: "answer",
+              content: quickAnswer,
+              timestamp: Date.now(),
+            });
+            return quickAnswer;
+          }
+
           const outputStr =
             typeof output === "string"
               ? output
@@ -727,12 +815,6 @@ Final Answer: [最终回答]
   async run(userInput: string, signal?: AbortSignal): Promise<string> {
     this.steps = [];
 
-    this.addStep({
-      type: "thought",
-      content: `用户问题: ${userInput}`,
-      timestamp: Date.now(),
-    });
-
     // 判断是否可以使用 Function Calling
     const canUseFC =
       !this.config.forceTextMode &&
@@ -741,27 +823,33 @@ Final Answer: [最终回答]
     if (canUseFC && this.fcAvailable !== false) {
       try {
         const result = await this.runFC(userInput, signal);
-        this.fcAvailable = true; // 标记 FC 可用
+        this.fcAvailable = true; // 当前实例标记 FC 可用
         return result;
       } catch (e) {
         if ((e as Error).message === "Aborted") throw e;
 
         const errMsg = (e as Error).message || "";
         const isFCIncompatible = errMsg.startsWith("FC_INCOMPATIBLE");
+        const shouldDowngrade = this.fcAvailable === null || isFCIncompatible;
+
+        if (isFCIncompatible) {
+          this.fcAvailable = false;
+          if (this.fcCompatibilityKey) {
+            fcIncompatibleCache.set(this.fcCompatibilityKey, true);
+          }
+        }
 
         // FC 调用失败 或 模型不兼容 FC → 降级到文本 ReAct 模式
-        if (this.fcAvailable === null || isFCIncompatible) {
+        if (shouldDowngrade) {
           handleError(e, {
             context: "ReAct Agent Function Calling 降级为文本模式",
             level: ErrorLevel.Warning,
+            silent: true,
           });
-          this.fcAvailable = false;
+          if (!isFCIncompatible) {
+            this.fcAvailable = false;
+          }
           this.steps = [];
-          this.addStep({
-            type: "thought",
-            content: `用户问题: ${userInput}`,
-            timestamp: Date.now(),
-          });
           return this.runText(userInput, signal);
         }
         throw e;

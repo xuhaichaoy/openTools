@@ -37,7 +37,8 @@ pub async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<Str
         }
         "run_shell_command" => {
             let command = args_value["command"].as_str().unwrap_or("echo hello");
-            crate::commands::system::run_shell_command(command.to_string()).await
+            let result = crate::commands::system::run_shell_command(command.to_string()).await?;
+            Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
         }
         "read_clipboard" => {
             use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -221,14 +222,10 @@ pub async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<Str
         }
         "write_file" => {
             let path = args_value["path"].as_str().unwrap_or("").to_string();
-            crate::commands::system::validate_path_access(app, &path)?;
             let content = args_value["content"].as_str().unwrap_or("").to_string();
-            let file_path = std::path::Path::new(&path);
-            if let Some(parent) = file_path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
-            }
-            std::fs::write(&file_path, &content).map_err(|e| format!("写入失败: {}", e))?;
-            Ok(format!("已写入 {} ({} 字节)", path, content.len()))
+            let result =
+                crate::commands::system::write_text_file(app.clone(), path, content).await?;
+            Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
         }
         "list_directory" => {
             let path = args_value["path"].as_str().unwrap_or(".").to_string();

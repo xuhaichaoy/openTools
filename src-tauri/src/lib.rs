@@ -219,6 +219,20 @@ pub fn run() {
             commands::ai::ai_embedding,
             commands::ai::ai_list_models,
             commands::ai::agent::ai_agent_stream,
+            // ── Agent Orchestrator ──
+            commands::agent_orchestrator::agent_task_create,
+            commands::agent_orchestrator::agent_task_list,
+            commands::agent_orchestrator::agent_task_pause,
+            commands::agent_orchestrator::agent_task_resume,
+            commands::agent_orchestrator::agent_task_cancel,
+            commands::agent_orchestrator::agent_task_set_status,
+            commands::agent_orchestrator::agent_scheduler_start,
+            commands::agent_orchestrator::agent_scheduler_reload,
+            commands::agent_orchestrator::agent_scheduler_status,
+            // ── Agent Runtime (Docker) ──
+            commands::agent_runtime::agent_container_available,
+            commands::agent_runtime::agent_container_run_shell,
+            commands::agent_runtime::agent_container_write_file,
             // ── Window ──
             commands::window::toggle_main_window,
             commands::window::resize_window,

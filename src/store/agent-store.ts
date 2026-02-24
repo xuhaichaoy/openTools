@@ -1,6 +1,13 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import type { AgentStep } from "@/plugins/builtin/SmartAgent/core/react-agent";
+import type {
+  AgentScheduledTask,
+  AgentScheduleType,
+  AgentTaskSkippedEvent,
+  AgentTaskStatus,
+  AgentTaskStatusPatch,
+} from "@/core/ai/types";
 import { handleError } from "@/core/errors";
 import { MAX_CONVERSATIONS } from "@/core/constants";
 import { createDebouncedPersister } from "@/core/storage";
@@ -11,6 +18,16 @@ export interface AgentTask {
   query: string;
   steps: AgentStep[];
   answer: string | null;
+  status?: AgentTaskStatus;
+  schedule_type?: AgentScheduleType;
+  schedule_value?: string;
+  retry_count?: number;
+  next_run_at?: number;
+  last_error?: string;
+  last_started_at?: number;
+  last_finished_at?: number;
+  last_duration_ms?: number;
+  last_result_status?: "success" | "error" | "skipped";
 }
 
 export interface AgentSession {
@@ -22,21 +39,54 @@ export interface AgentSession {
 
 interface AgentState {
   sessions: AgentSession[];
+  scheduledTasks: AgentScheduledTask[];
   currentSessionId: string | null;
   historyLoaded: boolean;
 
   loadHistory: () => Promise<void>;
   persistHistory: () => Promise<void>;
+  loadScheduledTasks: () => Promise<void>;
+  createScheduledTask: (params: {
+    query: string;
+    scheduleType: AgentScheduleType;
+    scheduleValue: string;
+    sessionId?: string;
+  }) => Promise<AgentScheduledTask | null>;
+  pauseScheduledTask: (taskId: string) => Promise<void>;
+  resumeScheduledTask: (taskId: string) => Promise<void>;
+  cancelScheduledTask: (taskId: string) => Promise<void>;
+  upsertScheduledTask: (task: AgentScheduledTask) => void;
+  applyScheduledTaskPatch: (patch: AgentTaskStatusPatch) => void;
+  applyScheduledTaskSkipped: (event: AgentTaskSkippedEvent) => void;
   createSession: (query: string) => string;
   getCurrentSession: () => AgentSession | null;
   setCurrentSession: (id: string) => void;
   /** 向会话追加一个新任务，返回新任务的 id */
   addTask: (sessionId: string, query: string) => string;
   /** 更新指定任务的 steps / answer（按 taskId 查找） */
-  updateTask: (sessionId: string, taskId: string, updates: Partial<Pick<AgentTask, "steps" | "answer">>) => void;
+  updateTask: (
+    sessionId: string,
+    taskId: string,
+    updates: Partial<
+      Pick<
+        AgentTask,
+        | "steps"
+        | "answer"
+        | "status"
+        | "retry_count"
+        | "next_run_at"
+        | "last_error"
+        | "last_started_at"
+        | "last_finished_at"
+        | "last_duration_ms"
+        | "last_result_status"
+      >
+    >,
+  ) => void;
   /** 更新会话级字段（如清空 tasks） */
   updateSession: (id: string, updates: Partial<Pick<AgentSession, "tasks" | "title">>) => void;
   deleteSession: (id: string) => void;
+  deleteAllSessions: () => void;
   renameSession: (id: string, title: string) => void;
   clearCurrentSession: () => void;
 }
@@ -55,6 +105,8 @@ function migrateSession(raw: Record<string, unknown>): AgentSession {
     const tasks = r.tasks.map((t: AgentTask) => ({
       ...t,
       id: t.id || generateId(),
+      status: t.status || (t.answer ? "success" : "pending"),
+      retry_count: t.retry_count ?? 0,
     }));
     return {
       id: r.id,
@@ -69,7 +121,16 @@ function migrateSession(raw: Record<string, unknown>): AgentSession {
     id: r.id,
     title: r.title || "新任务",
     tasks: hasContent
-      ? [{ id: generateId(), query: r.query || "", steps: r.steps || [], answer: r.answer ?? null }]
+      ? [
+          {
+            id: generateId(),
+            query: r.query || "",
+            steps: r.steps || [],
+            answer: r.answer ?? null,
+            status: r.answer ? "success" : "pending",
+            retry_count: 0,
+          },
+        ]
       : [],
     createdAt: r.createdAt ?? Date.now(),
   };
@@ -94,6 +155,7 @@ const debouncedPersist = () => _agentPersister.trigger();
 
 export const useAgentStore = create<AgentState>((set, get) => ({
   sessions: [],
+  scheduledTasks: [],
   currentSessionId: null,
   historyLoaded: false,
 
@@ -141,12 +203,152 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }
   },
 
+  loadScheduledTasks: async () => {
+    try {
+      const tasks = await invoke<AgentScheduledTask[]>("agent_task_list");
+      set({ scheduledTasks: tasks });
+    } catch (e) {
+      handleError(e, { context: "加载 Agent 编排任务", silent: true });
+    }
+  },
+
+  createScheduledTask: async ({ query, scheduleType, scheduleValue, sessionId }) => {
+    try {
+      const task = await invoke<AgentScheduledTask>("agent_task_create", {
+        query,
+        sessionId: sessionId || null,
+        scheduleType,
+        scheduleValue,
+      });
+      set((state) => ({
+        scheduledTasks: [task, ...state.scheduledTasks.filter((t) => t.id !== task.id)],
+      }));
+      return task;
+    } catch (e) {
+      handleError(e, { context: "创建 Agent 编排任务" });
+      return null;
+    }
+  },
+
+  pauseScheduledTask: async (taskId) => {
+    try {
+      await invoke("agent_task_pause", { taskId });
+      set((state) => ({
+        scheduledTasks: state.scheduledTasks.map((task) =>
+          task.id === taskId
+            ? { ...task, status: "paused", updated_at: Date.now() }
+            : task,
+        ),
+      }));
+    } catch (e) {
+      handleError(e, { context: "暂停 Agent 编排任务" });
+    }
+  },
+
+  resumeScheduledTask: async (taskId) => {
+    try {
+      await invoke("agent_task_resume", { taskId });
+      set((state) => ({
+        scheduledTasks: state.scheduledTasks.map((task) =>
+          task.id === taskId
+            ? { ...task, status: "pending", updated_at: Date.now() }
+            : task,
+        ),
+      }));
+    } catch (e) {
+      handleError(e, { context: "恢复 Agent 编排任务" });
+    }
+  },
+
+  cancelScheduledTask: async (taskId) => {
+    try {
+      await invoke("agent_task_cancel", { taskId });
+      set((state) => ({
+        scheduledTasks: state.scheduledTasks.map((task) =>
+          task.id === taskId
+            ? {
+                ...task,
+                status: "cancelled",
+                next_run_at: undefined,
+                updated_at: Date.now(),
+              }
+            : task,
+        ),
+      }));
+    } catch (e) {
+      handleError(e, { context: "取消 Agent 编排任务" });
+    }
+  },
+
+  upsertScheduledTask: (task) => {
+    set((state) => {
+      const exists = state.scheduledTasks.some((t) => t.id === task.id);
+      if (!exists) {
+        return { scheduledTasks: [task, ...state.scheduledTasks] };
+      }
+      return {
+        scheduledTasks: state.scheduledTasks.map((t) =>
+          t.id === task.id ? { ...t, ...task } : t,
+        ),
+      };
+    });
+  },
+
+  applyScheduledTaskPatch: (patch) => {
+    set((state) => ({
+      scheduledTasks: state.scheduledTasks.map((task) =>
+        task.id === patch.task_id
+          ? {
+              ...task,
+              status: patch.status,
+              retry_count: patch.retry_count,
+              next_run_at: patch.next_run_at,
+              last_error: patch.last_error,
+              last_started_at: patch.last_started_at,
+              last_finished_at: patch.last_finished_at,
+              last_duration_ms: patch.last_duration_ms,
+              last_result_status: patch.last_result_status,
+              last_skip_reason: patch.last_skip_reason,
+              updated_at: patch.updated_at,
+            }
+          : task,
+      ),
+    }));
+  },
+
+  applyScheduledTaskSkipped: (event) => {
+    set((state) => ({
+      scheduledTasks: state.scheduledTasks.map((task) =>
+        task.id === event.task_id
+          ? {
+              ...task,
+              next_run_at: event.next_run_at,
+              last_result_status: "skipped",
+              last_skip_reason: event.reason,
+              updated_at: event.skipped_at,
+            }
+          : task,
+      ),
+    }));
+  },
+
   createSession: (query: string) => {
     const id = generateId();
     const session: AgentSession = {
       id,
       title: query.slice(0, 30) || "新任务",
-      tasks: query ? [{ id: generateId(), query, steps: [], answer: null }] : [],
+      tasks: query
+        ? [
+            {
+              id: generateId(),
+              query,
+              steps: [],
+              answer: null,
+              status: "pending",
+              retry_count: 0,
+            },
+          ]
+        : [],
       createdAt: Date.now(),
     };
     set((state) => ({
@@ -169,7 +371,14 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     set((state) => ({
       sessions: state.sessions.map((s) => {
         if (s.id !== sessionId) return s;
-        const newTask: AgentTask = { id: taskId, query, steps: [], answer: null };
+        const newTask: AgentTask = {
+          id: taskId,
+          query,
+          steps: [],
+          answer: null,
+          status: "pending",
+          retry_count: 0,
+        };
         return { ...s, tasks: [...s.tasks, newTask] };
       }),
     }));
@@ -177,7 +386,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     return taskId;
   },
 
-  updateTask: (sessionId: string, taskId: string, updates: Partial<Pick<AgentTask, "steps" | "answer">>) => {
+  updateTask: (sessionId, taskId, updates) => {
     set((state) => {
       // 校验 session 和 task 仍然存在，防止异步竞态
       const session = state.sessions.find((s) => s.id === sessionId);
@@ -217,6 +426,14 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           ? remaining[0]?.id || null
           : state.currentSessionId,
       };
+    });
+    debouncedPersist();
+  },
+
+  deleteAllSessions: () => {
+    set({
+      sessions: [],
+      currentSessionId: null,
     });
     debouncedPersist();
   },

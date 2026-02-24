@@ -8,6 +8,7 @@
 
 import type {
   MToolsAI,
+  AIRequestPolicy,
   AIToolCall,
 } from "@/core/plugin-system/plugin-interface";
 import { handleError } from "@/core/errors";
@@ -29,6 +30,28 @@ const generateId = () =>
 /** 获取当前 AI 配置 */
 function getConfig(): AIConfig {
   return useAIStore.getState().config;
+}
+
+function applyRequestPolicy(
+  config: AIConfig,
+  requestPolicy?: AIRequestPolicy,
+): AIConfig {
+  if (!requestPolicy) return config;
+
+  const next: AIConfig = { ...config };
+  if (requestPolicy.ragMode && requestPolicy.ragMode !== "inherit") {
+    next.request_rag_mode = requestPolicy.ragMode;
+  } else {
+    next.request_rag_mode = undefined;
+  }
+
+  if (requestPolicy.forceProductRag === "off") {
+    next.disable_force_rag = true;
+  } else {
+    next.disable_force_rag = undefined;
+  }
+
+  return next;
 }
 
 interface SimpleAIMessage {
@@ -83,11 +106,15 @@ export function createMToolsAI(): MToolsAI {
     async chat(options) {
       const config = getConfig();
       const conversationId = `sdk-${generateId()}`;
-      const effectiveConfig: AIConfig = {
+      const baseConfig: AIConfig = {
         ...config,
         model: options.model || config.model,
         temperature: options.temperature ?? config.temperature,
       };
+      const effectiveConfig = applyRequestPolicy(
+        baseConfig,
+        options.requestPolicy,
+      );
       const routed = getRoutedConfig(effectiveConfig);
 
       return new Promise(async (resolve, reject) => {
@@ -134,7 +161,7 @@ export function createMToolsAI(): MToolsAI {
               role: m.role,
               content: m.content,
             })),
-            config,
+            effectiveConfig,
             conversationId,
           );
 
@@ -156,7 +183,8 @@ export function createMToolsAI(): MToolsAI {
     async stream(options) {
       const config = getConfig();
       const conversationId = `sdk-${generateId()}`;
-      const routed = getRoutedConfig(config);
+      const effectiveConfig = applyRequestPolicy(config, options.requestPolicy);
+      const routed = getRoutedConfig(effectiveConfig);
       let fullContent = "";
 
       return new Promise(async (resolve, reject) => {
@@ -203,7 +231,7 @@ export function createMToolsAI(): MToolsAI {
               role: m.role,
               content: m.content,
             })),
-            config,
+            effectiveConfig,
             conversationId,
           );
 

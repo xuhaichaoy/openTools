@@ -11,6 +11,22 @@ pub struct ScriptResult {
     pub exit_code: Option<i32>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct SystemShellResult {
+    pub runtime: &'static str,
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SystemWriteFileResult {
+    pub runtime: &'static str,
+    pub path: String,
+    pub bytes: usize,
+    pub message: String,
+}
+
 /// 执行 Python 脚本
 #[tauri::command]
 pub async fn run_python_script(
@@ -575,7 +591,7 @@ pub async fn write_text_file(
     app: tauri::AppHandle,
     path: String,
     content: String,
-) -> Result<String, String> {
+) -> Result<SystemWriteFileResult, String> {
     validate_path_access(&app, &path)?;
     let p = std::path::Path::new(&path);
     // 自动创建父目录
@@ -585,7 +601,12 @@ pub async fn write_text_file(
         }
     }
     std::fs::write(p, &content).map_err(|e| format!("写入失败: {}", e))?;
-    Ok(format!("已写入 {} 字节到 {}", content.len(), path))
+    Ok(SystemWriteFileResult {
+        runtime: "host",
+        path: path.clone(),
+        bytes: content.len(),
+        message: format!("已写入 {} 字节到 {}", content.len(), path),
+    })
 }
 
 /// 列出目录内容（受路径白名单保护）
@@ -732,7 +753,7 @@ pub async fn search_in_files(
 
 /// 执行 Shell 命令（受命令策略保护）
 #[tauri::command]
-pub async fn run_shell_command(command: String) -> Result<String, String> {
+pub async fn run_shell_command(command: String) -> Result<SystemShellResult, String> {
     validate_shell_command(&command)?;
     let output = if cfg!(target_os = "windows") {
         Command::new("cmd").args(["/C", &command]).output()
@@ -745,12 +766,12 @@ pub async fn run_shell_command(command: String) -> Result<String, String> {
             let stdout = String::from_utf8_lossy(&out.stdout).to_string();
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
             let code = out.status.code().unwrap_or(-1);
-            Ok(serde_json::json!({
-                "exit_code": code,
-                "stdout": stdout,
-                "stderr": stderr,
+            Ok(SystemShellResult {
+                runtime: "host",
+                exit_code: code,
+                stdout,
+                stderr,
             })
-            .to_string())
         }
         Err(e) => Err(format!("执行失败: {}", e)),
     }

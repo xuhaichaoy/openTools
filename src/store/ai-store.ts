@@ -108,6 +108,18 @@ function nativeToolsSupportedOnCurrentPlatform(): boolean {
 
 function normalizeConfig(config: AIConfig): AIConfig {
   const source = config.source || "own_key";
+  const normalizedConcurrency =
+    typeof config.agent_max_concurrency === "number"
+      ? Math.max(1, Math.min(8, Math.floor(config.agent_max_concurrency)))
+      : 2;
+  const normalizedRetryMax =
+    typeof config.agent_retry_max === "number"
+      ? Math.max(0, Math.min(10, Math.floor(config.agent_retry_max)))
+      : 3;
+  const normalizedBackoffMs =
+    typeof config.agent_retry_backoff_ms === "number"
+      ? Math.max(500, Math.min(60000, Math.floor(config.agent_retry_backoff_ms)))
+      : 5000;
   const normalized: AIConfig = {
     ...config,
     source,
@@ -115,6 +127,12 @@ function normalizeConfig(config: AIConfig): AIConfig {
     enable_memory_auto_recall: config.enable_memory_auto_recall ?? true,
     enable_memory_auto_save: config.enable_memory_auto_save ?? true,
     enable_memory_sync: config.enable_memory_sync ?? true,
+    agent_runtime_mode: config.agent_runtime_mode || "host",
+    agent_max_concurrency: normalizedConcurrency,
+    agent_retry_max: normalizedRetryMax,
+    agent_retry_backoff_ms: normalizedBackoffMs,
+    request_rag_mode: undefined,
+    disable_force_rag: undefined,
   };
 
   if (source !== "team") {
@@ -146,6 +164,10 @@ export const useAIStore = create<AIState>((set, get) => ({
     enable_memory_auto_save: true,
     enable_memory_sync: true,
     source: "own_key",
+    agent_runtime_mode: "host",
+    agent_max_concurrency: 2,
+    agent_retry_max: 3,
+    agent_retry_backoff_ms: 5000,
   },
   conversations: [],
   currentConversationId: null,

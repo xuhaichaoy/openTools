@@ -10,8 +10,14 @@ import { useBookmarkStore } from "@/store/bookmark-store";
 import { useAppStore } from "@/store/app-store";
 import { useAIStore } from "@/store/ai-store";
 import { useAgentStore } from "@/store/agent-store";
+import { agentRunnerService } from "@/core/agent/agent-runner-service";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, emit } from "@tauri-apps/api/event";
+import type {
+  AgentScheduledTask,
+  AgentTaskSkippedEvent,
+  AgentTaskStatusPatch,
+} from "@/core/ai/types";
 import {
   File,
   Folder,
@@ -189,6 +195,7 @@ function MainApp() {
       });
     useAIStore.getState().loadHistory();
     useAgentStore.getState().loadHistory();
+    useAgentStore.getState().loadScheduledTasks();
     useWorkflowStore.getState().loadWorkflows();
     usePluginStore.getState().loadPlugins();
     useBookmarkStore.getState().loadBookmarks();
@@ -196,8 +203,14 @@ function MainApp() {
     invoke("workflow_scheduler_start").catch((e) =>
       handleError(e, { context: "定时调度启动", level: ErrorLevel.Warning }),
     );
+    invoke("agent_scheduler_start").catch((e) =>
+      handleError(e, { context: "Agent 编排调度启动", level: ErrorLevel.Warning }),
+    );
 
     let unlistenScheduled: (() => void) | undefined;
+    let unlistenAgentTrigger: (() => void) | undefined;
+    let unlistenAgentStatus: (() => void) | undefined;
+    let unlistenAgentSkipped: (() => void) | undefined;
     listen<{ workflowId: string; workflowName: string }>(
       "workflow-scheduled-trigger",
       (event) => {
@@ -207,6 +220,26 @@ function MainApp() {
       },
     ).then((fn) => {
       unlistenScheduled = fn;
+    });
+    listen<AgentScheduledTask>("agent-task-trigger", (event) => {
+      if (cancelled) return;
+      const task = event.payload;
+      useAgentStore.getState().upsertScheduledTask(task);
+      agentRunnerService.enqueue(task);
+    }).then((fn) => {
+      unlistenAgentTrigger = fn;
+    });
+    listen<AgentTaskStatusPatch>("agent-task-status", (event) => {
+      if (cancelled) return;
+      useAgentStore.getState().applyScheduledTaskPatch(event.payload);
+    }).then((fn) => {
+      unlistenAgentStatus = fn;
+    });
+    listen<AgentTaskSkippedEvent>("agent-task-skipped", (event) => {
+      if (cancelled) return;
+      useAgentStore.getState().applyScheduledTaskSkipped(event.payload);
+    }).then((fn) => {
+      unlistenAgentSkipped = fn;
     });
 
     invoke<string>("load_general_settings")
@@ -222,6 +255,9 @@ function MainApp() {
     return () => {
       cancelled = true;
       unlistenScheduled?.();
+      unlistenAgentTrigger?.();
+      unlistenAgentStatus?.();
+      unlistenAgentSkipped?.();
     };
   }, []);
 

@@ -24,6 +24,11 @@ export interface AIToolCall {
   };
 }
 
+export interface AIRequestPolicy {
+  ragMode?: "inherit" | "off" | "on";
+  forceProductRag?: "inherit" | "off";
+}
+
 /** Core Shell 向所有插件暴露的 AI 能力 */
 export interface MToolsAI {
   /** 单轮对话 */
@@ -31,11 +36,13 @@ export interface MToolsAI {
     messages: { role: "system" | "user" | "assistant"; content: string }[];
     model?: string;
     temperature?: number;
+    requestPolicy?: AIRequestPolicy;
   }): Promise<{ content: string; usage?: { tokens: number } }>;
 
   /** 流式对话 */
   stream(options: {
     messages: { role: string; content: string }[];
+    requestPolicy?: AIRequestPolicy;
     onChunk: (chunk: string) => void;
     onDone?: (full: string) => void;
   }): Promise<void>;
