@@ -231,7 +231,7 @@ function AccountTab({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
       </div>
 
       {/* Energy & Stats */}
-      <div className="grid grid-cols-2 gap-2">
+      {/* <div className="grid grid-cols-2 gap-2">
         <div className="bg-[var(--color-bg)] rounded-xl p-3 border border-[var(--color-border)]">
           <div className="flex items-center justify-between mb-1.5">
             <span className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
@@ -276,15 +276,15 @@ function AccountTab({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
             兑换代金券（即将上线）
           </button>
         </div>
-      </div>
+      </div> */}
 
       {/* Account Actions */}
       <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] overflow-hidden">
-        <ActionItem
+        {/* <ActionItem
           label="能量流水"
           icon={Zap}
           onClick={() => onNavigate("energy-logs")}
-        />
+        /> */}
         {/* "支付记录" 和 "设备管理" 功能未上线，暂时隐藏入口 */}
         <button
           onClick={logout}

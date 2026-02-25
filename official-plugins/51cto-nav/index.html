@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>51CTO 内部导航</title>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      height: 100%;
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      background: #f7f8fa;
+      color: #1d2129;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .page {
+      padding: 20px 24px 28px;
+      min-height: 100%;
+      overflow-y: auto;
+    }
+
+    /* embed 模式：撑满页面，隐藏滚动条 */
+    body.is-embed {
+      height: 100%;
+      overflow: hidden;
+    }
+    body.is-embed .page {
+      padding: 10px 12px 10px;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    body.is-embed .groups {
+      flex: 1;
+      gap: 8px;
+      grid-template-rows: repeat(2, 1fr);
+      min-height: 0;
+    }
+
+    body.is-embed .group-card {
+      padding: 10px 12px 10px;
+      border-radius: 8px;
+      display: flex;
+      flex-direction: column;
+    }
+    body.is-embed .group-title {
+      font-size: 11px;
+      margin-bottom: 6px;
+      padding-bottom: 6px;
+    }
+    body.is-embed .link-list {
+      flex: 1;
+    }
+    body.is-embed .nav-link {
+      padding: 4px 5px;
+      font-size: 12.5px;
+    }
+
+    /* ── 搜索区 ── */
+    .search-section {
+      margin-bottom: 20px;
+    }
+    body.is-embed .search-section {
+      display: none;
+    }
+
+    .search-title {
+      font-size: 20px;
+      font-weight: 700;
+      color: #1d2129;
+      margin-bottom: 4px;
+    }
+    .search-subtitle {
+      font-size: 13px;
+      color: #86909c;
+      margin-bottom: 16px;
+    }
+
+    .search-engines {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+    .engine-btn {
+      padding: 4px 12px;
+      border-radius: 20px;
+      border: 1px solid #e5e8ef;
+      background: #fff;
+      color: #4e5969;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all .12s;
+    }
+    .engine-btn:hover { border-color: #4a6cf7; color: #4a6cf7; }
+    .engine-btn.active { background: #4a6cf7; border-color: #4a6cf7; color: #fff; }
+
+    .search-bar {
+      display: flex;
+      gap: 8px;
+    }
+    .search-input {
+      flex: 1;
+      height: 38px;
+      padding: 0 14px;
+      border: 1.5px solid #e5e8ef;
+      border-radius: 8px;
+      font-size: 14px;
+      color: #1d2129;
+      background: #fff;
+      outline: none;
+      transition: border-color .12s;
+    }
+    .search-input:focus { border-color: #4a6cf7; }
+    .search-btn {
+      height: 38px;
+      padding: 0 20px;
+      background: #4a6cf7;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      cursor: pointer;
+      transition: background .12s;
+    }
+    .search-btn:hover { background: #3a5ce7; }
+
+    /* ── 分组网格 ── */
+    .groups {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+    }
+
+    .group-card {
+      background: #fff;
+      border: 1px solid #e5e8ef;
+      border-radius: 10px;
+      padding: 12px 14px 14px;
+      transition: border-color .15s, box-shadow .15s;
+    }
+    .group-card:hover {
+      border-color: #d0dbff;
+      box-shadow: 0 2px 8px rgba(74,108,247,.06);
+    }
+    .group-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: #1d2129;
+      margin-bottom: 8px;
+      padding-bottom: 7px;
+      border-bottom: 2px solid #f2f3f5;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .group-title::before {
+      content: '';
+      width: 3px;
+      height: 12px;
+      border-radius: 2px;
+      background: #4a6cf7;
+      flex-shrink: 0;
+    }
+    .link-list {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+    }
+    .nav-link {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 5px 6px;
+      border-radius: 6px;
+      font-size: 13px;
+      color: #4e5969;
+      text-decoration: none;
+      cursor: pointer;
+      transition: background .12s, color .12s;
+    }
+    .nav-link:hover { background: #eff2ff; color: #4a6cf7; }
+    .nav-link.visited { color: #7c5cfc; }
+    .nav-link.visited:hover { background: #f3f0ff; color: #6740d4; }
+    .nav-link[data-empty] {
+      color: #c9cdd4;
+      cursor: default;
+      pointer-events: none;
+    }
+    .dot {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: #c9cdd4;
+      flex-shrink: 0;
+      transition: background .12s;
+    }
+    .nav-link:hover .dot { background: #4a6cf7; }
+    .nav-link.visited .dot { background: #b5a0f5; }
+    .nav-link.visited:hover .dot { background: #6740d4; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <!-- 搜索区：embed 模式下隐藏 -->
+    <div class="search-section">
+      <div class="search-title">51CTO 内部导航</div>
+      <div class="search-subtitle">快速访问内部系统与常用工具</div>
+      <div class="search-engines" id="engines">
+        <button class="engine-btn active" data-engine="baidu" onclick="selectEngine(this)">百度</button>
+        <button class="engine-btn" data-engine="bing" onclick="selectEngine(this)">Bing</button>
+        <button class="engine-btn" data-engine="google" onclick="selectEngine(this)">Google</button>
+      </div>
+      <form class="search-bar" onsubmit="doSearch(event)">
+        <input id="searchInput" class="search-input" type="text" placeholder="搜索…" autocomplete="off" />
+        <button class="search-btn" type="submit">搜索</button>
+      </form>
+    </div>
+
+    <div id="groups" class="groups"></div>
+  </div>
+
+  <script>
+    const NAV_SECTIONS = [
+      {
+        title: "企培",
+        links: [
+          { text: "企培官网",     href: "https://b.51cto.com" },
+          { text: "企培学员端",   href: "https://saas.51cto.com" },
+          { text: "企培运营端",   href: "https://saas-admin.51cto.com" },
+          { text: "企培工单系统", href: "" },
+        ],
+      },
+      {
+        title: "媒体",
+        links: [
+          { text: "51CTO 主站",  href: "https://www.51cto.com" },
+          { text: "51CTO 博客",  href: "https://blog.51cto.com" },
+          { text: "博客后台",    href: "https://back-blog.51cto.com" },
+          { text: "媒体后台",    href: "https://back-media.51cto.com" },
+        ],
+      },
+      {
+        title: "学堂 / 精培",
+        links: [
+          { text: "51CTO 学堂",   href: "https://edu.51cto.com" },
+          { text: "51CTO 精培",   href: "https://e.51cto.com" },
+          { text: "51CTO 软考站", href: "https://rk.51cto.com" },
+          { text: "大学堂后台",   href: "https://service.edu.51cto.com/admin" },
+          { text: "九天云创",     href: "https://www.51dcool.cn/prom-t1/products" },
+        ],
+      },
+      {
+        title: "公共系统",
+        links: [
+          { text: "公司大屏",       href: "https://saas-biz.51cto.com/sub-olink/#/bs" },
+          { text: "合同 / 项目管理", href: "https://ht.51cto.com" },
+          { text: "神策",           href: "https://fx.51cto.com" },
+          { text: "订餐平台",       href: "https://eat.51cto.com" },
+          { text: "AI 平台",        href: "" },
+        ],
+      },
+      {
+        title: "技术系统",
+        links: [
+          { text: "企培 xxl-job",  href: "https://saas-xxl.51cto.com" },
+          { text: "企培 Eureka",   href: "https://saas-eureka.51cto.com" },
+          { text: "企培 Apollo",   href: "https://saas-apollo.51cto.com" },
+          { text: "SQL 审计平台",  href: "http://sql.work.51cto.com" },
+          { text: "Jenkins",       href: "http://59.110.159.21:8081" },
+          { text: "GitLab",        href: "http://47.95.170.137/dashboard/projects" },
+          { text: "Diffy Agent",   href: "https://ai-platform.51cto.com" },
+        ],
+      },
+      {
+        title: "常用外部",
+        links: [
+          { text: "阿里云效", href: "https://devops.aliyun.com" },
+        ],
+      },
+    ];
+
+    // embed 模式检测：bridge 脚本注入后 window.utools 即可用
+    if (window.utools) {
+      document.body.classList.add("is-embed");
+    }
+
+    // 搜索引擎
+    const ENGINES = {
+      baidu:  "https://www.baidu.com/s?wd=",
+      bing:   "https://www.bing.com/search?q=",
+      google: "https://www.google.com/search?q=",
+    };
+    let currentEngine = "baidu";
+
+    function selectEngine(btn) {
+      document.querySelectorAll(".engine-btn").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      currentEngine = btn.dataset.engine;
+    }
+
+    function doSearch(e) {
+      e.preventDefault();
+      const q = document.getElementById("searchInput").value.trim();
+      if (!q) return;
+      const url = ENGINES[currentEngine] + encodeURIComponent(q);
+      openUrl(url);
+    }
+
+    // 已点击链接（内存，不依赖 sessionStorage/indexedDB 避免 sandbox SecurityError）
+    const visited = new Set();
+
+    function esc(s) {
+      const d = document.createElement("div");
+      d.textContent = s || "";
+      return d.innerHTML;
+    }
+
+    function openUrl(href) {
+      // embed bridge 注入的 utools API，用系统浏览器打开
+      if (window.utools && typeof window.utools.shellOpenExternal === "function") {
+        window.utools.shellOpenExternal(href);
+      } else {
+        // fallback: 非 embed 模式（开发者直接打开 HTML）
+        window.open(href, "_blank", "noopener,noreferrer");
+      }
+    }
+
+    function makeNavLink(href, text) {
+      if (!href) {
+        const span = document.createElement("span");
+        span.className = "nav-link";
+        span.dataset.empty = "";
+        span.innerHTML = `<span class="dot"></span>${esc(text)}`;
+        return span;
+      }
+      const a = document.createElement("a");
+      a.className = "nav-link" + (visited.has(href) ? " visited" : "");
+      a.href = href;
+      a.title = href;
+      a.innerHTML = `<span class="dot"></span>${esc(text)}`;
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        visited.add(href);
+        a.classList.add("visited");
+        openUrl(href);
+      });
+      return a;
+    }
+
+    function renderSections() {
+      const container = document.getElementById("groups");
+      NAV_SECTIONS.forEach((sec) => {
+        const card = document.createElement("div");
+        card.className = "group-card";
+
+        const title = document.createElement("div");
+        title.className = "group-title";
+        title.textContent = sec.title;
+        card.appendChild(title);
+
+        const list = document.createElement("div");
+        list.className = "link-list";
+        sec.links.forEach((l) => list.appendChild(makeNavLink(l.href, l.text)));
+        card.appendChild(list);
+
+        container.appendChild(card);
+      });
+    }
+
+    renderSections();
+  </script>
+</body>
+</html>

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { ArrowLeft, Code, RefreshCw, Package } from "lucide-react";
 import { handleError } from "@/core/errors";
 import { usePluginStore } from "@/store/plugin-store";
@@ -85,6 +85,14 @@ export function PluginMarket({ onBack }: { onBack: () => void }) {
   const [installingSlug, setInstallingSlug] = useState<string | null>(null);
   const [uninstallingPluginId, setUninstallingPluginId] = useState<
     string | null
+  >(null);
+  const [uninstallDialog, setUninstallDialog] = useState<{
+    pluginId: string;
+    pluginName: string;
+    dataProfile?: string;
+  } | null>(null);
+  const uninstallResolveRef = useRef<
+    ((choice: "cancel" | "uninstall" | "uninstall_and_clear") => void) | null
   >(null);
   const [selectedExternalPluginId, setSelectedExternalPluginId] = useState<
     string | null
@@ -444,24 +452,26 @@ export function PluginMarket({ onBack }: { onBack: () => void }) {
     }
   };
 
-  const resolveUninstallChoice = (
+  const showUninstallDialog = (
+    pluginId: string,
     pluginName: string,
     dataProfile?: string,
-  ): "cancel" | "uninstall" | "uninstall_and_clear" => {
-    if (!window.confirm(`确认卸载插件「${pluginName}」吗？`)) {
-      return "cancel";
-    }
-    if (!dataProfile || dataProfile === "none") {
-      return "uninstall";
-    }
-    const raw = window.prompt(
-      `插件「${pluginName}」支持清理本地数据。输入 1=仅卸载，2=卸载并清数据，3=取消`,
-      "1",
-    );
-    if (!raw || raw.trim() === "3") {
-      return "cancel";
-    }
-    return raw.trim() === "2" ? "uninstall_and_clear" : "uninstall";
+  ): Promise<"cancel" | "uninstall" | "uninstall_and_clear"> =>
+    new Promise((resolve) => {
+      uninstallResolveRef.current = resolve;
+      setUninstallDialog({ pluginId, pluginName, dataProfile });
+    });
+
+  const confirmUninstall = (choice: "uninstall" | "uninstall_and_clear") => {
+    setUninstallDialog(null);
+    uninstallResolveRef.current?.(choice);
+    uninstallResolveRef.current = null;
+  };
+
+  const cancelUninstall = () => {
+    setUninstallDialog(null);
+    uninstallResolveRef.current?.("cancel");
+    uninstallResolveRef.current = null;
   };
 
   const handleUninstallPlugin = async (
@@ -469,7 +479,7 @@ export function PluginMarket({ onBack }: { onBack: () => void }) {
     pluginName: string,
     dataProfile?: string,
   ) => {
-    const choice = resolveUninstallChoice(pluginName, dataProfile);
+    const choice = await showUninstallDialog(pluginId, pluginName, dataProfile);
     if (choice === "cancel") return;
 
     try {
@@ -754,6 +764,17 @@ export function PluginMarket({ onBack }: { onBack: () => void }) {
       useAppStore.getState().requestNavigate(slug);
       return;
     }
+    if (plugin.manifest.mtools?.openMode === "embed") {
+      const feature = plugin.manifest.features.find(
+        (f) => f.code === featureCode,
+      );
+      useAppStore.getState().requestEmbed({
+        pluginId: plugin.id,
+        featureCode,
+        title: feature?.explain || plugin.manifest.pluginName,
+      });
+      return;
+    }
     openPlugin(plugin.id, featureCode);
   };
 
@@ -934,6 +955,63 @@ export function PluginMarket({ onBack }: { onBack: () => void }) {
           />
         )}
       </div>
+
+      {/* 卸载确认 Dialog（原生 confirm/prompt 会让窗口失焦隐藏，改用内嵌） */}
+      {uninstallDialog && (
+        <div
+          className="absolute inset-0 z-50 flex items-center justify-center bg-black/30 rounded-xl"
+          onClick={cancelUninstall}
+        >
+          <div
+            className="bg-(--color-bg) border border-(--color-border) rounded-xl shadow-xl p-6 w-80 flex flex-col gap-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex flex-col gap-1">
+              <p className="text-sm font-semibold text-(--color-text)">
+                卸载插件
+              </p>
+              <p className="text-xs text-(--color-text-secondary)">
+                确认卸载插件「{uninstallDialog.pluginName}」吗？此操作不可恢复。
+              </p>
+            </div>
+
+            {uninstallDialog.dataProfile &&
+              uninstallDialog.dataProfile !== "none" && (
+                <label className="flex items-center gap-2 text-xs text-(--color-text-secondary) cursor-pointer select-none">
+                  <input
+                    id="clearDataCheckbox"
+                    type="checkbox"
+                    className="rounded"
+                    defaultChecked={false}
+                  />
+                  同时清除插件本地数据
+                </label>
+              )}
+
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={cancelUninstall}
+                className="px-3 py-1.5 text-xs rounded-lg border border-(--color-border) text-(--color-text-secondary) hover:bg-(--color-bg-hover) transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => {
+                  const checkbox = document.getElementById(
+                    "clearDataCheckbox",
+                  ) as HTMLInputElement | null;
+                  confirmUninstall(
+                    checkbox?.checked ? "uninstall_and_clear" : "uninstall",
+                  );
+                }}
+                className="px-3 py-1.5 text-xs rounded-lg bg-red-500 text-white hover:bg-red-600 transition-colors"
+              >
+                确认卸载
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

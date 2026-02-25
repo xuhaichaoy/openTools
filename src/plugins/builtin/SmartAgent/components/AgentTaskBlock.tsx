@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useCallback } from "react";
 import {
   Loader2,
   ChevronDown,
@@ -17,6 +17,58 @@ import {
   getExecutionWaitingStageLabel,
   type ExecutionWaitingStage,
 } from "../core/ui-state";
+
+// 代码块组件提取到渲染函数外，避免每次渲染创建新的组件引用
+function CodeBlock({
+  className,
+  children,
+  ...props
+}: React.ComponentPropsWithoutRef<"code">) {
+  if (!className) {
+    return (
+      <code className="bg-(--color-code-bg)" {...props}>
+        {children}
+      </code>
+    );
+  }
+  return (
+    <code className={className} {...props}>
+      {children}
+    </code>
+  );
+}
+
+const MD_COMPONENTS = { code: CodeBlock };
+
+/**
+ * 流式渲染（不带语法高亮）与完成后渲染（带语法高亮）分离，
+ * 并用 React.memo 避免内容未变时重复解析 Markdown。
+ */
+const MarkdownContent = React.memo(function MarkdownContent({
+  content,
+  isStreaming,
+}: {
+  content: string;
+  isStreaming: boolean;
+}) {
+  if (isStreaming) {
+    // 流式阶段跳过 rehypeHighlight（开销最大），避免每个 chunk 都做语法高亮
+    return (
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
+        {content}
+      </ReactMarkdown>
+    );
+  }
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      rehypePlugins={[rehypeHighlight]}
+      components={MD_COMPONENTS}
+    >
+      {content}
+    </ReactMarkdown>
+  );
+});
 
 const STEP_ICONS: Record<string, React.ReactNode> = {
   thought: <Brain className="w-3.5 h-3.5 text-[var(--color-text-secondary)]" />,
@@ -44,7 +96,8 @@ interface AgentTaskBlockProps {
   runningPhase?: "executing" | null;
   executionWaitingStage?: ExecutionWaitingStage | null;
   processCollapsed: boolean;
-  onToggleProcess: () => void;
+  /** 接受 taskId 参数，由外部传入稳定引用（避免内联箭头函数破坏 memo） */
+  onToggleProcess: (taskId: string) => void;
   expandedSteps: Set<string>;
   onToggleStep: (key: string) => void;
 }
@@ -64,7 +117,7 @@ function summarizeStepText(content: string, maxLen = 56) {
   return `${normalized.slice(0, maxLen)}...`;
 }
 
-export function AgentTaskBlock({
+function AgentTaskBlockInner({
   task,
   taskIdx,
   isLastTask,
@@ -77,6 +130,11 @@ export function AgentTaskBlock({
   onToggleStep,
 }: AgentTaskBlockProps) {
   const isRunningTask = isRunning && isLastTask;
+  // 稳定化 onToggleProcess 绑定，避免内联箭头函数破坏子组件 memo
+  const handleToggleProcess = useCallback(
+    () => onToggleProcess(task.id),
+    [onToggleProcess, task.id],
+  );
   const effectiveStatus =
     task.status || (isRunningTask ? "running" : task.answer ? "success" : "pending");
   const shouldCollapseProcess = processCollapsed && effectiveStatus !== "running";
@@ -127,7 +185,7 @@ export function AgentTaskBlock({
 
       {task.steps.length > 0 && effectiveStatus !== "running" && (
         <button
-          onClick={onToggleProcess}
+          onClick={handleToggleProcess}
           className="w-full rounded-md bg-[var(--color-bg-secondary)]/45 px-2 py-1 text-left flex items-center gap-2"
         >
           {shouldCollapseProcess ? (
@@ -224,28 +282,10 @@ export function AgentTaskBlock({
             {effectiveStatus === "running" ? "回答（生成中）" : "回答"}
           </h4>
           <div className="text-[13px] leading-relaxed break-words [&_p]:my-1.5 [&_ul]:my-1.5 [&_ol]:my-1.5 [&_li]:my-0.5 [&_h1]:text-[17px] [&_h1]:font-semibold [&_h1]:my-2 [&_h2]:text-[16px] [&_h2]:font-semibold [&_h2]:my-2 [&_h3]:text-[15px] [&_h3]:font-semibold [&_h3]:my-1.5 [&_hr]:my-2 [&_hr]:border-[var(--color-border)] [&_blockquote]:my-2 [&_blockquote]:border-l-2 [&_blockquote]:border-emerald-500/35 [&_blockquote]:pl-3 [&_blockquote]:text-[var(--color-text-secondary)] [&_table]:w-full [&_table]:border-collapse [&_th]:border [&_th]:border-[var(--color-border)] [&_th]:px-2 [&_th]:py-1 [&_td]:border [&_td]:border-[var(--color-border)] [&_td]:px-2 [&_td]:py-1 [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-[var(--color-code-bg)] [&_pre]:p-2 [&_pre]:text-[12px] [&_code]:rounded [&_code]:bg-[var(--color-code-bg)] [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-[12px]">
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              rehypePlugins={[rehypeHighlight]}
-              components={{
-                code({ className, children, ...props }) {
-                  if (!className) {
-                    return (
-                      <code className="bg-[var(--color-code-bg)]" {...props}>
-                        {children}
-                      </code>
-                    );
-                  }
-                  return (
-                    <code className={className} {...props}>
-                      {children}
-                    </code>
-                  );
-                },
-              }}
-            >
-              {task.answer}
-            </ReactMarkdown>
+            <MarkdownContent
+              content={task.answer}
+              isStreaming={effectiveStatus === "running"}
+            />
             {effectiveStatus === "running" && (
               <span className="inline-block w-1.5 h-4 bg-emerald-600 animate-pulse ml-1 align-middle" />
             )}
@@ -259,3 +299,46 @@ export function AgentTaskBlock({
     </div>
   );
 }
+
+/**
+ * React.memo 包裹：仅当 task 数据或直接影响渲染的 props 变化时才重渲染。
+ * expandedSteps Set 每次 toggle 都换新引用，通过手动比较本 task 涉及的 key 来降低无效重渲染。
+ */
+export const AgentTaskBlock = React.memo(AgentTaskBlockInner, (prev, next) => {
+  if (
+    prev.taskIdx !== next.taskIdx ||
+    prev.isLastTask !== next.isLastTask ||
+    prev.isRunning !== next.isRunning ||
+    prev.runningPhase !== next.runningPhase ||
+    prev.executionWaitingStage !== next.executionWaitingStage ||
+    prev.processCollapsed !== next.processCollapsed ||
+    prev.onToggleProcess !== next.onToggleProcess ||
+    prev.onToggleStep !== next.onToggleStep
+  ) {
+    return false; // 需要重渲染
+  }
+  // task 引用变了时，精确比较实际影响渲染的字段
+  if (prev.task !== next.task) {
+    if (
+      prev.task.query !== next.task.query ||
+      prev.task.answer !== next.task.answer ||
+      prev.task.status !== next.task.status ||
+      prev.task.steps.length !== next.task.steps.length ||
+      prev.task.steps[prev.task.steps.length - 1]?.content !==
+        next.task.steps[next.task.steps.length - 1]?.content
+    ) {
+      return false; // 需要重渲染
+    }
+  }
+  // expandedSteps Set 换了引用，只检查本 task 相关的 key 是否变化
+  if (prev.expandedSteps !== next.expandedSteps) {
+    const stepCount = next.task.steps.length;
+    for (let i = 0; i < stepCount; i++) {
+      const key = `${next.task.id}-${i}`;
+      if (prev.expandedSteps.has(key) !== next.expandedSteps.has(key)) {
+        return false; // 需要重渲染
+      }
+    }
+  }
+  return true; // 无需重渲染
+});

@@ -59,6 +59,14 @@ export function Dashboard({ onNavigate }: DashboardProps) {
           recentKey: `plugin:${plugin.id}`,
           action: () => {
             addRecentTool(`plugin:${plugin.id}`);
+            if (plugin.manifest.mtools?.openMode === "embed") {
+              useAppStore.getState().requestEmbed({
+                pluginId: plugin.id,
+                featureCode: primaryFeature.code,
+                title: primaryFeature.explain || plugin.manifest.pluginName,
+              });
+              return;
+            }
             openPlugin(plugin.id, primaryFeature.code);
           },
           color:

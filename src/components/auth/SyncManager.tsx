@@ -60,6 +60,7 @@ export function SyncManager() {
             handleError(new Error(hint), {
               context: "数据同步",
               level: ErrorLevel.Warning,
+              silent: true,
             });
           }
           return;

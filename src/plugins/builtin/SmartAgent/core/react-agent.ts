@@ -370,6 +370,8 @@ export class ReActAgent {
   private steps: AgentStep[] = [];
   private history: AgentStep[] = [];
   private onStep?: (step: AgentStep) => void;
+  /** 追踪流式 answer 的最新累积内容，用于 task_done 时恢复完整文档 */
+  private lastStreamingAnswer = "";
   /** Function Calling 是否可用（当前实例内缓存） */
   private fcAvailable: boolean | null = null;
   /** 跨实例模型兼容性缓存 key */
@@ -1113,6 +1115,7 @@ Final Answer: [最终回答]
             timestamp: Date.now(),
             streaming: true,
           });
+          this.lastStreamingAnswer = current;
           lastPushedLen = current.length;
         }
       },
@@ -1302,6 +1305,8 @@ Final Answer: [最终回答]
       messages.push({ role: "assistant", content: null, tool_calls: callResults.map((r) => r.tc) });
 
       let taskDoneResult: string | undefined;
+      /** task_done params.summary（纯文本，比 JSON outputStr 更适合展示） */
+      let taskDoneSummary: string | undefined;
 
       for (const { tc, toolName, result: pipelineResult } of callResults) {
         if (pipelineResult.quickAnswer && !quickAnswerFound) {
@@ -1311,6 +1316,11 @@ Final Answer: [最终回答]
 
         if (toolName === "task_done") {
           taskDoneResult = pipelineResult.outputStr || "任务已完成。";
+          // 尝试从工具调用参数中提取 summary 文本（人类可读，非 JSON）
+          try {
+            const doneParams = JSON.parse(tc.function.arguments || "{}") as { summary?: string };
+            if (doneParams.summary) taskDoneSummary = doneParams.summary.trim();
+          } catch { /* ignore */ }
         }
 
         if (pipelineResult.error) {
@@ -1334,7 +1344,12 @@ Final Answer: [最终回答]
 
       if (taskDoneResult) {
         const lastAnswerStep = [...this.steps].reverse().find((s) => s.type === "answer");
-        const answer = lastAnswerStep?.content || taskDoneResult;
+        // 优先级：① 已记录的 answer 步骤 → ② 流式累积的完整文档 → ③ task_done.summary 文本 → ④ 原始 outputStr JSON
+        const answer =
+          lastAnswerStep?.content ||
+          (this.lastStreamingAnswer.length > 50 ? this.lastStreamingAnswer : undefined) ||
+          taskDoneSummary ||
+          taskDoneResult;
         if (!lastAnswerStep) {
           this.addStep({ type: "answer", content: answer, timestamp: Date.now() });
         }
@@ -1489,6 +1504,7 @@ Final Answer: [最终回答]
     this.currentSignal = signal;
     this.steps = [];
     this.trajectory = [];
+    this.lastStreamingAnswer = "";
     this.loopDetector.reset();
     this.mode = this.config.initialMode ?? "execute";
 

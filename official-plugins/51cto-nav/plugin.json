@@ -1,0 +1,20 @@
+{
+  "pluginName": "51CTO 内部导航",
+  "description": "51CTO 内部系统快捷导航，支持搜索引擎切换和常用链接统计",
+  "version": "1.0.1",
+  "tag": "效率",
+  "main": "index.html",
+  "pluginType": "ui",
+  "features": [
+    {
+      "code": "51cto-nav",
+      "explain": "51CTO 内部导航",
+      "cmds": ["51cto", "导航", "nav"]
+    }
+  ],
+  "mtools": {
+    "permissions": ["network", "shell"],
+    "dataProfile": "none",
+    "openMode": "embed"
+  }
+}

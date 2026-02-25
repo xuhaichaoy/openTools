@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { createPortal } from "react-dom";
 import { AlertCircle, ChevronDown, ChevronRight } from "lucide-react";
 
 interface ConfirmDialogProps {
@@ -55,9 +56,9 @@ export function ConfirmDialog({
   const [showDetail, setShowDetail] = useState(false);
   const description = describeAction(toolName, params);
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-      <div className="bg-[var(--color-bg)] border border-[var(--color-border)] rounded-xl shadow-2xl w-[380px] p-5">
+  const dialog = (
+    <div className="fixed inset-0 z-9999 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+      <div className="bg-(--color-bg) border border-(--color-border) rounded-xl shadow-2xl w-[380px] p-5">
         <div className="flex items-center gap-2 mb-3">
           <div className="w-8 h-8 rounded-full bg-amber-500/10 flex items-center justify-center">
             <AlertCircle className="w-4 h-4 text-amber-500" />
@@ -112,4 +113,8 @@ export function ConfirmDialog({
       </div>
     </div>
   );
+
+  // 通过 createPortal 挂到 document.body，确保 fixed 定位相对于视口，
+  // 不受父容器 transform / overflow:hidden 影响
+  return createPortal(dialog, document.body);
 }

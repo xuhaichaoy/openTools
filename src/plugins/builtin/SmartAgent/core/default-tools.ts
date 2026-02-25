@@ -915,7 +915,14 @@ export function createBuiltinAgentTools(
 
   tools.push(...createLocalDevTools(confirmHostFallback));
   tools.push(createReminderTool());
-  tools.push(...createNativeAppTools());
+
+  const isMac =
+    typeof navigator !== "undefined" &&
+    navigator.platform.toLowerCase().includes("mac");
+  if (isMac) {
+    tools.push(...createNativeAppTools());
+  }
+
   return {
     tools,
     resetPerRunState: () => {

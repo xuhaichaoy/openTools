@@ -12,6 +12,7 @@ interface AgentTaskTimelineProps {
   scrollRef: React.RefObject<HTMLDivElement | null>;
   collapsedTaskProcesses: Set<string>;
   expandedSteps: Set<string>;
+  /** 稳定引用（useCallback），直接传给 AgentTaskBlock 避免内联箭头函数 */
   onToggleTaskProcess: (taskId: string) => void;
   onToggleStep: (key: string) => void;
 }
@@ -47,7 +48,7 @@ export function AgentTaskTimeline({
           runningPhase={runningPhase}
           executionWaitingStage={executionWaitingStage}
           processCollapsed={collapsedTaskProcesses.has(task.id)}
-          onToggleProcess={() => onToggleTaskProcess(task.id)}
+          onToggleProcess={onToggleTaskProcess}
           expandedSteps={expandedSteps}
           onToggleStep={onToggleStep}
         />

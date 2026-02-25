@@ -10,6 +10,8 @@ pub struct PluginMtoolsManifest {
     pub permissions: Vec<String>,
     #[serde(default, alias = "data_profile")]
     pub data_profile: Option<String>,
+    #[serde(default, alias = "open_mode")]
+    pub open_mode: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

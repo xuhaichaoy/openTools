@@ -81,6 +81,8 @@ export interface PluginManifest {
     actions?: ExternalPluginAction[]
     /** 插件声明需要的权限（未声明的权限将被拒绝） */
     permissions?: PluginPermission[]
+    /** 打开方式：'window'=新窗口（默认）, 'embed'=主窗口内嵌 */
+    openMode?: 'window' | 'embed'
   }
 
   // 运行时
