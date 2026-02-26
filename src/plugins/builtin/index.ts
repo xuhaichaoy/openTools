@@ -392,7 +392,7 @@ export const builtinPlugins: MToolsPlugin[] = [
     category: "AI",
     keywords: ["工作流", "workflow", "自动化", "流程", "automation"],
     viewId: "workflows",
-    render: (props) => createElement(WorkflowList, props),
+    render: (props) => createElement(WorkflowList, { onBack: props.onBack }),
   },
 
   // ── 知识库（独立）──
