@@ -2,6 +2,7 @@ pub mod ai;
 pub mod app_update;
 pub mod auth;
 pub mod kb;
+pub mod ocr;
 pub mod plugins;
 pub mod stubs;
 pub mod sync;
@@ -101,6 +102,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .nest_service("/uploads", ServeDir::new(&upload_dir))
         .nest("/v1/plugins", plugins::public_routes_no_layer())
         .nest("/plugins", plugins::public_routes_no_layer())
+        .nest("/v1/ocr", ocr::routes_no_layer())
         // v1 路由
         .nest("/v1/auth", auth::routes())
         .nest("/v1", v1_auth_routes)

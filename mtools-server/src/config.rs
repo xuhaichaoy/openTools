@@ -14,6 +14,8 @@ pub struct Config {
     pub port: u16,
     pub deploy_mode: DeployMode,
     pub upload_dir: String,
+    /// OCR 模型目录，默认 ./ocr-models
+    pub ocr_model_dir: String,
 }
 
 impl Config {
@@ -38,6 +40,8 @@ impl Config {
                 .parse()?,
             deploy_mode,
             upload_dir: std::env::var("UPLOAD_DIR").unwrap_or_else(|_| "./uploads".to_string()),
+            ocr_model_dir: std::env::var("OCR_MODEL_DIR")
+                .unwrap_or_else(|_| "./ocr-models".to_string()),
         })
     }
 }

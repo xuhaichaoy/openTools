@@ -8,9 +8,6 @@ import {
   Check,
   Loader2,
   Globe,
-  FolderOpen,
-  RefreshCw,
-  AlertTriangle,
   X,
 } from "lucide-react";
 import {
@@ -19,6 +16,8 @@ import {
   PluginEventTypes,
 } from "@/core/plugin-system/event-bus";
 import { useDragWindow } from "@/hooks/useDragWindow";
+import { getServerUrl } from "@/store/server-store";
+import { useAuthStore } from "@/store/auth-store";
 
 interface OcrBlock {
   text: string;
@@ -32,18 +31,6 @@ interface OcrResult {
   language: string;
   rotation_detected: boolean;
   rotation_angle: number;
-}
-
-interface OcrRuntimeInfo {
-  install_dir: string;
-  search_dirs: string[];
-  required_files: string[];
-  missing_required_files: string[];
-  runtime_library_loaded?: boolean;
-  runtime_library_path?: string | null;
-  runtime_library_error?: string | null;
-  runtime_search_dirs?: string[];
-  ready: boolean;
 }
 
 declare global {
@@ -69,49 +56,10 @@ const OCRPlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const [copied, setCopied] = useState(false);
   const [detectRotation, setDetectRotation] = useState(false);
   const [mergeParagraph, setMergeParagraph] = useState(true);
-  const [runtimeInfo, setRuntimeInfo] = useState<OcrRuntimeInfo | null>(null);
-  const [checkingModels, setCheckingModels] = useState(false);
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const refreshRuntimeInfo =
-    useCallback(async (): Promise<OcrRuntimeInfo | null> => {
-      setCheckingModels(true);
-      try {
-        const info = await invoke<OcrRuntimeInfo>("ocr_get_runtime_info");
-        setRuntimeInfo(info);
-        return info;
-      } catch {
-        return null;
-      } finally {
-        setCheckingModels(false);
-      }
-    }, []);
-
-  const buildMissingModelMessage = useCallback(
-    (info: OcrRuntimeInfo | null) => {
-      if (info?.runtime_library_loaded === false) {
-        return `OCR 运行时缺失或加载失败。\n${info.runtime_library_error || ""}`;
-      }
-      const missing =
-        info?.missing_required_files?.join(" / ") ||
-        "ppocr_det.onnx / ppocr_rec.onnx";
-      const installDir = info?.install_dir || "(未知目录)";
-      return `OCR 模型缺失：${missing}。请先安装后重试。\n建议目录：${installDir}`;
-    },
-    [],
-  );
-
-  const handleOpenModelDir = useCallback(async () => {
-    try {
-      const installDir = await invoke<string>("ocr_open_model_dir");
-      setError(
-        `已打开模型目录，请将 ppocr_det.onnx、ppocr_rec.onnx（以及 macOS 下的 libonnxruntime.dylib）放入：${installDir}`,
-      );
-    } catch (e) {
-      setError(`打开模型目录失败: ${String(e)}`);
-    }
-  }, []);
+  const token = useAuthStore((s) => s.token);
 
   const doOcr = useCallback(
     async (base64: string) => {
@@ -124,32 +72,21 @@ const OCRPlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
           lang: language,
           detectRotation,
           mergeParagraph,
+          baseUrl: getServerUrl(),
+          token: token ?? "",
         });
         setResult(res);
-        // 发送 OCR 结果事件
         emitPluginEvent(PluginEventTypes.OCR_RESULT, "esearch-ocr", {
           text: res.full_text,
           blocks: res.blocks,
         });
       } catch (e) {
-        const message = String(e);
-        if (message.includes("OCR models not loaded")) {
-          const info = await refreshRuntimeInfo();
-          setError(buildMissingModelMessage(info));
-        } else {
-          setError(message);
-        }
+        setError(String(e));
       } finally {
         setLoading(false);
       }
     },
-    [
-      language,
-      detectRotation,
-      mergeParagraph,
-      refreshRuntimeInfo,
-      buildMissingModelMessage,
-    ],
+    [language, detectRotation, mergeParagraph, token],
   );
 
   const handleFileSelect = useCallback(
@@ -251,12 +188,6 @@ const OCRPlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     doOcr(pending);
   }, [doOcr]);
 
-  React.useEffect(() => {
-    void refreshRuntimeInfo();
-  }, [refreshRuntimeInfo]);
-
-  const modelReady = runtimeInfo?.ready ?? true;
-
   return (
     <div className="flex flex-col h-full bg-[var(--color-bg)] text-[var(--color-text)]">
       {/* 头部 */}
@@ -304,16 +235,14 @@ const OCRPlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
           <div className="flex gap-2">
             <button
               onClick={() => fileInputRef.current?.click()}
-              disabled={!modelReady}
-              className="flex items-center gap-1.5 px-3 py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600 transition-colors text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+              className="flex items-center gap-1.5 px-3 py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600 transition-colors text-sm font-medium"
             >
               <Upload className="w-4 h-4" />
               选择图片
             </button>
             <button
               onClick={handlePaste}
-              disabled={!modelReady}
-              className="flex items-center gap-1.5 px-3 py-2 bg-[var(--color-bg-secondary)] rounded-lg hover:bg-[var(--color-bg-tertiary)] transition-colors text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+              className="flex items-center gap-1.5 px-3 py-2 bg-[var(--color-bg-secondary)] rounded-lg hover:bg-[var(--color-bg-tertiary)] transition-colors text-sm"
             >
               <Clipboard className="w-4 h-4" />
               从剪贴板
@@ -323,51 +252,9 @@ const OCRPlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
               type="file"
               accept="image/*"
               onChange={handleFileSelect}
-              disabled={!modelReady}
               className="hidden"
             />
           </div>
-
-          {runtimeInfo && !runtimeInfo.ready && (
-            <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-[var(--color-text)]">
-              <div className="flex items-center gap-1.5 font-medium text-amber-600">
-                <AlertTriangle className="w-3.5 h-3.5" />
-                OCR 模型未安装
-              </div>
-              <div className="mt-1 text-[var(--color-text-secondary)]">
-                缺失: {runtimeInfo.missing_required_files.join("、")}
-              </div>
-              <div className="mt-1 break-all text-[10px] text-[var(--color-text-secondary)]">
-                目录: {runtimeInfo.install_dir}
-              </div>
-              {runtimeInfo.runtime_library_loaded === false &&
-                runtimeInfo.runtime_library_error && (
-                  <div className="mt-1 whitespace-pre-wrap break-all text-[10px] text-red-500">
-                    Runtime: {runtimeInfo.runtime_library_error}
-                  </div>
-                )}
-              <div className="mt-2 flex items-center gap-2">
-                <button
-                  onClick={handleOpenModelDir}
-                  className="flex items-center gap-1 rounded-md bg-[var(--color-bg-secondary)] px-2 py-1 text-[10px] hover:bg-[var(--color-bg-tertiary)]"
-                >
-                  <FolderOpen className="w-3 h-3" />
-                  打开模型目录
-                </button>
-                <button
-                  onClick={() => {
-                    void refreshRuntimeInfo();
-                  }}
-                  className="flex items-center gap-1 rounded-md bg-[var(--color-bg-secondary)] px-2 py-1 text-[10px] hover:bg-[var(--color-bg-tertiary)]"
-                >
-                  <RefreshCw
-                    className={`w-3 h-3 ${checkingModels ? "animate-spin" : ""}`}
-                  />
-                  重新检测
-                </button>
-              </div>
-            </div>
-          )}
 
           {/* 选项 */}
           <div className="flex gap-4 text-sm text-[var(--color-text-secondary)]">
