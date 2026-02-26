@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+#[cfg(debug_assertions)]
 use url::Url;
-
 /// 截图窗口是否已加载就绪
 static SCREENSHOT_WINDOW_READY: AtomicBool = AtomicBool::new(false);
 /// 截图流程进行中（防止并发 start_capture 覆盖全局状态）

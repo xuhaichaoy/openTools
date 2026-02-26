@@ -139,7 +139,12 @@ export const useAppStore = create<AppState>()(
       currentView: () => getTopViewEntry(get().viewStack).viewId ?? MAIN_VIEW_ID,
       currentViewEntry: () => getTopViewEntry(get().viewStack),
       pushView: (viewId, params) =>
-        set((state) => ({ viewStack: pushViewEntry(state.viewStack, { viewId, params }) })),
+        set((state) => ({
+          viewStack: pushViewEntry(state.viewStack, { viewId, params }),
+          searchValue: '',
+          mode: 'search',
+          selectedIndex: 0,
+        })),
       popView: () => set((state) => ({ viewStack: popViewEntry(state.viewStack) })),
       replaceView: (viewId, params) =>
         set((state) => ({ viewStack: replaceTopViewEntry(state.viewStack, { viewId, params }) })),

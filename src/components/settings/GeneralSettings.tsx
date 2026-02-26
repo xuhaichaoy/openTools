@@ -1,7 +1,21 @@
 import { useState, useEffect } from "react";
-import { Monitor, Keyboard, Info, Loader2, Sun, Moon } from "lucide-react";
+import {
+  Monitor,
+  Keyboard,
+  Info,
+  Loader2,
+  Sun,
+  Moon,
+  RefreshCw,
+  Download,
+  CheckCircle,
+  AlertCircle,
+} from "lucide-react";
 import { handleError } from "@/core/errors";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
+import { check, type Update } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 
 interface AppSettings {
   hideOnBlur: boolean;
@@ -38,16 +52,75 @@ async function saveSettings(settings: AppSettings): Promise<void> {
   }
 }
 
+type UpdateStatus =
+  | "idle"
+  | "checking"
+  | "up-to-date"
+  | "available"
+  | "downloading"
+  | "installing"
+  | "error";
+
 export function GeneralSettings() {
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [loading, setLoading] = useState(true);
+  const [appVersion, setAppVersion] = useState("0.1.0");
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus>("idle");
+  const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState(0);
+  const [updateError, setUpdateError] = useState("");
 
   useEffect(() => {
     loadSettings().then((s) => {
       setSettings(s);
       setLoading(false);
     });
+    getVersion().then(setAppVersion).catch(() => {});
   }, []);
+
+  const handleCheckUpdate = async () => {
+    setUpdateStatus("checking");
+    setUpdateError("");
+    setPendingUpdate(null);
+    try {
+      const update = await check();
+      if (update?.available) {
+        setPendingUpdate(update);
+        setUpdateStatus("available");
+      } else {
+        setUpdateStatus("up-to-date");
+      }
+    } catch (e) {
+      setUpdateError(e instanceof Error ? e.message : String(e));
+      setUpdateStatus("error");
+    }
+  };
+
+  const handleInstallUpdate = async () => {
+    if (!pendingUpdate) return;
+    setUpdateStatus("downloading");
+    setDownloadProgress(0);
+    try {
+      let downloaded = 0;
+      let total = 0;
+      await pendingUpdate.downloadAndInstall((event) => {
+        if (event.event === "Started") {
+          total = event.data.contentLength ?? 0;
+        } else if (event.event === "Progress") {
+          downloaded += event.data.chunkLength;
+          if (total > 0) {
+            setDownloadProgress(Math.round((downloaded / total) * 100));
+          }
+        } else if (event.event === "Finished") {
+          setUpdateStatus("installing");
+        }
+      });
+      await relaunch();
+    } catch (e) {
+      setUpdateError(e instanceof Error ? e.message : String(e));
+      setUpdateStatus("error");
+    }
+  };
 
   const updateSetting = <K extends keyof AppSettings>(
     key: K,
@@ -206,12 +279,91 @@ export function GeneralSettings() {
         </div>
       </div>
 
-      {/* 版本信息 */}
-      <div className="pt-3 border-t border-[var(--color-border)] text-center">
-        <div className="text-xs text-[var(--color-text)]">mTools</div>
-        <div className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
-          v0.1.0 · Tauri v2 + React 19
+      {/* 版本信息与更新检测 */}
+      <div className="pt-3 border-t border-[var(--color-border)]">
+        <div className="flex items-center justify-between mb-2">
+          <div>
+            <div className="text-xs text-[var(--color-text)] font-medium">
+              mTools
+            </div>
+            <div className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
+              v{appVersion} · Tauri v2 + React 19
+            </div>
+          </div>
+          <button
+            onClick={handleCheckUpdate}
+            disabled={
+              updateStatus === "checking" ||
+              updateStatus === "downloading" ||
+              updateStatus === "installing"
+            }
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[10px] bg-[var(--color-bg-secondary)] border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-text)] hover:bg-[var(--color-bg-hover)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            <RefreshCw
+              className={`w-3 h-3 ${updateStatus === "checking" ? "animate-spin" : ""}`}
+            />
+            检查更新
+          </button>
         </div>
+
+        {/* 更新状态提示 */}
+        {updateStatus === "up-to-date" && (
+          <div className="flex items-center gap-1.5 text-[10px] text-green-500">
+            <CheckCircle className="w-3 h-3" />
+            已是最新版本
+          </div>
+        )}
+
+        {updateStatus === "error" && (
+          <div className="flex items-start gap-1.5 text-[10px] text-red-400">
+            <AlertCircle className="w-3 h-3 mt-0.5 shrink-0" />
+            <span className="break-all">{updateError || "检查更新失败"}</span>
+          </div>
+        )}
+
+        {updateStatus === "available" && pendingUpdate && (
+          <div className="mt-2 p-2.5 rounded-lg bg-[var(--color-bg-secondary)] border border-[var(--color-accent)] space-y-2">
+            <div className="text-[10px] text-[var(--color-text)]">
+              发现新版本{" "}
+              <span className="font-bold text-[var(--color-accent)]">
+                v{pendingUpdate.version}
+              </span>
+            </div>
+            {pendingUpdate.body && (
+              <div className="text-[10px] text-[var(--color-text-secondary)] leading-relaxed whitespace-pre-wrap">
+                {pendingUpdate.body}
+              </div>
+            )}
+            <button
+              onClick={handleInstallUpdate}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity"
+            >
+              <Download className="w-3 h-3" />
+              下载并安装
+            </button>
+          </div>
+        )}
+
+        {updateStatus === "downloading" && (
+          <div className="mt-2 space-y-1.5">
+            <div className="text-[10px] text-[var(--color-text-secondary)]">
+              下载中... {downloadProgress}%
+            </div>
+            <div className="h-1.5 w-full bg-[var(--color-bg-secondary)] rounded-full overflow-hidden">
+              <div
+                className="h-full bg-[var(--color-accent)] rounded-full transition-all duration-300"
+                style={{ width: `${downloadProgress}%` }}
+              />
+            </div>
+          </div>
+        )}
+
+        {updateStatus === "installing" && (
+          <div className="flex items-center gap-1.5 text-[10px] text-[var(--color-text-secondary)]">
+            <Loader2 className="w-3 h-3 animate-spin" />
+            安装中，即将重启...
+          </div>
+        )}
       </div>
     </div>
   );

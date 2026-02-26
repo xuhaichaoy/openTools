@@ -239,7 +239,7 @@ export function WorkflowList({ onBack }: { onBack?: () => void }) {
           <span className="text-[10px] text-[var(--color-text-secondary)] ml-1">{workflows.length} 个</span>
         </div>
         <div className="flex items-center gap-1">
-          {isLoggedIn && teams.length > 0 && (
+          {/* {isLoggedIn && teams.length > 0 && (
             <button
               onClick={handleShowTeamTemplates}
               className="flex items-center gap-1 px-2 py-1.5 text-[10px] rounded-lg text-[#F28F36] hover:bg-[#F28F36]/10 transition-colors"
@@ -248,7 +248,7 @@ export function WorkflowList({ onBack }: { onBack?: () => void }) {
               <Download className="w-3 h-3" />
               团队模板
             </button>
-          )}
+          )} */}
           <button onClick={handleRefresh} disabled={loading} className="p-1.5 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]" title="刷新">
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
           </button>

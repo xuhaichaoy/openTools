@@ -129,7 +129,7 @@ describe("useAgentRunActions", () => {
   });
 
   it("appends image info to query when images are provided", async () => {
-    const executeAgentTask = vi.fn(async () => undefined);
+    const executeAgentTask = vi.fn(async (_query: string) => undefined);
     let hookValue: ReturnType<typeof useAgentRunActions> | null = null;
 
     act(() => {

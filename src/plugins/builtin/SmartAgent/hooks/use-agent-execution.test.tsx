@@ -176,6 +176,7 @@ describe("useAgentExecution", () => {
               } as unknown as HTMLDivElement,
             },
             openDangerConfirm: vi.fn(async () => true),
+            resetPerRunState: null,
           }}
         />,
       );
@@ -231,6 +232,7 @@ describe("useAgentExecution", () => {
               } as unknown as HTMLDivElement,
             },
             openDangerConfirm: vi.fn(async () => true),
+            resetPerRunState: null,
           }}
         />,
       );
@@ -284,6 +286,7 @@ describe("useAgentExecution", () => {
               } as unknown as HTMLDivElement,
             },
             openDangerConfirm: vi.fn(async () => true),
+            resetPerRunState: null,
           }}
         />,
       );
@@ -342,6 +345,7 @@ describe("useAgentExecution", () => {
               } as unknown as HTMLDivElement,
             },
             openDangerConfirm: vi.fn(async () => true),
+            resetPerRunState: null,
           }}
         />,
       );

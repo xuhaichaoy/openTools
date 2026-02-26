@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod app_update;
 pub mod auth;
 pub mod kb;
 pub mod plugins;
@@ -96,6 +97,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health_check))
         .route("/deploy-info", get(deploy_info))
+        .route("/v1/app/update", get(app_update::check_update))
         .nest_service("/uploads", ServeDir::new(&upload_dir))
         .nest("/v1/plugins", plugins::public_routes_no_layer())
         .nest("/plugins", plugins::public_routes_no_layer())

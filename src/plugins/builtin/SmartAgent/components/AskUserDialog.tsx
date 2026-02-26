@@ -158,7 +158,7 @@ function TextInput({
 }: {
   value: string;
   onChange: (val: string) => void;
-  inputRef?: React.RefObject<HTMLTextAreaElement>;
+  inputRef?: React.RefObject<HTMLTextAreaElement | null>;
 }) {
   return (
     <textarea

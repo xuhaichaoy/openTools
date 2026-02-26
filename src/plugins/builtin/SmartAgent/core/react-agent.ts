@@ -19,15 +19,16 @@ import type { PluginAction } from "@/core/plugin-system/plugin-interface";
 
 // ── 结构化工具错误类型（借鉴 Kimi CLI 四层体系） ──
 
-export enum ToolErrorType {
-  NotFound = "not_found",
-  ParseError = "parse_error",
-  ValidationError = "validation_error",
-  RuntimeError = "runtime_error",
-  Timeout = "timeout",
-  LoopDetected = "loop_detected",
-  PlanModeBlocked = "plan_mode_blocked",
-}
+export const ToolErrorType = {
+  NotFound: "not_found",
+  ParseError: "parse_error",
+  ValidationError: "validation_error",
+  RuntimeError: "runtime_error",
+  Timeout: "timeout",
+  LoopDetected: "loop_detected",
+  PlanModeBlocked: "plan_mode_blocked",
+} as const;
+export type ToolErrorType = (typeof ToolErrorType)[keyof typeof ToolErrorType];
 
 export interface ToolErrorResult {
   type: ToolErrorType;
@@ -242,9 +243,13 @@ function truncateToolOutput(output: string): string {
 // ── 工具超时异常 ──
 
 class ToolTimeoutError extends Error {
-  constructor(public toolName: string, public timeoutMs: number) {
+  toolName: string;
+  timeoutMs: number;
+  constructor(toolName: string, timeoutMs: number) {
     super(`工具 ${toolName} 执行超时（${timeoutMs}ms）`);
     this.name = "ToolTimeoutError";
+    this.toolName = toolName;
+    this.timeoutMs = timeoutMs;
   }
 }
 
