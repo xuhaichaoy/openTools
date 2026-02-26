@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Zap, Loader2, ArrowDown, ArrowUp } from "lucide-react";
 import { api } from "@/core/api/client";
 import { handleError } from "@/core/errors";
+import { useAuthStore } from "@/store/auth-store";
 
 const BRAND = "#F28F36";
 
@@ -17,12 +18,17 @@ interface EnergyLog {
 }
 
 export function EnergyLogsTab() {
+  const { isLoggedIn } = useAuthStore();
   const [logs, setLogs] = useState<EnergyLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [offset, setOffset] = useState(0);
   const limit = 20;
 
   const fetchLogs = useCallback(async () => {
+    if (!isLoggedIn) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     try {
       const res = await api.get<{ logs: EnergyLog[] }>("/ai/energy/logs", {
@@ -35,7 +41,7 @@ export function EnergyLogsTab() {
     } finally {
       setLoading(false);
     }
-  }, [limit, offset]);
+  }, [isLoggedIn, limit, offset]);
 
   useEffect(() => {
     fetchLogs();

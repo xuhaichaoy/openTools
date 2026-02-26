@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { X, Phone, Mail, Github, Chrome, Loader2 } from "lucide-react";
+import { X, Mail, Loader2 } from "lucide-react";
 import { api } from "@/core/api/client";
 import { useAuthStore } from "@/store/auth-store";
 
@@ -7,7 +7,7 @@ const BRAND = "#F28F36";
 
 export function LoginModal() {
   const [isOpen, setIsOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<"phone" | "email">("phone");
+  const [activeTab, setActiveTab] = useState<"phone" | "email">("email");
   const [isRegistering, setIsRegistering] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
 
@@ -99,88 +99,10 @@ export function LoginModal() {
           </button>
         </div>
 
-        {/* Tabs */}
-        {!isRegistering && (
-          <div className="flex p-1 gap-1 bg-[var(--color-bg-secondary)] mx-5 mt-4 rounded-lg">
-            <button
-              onClick={() => setActiveTab("phone")}
-              className={`flex-1 flex items-center justify-center gap-2 py-1.5 text-xs font-medium rounded-md transition-all ${
-                activeTab === "phone"
-                  ? "bg-[var(--color-bg)] text-[var(--color-text)] shadow-sm"
-                  : "text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
-              }`}
-              style={activeTab === "phone" ? { color: BRAND } : {}}
-            >
-              <Phone className="w-3.5 h-4" />
-              手机号
-            </button>
-            <button
-              onClick={() => setActiveTab("email")}
-              className={`flex-1 flex items-center justify-center gap-2 py-1.5 text-xs font-medium rounded-md transition-all ${
-                activeTab === "email"
-                  ? "bg-[var(--color-bg)] text-[var(--color-text)] shadow-sm"
-                  : "text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
-              }`}
-              style={activeTab === "email" ? { color: BRAND } : {}}
-            >
-              <Mail className="w-3.5 h-4" />
-              邮箱
-            </button>
-          </div>
-        )}
+        {/* Tabs - 手机号登录暂时隐藏 */}
 
         {/* Form Content */}
         <div className="p-5">
-          {activeTab === "phone" ? (
-            <div className="space-y-3">
-              <div className="space-y-1.5">
-                <label className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
-                  手机号
-                </label>
-                <div className="relative">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-[var(--color-text-secondary)] border-r border-[var(--color-border)] pr-2">
-                    +86
-                  </span>
-                  <input
-                    type="tel"
-                    value={phone}
-                    onChange={(e) => setPhone(e.target.value)}
-                    placeholder="请输入手机号"
-                    className="w-full bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-2 pl-14 pr-4 outline-none focus:ring-2 transition-all text-sm"
-                    style={
-                      {
-                        "--tw-ring-color": `${BRAND}20`,
-                        focusBorderColor: BRAND,
-                      } as any
-                    }
-                  />
-                </div>
-              </div>
-              <div className="space-y-1.5">
-                <label className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
-                  验证码
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={code}
-                    onChange={(e) => setCode(e.target.value)}
-                    placeholder="6 位验证码"
-                    className="flex-1 bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-2 px-4 outline-none focus:ring-2 transition-all text-sm"
-                    style={{ "--tw-ring-color": `${BRAND}20` } as any}
-                  />
-                  <button
-                    onClick={handleSendCode}
-                    disabled={countdown > 0 || !phone}
-                    className="px-3 py-2 text-white text-xs font-medium rounded-lg transition-colors whitespace-nowrap disabled:opacity-50 min-w-[85px]"
-                    style={{ backgroundColor: BRAND }}
-                  >
-                    {countdown > 0 ? `${countdown}s` : "获取验证码"}
-                  </button>
-                </div>
-              </div>
-            </div>
-          ) : (
             <div className="space-y-3">
               {isRegistering && (
                 <div className="space-y-1.5">
@@ -234,13 +156,10 @@ export function LoginModal() {
                 </button>
               </div>
             </div>
-          )}
 
           {errorMsg && (
             <div className="mt-2 text-xs text-red-500 bg-red-500/10 rounded-lg px-3 py-1.5">
-              {errorMsg === "Unauthorized" &&
-              activeTab === "email" &&
-              !isRegistering
+              {errorMsg === "Unauthorized" && !isRegistering
                 ? "账号或密码错误，请注册新账号"
                 : errorMsg}
             </div>
@@ -248,10 +167,7 @@ export function LoginModal() {
 
           <button
             onClick={handleLogin}
-            disabled={
-              isLoading ||
-              (activeTab === "phone" ? !phone || !code : !email || !password)
-            }
+            disabled={isLoading || !email || !password}
             className="w-full mt-4 text-white font-bold py-2.5 rounded-lg shadow-lg transition-all transform active:scale-[0.98] flex items-center justify-center gap-2 text-sm"
             style={{
               backgroundColor: BRAND,
@@ -259,16 +175,12 @@ export function LoginModal() {
             }}
           >
             {isLoading && <Loader2 className="w-4 h-4 animate-spin" />}
-            {isRegistering
-              ? "立即注册"
-              : activeTab === "phone"
-                ? "进入 51ToolBox"
-                : "登录"}
+            {isRegistering ? "立即注册" : "登录"}
           </button>
         </div>
 
         {/* OAuth Section */}
-        <div className="px-5 pb-6">
+        {/* <div className="px-5 pb-6">
           <div className="relative flex items-center gap-4 py-1">
             <div className="flex-1 h-px bg-[var(--color-border)]"></div>
             <span className="text-[10px] text-[var(--color-text-secondary)] uppercase font-bold tracking-wider">
@@ -285,7 +197,7 @@ export function LoginModal() {
               <Chrome className="w-4 h-4 text-[var(--color-text)] group-hover:scale-110 transition-transform" />
             </button>
           </div>
-        </div>
+        </div> */}
       </div>
     </div>
   );

@@ -158,24 +158,28 @@ export default function ManagementCenter({ onBack }: MToolsPluginProps) {
 // ── 我的账号 ──
 
 function AccountTab({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
-  const { user, logout } = useAuthStore();
+  const { user, logout, isLoggedIn } = useAuthStore();
   const [energy, setEnergy] = useState<number>(user?.energy || 0);
   const [loading, setLoading] = useState(true);
   const [showEditProfile, setShowEditProfile] = useState(false);
 
   useEffect(() => {
+    if (!isLoggedIn) {
+      setLoading(false);
+      return;
+    }
     const fetchStats = async () => {
       try {
         const res = await api.get<{ balance: number }>("/ai/energy");
         setEnergy(res.balance);
       } catch (err) {
-        handleError(err, { context: "获取 AI 能量" });
+        handleError(err, { context: "获取 AI 能量", silent: true });
       } finally {
         setLoading(false);
       }
     };
     fetchStats();
-  }, []);
+  }, [isLoggedIn]);
 
   const registerDays = user?.registered_at
     ? Math.floor(
@@ -183,6 +187,34 @@ function AccountTab({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
           (1000 * 60 * 60 * 24),
       ) + 1
     : 1;
+
+  if (!isLoggedIn) {
+    return (
+      <div className="max-w-xl mx-auto space-y-2">
+        <div className="bg-[var(--color-bg)] rounded-xl p-8 border border-[var(--color-border)] flex flex-col items-center gap-3">
+          <div
+            className="w-14 h-14 rounded-xl flex items-center justify-center border"
+            style={{ background: `${BRAND}15`, borderColor: `${BRAND}30` }}
+          >
+            <User className="w-7 h-7" style={{ color: BRAND }} />
+          </div>
+          <div className="text-center">
+            <h2 className="text-sm font-semibold">尚未登录</h2>
+            <p className="text-xs text-[var(--color-text-secondary)] mt-1">
+              登录后可查看账号信息、同步数据和使用更多功能
+            </p>
+          </div>
+          <button
+            onClick={() => window.dispatchEvent(new CustomEvent("open-login-modal"))}
+            className="px-6 py-2 rounded-lg text-white text-xs font-semibold transition-all active:scale-95"
+            style={{ background: BRAND }}
+          >
+            立即登录
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-xl mx-auto space-y-2">

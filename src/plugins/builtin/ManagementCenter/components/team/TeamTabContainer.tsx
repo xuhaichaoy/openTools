@@ -103,7 +103,13 @@ export function TeamTabContainer() {
     string | null
   >(null);
 
+  const { isLoggedIn } = useAuthStore();
+
   useEffect(() => {
+    if (!isLoggedIn) {
+      setLoading(false);
+      return;
+    }
     const fetchTeams = async () => {
       try {
         const res = await api.get<Team[]>("/teams");
@@ -116,7 +122,7 @@ export function TeamTabContainer() {
     };
 
     fetchTeams();
-  }, []);
+  }, [isLoggedIn]);
 
   const handleCreateTeam = async () => {
     if (!newTeamName.trim()) return;
@@ -156,6 +162,31 @@ export function TeamTabContainer() {
       handleError(err, { context: "获取团队同步状态", silent: true });
     }
   };
+
+  if (!isLoggedIn) {
+    return (
+      <div className="max-w-xl mx-auto space-y-[var(--space-compact-3)]">
+        <div>
+          <h2 className="text-sm font-semibold">团队空间</h2>
+          <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">
+            创建或加入团队，共享 AI 模型额度和工作流。
+          </p>
+        </div>
+        <div className="flex flex-col items-center py-10 bg-[var(--color-bg)] rounded-xl border border-dashed border-[var(--color-border)]">
+          <Users className="w-8 h-8 text-[var(--color-text-secondary)] mx-auto mb-2 opacity-20" />
+          <p className="text-xs text-[var(--color-text-secondary)] mb-3">
+            登录后可创建或加入团队
+          </p>
+          <button
+            onClick={() => window.dispatchEvent(new CustomEvent("open-login-modal"))}
+            className="px-5 py-1.5 rounded-lg text-white text-xs font-semibold transition-all active:scale-95 bg-[#F28F36]"
+          >
+            立即登录
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (selectedTeam) {
     return (

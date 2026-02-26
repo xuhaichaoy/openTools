@@ -148,6 +148,16 @@ async function request<T>(
   const { token, logout } = useAuthStore.getState();
   const { params, headers, skipAuth, ...rest } = options;
 
+  const isAuthPath = path.startsWith("/auth/");
+  if (!token && !skipAuth && !isAuthPath) {
+    throw new ApiError({
+      status: 401,
+      code: "UNAUTHORIZED",
+      message: "Unauthorized",
+      path,
+    });
+  }
+
   const baseUrl = getServerUrl();
   let url = `${baseUrl}/v1${path}`;
   if (params) {

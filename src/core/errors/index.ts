@@ -71,7 +71,9 @@ interface ErrorMeta {
 export function handleError(error: unknown, options?: HandleErrorOptions): void {
   const level = options?.level ?? ErrorLevel.Recoverable;
   const context = options?.context;
-  const silent = options?.silent ?? false;
+  const isUnauthorized =
+    error && typeof error === "object" && (error as any).code === "UNAUTHORIZED";
+  const silent = options?.silent ?? isUnauthorized ?? false;
 
   const meta = extractErrorMeta(error);
   const baseMessage =

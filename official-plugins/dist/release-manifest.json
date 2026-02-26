@@ -1,0 +1,78 @@
+{
+  "generatedAt": "2026-02-25T05:40:41.101Z",
+  "count": 8,
+  "releases": [
+    {
+      "slug": "51cto-nav",
+      "name": "51CTO 内部导航",
+      "version": "1.0.1",
+      "zipName": "51cto-nav-1.0.1.zip",
+      "packageSizeBytes": 4052,
+      "packageSha256": "2fe3ae55366cf0ee2f9a24c38db67170c102a3a12ea6615c0cfbd81eb40f2eee",
+      "packageFilePath": "plugins/official/51cto-nav/1.0.1.zip"
+    },
+    {
+      "slug": "bookmarks",
+      "name": "网页书签",
+      "version": "1.0.0",
+      "zipName": "bookmarks-1.0.0.zip",
+      "packageSizeBytes": 1212,
+      "packageSha256": "816f7492d190a50668dae31a3c85a51cc595fe084b5b8bb04fff41851b87fc6f",
+      "packageFilePath": "plugins/official/bookmarks/1.0.0.zip"
+    },
+    {
+      "slug": "dev-toolbox",
+      "name": "开发工具箱",
+      "version": "1.0.0",
+      "zipName": "dev-toolbox-1.0.0.zip",
+      "packageSizeBytes": 1257,
+      "packageSha256": "bbb8b822aeb9945ddb87d339c408ac76a042dc28622a000aaa686edb1a37f993",
+      "packageFilePath": "plugins/official/dev-toolbox/1.0.0.zip"
+    },
+    {
+      "slug": "image-search",
+      "name": "以图搜图",
+      "version": "1.0.0",
+      "zipName": "image-search-1.0.0.zip",
+      "packageSizeBytes": 1195,
+      "packageSha256": "e97734f5d70895b9e00876d0904b40db1f0a7840f5a2a3a99b750ab14adc792c",
+      "packageFilePath": "plugins/official/image-search/1.0.0.zip"
+    },
+    {
+      "slug": "note-hub",
+      "name": "笔记中心",
+      "version": "1.0.0",
+      "zipName": "note-hub-1.0.0.zip",
+      "packageSizeBytes": 1195,
+      "packageSha256": "321052425b5fa424ef6a9d6fc3eaf7557fac8798a1ba68237376da6e4b7c2dd3",
+      "packageFilePath": "plugins/official/note-hub/1.0.0.zip"
+    },
+    {
+      "slug": "qr-code",
+      "name": "二维码",
+      "version": "1.0.0",
+      "zipName": "qr-code-1.0.0.zip",
+      "packageSizeBytes": 1177,
+      "packageSha256": "6bd8712305b6473b2c264bb8c6e82b952ccdd695e1c878cdf85c013fd4e71a8e",
+      "packageFilePath": "plugins/official/qr-code/1.0.0.zip"
+    },
+    {
+      "slug": "snippets",
+      "name": "快捷短语",
+      "version": "1.0.0",
+      "zipName": "snippets-1.0.0.zip",
+      "packageSizeBytes": 1248,
+      "packageSha256": "7e7403079e8880b474c1c4ebf1e5a9b1265ae44472236c298a8d553f78dc1222",
+      "packageFilePath": "plugins/official/snippets/1.0.0.zip"
+    },
+    {
+      "slug": "system-actions",
+      "name": "系统操作",
+      "version": "1.0.0",
+      "zipName": "system-actions-1.0.0.zip",
+      "packageSizeBytes": 1193,
+      "packageSha256": "d465dc40c2196128fb10de6c4e5e4b8c14850f961690e3e158bdfc2cc7463a7a",
+      "packageFilePath": "plugins/official/system-actions/1.0.0.zip"
+    }
+  ]
+}
