@@ -7,7 +7,7 @@ pub mod types;
 // Re-export types for external use (e.g. managed state in lib.rs)
 pub use types::{PluginCache, PluginDevState};
 
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 // ── 屏幕取色 ──
 
@@ -42,12 +42,14 @@ fn get_pixel_at_screen(sx: i32, sy: i32) -> Result<String, String> {
 
 #[cfg(target_os = "windows")]
 fn get_pixel_at_screen(sx: i32, sy: i32) -> Result<String, String> {
-    use windows::Win32::Foundation::COLORREF;
-    use windows::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC, SRCCOPY};
+    use windows::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC};
     use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
     unsafe {
         let hwnd = GetDesktopWindow();
-        let hdc = GetDC(hwnd).map_err(|e| format!("GetDC 失败: {}", e))?;
+        let hdc = GetDC(hwnd);
+        if hdc.is_invalid() {
+            return Err("GetDC 失败".to_string());
+        }
         let color = GetPixel(hdc, sx, sy);
         let _ = ReleaseDC(hwnd, hdc);
         if color.0 == 0xFFFFFFFF {

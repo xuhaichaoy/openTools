@@ -362,6 +362,57 @@ pub fn get_advanced_tools() -> Vec<serde_json::Value> {
     .clone()
 }
 
+/// Windows 原生能力工具定义（设置、打开应用等），供 AI 助手在 Windows 上调用
+#[cfg(target_os = "windows")]
+pub fn get_native_app_tools_windows() -> Vec<serde_json::Value> {
+    serde_json::json!([
+        {
+            "type": "function",
+            "function": {
+                "name": "win_open_settings",
+                "description": "打开 Windows 系统设置页面。用户要求打开设置、修改显示/网络/蓝牙/通知等时使用。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "page": {
+                            "type": "string",
+                            "description": "设置页面标识。常用: display(显示), network(网络), bluetooth(蓝牙), notifications(通知), sound(声音), storage(存储), apps(应用), defaultapps(默认应用), privacy(隐私), update(更新)。不填则打开设置首页。"
+                        }
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "native_app_open",
+                "description": "打开或激活一个已安装的应用程序。如：记事本、计算器、资源管理器、cmd、PowerShell 等。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "app_name": {
+                            "type": "string",
+                            "description": "应用名称或可执行文件名，如 notepad、calc、explorer、cmd、powershell、msedge、chrome 等"
+                        }
+                    },
+                    "required": ["app_name"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "native_app_list_interactive",
+                "description": "列出 Windows 上可供 AI 调用的原生能力（打开设置、打开应用等）。用户问「能做什么」「有哪些功能」时调用。",
+                "parameters": { "type": "object", "properties": {} }
+            }
+        }
+    ])
+    .as_array()
+    .expect("static JSON must be array")
+    .clone()
+}
+
 /// macOS 原生应用工具定义（日历、提醒、备忘录、邮件、快捷指令、应用操作）
 pub fn get_native_app_tools() -> Vec<serde_json::Value> {
     serde_json::json!([

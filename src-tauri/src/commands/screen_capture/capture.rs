@@ -34,27 +34,106 @@ fn get_helper_path(app: &AppHandle) -> PathBuf {
     }
 }
 
-/// 解析实际使用的 helper 路径：优先已下载的，否则尝试开发目录下编译产物
-fn resolve_helper_path(app: &AppHandle) -> PathBuf {
-    let downloaded = get_helper_path(app);
-    if downloaded.exists() {
-        return downloaded;
+/// 打包内随附的 helper 路径（Windows 安装包内可带 bin/screen-capture-helper.exe，与 macOS 一致开箱即用）
+fn bundled_helper_path(app: &AppHandle) -> Option<PathBuf> {
+    let resource_dir = app.path().resource_dir().ok()?;
+    #[cfg(windows)]
+    let path = resource_dir.join("bin/screen-capture-helper.exe");
+    #[cfg(not(windows))]
+    let path = resource_dir.join("bin/screen-capture-helper");
+    if path.exists() {
+        Some(path)
+    } else {
+        None
     }
-    // 开发环境：从可执行文件位置推断 workspace 根目录
+}
+
+/// 解析实际使用的 helper 路径：优先已安装的，否则打包内随附（复制到 helpers），最后尝试开发目录编译产物
+fn resolve_helper_path(app: &AppHandle) -> PathBuf {
+    let helpers_dir = get_helpers_dir(app);
+    let dest = get_helper_path(app);
+    if dest.exists() {
+        return dest;
+    }
+    // Windows/macOS 安装包：若随附了 helper，复制到 app data 的 helpers 目录，之后与“已下载”一致
+    if let Some(bundled) = bundled_helper_path(app) {
+        let _ = std::fs::create_dir_all(&helpers_dir);
+        if std::fs::copy(&bundled, &dest).is_ok() {
+            return dest;
+        }
+    }
+    // 开发环境：先看 src-tauri/bin/ 是否已有 helper（与打包脚本一致）
+    let try_bin_helper = |dir: &std::path::Path| -> Option<PathBuf> {
+        #[cfg(windows)]
+        let p = dir.join("bin").join("screen-capture-helper.exe");
+        #[cfg(not(windows))]
+        let p = dir.join("bin").join("screen-capture-helper");
+        if p.exists() {
+            Some(p)
+        } else {
+            None
+        }
+    };
+    let try_copy_and_return = |bin_helper: PathBuf| {
+        let _ = std::fs::create_dir_all(&helpers_dir);
+        if std::fs::copy(&bin_helper, &dest).is_ok() {
+            return dest.clone();
+        }
+        bin_helper
+    };
+    // 1) 从当前进程 exe 推断：exe 在 .../src-tauri/target/debug 或 target/release
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(src_tauri) = exe_path.parent().and_then(|p| p.parent()) {
+            if let Some(bin_helper) = try_bin_helper(src_tauri) {
+                return try_copy_and_return(bin_helper);
+            }
+        }
+    }
+    // 2) 从 Tauri executable_dir 推断
     if let Ok(exe_dir) = app.path().executable_dir() {
-        // exe_dir 一般为 .../51ToolBox/src-tauri/target/debug
-        let workspace_root = exe_dir
-            .parent()
-            .and_then(|p| p.parent())
-            .and_then(|p| p.parent());
-        if let Some(root) = workspace_root {
+        if let Some(src_tauri) = exe_dir.parent().and_then(|p| p.parent()) {
+            if let Some(bin_helper) = try_bin_helper(src_tauri) {
+                return try_copy_and_return(bin_helper);
+            }
+        }
+        // 3) 从当前工作目录：项目根或 src-tauri；或 cwd 在 target/debug 时向上两级
+        if let Ok(cwd) = std::env::current_dir() {
+            if let Some(bin_helper) = try_bin_helper(&cwd) {
+                return try_copy_and_return(bin_helper);
+            }
+            if let Some(bin_helper) = try_bin_helper(&cwd.join("src-tauri")) {
+                return try_copy_and_return(bin_helper);
+            }
+            // cwd 可能是 .../target/debug 或 .../target/release，则 src_tauri = cwd.parent().parent()
+            if let Some(target_dir) = cwd.parent() {
+                if target_dir.file_name().map(|n| n == "target").unwrap_or(false) {
+                    if let Some(src_tauri) = target_dir.parent() {
+                        if let Some(bin_helper) = try_bin_helper(src_tauri) {
+                            return try_copy_and_return(bin_helper);
+                        }
+                    }
+                }
+            }
+        }
+        // 4) crates/screen-capture-helper/target 下的编译产物
+        let candidates: Vec<PathBuf> = exe_dir
+            .ancestors()
+            .skip(1)
+            .take(5)
+            .map(PathBuf::from)
+            .collect();
+        for root in candidates {
             let base = root.join("crates/screen-capture-helper/target");
-            let release = base.join("release/screen-capture-helper");
-            let debug = base.join("debug/screen-capture-helper");
             #[cfg(windows)]
-            let release = base.join("release/screen-capture-helper.exe");
-            #[cfg(windows)]
-            let debug = base.join("debug/screen-capture-helper.exe");
+            let (release, debug) = (
+                base.join("release/screen-capture-helper.exe"),
+                base.join("debug/screen-capture-helper.exe"),
+            );
+            #[cfg(not(windows))]
+            let (release, debug) = (
+                base.join("release/screen-capture-helper"),
+                base.join("debug/screen-capture-helper"),
+            );
             if release.exists() {
                 return release;
             }
@@ -63,7 +142,7 @@ fn resolve_helper_path(app: &AppHandle) -> PathBuf {
             }
         }
     }
-    downloaded
+    dest
 }
 
 fn get_ffmpeg_path(app: &AppHandle) -> PathBuf {
@@ -96,7 +175,16 @@ fn ensure_helper(app: &AppHandle) -> Result<(), String> {
     // 启动新进程（优先已下载，否则用开发目录下编译的）
     let helper_path = resolve_helper_path(app);
     if !helper_path.exists() {
-        return Err("helper 未安装。请先下载，或本地编译：在项目根目录执行 cd crates/screen-capture-helper && cargo build --release，将 target/release/screen-capture-helper 复制到应用数据目录的 helpers 文件夹".to_string());
+        let helpers_dir = get_helpers_dir(app);
+        #[cfg(windows)]
+        let bin_name = "target\\release\\screen-capture-helper.exe";
+        #[cfg(not(windows))]
+        let bin_name = "target/release/screen-capture-helper";
+        return Err(format!(
+            "截图组件未安装。请本地编译：在项目根目录执行 cd crates/screen-capture-helper && cargo build --release，将 {} 复制到 {}",
+            bin_name,
+            helpers_dir.display()
+        ));
     }
 
     let mut child = Command::new(&helper_path)
@@ -275,8 +363,13 @@ pub async fn screen_capture_download(app: AppHandle, component: String) -> Resul
     if !resp.status().is_success() {
         if resp.status().as_u16() == 404 && component == "helper" {
             let helpers_dir = get_helpers_dir(&app);
+            #[cfg(windows)]
+            let bin_hint = "target\\release\\screen-capture-helper.exe";
+            #[cfg(not(windows))]
+            let bin_hint = "target/release/screen-capture-helper";
             return Err(format!(
-                "预编译组件暂未发布（404）。请本地编译：在项目根目录执行 cd crates/screen-capture-helper && cargo build --release，将生成的 target/release/screen-capture-helper 复制到 {}",
+                "预编译组件暂未发布（404）。请本地编译：在项目根目录执行 cd crates/screen-capture-helper && cargo build --release，将生成的 {} 复制到 {}",
+                bin_hint,
                 helpers_dir.display()
             ));
         }

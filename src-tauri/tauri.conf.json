@@ -31,15 +31,11 @@
     ],
     "security": {
       "csp": "default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' https: http:; img-src 'self' data: blob: https:; font-src 'self' data:; frame-src 'self' null:"
-    },
-    "trayIcon": {
-      "iconPath": "icons/icon.png",
-      "iconAsTemplate": true
     }
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": "nsis",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -48,7 +44,8 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "plugins/**/*"
+      "plugins/**/*",
+      "bin/**/*"
     ]
   },
   "plugins": {

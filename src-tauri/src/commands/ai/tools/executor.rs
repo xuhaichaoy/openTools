@@ -469,6 +469,11 @@ pub async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<Str
             let result = crate::commands::native_apps::native_app_list_interactive().await?;
             Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
         }
+        "win_open_settings" => {
+            let page = args_value["page"].as_str().map(|s| s.to_string());
+            let result = crate::commands::native_apps::win_open_settings(page).await?;
+            Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
+        }
         _ => Err(format!("未知工具: {}", name)),
     }
 }

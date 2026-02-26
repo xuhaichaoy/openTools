@@ -71,7 +71,9 @@
     {
       "identifier": "fs:scope",
       "allow": [
-        "$APPDATA/**"
+        "$APPDATA/**",
+        "$APPLOCALDATA/**",
+        "$TEMP/**"
       ]
     },
     "process:default",

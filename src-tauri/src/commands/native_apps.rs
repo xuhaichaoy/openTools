@@ -100,11 +100,13 @@ fn run_jxa(script: &str) -> Result<String, String> {
 // ── 非 macOS 平台的 fallback ──
 
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
 fn run_applescript(_script: &str) -> Result<String, String> {
     Err("AppleScript 仅支持 macOS".to_string())
 }
 
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
 fn run_applescript_multiline(_lines: &[&str]) -> Result<String, String> {
     Err("AppleScript 仅支持 macOS".to_string())
 }
@@ -619,7 +621,10 @@ pub async fn native_shortcuts_run(
         }
     }
     #[cfg(not(target_os = "macos"))]
-    Ok(NativeAppResult::err("快捷指令仅支持 macOS"))
+    {
+        let _ = input;
+        Ok(NativeAppResult::err("快捷指令仅支持 macOS"))
+    }
 }
 
 // ══════════════════════════════════════════════
@@ -654,17 +659,57 @@ pub async fn native_app_open(app_name: String) -> Result<NativeAppResult, String
 /// 列出已安装的可交互应用
 #[tauri::command]
 pub async fn native_app_list_interactive() -> Result<NativeAppResult, String> {
-    let apps = serde_json::json!([
-        {"name": "日历", "app": "Calendar", "capabilities": ["创建事件", "查看日程", "列出日历"]},
-        {"name": "提醒事项", "app": "Reminders", "capabilities": ["创建提醒", "查看提醒", "列出列表"]},
-        {"name": "备忘录", "app": "Notes", "capabilities": ["创建备忘录", "搜索备忘录"]},
-        {"name": "邮件", "app": "Mail", "capabilities": ["创建草稿"]},
-        {"name": "快捷指令", "app": "Shortcuts", "capabilities": ["列出指令", "运行指令"]},
-        {"name": "访达", "app": "Finder", "capabilities": ["打开文件夹"]},
-        {"name": "终端", "app": "Terminal", "capabilities": ["执行命令"]},
-        {"name": "系统偏好设置", "app": "System Preferences", "capabilities": ["打开设置"]},
-    ]);
-    Ok(NativeAppResult::ok_with_data("可交互的本机应用列表", apps))
+    #[cfg(target_os = "macos")]
+    {
+        let apps = serde_json::json!([
+            {"name": "日历", "app": "Calendar", "capabilities": ["创建事件", "查看日程", "列出日历"]},
+            {"name": "提醒事项", "app": "Reminders", "capabilities": ["创建提醒", "查看提醒", "列出列表"]},
+            {"name": "备忘录", "app": "Notes", "capabilities": ["创建备忘录", "搜索备忘录"]},
+            {"name": "邮件", "app": "Mail", "capabilities": ["创建草稿"]},
+            {"name": "快捷指令", "app": "Shortcuts", "capabilities": ["列出指令", "运行指令"]},
+            {"name": "访达", "app": "Finder", "capabilities": ["打开文件夹"]},
+            {"name": "终端", "app": "Terminal", "capabilities": ["执行命令"]},
+            {"name": "系统偏好设置", "app": "System Preferences", "capabilities": ["打开设置"]},
+        ]);
+        Ok(NativeAppResult::ok_with_data("可交互的本机应用列表", apps))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let apps = serde_json::json!([
+            {"name": "系统设置", "tool": "win_open_settings", "capabilities": ["打开设置首页", "显示/网络/蓝牙/通知/声音/存储/应用/隐私/更新等页面"], "example_page": "display"},
+            {"name": "打开应用", "tool": "native_app_open", "capabilities": ["记事本(notepad)", "计算器(calc)", "资源管理器(explorer)", "cmd", "PowerShell(powershell)", "Edge(msedge)", "Chrome(chrome) 等"]},
+        ]);
+        Ok(NativeAppResult::ok_with_data("Windows 上可供 AI 调用的原生能力", apps))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    Ok(NativeAppResult::err("当前系统暂无原生应用列表"))
+}
+
+// ══════════════════════════════════════════════
+//  Windows 原生能力
+// ══════════════════════════════════════════════
+
+/// 打开 Windows 系统设置页面（供 AI 助手调用）
+#[tauri::command]
+pub async fn win_open_settings(page: Option<String>) -> Result<NativeAppResult, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let uri = page
+            .as_deref()
+            .map(|p| p.trim())
+            .filter(|p| !p.is_empty())
+            .map(|p| format!("ms-settings:{}", p))
+            .unwrap_or_else(|| "ms-settings:".to_string());
+        open::that(&uri).map_err(|e| format!("打开设置失败: {}", e))?;
+        let msg = page
+            .as_deref()
+            .filter(|p| !p.is_empty())
+            .map(|p| format!("已打开设置页面「{}」", p))
+            .unwrap_or_else(|| "已打开系统设置".to_string());
+        Ok(NativeAppResult::ok(msg))
+    }
+    #[cfg(not(target_os = "windows"))]
+    Ok(NativeAppResult::err("win_open_settings 仅支持 Windows"))
 }
 
 // ── 工具函数 ──

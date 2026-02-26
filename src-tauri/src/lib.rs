@@ -4,13 +4,89 @@ pub mod error;
 mod mtplugin;
 
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, PhysicalPosition, Position,
 };
+
+/// 当前生效的全局快捷键（用于 handler 比对与重载时 unregister）
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+struct CurrentShortcuts {
+    toggle: tauri_plugin_global_shortcut::Shortcut,
+    context: tauri_plugin_global_shortcut::Shortcut,
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+impl Default for CurrentShortcuts {
+    fn default() -> Self {
+        use tauri_plugin_global_shortcut::Shortcut;
+        Self {
+            toggle: "Super+Digit2".parse().expect("default toggle shortcut"),
+            context: "Control+Shift+KeyA".parse().expect("default context shortcut"),
+        }
+    }
+}
+
+/// 从 general_settings JSON 重载全局快捷键（保存设置后由前端调用）
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[tauri::command]
+fn reload_global_shortcuts(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
+    use tauri_plugin_store::StoreExt;
+
+    let store = app.store("config.json").map_err(|e| e.to_string())?;
+    let json_str = store
+        .get("general_settings")
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_else(|| "{}".to_string());
+    let json: serde_json::Value = serde_json::from_str(&json_str).unwrap_or(serde_json::json!({}));
+
+    let toggle_str = json
+        .get("shortcutToggle")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Super+Digit2");
+    let context_str = json
+        .get("shortcutContext")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Control+Shift+KeyA");
+
+    let new_toggle: Shortcut = toggle_str
+        .parse()
+        .map_err(|e| format!("无效唤醒快捷键: {}", e))?;
+    let new_context: Shortcut = context_str
+        .parse()
+        .map_err(|e| format!("无效上下文快捷键: {}", e))?;
+
+    let state = app
+        .try_state::<Mutex<CurrentShortcuts>>()
+        .ok_or_else(|| "CurrentShortcuts state not found".to_string())?;
+    let mut cur = state.lock().map_err(|e| e.to_string())?;
+    let _ = app.global_shortcut().unregister(cur.toggle.clone());
+    let _ = app.global_shortcut().unregister(cur.context.clone());
+    if app.global_shortcut().register(new_toggle.clone()).is_err() {
+        log::warn!("全局快捷键 {} 注册失败（可能已被占用）", toggle_str);
+    }
+    if app.global_shortcut().register(new_context.clone()).is_err() {
+        log::warn!("全局快捷键 {} 注册失败（可能已被占用）", context_str);
+    }
+    *cur = CurrentShortcuts {
+        toggle: new_toggle,
+        context: new_context,
+    };
+    Ok(())
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+fn reload_global_shortcuts(_app: tauri::AppHandle) -> Result<(), String> {
+    Ok(())
+}
 
 fn is_subpath_of(path: &std::path::Path, root: &std::path::Path) -> bool {
     path.starts_with(root)
@@ -256,6 +332,7 @@ pub fn run() {
             commands::system::web_search,
             commands::system::save_general_settings,
             commands::system::load_general_settings,
+            reload_global_shortcuts,
             commands::system::clean_old_chat_images,
             commands::system::read_text_file,
             commands::system::read_text_file_range,
@@ -389,6 +466,7 @@ pub fn run() {
             commands::native_apps::native_shortcuts_run,
             commands::native_apps::native_app_open,
             commands::native_apps::native_app_list_interactive,
+            commands::native_apps::win_open_settings,
         ])
         .setup(|app| {
             let suppress_hide = Arc::new(AtomicUsize::new(0));
@@ -433,6 +511,16 @@ fn setup_tray(
                 }
             }
             "quit" => {
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                {
+                    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+                    if let Some(state) = app.try_state::<Mutex<CurrentShortcuts>>() {
+                        if let Ok(cur) = state.lock() {
+                            let _ = app.global_shortcut().unregister(cur.toggle.clone());
+                            let _ = app.global_shortcut().unregister(cur.context.clone());
+                        }
+                    }
+                }
                 app.exit(0);
             }
             _ => {}
@@ -459,40 +547,43 @@ fn setup_tray(
     Ok(())
 }
 
-/// 注册全局快捷键
+/// 注册全局快捷键（使用 CurrentShortcuts 状态，支持后续 reload_global_shortcuts 重载）
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn setup_shortcuts(
     app: &tauri::App,
     suppress_hide: &Arc<AtomicUsize>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use tauri_plugin_global_shortcut::{
-        Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
-    };
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
-    let toggle_shortcut = Shortcut::new(Some(Modifiers::META), Code::Digit2);
-    let context_shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyA);
+    let default = CurrentShortcuts::default();
+    app.manage(Mutex::new(CurrentShortcuts::default()));
 
     let suppress_for_shortcut = suppress_hide.clone();
     app.handle().plugin(
         tauri_plugin_global_shortcut::Builder::new()
             .with_handler(move |app, shortcut, event| {
-                if event.state == ShortcutState::Pressed {
-                    if shortcut == &toggle_shortcut {
-                        if let Some(window) = app.get_webview_window("main") {
-                            if window.is_visible().unwrap_or(false) {
-                                let _ = window.hide();
-                            } else {
-                                show_window(&window, &suppress_for_shortcut);
-                            }
-                        }
-                    }
-                    if shortcut == &context_shortcut {
-                        use tauri_plugin_clipboard_manager::ClipboardExt;
-                        let text = app.clipboard().read_text().unwrap_or_default();
-                        if !text.is_empty() {
-                            use tauri::Emitter;
-                            let _ = app.emit("context-action", serde_json::json!({ "text": text }));
+                if event.state != ShortcutState::Pressed {
+                    return;
+                }
+                if let Some(state) = app.try_state::<Mutex<CurrentShortcuts>>() {
+                    if let Ok(cur) = state.lock() {
+                        if *shortcut == cur.toggle {
                             if let Some(window) = app.get_webview_window("main") {
-                                show_window(&window, &suppress_for_shortcut);
+                                if window.is_visible().unwrap_or(false) {
+                                    let _ = window.hide();
+                                } else {
+                                    show_window(&window, &suppress_for_shortcut);
+                                }
+                            }
+                        } else if *shortcut == cur.context {
+                            use tauri_plugin_clipboard_manager::ClipboardExt;
+                            let text = app.clipboard().read_text().unwrap_or_default();
+                            if !text.is_empty() {
+                                use tauri::Emitter;
+                                let _ = app.emit("context-action", serde_json::json!({ "text": text }));
+                                if let Some(window) = app.get_webview_window("main") {
+                                    show_window(&window, &suppress_for_shortcut);
+                                }
                             }
                         }
                     }
@@ -500,8 +591,20 @@ fn setup_shortcuts(
             })
             .build(),
     )?;
-    app.global_shortcut().register(toggle_shortcut)?;
-    app.global_shortcut().register(context_shortcut)?;
+    if app.global_shortcut().register(default.toggle.clone()).is_err() {
+        log::warn!("全局快捷键 唤醒/隐藏 注册失败（可能已被占用），将不生效");
+    }
+    if app.global_shortcut().register(default.context.clone()).is_err() {
+        log::warn!("全局快捷键 上下文操作 注册失败（可能已被占用），将不生效");
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn setup_shortcuts(
+    _app: &tauri::App,
+    _suppress_hide: &Arc<AtomicUsize>,
+) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 

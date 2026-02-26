@@ -11,6 +11,8 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
+    "tauri:build:win": "node scripts/build-win-with-helper.mjs --build",
+    "helper:copy": "node scripts/build-win-with-helper.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "quality:check": "bash ./scripts/quality-check.sh",

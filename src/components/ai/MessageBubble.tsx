@@ -4,6 +4,7 @@ import { User, Bot, Copy, Check, RefreshCw, Pencil, X } from "lucide-react";
 import type { ChatMessage } from "@/store/ai-store";
 import { useAIStore } from "@/store/ai-store";
 import { ToolCallDisplay } from "./ToolCallDisplay";
+import { pathToMtpluginUrl } from "@/components/tools/ScreenCaptureWidgets";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
@@ -349,11 +350,11 @@ export const MessageBubble = memo(function MessageBubble({
                   {msg.images.map((imgPath, i) => (
                     <img
                       key={i}
-                      src={`mtplugin://localhost${imgPath}`}
+                      src={pathToMtpluginUrl(imgPath)}
                       alt={`图片 ${i + 1}`}
                       className="max-w-[200px] max-h-[200px] object-cover rounded-lg cursor-zoom-in hover:opacity-90 transition-opacity"
                       onClick={() =>
-                        setPreviewImage(`mtplugin://localhost${imgPath}`)
+                        setPreviewImage(pathToMtpluginUrl(imgPath))
                       }
                     />
                   ))}

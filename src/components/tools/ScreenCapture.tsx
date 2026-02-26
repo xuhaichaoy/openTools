@@ -25,6 +25,7 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
     mode, setMode,
     step, setStep,
     status,
+    checkStatus,
     downloading,
     downloadProgress,
     monitors,
@@ -79,6 +80,13 @@ export function ScreenCapture({ onBack }: ScreenCaptureProps) {
               </button>
             )}
             {error && <p className="text-xs text-red-400 mt-1">{error}</p>}
+            <button
+              type="button"
+              onClick={() => checkStatus()}
+              className="text-[10px] text-[var(--color-text-secondary)] hover:text-[var(--color-text)] mt-1 underline"
+            >
+              若已本地安装或已复制到 bin，点击重新检测
+            </button>
           </div>
           <div className="mt-4 text-[10px] text-[var(--color-text-secondary)] space-y-1">
             <p>• 首次使用需下载截图录屏引擎</p>

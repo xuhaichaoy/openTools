@@ -36,6 +36,10 @@ pub fn get_tools(enable_advanced: bool, enable_native: bool) -> Vec<serde_json::
     if enable_native {
         tools.extend(get_native_app_tools());
     }
+    #[cfg(target_os = "windows")]
+    if enable_native {
+        tools.extend(definitions::get_native_app_tools_windows());
+    }
     tools
 }
 
@@ -47,9 +51,11 @@ pub fn get_system_prompt(
 ) -> String {
     #[cfg(target_os = "macos")]
     let native_tools_enabled = enable_native;
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    let native_tools_enabled = enable_native;
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let native_tools_enabled = false;
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = enable_native;
 
     let mut base = format!(
@@ -80,6 +86,7 @@ pub fn get_system_prompt(
         IDENTITY_GUARDRAIL
     );
 
+    #[cfg(target_os = "macos")]
     if native_tools_enabled {
         base.push_str("\n你拥有强大的本机应用交互能力：\n\
      - 日历：创建日程事件、查看今日/近期日程（native_calendar_create_event, native_calendar_list_events）\n\
@@ -90,6 +97,14 @@ pub fn get_system_prompt(
      - 打开应用：启动或切换到任意应用（native_app_open）\n\
      当用户说「定一个日程」「提醒我」「记一下」「发邮件」等，应自动识别意图并调用对应的原生应用工具。\n\
      调用前先从用户描述中提取关键信息（时间、标题、内容等），缺少必要信息时简短追问。\n");
+    }
+    #[cfg(target_os = "windows")]
+    if native_tools_enabled {
+        base.push_str("\n你拥有 Windows 原生能力：\n\
+     - 打开系统设置：win_open_settings(page) 可打开显示/网络/蓝牙/通知/声音/存储/应用/隐私/更新等页面\n\
+     - 打开应用：native_app_open(app_name) 可启动记事本、计算器、资源管理器、cmd、PowerShell 等\n\
+     - 查看能力列表：native_app_list_interactive 可列出当前可调用的原生能力\n\
+     当用户说「打开设置」「改显示」「改网络」「打开记事本」等，应调用对应工具。\n");
     }
 
     let mut prompt = if enable_advanced {

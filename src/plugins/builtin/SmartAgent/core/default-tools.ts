@@ -504,6 +504,52 @@ function createNativeAppTools(): AgentTool[] {
   ];
 }
 
+/** Windows 原生能力：打开系统设置、打开应用等（仅 Windows 显示） */
+function createWindowsNativeTools(): AgentTool[] {
+  return [
+    {
+      name: "win_open_settings",
+      description:
+        "打开 Windows 系统设置页面。用户要求打开设置、修改显示/网络/蓝牙/通知等时使用。",
+      parameters: {
+        page: {
+          type: "string",
+          description:
+            "设置页面标识。常用: display(显示), network(网络), bluetooth(蓝牙), notifications(通知), sound(声音), storage(存储), apps(应用), defaultapps(默认应用), privacy(隐私), update(更新)。不填则打开设置首页。",
+          required: false,
+        },
+      },
+      execute: async (params) =>
+        invokeTauri("win_open_settings", {
+          page: params.page ? String(params.page) : null,
+        }),
+    },
+    {
+      name: "native_app_open",
+      description:
+        "打开或激活一个已安装的应用程序。如：记事本(notepad)、计算器(calc)、资源管理器(explorer)、cmd、PowerShell(powershell)、Edge(msedge)、Chrome(chrome) 等。",
+      parameters: {
+        app_name: {
+          type: "string",
+          description:
+            "应用名称或可执行文件名，如 notepad、calc、explorer、cmd、powershell、msedge、chrome 等",
+        },
+      },
+      execute: async (params) =>
+        invokeTauri("native_app_open", {
+          appName: String(params.app_name ?? ""),
+        }),
+    },
+    {
+      name: "native_app_list_interactive",
+      description:
+        "列出 Windows 上可供 AI 调用的原生能力（打开设置、打开应用等）。用户问「能做什么」「有哪些功能」时调用。",
+      readonly: true,
+      execute: async () => invokeTauri("native_app_list_interactive"),
+    },
+  ];
+}
+
 export interface AskUserQuestion {
   id: string;
   question: string;
@@ -921,6 +967,13 @@ export function createBuiltinAgentTools(
     navigator.platform.toLowerCase().includes("mac");
   if (isMac) {
     tools.push(...createNativeAppTools());
+  }
+
+  const isWin =
+    typeof navigator !== "undefined" &&
+    navigator.platform.toLowerCase().includes("win");
+  if (isWin) {
+    tools.push(...createWindowsNativeTools());
   }
 
   return {

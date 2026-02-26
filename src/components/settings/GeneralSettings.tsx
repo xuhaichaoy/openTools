@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import {
   Monitor,
   Keyboard,
@@ -23,6 +23,8 @@ interface AppSettings {
   alwaysOnTop: boolean;
   developerMode: boolean;
   theme: "light" | "dark";
+  shortcutToggle: string;
+  shortcutContext: string;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -31,6 +33,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   alwaysOnTop: true,
   developerMode: false,
   theme: "light",
+  shortcutToggle: "Super+Digit2",
+  shortcutContext: "Control+Shift+KeyA",
 };
 
 async function loadSettings(): Promise<AppSettings> {
@@ -52,6 +56,98 @@ async function saveSettings(settings: AppSettings): Promise<void> {
   }
 }
 
+/** 将 KeyboardEvent 转换为 Tauri 快捷键格式，如 "Super+Digit2" */
+function buildShortcutString(e: React.KeyboardEvent): string | null {
+  const MODIFIER_CODES = new Set([
+    "ControlLeft", "ControlRight",
+    "ShiftLeft", "ShiftRight",
+    "AltLeft", "AltRight",
+    "MetaLeft", "MetaRight",
+  ]);
+  if (MODIFIER_CODES.has(e.code)) return null;
+
+  const mods: string[] = [];
+  if (e.metaKey) mods.push("Super");
+  if (e.ctrlKey) mods.push("Control");
+  if (e.altKey) mods.push("Alt");
+  if (e.shiftKey) mods.push("Shift");
+
+  if (mods.length === 0) return null;
+  return [...mods, e.code].join("+");
+}
+
+/** 将内部格式 "Super+Digit2" 转换为友好展示文本 */
+function displayShortcut(raw: string): string {
+  if (!raw) return "";
+  return raw
+    .split("+")
+    .map((part) => {
+      if (part === "Super") return "⌘/Win";
+      if (part === "Control") return "Ctrl";
+      if (part === "Alt") return "Alt";
+      if (part === "Shift") return "⇧";
+      if (part.startsWith("Key")) return part.slice(3);
+      if (part.startsWith("Digit")) return part.slice(5);
+      return part;
+    })
+    .join(" + ");
+}
+
+interface ShortcutRecorderProps {
+  value: string;
+  onChange: (val: string) => void;
+  label: string;
+}
+
+function ShortcutRecorder({ value, onChange, label }: ShortcutRecorderProps) {
+  const [capturing, setCapturing] = useState(false);
+  const inputRef = useRef<HTMLButtonElement>(null);
+
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const shortcut = buildShortcutString(e);
+      if (shortcut) {
+        onChange(shortcut);
+        setCapturing(false);
+        inputRef.current?.blur();
+      }
+    },
+    [onChange],
+  );
+
+  return (
+    <div>
+      <label className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)] mb-1">
+        <Keyboard className="w-3.5 h-3.5" />
+        {label}
+      </label>
+      <button
+        ref={inputRef}
+        onFocus={() => setCapturing(true)}
+        onBlur={() => setCapturing(false)}
+        onKeyDown={capturing ? handleKeyDown : undefined}
+        className={`w-full text-left bg-[var(--color-bg-secondary)] text-sm font-mono rounded-lg px-3 py-2 outline-none border transition-colors ${
+          capturing
+            ? "border-[var(--color-accent)] text-[var(--color-accent)]"
+            : "border-[var(--color-border)] text-[var(--color-text)] hover:border-[var(--color-accent)]"
+        }`}
+        aria-label={label}
+      >
+        {capturing ? (
+          <span className="opacity-60 text-xs">按下快捷键组合...</span>
+        ) : (
+          displayShortcut(value) || <span className="opacity-40 text-xs">点击设置快捷键</span>
+        )}
+      </button>
+      <p className="text-[10px] text-[var(--color-text-secondary)] mt-1 opacity-60">
+        点击后按下快捷键组合（需包含修饰键）· 当前: {value}
+      </p>
+    </div>
+  );
+}
+
 type UpdateStatus =
   | "idle"
   | "checking"
@@ -69,6 +165,7 @@ export function GeneralSettings() {
   const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [updateError, setUpdateError] = useState("");
+  const [shortcutSaveMsg, setShortcutSaveMsg] = useState("");
 
   useEffect(() => {
     loadSettings().then((s) => {
@@ -134,6 +231,19 @@ export function GeneralSettings() {
     }
   };
 
+  const updateShortcut = async (key: "shortcutToggle" | "shortcutContext", value: string) => {
+    const next = { ...settings, [key]: value };
+    setSettings(next);
+    await saveSettings(next);
+    try {
+      await invoke("reload_global_shortcuts");
+      setShortcutSaveMsg("快捷键已更新");
+    } catch (e) {
+      setShortcutSaveMsg(`更新失败: ${e}`);
+    }
+    setTimeout(() => setShortcutSaveMsg(""), 2500);
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-8">
@@ -151,26 +261,33 @@ export function GeneralSettings() {
         </h3>
       </div>
 
-      {/* 快捷键 */}
-      <div>
-        <label className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)] mb-1">
+      {/* 全局快捷键设置 */}
+      <div className="space-y-3">
+        <div className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)]">
           <Keyboard className="w-3.5 h-3.5" />
-          全局唤醒快捷键
-        </label>
-        <input
-          type="text"
-          className="w-full bg-[var(--color-bg-secondary)] text-[var(--color-text)] text-sm font-mono rounded-lg px-3 py-2 outline-none border border-[var(--color-border)] focus:border-[var(--color-accent)]"
-          value="Command + 2"
-          readOnly
-          aria-label="全局唤醒快捷键"
+          <span>全局快捷键</span>
+          {shortcutSaveMsg && (
+            <span className={`ml-auto text-[10px] ${shortcutSaveMsg.startsWith("更新失败") ? "text-red-400" : "text-green-500"}`}>
+              {shortcutSaveMsg}
+            </span>
+          )}
+        </div>
+
+        <ShortcutRecorder
+          label="唤醒 / 隐藏窗口"
+          value={settings.shortcutToggle}
+          onChange={(v) => updateShortcut("shortcutToggle", v)}
         />
-        <p className="text-[10px] text-[var(--color-text-secondary)] mt-1 opacity-60">
-          暂不支持自定义，后续版本开放
-        </p>
+
+        <ShortcutRecorder
+          label="上下文操作（选中文本后触发）"
+          value={settings.shortcutContext}
+          onChange={(v) => updateShortcut("shortcutContext", v)}
+        />
       </div>
 
       {/* 开关选项 */}
-      <div className="space-y-3">
+      <div className="space-y-3 pt-3 border-t border-[var(--color-border)]">
         <label className="flex items-center justify-between cursor-pointer">
           <span className="text-xs text-[var(--color-text)]">
             失焦自动隐藏窗口
@@ -261,13 +378,13 @@ export function GeneralSettings() {
           <div className="flex justify-between">
             <span>唤醒/隐藏窗口</span>
             <kbd className="px-1.5 py-0.5 bg-[var(--color-bg-secondary)] rounded font-mono">
-              Command + 2
+              {displayShortcut(settings.shortcutToggle)}
             </kbd>
           </div>
           <div className="flex justify-between">
             <span>上下文操作（选中文本后）</span>
             <kbd className="px-1.5 py-0.5 bg-[var(--color-bg-secondary)] rounded font-mono">
-              Ctrl + Shift + A
+              {displayShortcut(settings.shortcutContext)}
             </kbd>
           </div>
           <div className="flex justify-between">
@@ -306,7 +423,6 @@ export function GeneralSettings() {
           </button>
         </div>
 
-        {/* 更新状态提示 */}
         {updateStatus === "up-to-date" && (
           <div className="flex items-center gap-1.5 text-[10px] text-green-500">
             <CheckCircle className="w-3 h-3" />

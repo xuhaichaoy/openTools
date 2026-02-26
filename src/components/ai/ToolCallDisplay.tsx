@@ -17,6 +17,9 @@ const TOOL_LABELS: Record<string, string> = {
   open_url: '打开网址',
   open_path: '打开文件/目录',
   get_running_processes: '获取进程列表',
+  win_open_settings: '打开系统设置',
+  native_app_open: '打开应用',
+  native_app_list_interactive: '列出原生能力',
 }
 
 export function ToolCallDisplay({ toolCalls }: { toolCalls: ToolCallInfo[] }) {

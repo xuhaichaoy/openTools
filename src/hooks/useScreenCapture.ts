@@ -388,6 +388,7 @@ export function useScreenCapture() {
     mode, setMode,
     step, setStep,
     status,
+    checkStatus,
     downloading,
     downloadProgress,
     monitors,

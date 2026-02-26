@@ -1,3 +1,4 @@
+import { useState, useEffect } from "react";
 import {
   ArrowLeft,
   AppWindow,
@@ -5,8 +6,87 @@ import {
   Save,
   FileImage,
   FileText,
+  Loader2,
 } from "lucide-react";
+import { readFile } from "@tauri-apps/plugin-fs";
 import type { WindowInfo } from "@/hooks/useScreenCapture";
+
+/**
+ * 将本地绝对路径转换为 mtplugin:// URL
+ * 兼容 Windows（C:\...）和 macOS/Linux（/...）
+ */
+export function pathToMtpluginUrl(filePath: string): string {
+  // Normalize: Windows backslashes → forward slashes
+  const normalized = filePath.replace(/\\/g, "/");
+  // Ensure leading slash
+  const withSlash = normalized.startsWith("/") ? normalized : `/${normalized}`;
+  // Percent-encode each segment (preserve : for Windows drive letters like C:)
+  const encoded = withSlash
+    .split("/")
+    .map((seg) => encodeURIComponent(seg).replace(/%3A/gi, ":"))
+    .join("/");
+  return `mtplugin://localhost${encoded}?t=${Date.now()}`;
+}
+
+/**
+ * 截图预览组件
+ * 使用 Tauri FS 读取文件后转为 blob URL，彻底绕过协议/CSP/白名单限制
+ */
+function ScreenshotPreview({ path }: { path: string }) {
+  const [blobUrl, setBlobUrl] = useState<string>("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let url = "";
+    setLoading(true);
+    setError("");
+    setBlobUrl("");
+
+    readFile(path)
+      .then((bytes) => {
+        const ext = path.split(".").pop()?.toLowerCase() ?? "png";
+        const mime =
+          ext === "jpg" || ext === "jpeg"
+            ? "image/jpeg"
+            : ext === "gif"
+              ? "image/gif"
+              : "image/png";
+        const blob = new Blob([bytes], { type: mime });
+        url = URL.createObjectURL(blob);
+        setBlobUrl(url);
+      })
+      .catch((e) => {
+        console.error("[ScreenshotPreview] 读取文件失败:", path, e);
+        setError(String(e));
+      })
+      .finally(() => setLoading(false));
+
+    return () => {
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [path]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-10">
+        <Loader2 className="w-6 h-6 animate-spin text-blue-400" />
+      </div>
+    );
+  }
+
+  if (error || !blobUrl) {
+    return (
+      <div className="p-3 text-xs text-red-400 space-y-1">
+        <div>图片加载失败</div>
+        <div className="opacity-60 break-all">{path}</div>
+        {error && <div className="opacity-60">{error}</div>}
+      </div>
+    );
+  }
+
+  return <img src={blobUrl} className="w-full" alt="截图预览" />;
+}
 
 export function Header({
   onBack,
@@ -120,11 +200,7 @@ export function PreviewPanel({
             录制完成：{path.split("/").pop()}
           </div>
         ) : (
-          <img
-            src={`mtplugin://localhost${path}?t=${new Date().getTime()}`}
-            className="w-full"
-            alt="截图预览"
-          />
+          <ScreenshotPreview path={path} />
         )}
       </div>
 

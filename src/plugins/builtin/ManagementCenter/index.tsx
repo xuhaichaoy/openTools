@@ -1,4 +1,4 @@
-import { useState, useEffect, type CSSProperties } from "react";
+import { useState, useEffect, useRef, useCallback, type CSSProperties } from "react";
 import {
   User,
   Database,
@@ -18,6 +18,7 @@ import {
   Sun,
   Moon,
   Info,
+  Keyboard,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
@@ -436,6 +437,8 @@ interface AppSettings {
   alwaysOnTop: boolean;
   developerMode: boolean;
   theme: "light" | "dark";
+  shortcutToggle: string;
+  shortcutContext: string;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -444,11 +447,100 @@ const DEFAULT_SETTINGS: AppSettings = {
   alwaysOnTop: true,
   developerMode: false,
   theme: "light",
+  shortcutToggle: "Super+Digit2",
+  shortcutContext: "Control+Shift+KeyA",
 };
+
+/** 将 KeyboardEvent 转换为 Tauri 快捷键格式，如 "Super+Digit2" */
+function buildShortcutString(e: React.KeyboardEvent): string | null {
+  const MODIFIER_CODES = new Set([
+    "ControlLeft", "ControlRight",
+    "ShiftLeft", "ShiftRight",
+    "AltLeft", "AltRight",
+    "MetaLeft", "MetaRight",
+  ]);
+  if (MODIFIER_CODES.has(e.code)) return null;
+  const mods: string[] = [];
+  if (e.metaKey) mods.push("Super");
+  if (e.ctrlKey) mods.push("Control");
+  if (e.altKey) mods.push("Alt");
+  if (e.shiftKey) mods.push("Shift");
+  if (mods.length === 0) return null;
+  return [...mods, e.code].join("+");
+}
+
+/** 将内部格式 "Super+Digit2" 转换为友好展示文本 */
+function displayShortcut(raw: string): string {
+  if (!raw) return "";
+  return raw
+    .split("+")
+    .map((part) => {
+      if (part === "Super") return "⌘/Win";
+      if (part === "Control") return "Ctrl";
+      if (part === "Alt") return "Alt";
+      if (part === "Shift") return "⇧";
+      if (part.startsWith("Key")) return part.slice(3);
+      if (part.startsWith("Digit")) return part.slice(5);
+      return part;
+    })
+    .join(" + ");
+}
+
+function ShortcutRecorder({
+  value,
+  onChange,
+  label,
+}: {
+  value: string;
+  onChange: (val: string) => void;
+  label: string;
+}) {
+  const [capturing, setCapturing] = useState(false);
+  const btnRef = useRef<HTMLButtonElement>(null);
+
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const shortcut = buildShortcutString(e);
+      if (shortcut) {
+        onChange(shortcut);
+        setCapturing(false);
+        btnRef.current?.blur();
+      }
+    },
+    [onChange],
+  );
+
+  return (
+    <div className="flex items-center justify-between px-3 py-2">
+      <div className="flex items-center gap-1.5">
+        <Keyboard className="w-3 h-3 text-[var(--color-text-secondary)]" />
+        <span className="text-xs font-medium">{label}</span>
+      </div>
+      <button
+        ref={btnRef}
+        onFocus={() => setCapturing(true)}
+        onBlur={() => setCapturing(false)}
+        onKeyDown={capturing ? handleKeyDown : undefined}
+        className={`text-xs font-mono px-2.5 py-1 rounded-lg border transition-colors outline-none min-w-[130px] text-right ${
+          capturing
+            ? "border-[var(--color-accent)] text-[var(--color-accent)] bg-[var(--color-bg-secondary)]"
+            : "border-[var(--color-border)] text-[var(--color-text-secondary)] bg-[var(--color-bg-secondary)] hover:border-[var(--color-accent)]"
+        }`}
+        style={capturing ? { borderColor: BRAND, color: BRAND } : undefined}
+        title="点击后按下快捷键组合"
+      >
+        {capturing ? "按下组合键…" : displayShortcut(value)}
+      </button>
+    </div>
+  );
+}
 
 function GeneralSettingsTab() {
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [loading, setLoading] = useState(true);
+  const [shortcutMsg, setShortcutMsg] = useState("");
 
   useEffect(() => {
     (async () => {
@@ -475,6 +567,19 @@ function GeneralSettingsTab() {
     if (key === "theme") {
       document.documentElement.setAttribute("data-theme", value as string);
     }
+  };
+
+  const updateShortcut = async (key: "shortcutToggle" | "shortcutContext", value: string) => {
+    const next = { ...settings, [key]: value };
+    setSettings(next);
+    try {
+      await invoke("save_general_settings", { settings: JSON.stringify(next) });
+      await invoke("reload_global_shortcuts");
+      setShortcutMsg("快捷键已更新 ✓");
+    } catch (e) {
+      setShortcutMsg(`更新失败: ${e}`);
+    }
+    setTimeout(() => setShortcutMsg(""), 2500);
   };
 
   if (loading) {
@@ -580,35 +685,38 @@ function GeneralSettingsTab() {
         </div>
       </div>
 
-      {/* 快捷键说明 */}
-      <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-[var(--space-compact-3)]">
-        <div className="flex items-center gap-2 mb-3">
-          <Info className="w-3.5 h-3.5" style={{ color: BRAND }} />
-          <span className="text-xs font-medium">快捷键说明</span>
+      {/* 全局快捷键 */}
+      <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] overflow-hidden divide-y divide-[var(--color-border)]">
+        <div className="flex items-center justify-between px-3 py-2.5">
+          <div className="flex items-center gap-2">
+            <Info className="w-3.5 h-3.5" style={{ color: BRAND }} />
+            <span className="text-xs font-medium">全局快捷键</span>
+          </div>
+          {shortcutMsg && (
+            <span className={`text-[10px] ${shortcutMsg.startsWith("更新失败") ? "text-red-400" : "text-green-500"}`}>
+              {shortcutMsg}
+            </span>
+          )}
         </div>
-        <div className="space-y-2 text-[10px] text-[var(--color-text-secondary)]">
-          <div className="flex justify-between">
-            <span>唤醒/隐藏窗口</span>
-            <kbd className="px-1.5 py-0.5 bg-[var(--color-bg-secondary)] rounded font-mono">
-              Command + 2
-            </kbd>
-          </div>
-          <div className="flex justify-between">
-            <span>上下文操作（选中文本后）</span>
-            <kbd className="px-1.5 py-0.5 bg-[var(--color-bg-secondary)] rounded font-mono">
-              Ctrl + Shift + A
-            </kbd>
-          </div>
-          <div className="flex justify-between">
-            <span>返回搜索框</span>
-            <kbd className="px-1.5 py-0.5 bg-[var(--color-bg-secondary)] rounded font-mono">
-              Esc
-            </kbd>
-          </div>
+        <ShortcutRecorder
+          label="唤醒 / 隐藏窗口"
+          value={settings.shortcutToggle}
+          onChange={(v) => updateShortcut("shortcutToggle", v)}
+        />
+        <ShortcutRecorder
+          label="上下文操作（选中文本后）"
+          value={settings.shortcutContext}
+          onChange={(v) => updateShortcut("shortcutContext", v)}
+        />
+        <div className="flex justify-between items-center px-3 py-2 text-[10px] text-[var(--color-text-secondary)]">
+          <span>返回搜索框</span>
+          <kbd className="px-1.5 py-0.5 bg-[var(--color-bg-secondary)] rounded font-mono border border-[var(--color-border)]">Esc</kbd>
         </div>
-        <p className="text-[10px] text-[var(--color-text-secondary)] mt-2 opacity-60">
-          自定义快捷键功能暂不支持，后续版本开放
-        </p>
+        <div className="px-3 py-2">
+          <p className="text-[10px] text-[var(--color-text-secondary)] opacity-60">
+            点击快捷键按钮后，按下新的组合键（需含修饰键）即可更新，立即生效
+          </p>
+        </div>
       </div>
 
       {/* 版本信息 */}

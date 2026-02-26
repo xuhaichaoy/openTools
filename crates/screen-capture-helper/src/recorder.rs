@@ -51,15 +51,17 @@ pub fn start_gif_recording(
     event_sender: &std::sync::mpsc::Sender<String>,
 ) -> Result<(), String> {
     let monitors = Monitor::all().map_err(|e| format!("枚举显示器失败: {e}"))?;
-    let monitor = if let Some(id) = monitor_id {
-        monitors.get(id as usize)
-            .ok_or_else(|| format!("显示器 {} 不存在", id))?
-            .clone()
+    let monitor_index = if let Some(id) = monitor_id {
+        let i = id as usize;
+        if i >= monitors.len() {
+            return Err(format!("显示器 {} 不存在", id));
+        }
+        i
     } else {
-        monitors.iter().find(|m| m.is_primary().unwrap_or(false))
-            .or_else(|| monitors.first())
-            .ok_or_else(|| "没有找到显示器".to_string())?
-            .clone()
+        monitors.iter()
+            .position(|m| m.is_primary().unwrap_or(false))
+            .or(Some(0))
+            .unwrap_or(0)
     };
 
     let fps = fps.max(1).min(30);
@@ -85,8 +87,29 @@ pub fn start_gif_recording(
     let stop_flag = RECORDER.lock().unwrap().stop_flag.clone();
     let pause_flag = RECORDER.lock().unwrap().pause_flag.clone();
 
-    // 在新线程中录制
+    // 在新线程中录制（在线程内按索引取 Monitor，避免把非 Send 的 HMONITOR 跨线程）
     std::thread::spawn(move || {
+        let monitors = match Monitor::all() {
+            Ok(m) => m,
+            Err(e) => {
+                let _ = sender.send(serde_json::json!({
+                    "id": null, "event": "recorder_error",
+                    "data": { "error": format!("枚举显示器失败: {e}") }
+                }).to_string());
+                return;
+            }
+        };
+        let monitor = match monitors.get(monitor_index) {
+            Some(m) => m.clone(),
+            None => {
+                let _ = sender.send(serde_json::json!({
+                    "id": null, "event": "recorder_error",
+                    "data": { "error": "显示器不存在" }
+                }).to_string());
+                return;
+            }
+        };
+
         let mut frames: Vec<(Vec<u8>, u32, u32, u16)> = Vec::new(); // (rgba, w, h, delay)
         let mut last_capture = Instant::now();
 
@@ -200,29 +223,30 @@ pub fn start_mp4_recording(
     event_sender: &std::sync::mpsc::Sender<String>,
 ) -> Result<(), String> {
     let monitors = Monitor::all().map_err(|e| format!("枚举显示器失败: {e}"))?;
-    let monitor = if let Some(id) = monitor_id {
-        monitors.get(id as usize)
-            .ok_or_else(|| format!("显示器 {} 不存在", id))?
-            .clone()
+    let monitor_index = if let Some(id) = monitor_id {
+        let i = id as usize;
+        if i >= monitors.len() {
+            return Err(format!("显示器 {} 不存在", id));
+        }
+        i
     } else {
-        monitors.iter().find(|m| m.is_primary().unwrap_or(false))
-            .or_else(|| monitors.first())
-            .ok_or_else(|| "没有找到显示器".to_string())?
-            .clone()
+        monitors.iter()
+            .position(|m| m.is_primary().unwrap_or(false))
+            .or(Some(0))
+            .unwrap_or(0)
     };
+
+    let monitor_ref = monitors.get(monitor_index).unwrap();
+    let cap_w = monitor_ref.width().unwrap_or(1920);
+    let cap_h = monitor_ref.height().unwrap_or(1080);
+    let enc_w = cap_w & !1;
+    let enc_h = cap_h & !1;
 
     let fps = fps.max(1).min(60);
     let frame_interval = Duration::from_millis(1000 / fps as u64);
     let output = output_path.to_string();
     let ffmpeg = ffmpeg_path.to_string();
     let sender = event_sender.clone();
-
-    // 获取显示器尺寸
-    let cap_w = monitor.width().unwrap_or(1920);
-    let cap_h = monitor.height().unwrap_or(1080);
-    // 确保宽高是偶数 (H.264 要求)
-    let enc_w = cap_w & !1;
-    let enc_h = cap_h & !1;
 
     // 设置录制状态
     {
@@ -244,6 +268,27 @@ pub fn start_mp4_recording(
     std::thread::spawn(move || {
         use std::io::Write;
         use std::process::{Command, Stdio};
+
+        let monitors = match Monitor::all() {
+            Ok(m) => m,
+            Err(e) => {
+                let _ = sender.send(serde_json::json!({
+                    "id": null, "event": "recorder_error",
+                    "data": { "error": format!("枚举显示器失败: {e}") }
+                }).to_string());
+                return;
+            }
+        };
+        let monitor = match monitors.get(monitor_index) {
+            Some(m) => m.clone(),
+            None => {
+                let _ = sender.send(serde_json::json!({
+                    "id": null, "event": "recorder_error",
+                    "data": { "error": "显示器不存在" }
+                }).to_string());
+                return;
+            }
+        };
 
         // 启动 ffmpeg 进程
         let mut child = match Command::new(&ffmpeg)
