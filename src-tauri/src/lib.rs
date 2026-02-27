@@ -1,3 +1,4 @@
+pub mod branding;
 mod commands;
 pub mod crypto;
 pub mod error;
@@ -501,7 +502,7 @@ fn setup_tray(
     let suppress_for_tray = suppress_hide.clone();
     let mut tray_builder = TrayIconBuilder::new()
         .menu(&menu)
-        .tooltip("mTools")
+        .tooltip(branding::APP_NAME)
         .on_menu_event(move |app, event| match event.id.as_ref() {
             "show" => {
                 if let Some(window) = app.get_webview_window("main") {

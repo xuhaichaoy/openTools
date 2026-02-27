@@ -56,7 +56,7 @@ fn get_latest_release() -> Option<UpdateManifest> {
             PlatformUpdate {
                 signature: sig,
                 url: format!(
-                    "{}/mTools_{}_aarch64.dmg.tar.gz",
+                    "{}/51ToolBox_{}_aarch64.dmg.tar.gz",
                     base_url, version
                 ),
             },
@@ -70,7 +70,7 @@ fn get_latest_release() -> Option<UpdateManifest> {
             PlatformUpdate {
                 signature: sig,
                 url: format!(
-                    "{}/mTools_{}_x64.dmg.tar.gz",
+                    "{}/51ToolBox_{}_x64.dmg.tar.gz",
                     base_url, version
                 ),
             },
@@ -84,7 +84,7 @@ fn get_latest_release() -> Option<UpdateManifest> {
             PlatformUpdate {
                 signature: sig,
                 url: format!(
-                    "{}/mTools_{}_x64-setup.nsis.zip",
+                    "{}/51ToolBox_{}_x64-setup.nsis.zip",
                     base_url, version
                 ),
             },
@@ -98,7 +98,7 @@ fn get_latest_release() -> Option<UpdateManifest> {
             PlatformUpdate {
                 signature: sig,
                 url: format!(
-                    "{}/mTools_{}_amd64.AppImage.tar.gz",
+                    "{}/51ToolBox_{}_amd64.AppImage.tar.gz",
                     base_url, version
                 ),
             },

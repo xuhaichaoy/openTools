@@ -23,6 +23,7 @@ import {
 } from "@/components/icons/animated";
 
 import { createElement } from "react";
+import { APP_CLOUD_NAME } from "@/config/app-branding";
 
 // ── 壳组件 (懒加载) ──
 const DevToolbox = lazy(() =>
@@ -476,7 +477,7 @@ export const builtinPlugins: MToolsPlugin[] = [
     id: "cloud-sync",
     tier: "extension",
     name: "云同步",
-    description: "mTools Cloud 个人云同步",
+    description: `${APP_CLOUD_NAME} 个人云同步`,
     icon: createElement(CloudSyncIcon, { className: "w-6 h-6" }),
     color: "text-sky-500 bg-sky-500/10",
     category: "系统",

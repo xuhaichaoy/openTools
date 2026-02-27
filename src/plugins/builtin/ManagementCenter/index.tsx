@@ -27,6 +27,7 @@ import { useAuthStore } from "@/store/auth-store";
 import type { User as AuthUser } from "@/store/auth-store";
 import { api } from "@/core/api/client";
 import type { MToolsPluginProps } from "@/core/plugin-system/plugin-interface";
+import { APP_NAME, APP_TECH_STACK, APP_VERSION } from "@/config/app-branding";
 import { AIModelTab } from "./components/AIModelTab";
 import { TeamTab } from "./components/TeamTab";
 import { MyDataTab } from "./components/MyDataTab";
@@ -721,9 +722,9 @@ function GeneralSettingsTab() {
 
       {/* 版本信息 */}
       <div className="text-center pt-2">
-        <div className="text-xs text-[var(--color-text)]">mTools</div>
+        <div className="text-xs text-[var(--color-text)]">{APP_NAME}</div>
         <div className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
-          v0.1.0 · Tauri v2 + React 19
+          v{APP_VERSION} · {APP_TECH_STACK}
         </div>
       </div>
     </div>

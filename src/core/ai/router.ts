@@ -51,8 +51,8 @@ export function getRoutedConfig(config: AIConfig): AIConfig {
 /**
  * 根据 AI 来源配置路由请求
  * - own_key: 直接使用用户配置的 API Key
- * - platform: 通过 mTools 服务器代理（消耗能量）
- * - team: 通过 mTools 服务器的团队代理（使用团队 Key）
+ * - platform: 通过 51ToolBox 服务器代理（消耗能量）
+ * - team: 通过 51ToolBox 服务器的团队代理（使用团队 Key）
  */
 export async function routeAIRequest(options: RouteOptions) {
   const { messages, config, conversationId, token } = options;

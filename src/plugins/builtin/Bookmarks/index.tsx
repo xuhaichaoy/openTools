@@ -13,6 +13,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useBookmarkStore, type Bookmark } from "@/store/bookmark-store";
 import { invoke } from "@tauri-apps/api/core";
 import { handleError } from "@/core/errors";
+import { APP_NAME, APP_NAME_EN } from "@/config/app-branding";
 import {
   Plus,
   Search,
@@ -135,7 +136,7 @@ export default function BookmarksPlugin({ onBack }: { onBack: () => void }) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "mtools-bookmarks.json";
+    a.download = `${APP_NAME_EN.toLowerCase()}-bookmarks.json`;
     a.click();
     URL.revokeObjectURL(url);
   }, [exportBookmarks]);
@@ -253,7 +254,7 @@ export default function BookmarksPlugin({ onBack }: { onBack: () => void }) {
                   className="w-full text-left px-3 py-1.5 text-xs hover:bg-[var(--color-bg-hover)] transition-colors flex items-center gap-2"
                 >
                   <Download className="w-3 h-3 text-green-400" />
-                  从 mTools JSON 导入
+                  从 {APP_NAME} JSON 导入
                 </button>
               </div>
             )}

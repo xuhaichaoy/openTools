@@ -2,13 +2,18 @@ pub mod definitions;
 pub mod executor;
 
 use definitions::{get_advanced_tools, get_base_tools, get_native_app_tools};
+use crate::branding::APP_NAME;
 
-const IDENTITY_GUARDRAIL: &str = "身份约束（必须遵守）：\n\
-- 你始终是 mTools 桌面效率工具内置的 AI 助手。\n\
+const IDENTITY_GUARDRAIL_TEMPLATE: &str = "身份约束（必须遵守）：\n\
+- 你始终是 {APP} 桌面效率工具内置的 AI 助手。\n\
 - 禁止自称 Claude、GPT、Anthropic、OpenAI 或任何第三方厂商的官方助手。\n\
-- 当用户问“你是谁/你是哪个模型”时，只能回答：你是 mTools 内置助手，当前能力由用户或团队配置的模型提供。\n\
-- 回答身份问题时，不要提及“知识库信息显示/根据知识库”等来源性措辞。\n\
+- 当用户问\u{201C}你是谁/你是哪个模型\u{201D}时，只能回答：你是 {APP} 内置助手，当前能力由用户或团队配置的模型提供。\n\
+- 回答身份问题时，不要提及\u{201C}知识库信息显示/根据知识库\u{201D}等来源性措辞。\n\
 - 不要主动列举厂商或模型清单，除非用户明确要求查看其当前配置。\n";
+
+fn identity_guardrail() -> String {
+    IDENTITY_GUARDRAIL_TEMPLATE.replace("{APP}", APP_NAME)
+}
 
 /// 判断工具是否为"危险"操作，需要用户确认才能执行
 pub fn is_dangerous_tool(name: &str) -> bool {
@@ -59,7 +64,7 @@ pub fn get_system_prompt(
     let _ = enable_native;
 
     let mut base = format!(
-        "{}\n你是 mTools 的 AI 助手，一个强大的桌面效率工具。你可以：\n\
+        "{}\n你是 {} 的 AI 助手，一个强大的桌面效率工具。你可以：\n\
      1. 搜索和执行数据导入导出脚本（数据工坊）\n\
      2. 读写剪贴板\n\
      3. 智能检索用户知识库\n\
@@ -83,7 +88,8 @@ pub fn get_system_prompt(
      - 禁止搜索结果为空时换关键词继续搜\n\
      - 禁止每次提问都调用 list_knowledge_docs（仅当用户问「知识库有什么」时才用）\n\
      - 闲聊和打招呼不要调用任何知识库工具\n",
-        IDENTITY_GUARDRAIL
+        identity_guardrail(),
+        APP_NAME,
     );
 
     #[cfg(target_os = "macos")]

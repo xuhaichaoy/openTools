@@ -56,7 +56,7 @@ export type PluginPermission =
   | 'notification'
   | 'system'
 
-/** 插件清单 — 统一格式 (兼容 uTools plugin.json + Rubick package.json + mTools 扩展) */
+/** 插件清单 — 统一格式 (兼容 uTools plugin.json + Rubick package.json + 51ToolBox 扩展) */
 export interface PluginManifest {
   // 基础信息
   pluginName: string     // 插件名
@@ -73,10 +73,10 @@ export interface PluginManifest {
   // 功能
   features: PluginFeature[]
 
-  // mTools 扩展 — 工作流
+  // 51ToolBox 扩展 — 工作流
   workflows?: PluginWorkflowDef[]  // 插件提供的工作流
 
-  // mTools 扩展 — AI 动作声明（外部插件可被 Agent 调用）
+  // 51ToolBox 扩展 — AI 动作声明（外部插件可被 Agent 调用）
   mtools?: {
     actions?: ExternalPluginAction[]
     /** 插件声明需要的权限（未声明的权限将被拒绝） */

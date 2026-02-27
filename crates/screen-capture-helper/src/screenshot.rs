@@ -83,7 +83,7 @@ pub fn list_windows() -> Result<Vec<WindowInfo>, String> {
         }
 
         // 跳过自身
-        if app_name == "mTools" || app_name == "screen-capture-helper" {
+        if app_name == "51ToolBox" || app_name == "mTools" || app_name == "screen-capture-helper" {
             continue;
         }
 

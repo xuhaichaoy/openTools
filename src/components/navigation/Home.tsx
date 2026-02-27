@@ -22,6 +22,7 @@ import { useDragWindow } from "@/hooks/useDragWindow";
 import { registry } from "@/core/plugin-system/registry";
 import { usePluginStore } from "@/store/plugin-store";
 import { isBuiltinPluginInstallRequired } from "@/plugins/builtin";
+import { APP_CLOUD_NAME } from "@/config/app-branding";
 
 interface FeatureCard {
   id: string;
@@ -199,7 +200,7 @@ export function Home({ onNavigate, onBack }: HomeProps) {
       id: "cloud-sync",
       icon: <CloudSyncIcon className="w-5 h-5" />,
       title: "云同步",
-      description: "mTools Cloud",
+      description: APP_CLOUD_NAME,
       color: "text-sky-400 bg-sky-400/10",
       action: () => onNavigate("cloud-sync"),
     },

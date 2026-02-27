@@ -29,6 +29,7 @@ import { useAuthStore } from "@/store/auth-store";
 import { getServerUrl } from "@/store/server-store";
 import { handleError } from "@/core/errors";
 import type { Workflow } from "@/core/workflows/types";
+import { APP_NAME, APP_CLOUD_NAME } from "@/config/app-branding";
 
 interface CloudSyncPluginProps {
   onBack?: () => void;
@@ -155,7 +156,7 @@ const CloudSyncPlugin: React.FC<CloudSyncPluginProps> = ({
         baseUrl: getServerUrl(),
       });
       setConnected(ok);
-      if (!ok) setError("无法连接到 mTools 服务器");
+      if (!ok) setError(`无法连接到 ${APP_NAME} 服务器`);
     } catch (e) {
       setConnected(false);
       setError(String(e));
@@ -469,7 +470,7 @@ const CloudSyncPlugin: React.FC<CloudSyncPluginProps> = ({
         <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-3 space-y-3">
           <div className="flex items-center gap-2 text-xs">
             <Zap className="w-4 h-4 text-amber-500" />
-            当前同步通道：mTools Cloud
+            当前同步通道：{APP_CLOUD_NAME}
           </div>
           <div className="text-[10px] text-[var(--color-text-secondary)] break-all">
             服务地址：{getServerUrlV1()}

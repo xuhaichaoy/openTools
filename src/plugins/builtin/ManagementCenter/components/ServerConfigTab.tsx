@@ -2,6 +2,7 @@ import { useState, type CSSProperties } from "react";
 import { Server, Check, AlertCircle, Loader2 } from "lucide-react";
 import { useServerStore } from "@/store/server-store";
 import { handleError } from "@/core/errors";
+import { APP_NAME } from "@/config/app-branding";
 
 const BRAND = "#F28F36";
 
@@ -41,7 +42,7 @@ export function ServerConfigTab() {
       <div>
         <h2 className="text-sm font-semibold">服务器地址</h2>
         <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">
-          配置 mTools 后端服务器地址。支持私有部署和公共服务。
+          配置 {APP_NAME} 后端服务器地址。支持私有部署和公共服务。
         </p>
       </div>
 
@@ -111,7 +112,7 @@ export function ServerConfigTab() {
       <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-[var(--space-compact-3)]">
         <h3 className="text-xs font-semibold mb-1">关于私有部署</h3>
         <p className="text-[10px] text-[var(--color-text-secondary)] leading-relaxed">
-          mTools 支持私有部署后端服务。使用 Docker Compose
+          {APP_NAME} 支持私有部署后端服务。使用 Docker Compose
           即可快速部署包含数据库、缓存的完整后端。
           部署后将上方地址修改为你的服务器地址即可。
         </p>

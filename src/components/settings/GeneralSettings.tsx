@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { handleError } from "@/core/errors";
 import { invoke } from "@tauri-apps/api/core";
+import { APP_NAME, APP_TECH_STACK } from "@/config/app-branding";
 import { getVersion } from "@tauri-apps/api/app";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -402,10 +403,10 @@ export function GeneralSettings() {
         <div className="flex items-center justify-between mb-2">
           <div>
             <div className="text-xs text-[var(--color-text)] font-medium">
-              mTools
+              {APP_NAME}
             </div>
             <div className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
-              v{appVersion} · Tauri v2 + React 19
+              v{appVersion} · {APP_TECH_STACK}
             </div>
           </div>
           <button

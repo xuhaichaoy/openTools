@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { handleError, ErrorLevel } from "@/core/errors";
 import { listen } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
+import { APP_NAME } from "@/config/app-branding";
 
 export type Mode = "screenshot" | "recording";
 export type CaptureStep =
@@ -317,7 +318,7 @@ export function useScreenCapture() {
         /permission|模拟|输入模拟|simulate|accessibility|辅助功能/i.test(msg)
       ) {
         setError(
-          "长截图需要「辅助功能」权限：系统设置 → 隐私与安全性 → 辅助功能 → 添加本应用（mTools）后重试。",
+          `长截图需要「辅助功能」权限：系统设置 → 隐私与安全性 → 辅助功能 → 添加本应用（${APP_NAME}）后重试。`,
         );
       } else {
         setError(msg);

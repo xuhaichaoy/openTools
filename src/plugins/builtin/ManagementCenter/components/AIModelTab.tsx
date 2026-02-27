@@ -12,6 +12,7 @@ import {
 import { api } from "@/core/api/client";
 import { handleError } from "@/core/errors";
 import { maskApiKey } from "@/utils/mask";
+import { APP_NAME } from "@/config/app-branding";
 import {
   Zap,
   Shield,
@@ -222,7 +223,7 @@ export function AIModelTab() {
       id: "platform",
       label: "平台服务",
       icon: Zap,
-      description: "使用 mTools 提供的平台模型服务，消耗能量额度。",
+      description: `使用 ${APP_NAME} 提供的平台模型服务，消耗能量额度。`,
     },
   ];
 
@@ -376,7 +377,7 @@ export function AIModelTab() {
                 style={{ color: BRAND }}
               />
               <p className="text-[10px] text-[var(--color-text-secondary)]">
-                当前来源由 mTools
+                当前来源由 {APP_NAME}
                 服务器集中管理。您的请求将通过服务器中转以实现计费或共享 Key 使用。
               </p>
             </div>

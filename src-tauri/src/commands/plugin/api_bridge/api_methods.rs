@@ -50,7 +50,7 @@ pub(super) async fn dispatch_plugin_api_call(
             use tauri_plugin_notification::NotificationExt;
             app.notification()
                 .builder()
-                .title("mTools")
+                .title(crate::branding::APP_NAME)
                 .body(body)
                 .show()
                 .map_err(|e| e.to_string())?;

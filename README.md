@@ -1,4 +1,4 @@
-# mTools
+# 51ToolBox
 
 AI-First 桌面效率工具箱，基于 Tauri v2 + React 19。
 

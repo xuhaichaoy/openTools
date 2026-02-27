@@ -32,7 +32,7 @@ pub struct SyncPullResponse {
     pub latest_version: i32,
 }
 
-/// 测试 mTools 服务器连接
+/// 测试 51ToolBox 服务器连接
 #[tauri::command]
 pub async fn mtools_sync_test(token: String, base_url: String) -> Result<bool, String> {
     let client = reqwest::Client::new();
@@ -46,7 +46,7 @@ pub async fn mtools_sync_test(token: String, base_url: String) -> Result<bool, S
     Ok(response.status().is_success())
 }
 
-/// 推送变更到 mTools 服务器
+/// 推送变更到 51ToolBox 服务器
 #[tauri::command]
 pub async fn mtools_sync_push(
     token: String,
@@ -70,7 +70,7 @@ pub async fn mtools_sync_push(
     Ok(true)
 }
 
-/// 从 mTools 服务器拉取变更
+/// 从 51ToolBox 服务器拉取变更
 #[tauri::command]
 pub async fn mtools_sync_pull(
     token: String,
