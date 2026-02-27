@@ -351,6 +351,7 @@ fn ensure_ort_runtime(model_dir: &Path) -> Result<Option<String>, String> {
     ))
 }
 
+#[allow(dead_code)]
 fn panic_message(payload: Box<dyn Any + Send>) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         return (*s).to_string();
@@ -447,6 +448,7 @@ fn collect_rec_model_candidates(model_dir: &Path) -> Vec<PathBuf> {
     dedup_dirs(paths)
 }
 
+#[allow(dead_code)]
 fn find_any_rec_model_path(model_dir: &Path) -> Option<PathBuf> {
     collect_rec_model_candidates(model_dir).into_iter().next()
 }

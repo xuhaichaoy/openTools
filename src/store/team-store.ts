@@ -76,8 +76,10 @@ interface TeamState {
   teams: Team[];
   activeTeamId: string | null;
   loaded: boolean;
+  loadError: boolean;
 
   loadTeams: () => Promise<void>;
+  reloadTeams: () => Promise<void>;
   setActiveTeam: (teamId: string | null) => void;
   getActiveTeam: () => Team | null;
 
@@ -238,18 +240,33 @@ export const useTeamStore = create<TeamState>((set, get) => ({
   teams: [],
   activeTeamId: null,
   loaded: false,
+  loadError: false,
 
   async loadTeams() {
+    if (get().loaded) return;
     try {
       const teams = await api.get<Team[]>("/teams");
-      set({ teams, loaded: true });
-      // 自动选中第一个团队
+      set({ teams, loaded: true, loadError: false });
       if (teams.length > 0 && !get().activeTeamId) {
         set({ activeTeamId: teams[0].id });
       }
     } catch (e) {
       handleError(e, { context: "加载团队列表" });
-      set({ teams: [], loaded: true });
+      set({ teams: [], loaded: true, loadError: true });
+    }
+  },
+
+  async reloadTeams() {
+    set({ loaded: false, loadError: false });
+    try {
+      const teams = await api.get<Team[]>("/teams");
+      set({ teams, loaded: true, loadError: false });
+      if (teams.length > 0 && !get().activeTeamId) {
+        set({ activeTeamId: teams[0].id });
+      }
+    } catch (e) {
+      handleError(e, { context: "加载团队列表" });
+      set({ teams: [], loaded: true, loadError: true });
     }
   },
 

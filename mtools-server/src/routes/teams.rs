@@ -104,7 +104,12 @@ async fn check_membership(db: &sqlx::PgPool, team_id: Uuid, user_id: Uuid) -> Re
     .await?;
 
     if !is_member {
-        return Err(Error::Unauthorized("Not a team member".into()));
+        return Err(Error::api(
+            http::StatusCode::FORBIDDEN,
+            "TEAM_ACCESS_DENIED",
+            "Not a team member",
+            Some(serde_json::json!({ "team_id": team_id })),
+        ));
     }
     Ok(())
 }
@@ -119,8 +124,18 @@ async fn check_admin(db: &sqlx::PgPool, team_id: Uuid, user_id: Uuid) -> Result<
 
     match role.as_deref() {
         Some("owner") | Some("admin") => Ok(()),
-        Some(_) => Err(Error::Unauthorized("Admin permission required".into())),
-        None => Err(Error::Unauthorized("Not a team member".into())),
+        Some(_) => Err(Error::api(
+            http::StatusCode::FORBIDDEN,
+            "TEAM_ADMIN_REQUIRED",
+            "Admin permission required",
+            Some(serde_json::json!({ "team_id": team_id })),
+        )),
+        None => Err(Error::api(
+            http::StatusCode::FORBIDDEN,
+            "TEAM_ACCESS_DENIED",
+            "Not a team member",
+            Some(serde_json::json!({ "team_id": team_id })),
+        )),
     }
 }
 
@@ -261,7 +276,12 @@ async fn delete_team(
         .await?;
 
     if owner_id != user_id {
-        return Err(Error::Unauthorized("Only owner can delete team".into()));
+        return Err(Error::api(
+            http::StatusCode::FORBIDDEN,
+            "TEAM_OWNER_REQUIRED",
+            "Only owner can delete team",
+            Some(serde_json::json!({ "team_id": team_id })),
+        ));
     }
 
     sqlx::query("DELETE FROM teams WHERE id = $1")

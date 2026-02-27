@@ -691,17 +691,17 @@ pub async fn native_app_list_interactive() -> Result<NativeAppResult, String> {
 
 /// 打开 Windows 系统设置页面（供 AI 助手调用）
 #[tauri::command]
-pub async fn win_open_settings(page: Option<String>) -> Result<NativeAppResult, String> {
+pub async fn win_open_settings(_page: Option<String>) -> Result<NativeAppResult, String> {
     #[cfg(target_os = "windows")]
     {
-        let uri = page
+        let uri = _page
             .as_deref()
             .map(|p| p.trim())
             .filter(|p| !p.is_empty())
             .map(|p| format!("ms-settings:{}", p))
             .unwrap_or_else(|| "ms-settings:".to_string());
         open::that(&uri).map_err(|e| format!("打开设置失败: {}", e))?;
-        let msg = page
+        let msg = _page
             .as_deref()
             .filter(|p| !p.is_empty())
             .map(|p| format!("已打开设置页面「{}」", p))

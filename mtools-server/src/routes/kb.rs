@@ -146,10 +146,18 @@ async fn check_team_admin_or_uploader(
 
     match role.as_deref() {
         Some("owner") | Some("admin") => Ok(()),
-        Some(_) => Err(Error::Unauthorized(
-            "Admin or uploader permission required".into(),
+        Some(_) => Err(Error::api(
+            http::StatusCode::FORBIDDEN,
+            "TEAM_ADMIN_REQUIRED",
+            "Admin or uploader permission required",
+            Some(serde_json::json!({ "team_id": team_id })),
         )),
-        None => Err(Error::Unauthorized("Not a team member".into())),
+        None => Err(Error::api(
+            http::StatusCode::FORBIDDEN,
+            "TEAM_ACCESS_DENIED",
+            "Not a team member",
+            Some(serde_json::json!({ "team_id": team_id })),
+        )),
     }
 }
 

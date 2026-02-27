@@ -125,6 +125,7 @@ function ShortcutRecorder({ value, onChange, label }: ShortcutRecorderProps) {
       </label>
       <button
         ref={inputRef}
+        onClick={() => inputRef.current?.focus()}
         onFocus={() => setCapturing(true)}
         onBlur={() => setCapturing(false)}
         onKeyDown={capturing ? handleKeyDown : undefined}

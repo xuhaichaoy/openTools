@@ -7,7 +7,7 @@ pub mod types;
 // Re-export types for external use (e.g. managed state in lib.rs)
 pub use types::{PluginCache, PluginDevState};
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 // ── 屏幕取色 ──
 

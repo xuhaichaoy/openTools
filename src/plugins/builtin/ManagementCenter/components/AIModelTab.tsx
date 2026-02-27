@@ -1182,13 +1182,20 @@ function TeamSourceSection({
   teamId?: string;
   onTeamChange: (teamId: string) => void;
 }) {
-  const { teams, loadTeams, loaded } = useTeamStore();
+  const { teams, loadTeams, reloadTeams, loaded, loadError } = useTeamStore();
   const [models, setModels] = useState<TeamModelInfo[]>([]);
   const [loadingModels, setLoadingModels] = useState(false);
+  const [reloading, setReloading] = useState(false);
 
   useEffect(() => {
     if (!loaded) loadTeams();
   }, [loaded, loadTeams]);
+
+  const handleReload = async () => {
+    setReloading(true);
+    await reloadTeams();
+    setReloading(false);
+  };
 
   // 自动选中第一个团队
   useEffect(() => {
@@ -1246,10 +1253,20 @@ function TeamSourceSection({
       {/* 团队选择器 */}
       {teams.length > 0 ? (
         <div>
-          <label className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
-            选择团队
-          </label>
-          <div className="relative mt-1">
+          <div className="flex items-center justify-between mb-1">
+            <label className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
+              选择团队
+            </label>
+            <button
+              onClick={handleReload}
+              disabled={reloading}
+              className="text-[10px] px-2 py-0.5 rounded border border-[var(--color-border)] hover:bg-[var(--color-bg-hover)] disabled:opacity-50 flex items-center gap-1"
+            >
+              {reloading ? <Loader2 className="w-2.5 h-2.5 animate-spin" /> : null}
+              刷新
+            </button>
+          </div>
+          <div className="relative">
             <select
               value={teamId || ""}
               onChange={(e) => onTeamChange(e.target.value)}
@@ -1270,11 +1287,23 @@ function TeamSourceSection({
           )}
         </div>
       ) : (
-        <div className="text-center py-4">
+        <div className="text-center py-4 space-y-2">
           <Users className="w-5 h-5 mx-auto mb-1.5 text-[var(--color-text-secondary)] opacity-40" />
           <p className="text-[10px] text-[var(--color-text-secondary)]">
-            您还没有加入任何团队。请先在「团队」标签页创建或加入一个团队。
+            {loadError
+              ? "团队加载失败，请重试。"
+              : "您还没有加入任何团队。请先在「团队」标签页创建或加入一个团队。"}
           </p>
+          {loadError && (
+            <button
+              onClick={handleReload}
+              disabled={reloading}
+              className="text-[10px] px-3 py-1 rounded-lg border border-[var(--color-border)] hover:bg-[var(--color-bg-hover)] disabled:opacity-50 flex items-center gap-1 mx-auto"
+            >
+              {reloading ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
+              重新加载
+            </button>
+          )}
         </div>
       )}
 

@@ -4,7 +4,6 @@ pub mod error;
 mod mtplugin;
 
 use std::path::PathBuf;
-use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{
@@ -23,7 +22,6 @@ struct CurrentShortcuts {
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 impl Default for CurrentShortcuts {
     fn default() -> Self {
-        use tauri_plugin_global_shortcut::Shortcut;
         Self {
             toggle: "Super+Digit2".parse().expect("default toggle shortcut"),
             context: "Control+Shift+KeyA".parse().expect("default context shortcut"),

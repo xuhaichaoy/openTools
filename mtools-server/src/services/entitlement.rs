@@ -195,7 +195,8 @@ pub async fn require_team_active(
     let entitlement = resolve_team_entitlement(db, team_id, user_id).await?;
 
     if !entitlement.is_member {
-        return Err(Error::unauthorized_code(
+        return Err(Error::api(
+            StatusCode::FORBIDDEN,
             "TEAM_ACCESS_DENIED",
             "Not a team member",
             Some(serde_json::json!({ "team_id": team_id })),

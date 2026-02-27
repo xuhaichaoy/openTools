@@ -28,7 +28,8 @@ async fn get_team_entitlements(
     let team_entitlement =
         entitlement::resolve_team_entitlement(&state.db, team_id, user_id).await?;
     if !team_entitlement.is_member {
-        return Err(Error::unauthorized_code(
+        return Err(Error::api(
+            http::StatusCode::FORBIDDEN,
             "TEAM_ACCESS_DENIED",
             "Not a team member",
             Some(serde_json::json!({ "team_id": team_id })),

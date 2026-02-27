@@ -65,8 +65,18 @@ async fn check_admin(db: &sqlx::PgPool, team_id: Uuid, user_id: Uuid) -> Result<
 
     match role.as_deref() {
         Some("owner") | Some("admin") => Ok(()),
-        Some(_) => Err(Error::Unauthorized("Admin permission required".into())),
-        None => Err(Error::Unauthorized("Not a team member".into())),
+        Some(_) => Err(Error::api(
+            http::StatusCode::FORBIDDEN,
+            "TEAM_ADMIN_REQUIRED",
+            "Admin permission required",
+            Some(serde_json::json!({ "team_id": team_id })),
+        )),
+        None => Err(Error::api(
+            http::StatusCode::FORBIDDEN,
+            "TEAM_ACCESS_DENIED",
+            "Not a team member",
+            Some(serde_json::json!({ "team_id": team_id })),
+        )),
     }
 }
 
