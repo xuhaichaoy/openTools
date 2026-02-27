@@ -1197,9 +1197,10 @@ function TeamSourceSection({
     setReloading(false);
   };
 
-  // 自动选中第一个团队
   useEffect(() => {
-    if (loaded && teams.length > 0 && !teamId) {
+    if (!loaded || teams.length === 0) return;
+    const teamIdValid = teamId && teams.some((t) => t.id === teamId);
+    if (!teamIdValid) {
       const defaultTeamId = pickDefaultTeamId(teams);
       if (defaultTeamId) {
         onTeamChange(defaultTeamId);

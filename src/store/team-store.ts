@@ -8,6 +8,7 @@
 import { create } from "zustand";
 import { api, assertResponseShape } from "@/core/api/client";
 import { handleError } from "@/core/errors";
+import { useAuthStore } from "@/store/auth-store";
 import {
   getExpiryHint,
   getTeamSyncPolicy,
@@ -80,6 +81,7 @@ interface TeamState {
 
   loadTeams: () => Promise<void>;
   reloadTeams: () => Promise<void>;
+  reset: () => void;
   setActiveTeam: (teamId: string | null) => void;
   getActiveTeam: () => Team | null;
 
@@ -242,6 +244,10 @@ export const useTeamStore = create<TeamState>((set, get) => ({
   loaded: false,
   loadError: false,
 
+  reset() {
+    set({ teams: [], activeTeamId: null, loaded: false, loadError: false });
+  },
+
   async loadTeams() {
     if (get().loaded) return;
     try {
@@ -355,3 +361,9 @@ export const useTeamStore = create<TeamState>((set, get) => ({
     );
   },
 }));
+
+useAuthStore.subscribe((state, prev) => {
+  if (prev.isLoggedIn !== state.isLoggedIn) {
+    useTeamStore.getState().reset();
+  }
+});

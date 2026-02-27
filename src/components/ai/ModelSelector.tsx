@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { ChevronDown, Check, Sparkles, Cpu } from "lucide-react";
 import { useAIStore } from "@/store/ai-store";
+import { useTeamStore } from "@/store/team-store";
 import { api } from "@/core/api/client";
 
 interface TeamModelInfo {
@@ -30,6 +31,8 @@ export function ModelSelector() {
     [saveConfig],
   );
 
+  const { teams, loaded: teamsLoaded, loadTeams } = useTeamStore();
+
   // 加载 ownKeys（首次）
   useEffect(() => {
     if (config.source === "own_key" && ownKeys.length === 0) {
@@ -37,9 +40,25 @@ export function ModelSelector() {
     }
   }, [config.source, ownKeys.length, loadOwnKeys]);
 
-  // 加载团队模型
+  // 团队模式下先确保 teams 已加载
+  useEffect(() => {
+    if (config.source === "team" && !teamsLoaded) {
+      void loadTeams();
+    }
+  }, [config.source, teamsLoaded, loadTeams]);
+
+  // 团队模式下校验 team_id，无效则自动纠正到第一个团队
+  useEffect(() => {
+    if (config.source !== "team" || !teamsLoaded || teams.length === 0) return;
+    if (config.team_id && teams.some((t) => t.id === config.team_id)) return;
+    const fallbackId = teams[0].id;
+    applyConfigPatch({ team_id: fallbackId, team_config_id: undefined });
+  }, [config.source, config.team_id, teamsLoaded, teams, applyConfigPatch]);
+
+  // 加载团队模型（只在 team_id 经过验证后才请求）
   useEffect(() => {
     if (config.source === "team" && config.team_id) {
+      if (!teamsLoaded || !teams.some((t) => t.id === config.team_id)) return;
       let cancelled = false;
       api
         .get<{ models: TeamModelInfo[] }>(
@@ -63,7 +82,7 @@ export function ModelSelector() {
         setTeamModels((prev) => (prev.length === 0 ? prev : []));
       });
     }
-  }, [config.source, config.team_id]);
+  }, [config.source, config.team_id, teamsLoaded, teams]);
 
   // 团队模式下自动修正无效 team_config_id，并优先选中最高优先级模型
   useEffect(() => {

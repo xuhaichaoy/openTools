@@ -12,6 +12,7 @@ import {
   DEFAULT_AI_MODEL,
   DEFAULT_AI_TEMPERATURE,
 } from "@/core/constants";
+import { useAuthStore } from "@/store/auth-store";
 import { handleError } from "@/core/errors";
 import {
   generateChatId,
@@ -564,3 +565,18 @@ export const useAIStore = create<AIState>((set, get) => ({
     });
   },
 }));
+
+useAuthStore.subscribe((state, prev) => {
+  if (prev.isLoggedIn && !state.isLoggedIn) {
+    const { config } = useAIStore.getState();
+    if (config.source === "team" || config.team_id) {
+      const cleared = {
+        ...config,
+        source: "own_key" as const,
+        team_id: undefined,
+        team_config_id: undefined,
+      };
+      useAIStore.getState().saveConfig(cleared);
+    }
+  }
+});
