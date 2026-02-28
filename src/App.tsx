@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect } from "react";
 import { ScreenshotSelector } from "@/components/tools/ScreenshotSelector";
 import { LoginModal } from "@/components/auth/LoginModal";
 import { SyncManager } from "@/components/auth/SyncManager";
+import { ClusterFloatingIndicator } from "@/components/cluster/ClusterFloatingIndicator";
 import { MainViewRouter } from "@/components/app/MainViewRouter";
 import { useAppStore } from "@/store/app-store";
 import { useAIStore } from "@/store/ai-store";
@@ -146,6 +147,7 @@ function MainApp() {
 
       <LoginModal />
       <SyncManager />
+      <ClusterFloatingIndicator />
     </div>
   );
 }

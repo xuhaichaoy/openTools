@@ -15,7 +15,8 @@ export type AppMode = 'search' | 'ai'
 
 const MAX_RECENT_TOOLS = 20
 
-export type AIInitialMode = 'ask' | 'agent'
+export type AIInitialMode = 'ask' | 'agent' | 'cluster'
+export type AICenterMode = 'ask' | 'agent' | 'cluster'
 
 export interface EmbedRequest {
   pluginId: string
@@ -32,6 +33,8 @@ export interface AppState {
   recentTools: string[]
   /** AI 助手打开时的初始模式（一次性消费：读取后自动重置为 ask） */
   aiInitialMode: AIInitialMode
+  /** AI 助手当前选中的 tab 模式（跨组件生命周期持久） */
+  aiCenterMode: AICenterMode
   /** 待处理的嵌入打开请求（一次性消费） */
   pendingEmbed: EmbedRequest | null
   /** 待处理的视图导航请求（一次性消费） */
@@ -50,6 +53,8 @@ export interface AppState {
   setAiInitialMode: (mode: AIInitialMode) => void
   /** 消费 aiInitialMode（读取并重置为 ask） */
   consumeAiInitialMode: () => AIInitialMode
+  /** 设置 AI 助手当前 tab 模式 */
+  setAiCenterMode: (mode: AICenterMode) => void
   /** 请求在主窗口中嵌入打开外部插件 */
   requestEmbed: (req: EmbedRequest) => void
   /** 消费嵌入请求 */
@@ -86,6 +91,7 @@ export const useAppStore = create<AppState>()(
       windowExpanded: false,
       recentTools: [] as string[],
       aiInitialMode: 'ask' as AIInitialMode,
+      aiCenterMode: 'ask' as AICenterMode,
       pendingEmbed: null as EmbedRequest | null,
       pendingNavigate: null as string | null,
       viewStack: createRootViewStack(),
@@ -112,6 +118,7 @@ export const useAppStore = create<AppState>()(
         if (current !== 'ask') set({ aiInitialMode: 'ask' })
         return current
       },
+      setAiCenterMode: (mode) => set({ aiCenterMode: mode }),
       requestEmbed: (req) => set({ pendingEmbed: req }),
       consumeEmbed: () => {
         const current = get().pendingEmbed

@@ -1199,6 +1199,7 @@ Final Answer: [最终回答]
     const toolFailCounts = new Map<string, number>();
 
     let iterationWarningIdx = -1;
+    let fcEmptyCount = 0;
 
     for (let i = 0; i < this.config.maxIterations; i++) {
       if (signal?.aborted) throw new Error("Aborted");
@@ -1247,6 +1248,12 @@ Final Answer: [最终回答]
             timestamp: Date.now(),
           });
           return answer;
+        }
+        fcEmptyCount++;
+        if (fcEmptyCount >= 3) {
+          const fallback = this.buildIterationExhaustedSummary();
+          this.addStep({ type: "answer", content: fallback, timestamp: Date.now() });
+          return fallback;
         }
         messages.push({ role: "assistant", content: "" });
         messages.push({ role: "user", content: "请继续回答或使用工具。" });
@@ -1384,6 +1391,8 @@ Final Answer: [最终回答]
     const textToolFailCounts = new Map<string, number>();
 
     let textIterationWarningIdx = -1;
+    let prevResponseContent = "";
+    let staleCount = 0;
 
     for (let i = 0; i < this.config.maxIterations; i++) {
       if (signal?.aborted) throw new Error("Aborted");
@@ -1420,6 +1429,21 @@ Final Answer: [最终回答]
       }
 
       if (signal?.aborted) throw new Error("Aborted");
+
+      const trimmed = responseContent.trim();
+      const prevTrimmed = prevResponseContent.trim();
+      const isSimilar = trimmed.length > 0 && prevTrimmed.length > 0 &&
+        trimmed.slice(0, 120) === prevTrimmed.slice(0, 120);
+      if (isSimilar) {
+        staleCount++;
+        if (staleCount >= 1) {
+          this.addStep({ type: "answer", content: trimmed, timestamp: Date.now() });
+          return trimmed;
+        }
+      } else {
+        staleCount = 0;
+      }
+      prevResponseContent = responseContent;
 
       const parsed = this.parseResponse(responseContent);
 
