@@ -102,6 +102,9 @@ function triggerPersist() {
   debouncedPersist(() => useAIStore.getState().persistHistory());
 }
 
+/** 保存当前流式会话的 cleanup 引用,用于 stopStreaming 时清理事件监听 */
+let _streamCleanup: (() => void) | null = null;
+
 function nativeToolsSupportedOnCurrentPlatform(): boolean {
   if (typeof navigator === "undefined") return true;
   return navigator.platform.toLowerCase().includes("mac");
@@ -412,6 +415,10 @@ export const useAIStore = create<AIState>((set, get) => ({
     const { currentConversationId } = get();
     if (!currentConversationId) return;
     invoke("ai_stop_stream", { conversationId: currentConversationId }).catch(() => {});
+    if (_streamCleanup) {
+      _streamCleanup();
+      _streamCleanup = null;
+    }
     set((state) => ({
       isStreaming: false,
       conversations: state.conversations.map((c) =>
@@ -564,7 +571,7 @@ export const useAIStore = create<AIState>((set, get) => ({
     }
 
     // 委托 Service 处理流式监听
-    await startStreamingChat({
+    const cleanup = await startStreamingChat({
       conversationId,
       assistantMessageId: assistantMessage.id,
       apiMessages,
@@ -585,9 +592,13 @@ export const useAIStore = create<AIState>((set, get) => ({
           }));
         },
         setState: (partial) => set(partial),
-        onPersist: triggerPersist,
+        onPersist: () => {
+          _streamCleanup = null;
+          triggerPersist();
+        },
       },
     });
+    _streamCleanup = cleanup;
   },
 }));
 

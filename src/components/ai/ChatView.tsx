@@ -5,6 +5,7 @@ import {
   useImperativeHandle,
   forwardRef,
   useMemo,
+  useCallback,
 } from "react";
 import {
   Plus,
@@ -61,6 +62,8 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
   const isComposingRef = useRef(false);
   const prevMessagesLengthRef = useRef(0);
   const scrollThrottleRef = useRef(0);
+  const userScrolledUpRef = useRef(false);
+  const streamStartTimeRef = useRef<number | null>(null);
   const handleExportRef = useRef<(() => void) | null>(null);
   const {
     getCurrentConversation,
@@ -89,6 +92,13 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
     );
     return filtered.slice(0, 3);
   }, [currentConversationId, memoryCandidates]);
+
+  const lastAssistantIdx = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === "assistant") return i;
+    }
+    return -1;
+  }, [messages]);
 
   // 暴露控制接口给父组件
   useImperativeHandle(ref, () => ({
@@ -119,50 +129,18 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
     loadMemoryCandidates();
   }, [loadMemoryCandidates]);
 
-  // 自动滚动到底部
-  useEffect(() => {
+  const scrollToBottom = useCallback((instant?: boolean) => {
     const container = messagesContainerRef.current;
     if (!container) return;
-
-    const lastMsg = messages[messages.length - 1];
-    const streaming = lastMsg?.role === "assistant" && lastMsg?.streaming;
-    const distanceFromBottom =
-      container.scrollHeight - container.scrollTop - container.clientHeight;
-    const isNearBottom = distanceFromBottom < 150;
-    const shouldScroll = streaming || isNearBottom;
-    const lengthIncreased = messages.length > prevMessagesLengthRef.current;
-    prevMessagesLengthRef.current = messages.length;
-
-    const doScroll = () => {
+    if (instant) {
       container.scrollTop = container.scrollHeight;
-    };
-
-    if (lengthIncreased) {
-      const t = setTimeout(doScroll, 80);
-      return () => clearTimeout(t);
+    } else {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }
-
-    if (!shouldScroll) return;
-
-    if (streaming) {
-      const now = Date.now();
-      if (now - scrollThrottleRef.current < 60) return;
-      scrollThrottleRef.current = now;
-    }
-
-    const id = requestAnimationFrame(doScroll);
-    return () => cancelAnimationFrame(id);
-  }, [messages]);
-
-  useEffect(() => {
-    scrollToBottom();
-  }, [messages, attachments]);
-
-  useEffect(() => {
-    scrollToBottom();
+    userScrolledUpRef.current = false;
   }, []);
 
-  // 监听滚动位置
+  // 监听滚动位置 + 检测用户主动上滑
   useEffect(() => {
     const container = messagesContainerRef.current;
     if (!container) return;
@@ -170,14 +148,59 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
       const distanceFromBottom =
         container.scrollHeight - container.scrollTop - container.clientHeight;
       setShowScrollBtn(distanceFromBottom > 200);
+      if (distanceFromBottom > 300) {
+        userScrolledUpRef.current = true;
+      } else if (distanceFromBottom < 50) {
+        userScrolledUpRef.current = false;
+      }
     };
-    container.addEventListener("scroll", handleScroll);
+    container.addEventListener("scroll", handleScroll, { passive: true });
     return () => container.removeEventListener("scroll", handleScroll);
   }, []);
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  };
+  // 自动滚动到底部（合并后的唯一滚动 effect）
+  useEffect(() => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+
+    const lastMsg = messages[messages.length - 1];
+    const streaming = lastMsg?.role === "assistant" && lastMsg?.streaming;
+    const lengthIncreased = messages.length > prevMessagesLengthRef.current;
+    prevMessagesLengthRef.current = messages.length;
+
+    // 记录流式开始时间
+    if (streaming && !streamStartTimeRef.current) {
+      streamStartTimeRef.current = Date.now();
+    } else if (!streaming) {
+      streamStartTimeRef.current = null;
+    }
+
+    // 用户发送新消息时（消息数量增加）总是滚动到底部
+    if (lengthIncreased) {
+      const t = setTimeout(() => {
+        container.scrollTop = container.scrollHeight;
+        userScrolledUpRef.current = false;
+      }, 80);
+      return () => clearTimeout(t);
+    }
+
+    // 用户主动上滑或正在选择文本时不自动滚动
+    if (userScrolledUpRef.current) return;
+    const hasSelection = window.getSelection()?.toString();
+    if (hasSelection) return;
+
+    if (!streaming) return;
+
+    // 流式节流 150ms
+    const now = Date.now();
+    if (now - scrollThrottleRef.current < 150) return;
+    scrollThrottleRef.current = now;
+
+    const id = requestAnimationFrame(() => {
+      container.scrollTop = container.scrollHeight;
+    });
+    return () => cancelAnimationFrame(id);
+  }, [messages]);
 
   // 切换对话时重置搜索
   useEffect(() => {
@@ -443,9 +466,7 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
           )}
 
           {messages.map((msg, idx) => {
-            const isLastAssistant =
-              msg.role === "assistant" &&
-              !messages.slice(idx + 1).some((m) => m.role === "assistant");
+            const isLastAssistant = idx === lastAssistantIdx;
             const isSearchMatch =
               !searchQuery ||
               msg.content.toLowerCase().includes(searchQuery.toLowerCase());
@@ -539,6 +560,7 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
           inputRef={inputRef}
           isComposingRef={isComposingRef}
           messages={messages}
+          streamStartTime={streamStartTimeRef.current}
         />
       </div>
     </div>

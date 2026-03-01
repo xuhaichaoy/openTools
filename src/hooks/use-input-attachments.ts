@@ -4,27 +4,34 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { handleError } from "@/core/errors";
 
 const IMAGE_EXT = new Set([
-  "jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "ico",
+  "jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "ico", "avif", "tiff", "tif",
 ]);
 const TEXT_EXT = new Set([
-  "txt", "md", "json", "yaml", "yml", "toml", "xml", "csv", "log",
+  "txt", "md", "json", "yaml", "yml", "toml", "xml", "csv", "log", "ini", "cfg", "conf",
   "js", "ts", "jsx", "tsx", "mjs", "cjs",
   "py", "rs", "go", "java", "c", "cpp", "h", "hpp", "swift", "kt", "rb", "php",
-  "sh", "bash", "zsh", "sql", "css", "html", "htm", "vue", "svelte",
+  "sh", "bash", "zsh", "sql", "css", "scss", "less", "html", "htm", "vue", "svelte",
+  "dockerfile", "makefile", "cmake", "gradle", "tf", "hcl",
+  "r", "m", "lua", "pl", "dart", "scala", "groovy", "zig", "nim", "ex", "exs", "erl",
 ]);
-const MAX_TEXT_FILE_BYTES = 50 * 1024;
-const MAX_TOTAL_TEXT_BYTES = 200 * 1024;
+const DOCUMENT_EXT = new Set([
+  "pdf", "doc", "docx", "rtf", "odt",
+]);
+const MAX_TEXT_FILE_BYTES = 100 * 1024;
+const MAX_TOTAL_TEXT_BYTES = 500 * 1024;
 const MAX_FOLDER_DEPTH = 3;
 const MAX_FOLDER_FILES = 50;
 
 export interface InputAttachment {
   id: string;
-  type: "image" | "text_file";
+  type: "image" | "text_file" | "document";
   name: string;
   path?: string;
   preview?: string;
   textContent?: string;
   size: number;
+  /** 文档原始格式，如 pdf/docx */
+  originalExt?: string;
 }
 
 function ext(name: string): string {
@@ -71,12 +78,8 @@ export function useInputAttachments() {
     .filter((a) => a.type === "image" && a.preview)
     .map((a) => a.preview!);
 
-  const totalTextBytes = attachments
-    .filter((a) => a.type === "text_file" && a.textContent)
-    .reduce((sum, a) => sum + (a.textContent?.length ?? 0), 0);
-
   const fileContextBlock = attachments
-    .filter((a) => a.type === "text_file" && a.textContent)
+    .filter((a) => (a.type === "text_file" || a.type === "document") && a.textContent)
     .map((a) => `### ${a.name}\n${a.textContent}`)
     .join("\n\n---\n\n");
 
@@ -176,6 +179,39 @@ export function useInputAttachments() {
     }
   }, []);
 
+  const addDocumentFile = useCallback(async (path: string) => {
+    const name = path.replace(/^.*[/\\]/, "");
+    const extName = ext(name);
+    try {
+      const content = await invoke<string>("extract_document_text", { path }).catch(() => null);
+      if (content) {
+        const bytes = new TextEncoder().encode(content).length;
+        setAttachments((prev) => {
+          const currentTotal = prev
+            .filter((a) => a.type === "text_file" || a.type === "document")
+            .reduce((s, a) => s + (a.textContent?.length ?? 0), 0);
+          if (currentTotal + bytes > MAX_TOTAL_TEXT_BYTES) return prev;
+          return [
+            ...prev,
+            {
+              id: genId(),
+              type: "document",
+              name,
+              path,
+              textContent: content,
+              size: bytes,
+              originalExt: extName,
+            },
+          ];
+        });
+      } else {
+        await addTextFile(path);
+      }
+    } catch {
+      await addTextFile(path);
+    }
+  }, [addTextFile]);
+
   const handlePaste = useCallback(
     (e: ClipboardEvent) => {
       const items = e.clipboardData?.items;
@@ -230,6 +266,17 @@ export function useInputAttachments() {
             reader.readAsText(file, "utf-8");
           }).catch(() => "");
           if (content) addTextFileFromFile(file, content);
+        } else if (DOCUMENT_EXT.has(extName)) {
+          // 文档文件需要通过原生后端路径处理
+          const content = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result ?? ""));
+            reader.onerror = reject;
+            reader.readAsText(file, "utf-8");
+          }).catch(() => "");
+          if (content) {
+            addTextFileFromFile(file, content);
+          }
         }
       }
     },
@@ -258,12 +305,14 @@ export function useInputAttachments() {
           await addImageFromPath(f.path);
         } else if (TEXT_EXT.has(extName)) {
           await addTextFile(f.path);
+        } else if (DOCUMENT_EXT.has(extName)) {
+          await addDocumentFile(f.path);
         }
       }
     } catch (err) {
       handleError(err, { context: "选择文件夹", silent: true });
     }
-  }, [addImageFromPath, addTextFile]);
+  }, [addImageFromPath, addTextFile, addDocumentFile]);
 
   const removeAttachment = useCallback((id: string) => {
     setAttachments((prev) => prev.filter((a) => a.id !== id));

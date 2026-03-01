@@ -48,7 +48,7 @@ export function generateChatId(): string {
 
 // ── 防抖持久化（使用统一工具） ──
 
-let _lastPersistedHash = "";
+let _lastPersistedHash: number = 0;
 let _debouncedPersistCb: (() => void) | null = null;
 const _chatPersister = createDebouncedPersister(() => {
   _debouncedPersistCb?.();
@@ -64,31 +64,49 @@ export function debouncedPersist(persistFn: () => void) {
 
 // ── 持久化逻辑 ──
 
+/** FNV-1a 32-bit 字符串哈希 */
+function fnv1a(str: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0, len = str.length; i < len; i++) {
+    hash ^= str.charCodeAt(i);
+    hash = (hash * 0x01000193) >>> 0;
+  }
+  return hash;
+}
+
+const PERSIST_MAX_RETRIES = 2;
+
 export async function persistConversations(conversations: Conversation[]): Promise<void> {
-  try {
-    const trimmed = conversations
-      .slice(0, MAX_CONVERSATIONS)
-      .map((c) => ({
-        ...c,
-        messages: c.messages.slice(-MAX_MESSAGES_PER_CONVERSATION).map((m) => ({
-          ...m,
-          streaming: false,
-        })),
-      }));
-    const json = JSON.stringify(trimmed);
-    const hash =
-      json.length +
-      ":" +
-      (json.charCodeAt(0) || 0) +
-      ":" +
-      (json.charCodeAt(json.length - 1) || 0);
-    if (hash === _lastPersistedHash && json.length < 100000) {
+  const trimmed = conversations
+    .slice(0, MAX_CONVERSATIONS)
+    .map((c) => ({
+      ...c,
+      messages: c.messages.slice(-MAX_MESSAGES_PER_CONVERSATION).map((m) => ({
+        ...m,
+        streaming: false,
+      })),
+    }));
+  const json = JSON.stringify(trimmed);
+
+  // 采样哈希避免完全遍历：取长度+头64+尾64+中间64字符
+  const sampleLen = 64;
+  const mid = Math.max(0, Math.floor(json.length / 2) - sampleLen / 2);
+  const sample = `${json.length}:${json.slice(0, sampleLen)}:${json.slice(mid, mid + sampleLen)}:${json.slice(-sampleLen)}`;
+  const hash = fnv1a(sample);
+  if (hash === _lastPersistedHash) return;
+
+  for (let attempt = 0; attempt <= PERSIST_MAX_RETRIES; attempt++) {
+    try {
+      await invoke("save_chat_history", { conversations: json });
+      _lastPersistedHash = hash;
       return;
+    } catch (e) {
+      if (attempt === PERSIST_MAX_RETRIES) {
+        handleError(e, { context: "保存对话历史", silent: true });
+      } else {
+        await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+      }
     }
-    _lastPersistedHash = hash;
-    await invoke("save_chat_history", { conversations: json });
-  } catch (e) {
-    handleError(e, { context: "保存对话历史", silent: true });
   }
 }
 
@@ -218,6 +236,21 @@ export async function startStreamingChat(opts: {
   // <think> 标签过滤器（DeepSeek 等模型的思考过程）
   const thinkFilter = new ThinkTagFilter();
 
+  // chunk 缓冲：累积多个 chunk 后批量刷新到 React state，减少 re-render 次数
+  let _chunkBuffer = "";
+  let _chunkRafId: number | null = null;
+
+  function flushChunkBuffer() {
+    _chunkRafId = null;
+    if (!_chunkBuffer) return;
+    const flushed = _chunkBuffer;
+    _chunkBuffer = "";
+    updateAssistant((m) => ({
+      ...m,
+      content: m.content + flushed,
+    }));
+  }
+
   // 监听流式 chunks
   const unlisten = await listen<{ conversation_id: string; content: string }>(
     "ai-stream-chunk",
@@ -225,10 +258,10 @@ export async function startStreamingChat(opts: {
       if (event.payload.conversation_id === conversationId) {
         const filtered = thinkFilter.process(event.payload.content);
         if (filtered) {
-          updateAssistant((m) => ({
-            ...m,
-            content: m.content + filtered,
-          }));
+          _chunkBuffer += filtered;
+          if (_chunkRafId === null) {
+            _chunkRafId = requestAnimationFrame(flushChunkBuffer);
+          }
         }
       }
     },
@@ -281,6 +314,11 @@ export async function startStreamingChat(opts: {
   });
 
   const cleanup = () => {
+    if (_chunkRafId !== null) {
+      cancelAnimationFrame(_chunkRafId);
+      _chunkRafId = null;
+    }
+    if (_chunkBuffer) flushChunkBuffer();
     unlisten();
     unlistenToolCalls();
     unlistenToolResult();
@@ -294,8 +332,14 @@ export async function startStreamingChat(opts: {
     "ai-stream-done",
     (event) => {
       if (event.payload.conversation_id === conversationId) {
-        // 刷出 think 过滤器残留缓冲
-        const remaining = thinkFilter.flush();
+        // 先刷出 chunk 缓冲
+        if (_chunkRafId !== null) {
+          cancelAnimationFrame(_chunkRafId);
+          _chunkRafId = null;
+        }
+        // 合并残留缓冲 + think 过滤器残留
+        const remaining = (_chunkBuffer || "") + thinkFilter.flush();
+        _chunkBuffer = "";
         updateAssistant((m) => ({
           ...m,
           content: remaining ? m.content + remaining : m.content,

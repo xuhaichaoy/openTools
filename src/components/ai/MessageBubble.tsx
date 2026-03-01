@@ -1,4 +1,4 @@
-import { memo, useCallback, useRef, useState, useEffect } from "react";
+import { memo, useCallback, useRef, useState, useEffect, useMemo } from "react";
 import { User, Bot, Copy, Check, RefreshCw, Pencil, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -8,7 +8,42 @@ import { useAIStore } from "@/store/ai-store";
 import { ToolCallDisplay } from "./ToolCallDisplay";
 import type { ChatMessage } from "@/core/ai/types";
 
-/** 用 Tauri FS 读文件转 blob URL，绕过 asset:// 协议白名单限制 */
+// ── 图片 blob URL LRU 缓存 ──
+const IMAGE_CACHE_MAX = 60;
+const _imageCache = new Map<string, string>();
+
+function getCachedBlobUrl(path: string): string | undefined {
+  const cached = _imageCache.get(path);
+  if (cached) {
+    _imageCache.delete(path);
+    _imageCache.set(path, cached);
+  }
+  return cached;
+}
+
+function setCachedBlobUrl(path: string, url: string) {
+  if (_imageCache.size >= IMAGE_CACHE_MAX) {
+    const oldest = _imageCache.keys().next().value;
+    if (oldest) {
+      const oldUrl = _imageCache.get(oldest);
+      if (oldUrl) URL.revokeObjectURL(oldUrl);
+      _imageCache.delete(oldest);
+    }
+  }
+  _imageCache.set(path, url);
+}
+
+function getMimeType(filePath: string): string {
+  const ext = filePath.split(".").pop()?.toLowerCase() ?? "png";
+  if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
+  if (ext === "gif") return "image/gif";
+  if (ext === "webp") return "image/webp";
+  if (ext === "svg") return "image/svg+xml";
+  if (ext === "bmp") return "image/bmp";
+  return "image/png";
+}
+
+/** 用 Tauri FS 读文件转 blob URL，带 LRU 缓存 */
 export function ChatImage({
   path,
   className,
@@ -18,33 +53,41 @@ export function ChatImage({
   className?: string;
   onClick?: (blobUrl: string) => void;
 }) {
-  const [blobUrl, setBlobUrl] = useState("");
+  const [blobUrl, setBlobUrl] = useState(() => getCachedBlobUrl(path) ?? "");
+  const [error, setError] = useState(false);
+
   useEffect(() => {
-    let url = "";
+    const cached = getCachedBlobUrl(path);
+    if (cached) {
+      setBlobUrl(cached);
+      return;
+    }
+    let cancelled = false;
     readFile(path)
       .then((bytes) => {
-        const ext = path.split(".").pop()?.toLowerCase() ?? "png";
-        const mime =
-          ext === "jpg" || ext === "jpeg"
-            ? "image/jpeg"
-            : ext === "gif"
-              ? "image/gif"
-              : ext === "webp"
-                ? "image/webp"
-                : "image/png";
-        const blob = new Blob([bytes], { type: mime });
-        url = URL.createObjectURL(blob);
+        if (cancelled) return;
+        const blob = new Blob([bytes], { type: getMimeType(path) });
+        const url = URL.createObjectURL(blob);
+        setCachedBlobUrl(path, url);
         setBlobUrl(url);
       })
-      .catch(() => {});
-    return () => {
-      if (url) URL.revokeObjectURL(url);
-    };
+      .catch(() => {
+        if (!cancelled) setError(true);
+      });
+    return () => { cancelled = true; };
   }, [path]);
+
+  if (error)
+    return (
+      <div className={`bg-[var(--color-bg-secondary)] rounded-lg flex items-center justify-center text-[var(--color-text-secondary)] text-[10px] ${className ?? ""}`}>
+        加载失败
+      </div>
+    );
   if (!blobUrl)
     return (
       <div
         className={`bg-[var(--color-bg-secondary)] animate-pulse rounded-lg ${className ?? ""}`}
+        style={{ minWidth: 60, minHeight: 60 }}
       />
     );
   return (
@@ -53,6 +96,7 @@ export function ChatImage({
       alt="附件图片"
       className={className}
       onClick={() => onClick?.(blobUrl)}
+      loading="lazy"
     />
   );
 }
@@ -245,6 +289,31 @@ function HighlightText({ text, query }: { text: string; query?: string }) {
   return <>{parts}</>;
 }
 
+const MARKDOWN_PATTERN = /[#*`\[\]|>!\-\d+\.\n]{2,}|```|^\s*[-*+]\s|^\s*\d+\.\s|^\s*>/m;
+
+// 记忆化 ReactMarkdown 插件和组件配置，避免每次渲染创建新对象
+const remarkPlugins = [remarkGfm];
+const rehypePlugins = [rehypeHighlight];
+
+function MdCode({ className, children, ...props }: any) {
+  const isInline = !className;
+  if (isInline) {
+    return (
+      <code
+        className="bg-[var(--color-code-bg)] px-1.5 py-0.5 rounded text-sm font-mono text-indigo-500"
+        {...props}
+      >
+        {children}
+      </code>
+    );
+  }
+  return (
+    <CodeBlock className={className} {...props}>
+      {children}
+    </CodeBlock>
+  );
+}
+
 /** 单条消息气泡 */
 export const MessageBubble = memo(function MessageBubble({
   msg,
@@ -263,12 +332,33 @@ export const MessageBubble = memo(function MessageBubble({
   const { editAndResend, isStreaming } = useAIStore();
   const editRef = useRef<HTMLTextAreaElement>(null);
 
-  // 长文本截断阈值（字符数）
   const TRUNCATE_LENGTH = 2000;
   const shouldTruncate = !isUser && !expanded && msg.content.length > TRUNCATE_LENGTH && !msg.streaming;
   const displayContent = shouldTruncate 
     ? msg.content.slice(0, TRUNCATE_LENGTH) + "\n\n..."
     : msg.content;
+
+  // 简单文本检测：不含 Markdown 语法且不在流式中时跳过 ReactMarkdown
+  const isPlainText = useMemo(() => {
+    if (msg.streaming) return false;
+    return !MARKDOWN_PATTERN.test(msg.content);
+  }, [msg.content, msg.streaming]);
+
+  const mdComponents = useMemo(() => ({
+    code: MdCode,
+    img({ src, alt, ...props }: any) {
+      return (
+        <img
+          src={src}
+          alt={alt || "图片"}
+          className="max-w-full rounded-lg my-2 cursor-zoom-in hover:opacity-90 transition-opacity"
+          onClick={() => src && setPreviewImage(src)}
+          loading="lazy"
+          {...props}
+        />
+      );
+    },
+  }), []);
 
   const handleEditSubmit = () => {
     const trimmed = editText.trim();
@@ -313,44 +403,17 @@ export const MessageBubble = memo(function MessageBubble({
               <div
                 className={`prose prose-invert prose-base max-w-none [&_p]:leading-7 [&_p]:my-2 [&_li]:my-1 first:[&_p]:mt-0 last:[&_p]:mb-0 ${msg.streaming ? "min-h-[1.5rem]" : ""}`}
               >
-                <ReactMarkdown
-                  remarkPlugins={[remarkGfm]}
-                  rehypePlugins={[rehypeHighlight]}
-                  components={{
-                    code({ className, children, ...props }) {
-                      const isInline = !className;
-                      if (isInline) {
-                        return (
-                          <code
-                            className="bg-[var(--color-code-bg)] px-1.5 py-0.5 rounded text-sm font-mono text-indigo-500"
-                            {...props}
-                          >
-                            {children}
-                          </code>
-                        );
-                      }
-                      return (
-                        <CodeBlock className={className} {...props}>
-                          {children}
-                        </CodeBlock>
-                      );
-                    },
-                    img({ src, alt, ...props }) {
-                      return (
-                        <img
-                          src={src}
-                          alt={alt || "图片"}
-                          className="max-w-full rounded-lg my-2 cursor-zoom-in hover:opacity-90 transition-opacity"
-                          onClick={() => src && setPreviewImage(src)}
-                          loading="lazy"
-                          {...props}
-                        />
-                      );
-                    },
-                  }}
-                >
-                  {displayContent || (msg.streaming ? "▌" : "")}
-                </ReactMarkdown>
+                {isPlainText && displayContent ? (
+                  <p className="whitespace-pre-wrap leading-7 my-0">{displayContent}</p>
+                ) : (
+                  <ReactMarkdown
+                    remarkPlugins={remarkPlugins}
+                    rehypePlugins={rehypePlugins}
+                    components={mdComponents}
+                  >
+                    {displayContent || (msg.streaming ? "▌" : "")}
+                  </ReactMarkdown>
+                )}
                 {msg.streaming && (
                   <span className="inline-block w-1.5 h-4 bg-indigo-500 animate-pulse ml-1 align-middle" />
                 )}

@@ -6,6 +6,8 @@ import {
   X,
   ArrowLeft,
   FileText,
+  Maximize2,
+  Minimize2,
 } from "lucide-react";
 import type { InputAttachment } from "@/hooks/use-input-attachments";
 import { AttachDropdown } from "@/components/ui/AttachDropdown";
@@ -35,13 +37,14 @@ export interface ChatInputProps {
   setPreviewImage: (value: string | null) => void;
   inputRef: React.RefObject<HTMLTextAreaElement | null>;
   isComposingRef: React.MutableRefObject<boolean>;
-  messages: { content?: string; streaming?: boolean }[];
+  messages: { content?: string; streaming?: boolean; toolCalls?: { id: string; name: string; result?: string }[] }[];
   /** 统一附件（图片+文本文件），与 pendingImages 二选一；提供时显示文件/文件夹按钮 */
   attachments?: InputAttachment[];
   onRemoveAttachment?: (id: string) => void;
   onFileSelect?: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onFolderSelect?: () => void;
   fileInputRef?: React.RefObject<HTMLInputElement | null>;
+  streamStartTime?: number | null;
 }
 
 export function ChatInput({
@@ -64,24 +67,39 @@ export function ChatInput({
   onFileSelect,
   onFolderSelect,
   fileInputRef,
+  streamStartTime,
 }: ChatInputProps) {
   const [showTemplates, setShowTemplates] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
   const templateRef = useRef<HTMLDivElement>(null);
   const internalFileInputRef = useRef<HTMLInputElement>(null);
   const fileInputEl = fileInputRef ?? internalFileInputRef;
   const useAttachments = attachments && onRemoveAttachment;
-  const hasImages = useAttachments
-    ? attachments.some((a) => a.type === "image")
-    : pendingImages.length > 0;
   const hasAnyAttachment = useAttachments ? attachments.length > 0 : pendingImages.length > 0;
 
-  // 内容变化时（含程序预填）同步 textarea 高度，最多 3 行
+  const maxHeight = expanded ? 20 * 16 : 9 * 16;
+
+  // 流式计时器
+  useEffect(() => {
+    if (!isStreaming || !streamStartTime) {
+      setElapsed(0);
+      return;
+    }
+    setElapsed(Math.floor((Date.now() - streamStartTime) / 1000));
+    const timer = setInterval(() => {
+      setElapsed(Math.floor((Date.now() - streamStartTime) / 1000));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [isStreaming, streamStartTime]);
+
+  // 内容变化时同步 textarea 高度
   useEffect(() => {
     const el = inputRef.current;
     if (!el) return;
     el.style.height = "auto";
-    el.style.height = Math.min(el.scrollHeight, 9 * 16) + "px";
-  }, [input]);
+    el.style.height = Math.min(el.scrollHeight, maxHeight) + "px";
+  }, [input, maxHeight]);
 
   // 点击外部关闭 Prompt 模板菜单
   useEffect(() => {
@@ -113,17 +131,30 @@ export function ChatInput({
 
   return (
     <>
-      {/* 停止生成按钮 + token 计数 */}
+      {/* 停止生成按钮 + 阶段状态 + 耗时 */}
       {isStreaming &&
         (() => {
           const streamingMsg = messages.find((m) => m.streaming);
           const charCount = streamingMsg?.content?.length || 0;
+          const hasToolCalls = (streamingMsg as any)?.toolCalls?.length > 0;
+          const pendingTools = (streamingMsg as any)?.toolCalls?.filter(
+            (tc: any) => !tc.result,
+          )?.length ?? 0;
           const estimatedTokens = Math.ceil(
             [...(streamingMsg?.content || "")].reduce(
               (sum, ch) => sum + (ch.charCodeAt(0) > 127 ? 1.5 : 0.25),
               0,
             ),
           );
+          const phase = pendingTools > 0
+            ? `正在执行工具 (${pendingTools})...`
+            : charCount === 0
+              ? "正在思考..."
+              : hasToolCalls
+                ? "正在整理结果..."
+                : "正在生成...";
+          const formatTime = (s: number) =>
+            s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${s % 60}s`;
           return (
             <div className="flex items-center justify-center gap-3 py-1">
               <button
@@ -133,11 +164,14 @@ export function ChatInput({
                 <Square className="w-3 h-3" />
                 停止生成
               </button>
-              {charCount > 0 && (
-                <span className="text-[10px] text-[var(--color-text-secondary)] opacity-60">
-                  ~{estimatedTokens} tokens · {charCount} 字符
-                </span>
-              )}
+              <span className="text-[10px] text-[var(--color-text-secondary)] opacity-60 flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                {phase}
+                {elapsed > 0 && <span>· {formatTime(elapsed)}</span>}
+                {charCount > 0 && (
+                  <span>· ~{estimatedTokens} tokens · {charCount} 字</span>
+                )}
+              </span>
             </div>
           );
         })()}
@@ -153,7 +187,7 @@ export function ChatInput({
                   ref={fileInputEl as React.RefObject<HTMLInputElement>}
                   type="file"
                   multiple
-                  accept="image/*,.txt,.md,.json,.yaml,.yml,.toml,.xml,.csv,.log,.js,.ts,.jsx,.tsx,.py,.rs,.go,.java,.c,.cpp,.h,.hpp,.swift,.kt,.rb,.php,.sh,.sql,.css,.html,.htm,.vue,.svelte"
+                  accept="image/*,.txt,.md,.json,.yaml,.yml,.toml,.xml,.csv,.log,.js,.ts,.jsx,.tsx,.py,.rs,.go,.java,.c,.cpp,.h,.hpp,.swift,.kt,.rb,.php,.sh,.sql,.css,.scss,.less,.html,.htm,.vue,.svelte,.pdf,.doc,.docx,.rtf,.odt,.r,.lua,.dart,.scala,.groovy,.zig,.dockerfile,.makefile,.ini,.cfg,.conf"
                   className="hidden"
                   onChange={onFileSelect}
                 />
@@ -263,7 +297,7 @@ export function ChatInput({
             ) : null}
             <textarea
               ref={inputRef}
-              className="w-full bg-transparent text-[var(--color-text)] text-[14px] px-2 outline-none resize-none min-h-[2rem] max-h-[9rem] placeholder:text-[var(--color-text-secondary)]/50 leading-relaxed py-2"
+              className={`w-full bg-transparent text-[var(--color-text)] text-[14px] px-2 outline-none resize-none min-h-[2rem] placeholder:text-[var(--color-text-secondary)]/50 leading-relaxed py-2 ${expanded ? "max-h-[20rem]" : "max-h-[9rem]"}`}
               placeholder={
                 hasAnyAttachment
                   ? "输入描述（可省略）..."
@@ -273,7 +307,7 @@ export function ChatInput({
               onChange={(e) => {
                 setInput(e.target.value);
                 e.target.style.height = "auto";
-                e.target.style.height = Math.min(e.target.scrollHeight, 9 * 16) + "px";
+                e.target.style.height = Math.min(e.target.scrollHeight, maxHeight) + "px";
               }}
               onKeyDown={handleKeyDown}
               onPaste={onPaste}
@@ -289,23 +323,35 @@ export function ChatInput({
               style={{ height: "auto" }}
             />
           </div>
-          <button
-            onClick={onSend}
-            disabled={
-              isStreaming || (!input.trim() && !hasAnyAttachment)
-            }
-            className="p-2 rounded-full bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-40 disabled:hover:bg-indigo-600 disabled:cursor-not-allowed transition-all shadow-sm active:scale-95 shrink-0"
-            aria-label="发送"
-          >
-            {isStreaming ? (
-              <Loader2 className="w-5 h-5 animate-spin" />
-            ) : (
-              <ArrowLeft className="w-5 h-5 rotate-90" />
-            )}
-          </button>
+          <div className="flex flex-col items-center gap-1 shrink-0">
+            <button
+              onClick={onSend}
+              disabled={
+                isStreaming || (!input.trim() && !hasAnyAttachment)
+              }
+              className="p-2 rounded-full bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-40 disabled:hover:bg-indigo-600 disabled:cursor-not-allowed transition-all shadow-sm active:scale-95"
+              aria-label="发送"
+            >
+              {isStreaming ? (
+                <Loader2 className="w-5 h-5 animate-spin" />
+              ) : (
+                <ArrowLeft className="w-5 h-5 rotate-90" />
+              )}
+            </button>
+            <button
+              onClick={() => setExpanded((v) => !v)}
+              className="p-1 rounded-md text-[var(--color-text-secondary)] hover:text-[var(--color-text)] hover:bg-[var(--color-bg-hover)] transition-colors"
+              title={expanded ? "收起输入框" : "展开输入框"}
+            >
+              {expanded ? <Minimize2 className="w-3 h-3" /> : <Maximize2 className="w-3 h-3" />}
+            </button>
+          </div>
         </div>
-        <div className="text-[10px] text-center text-[var(--color-text-secondary)] mt-1 opacity-60">
-          Enter 发送 · Shift+Enter 换行 · ⌘N 新对话 · ⌘F 搜索
+        <div className="flex items-center justify-between text-[10px] text-[var(--color-text-secondary)] mt-1 opacity-60 px-1">
+          <span>Enter 发送 · Shift+Enter 换行 · ⌘N 新对话 · ⌘F 搜索</span>
+          {input.length > 0 && (
+            <span>{input.length} 字符</span>
+          )}
         </div>
       </div>
 
