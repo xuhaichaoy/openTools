@@ -52,7 +52,7 @@ export interface AgentTool {
   readonly?: boolean;
   /** 单工具执行超时（毫秒），不设则无超时 */
   timeout?: number;
-  execute: (params: Record<string, unknown>) => Promise<unknown>;
+  execute: (params: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>;
 }
 
 export interface AgentStep {
@@ -158,6 +158,35 @@ function estimateMessagesTokens(
   return total;
 }
 
+function summarizeDiscardedMiddle<
+  T extends { role: string; content: string | null; tool_calls?: unknown; [k: string]: unknown },
+>(middle: T[]): string {
+  const toolNames: string[] = [];
+  const keyFindings: string[] = [];
+  for (const m of middle) {
+    if (m.role === "assistant" && m.tool_calls && Array.isArray(m.tool_calls)) {
+      for (const tc of m.tool_calls as Array<{ function?: { name?: string } }>) {
+        if (tc.function?.name) toolNames.push(tc.function.name);
+      }
+    }
+    if (m.role === "assistant" && !m.tool_calls && m.content) {
+      // 提取前100字符作为关键发现
+      const snippet = m.content.slice(0, 100).trim();
+      if (snippet) keyFindings.push(snippet);
+    }
+  }
+  const parts: string[] = ["[上下文压缩摘要]"];
+  if (toolNames.length > 0) {
+    const unique = [...new Set(toolNames)];
+    parts.push(`已执行工具: ${unique.join(", ")} (共${toolNames.length}次调用)`);
+  }
+  if (keyFindings.length > 0) {
+    parts.push(`关键步骤: ${keyFindings.slice(-3).join(" → ")}`);
+  }
+  parts.push(`(已压缩 ${middle.length} 条消息)`);
+  return parts.join("\n");
+}
+
 function compactMessages<
   T extends { role: string; content: string | null; [k: string]: unknown },
 >(messages: T[], contextLimit: number): T[] {
@@ -177,6 +206,7 @@ function compactMessages<
 
   if (middle.length > 0) {
     const toolCallGroups: T[][] = [];
+    const nonGroupMessages: T[] = [];
     let i = 0;
     while (i < middle.length) {
       const m = middle[i];
@@ -190,11 +220,25 @@ function compactMessages<
         toolCallGroups.push(group);
         i = j;
       } else {
+        nonGroupMessages.push(m);
         i++;
       }
     }
 
-    const recentGroups = toolCallGroups.slice(-2);
+    // 保留最近3组工具调用（之前是2组）
+    const keepCount = Math.min(3, toolCallGroups.length);
+    const recentGroups = toolCallGroups.slice(-keepCount);
+    const discardedGroups = toolCallGroups.slice(0, -keepCount || toolCallGroups.length);
+
+    // 为被丢弃的部分生成摘要
+    const discardedMessages = discardedGroups.flat().concat(
+      nonGroupMessages.filter((m) => !recentGroups.flat().includes(m)),
+    );
+    if (discardedMessages.length > 0) {
+      const summary = summarizeDiscardedMiddle(discardedMessages);
+      result.push({ role: "user", content: summary } as unknown as T);
+    }
+
     const compactedGroups = recentGroups.map((group) =>
       group.map((m) => {
         if (m.role === "tool") {
@@ -207,7 +251,8 @@ function compactMessages<
       }),
     );
 
-    const assistantMsgs = middle.filter(
+    // 保留最后一条纯文本 assistant 消息
+    const assistantMsgs = nonGroupMessages.filter(
       (m) => m.role === "assistant" && !m.tool_calls,
     );
     const lastAssistant = assistantMsgs.length > 0 ? assistantMsgs[assistantMsgs.length - 1] : null;
@@ -232,12 +277,27 @@ const TOOL_OUTPUT_MAX_CHARS = 8000;
 const TOOL_OUTPUT_KEEP_HEAD = 3500;
 const TOOL_OUTPUT_KEEP_TAIL = 1500;
 
-function truncateToolOutput(output: string): string {
+function truncateToolOutput(output: string, toolName?: string): string {
   if (output.length <= TOOL_OUTPUT_MAX_CHARS) return output;
   const head = output.slice(0, TOOL_OUTPUT_KEEP_HEAD);
   const tail = output.slice(-TOOL_OUTPUT_KEEP_TAIL);
   const omitted = output.length - TOOL_OUTPUT_KEEP_HEAD - TOOL_OUTPUT_KEEP_TAIL;
-  return `${head}\n\n... [已省略 ${omitted} 字符] ...\n\n${tail}`;
+
+  // 根据工具类型提供可操作的恢复指引
+  let recoveryHint = "";
+  if (toolName === "read_file" || toolName === "read_text_file") {
+    recoveryHint = "\n<NOTE>输出已截断。请使用 read_file_range 指定 start_line/end_line 分段读取需要的部分。</NOTE>";
+  } else if (toolName === "search_in_files") {
+    recoveryHint = "\n<NOTE>搜索结果已截断。请缩小搜索范围：添加 file_pattern 过滤文件类型，或减小 max_results，或使用更精确的 query。</NOTE>";
+  } else if (toolName === "run_shell_command" || toolName === "persistent_shell") {
+    recoveryHint = "\n<NOTE>命令输出已截断。请在命令中配合 grep/head/tail 过滤输出，或将输出重定向到文件后用 read_file_range 分段读取。</NOTE>";
+  } else if (toolName === "list_directory") {
+    recoveryHint = "\n<NOTE>目录列表已截断。请指定更深层的子目录路径来缩小范围。</NOTE>";
+  } else {
+    recoveryHint = "\n<NOTE>输出已截断。请尝试缩小请求范围以获取完整结果。</NOTE>";
+  }
+
+  return `${head}\n\n... [已省略 ${omitted} 字符] ...${recoveryHint}\n\n${tail}`;
 }
 
 // ── 工具超时异常 ──
@@ -273,17 +333,28 @@ export interface TrajectoryEntry {
 const LOOP_DETECTOR_WINDOW = 6;
 const LOOP_DETECTOR_THRESHOLD = 3;
 const DOOM_LOOP_CONSECUTIVE_FAILURES = 3;
+const SAME_TOOL_CONSECUTIVE_LIMIT = 3;
+const THINKING_ONLY_TOOLS = new Set(["sequential_thinking"]);
 
 class LoopDetector {
   private recentCalls: string[] = [];
   private consecutiveFailures: Map<string, number> = new Map();
   private disabledTools: Set<string> = new Set();
+  private consecutiveToolCounts: Map<string, number> = new Map();
+  private lastToolName: string | null = null;
 
   record(toolName: string, args: Record<string, unknown>): void {
     const key = `${toolName}::${JSON.stringify(args)}`;
     this.recentCalls.push(key);
     if (this.recentCalls.length > LOOP_DETECTOR_WINDOW * 2) {
       this.recentCalls = this.recentCalls.slice(-LOOP_DETECTOR_WINDOW * 2);
+    }
+
+    if (toolName === this.lastToolName) {
+      this.consecutiveToolCounts.set(toolName, (this.consecutiveToolCounts.get(toolName) ?? 1) + 1);
+    } else {
+      this.consecutiveToolCounts.set(toolName, 1);
+      this.lastToolName = toolName;
     }
   }
 
@@ -300,6 +371,15 @@ class LoopDetector {
       if (count >= LOOP_DETECTOR_THRESHOLD) {
         return { looping: true, tool: key.split("::")[0] };
       }
+    }
+    return { looping: false };
+  }
+
+  detectConsecutiveSameTool(): { looping: boolean; tool?: string; count?: number } {
+    if (!this.lastToolName) return { looping: false };
+    const count = this.consecutiveToolCounts.get(this.lastToolName) ?? 0;
+    if (count >= SAME_TOOL_CONSECUTIVE_LIMIT && THINKING_ONLY_TOOLS.has(this.lastToolName)) {
+      return { looping: true, tool: this.lastToolName, count };
     }
     return { looping: false };
   }
@@ -328,6 +408,8 @@ class LoopDetector {
     this.recentCalls = [];
     this.consecutiveFailures.clear();
     this.disabledTools.clear();
+    this.consecutiveToolCounts.clear();
+    this.lastToolName = null;
   }
 }
 
@@ -443,14 +525,17 @@ export class ReActAgent {
 
   private hasWriteFileAction(): boolean {
     const allSteps = [...this.history, ...this.steps];
+    const writeToolPatterns = ["write_file", "str_replace_edit", "json_edit"];
     return allSteps.some(
-      (step) => step.type === "action" && step.toolName?.toLowerCase().includes("write_file"),
+      (step) =>
+        step.type === "action" &&
+        writeToolPatterns.some((p) => step.toolName?.toLowerCase().includes(p)),
     );
   }
 
   private hasSaveLikeIntent(userInput: string): boolean {
     const text = userInput.toLowerCase();
-    const writeVerbs = ["写入", "保存", "另存", "覆盖", "修改文件", "更新文件", "写到", "write_file", "save"];
+    const writeVerbs = ["写入", "保存", "另存", "覆盖", "修改文件", "更新文件", "写到", "编辑文件", "插入", "write_file", "str_replace", "save", "edit"];
     if (writeVerbs.some((k) => text.includes(k))) return true;
     const targets = [".md", ".txt", ".json", ".csv", ".yaml", ".yml"];
     const writeContextWords = ["改成", "改为", "替换", "更新", "创建", "生成", "导出"];
@@ -492,7 +577,7 @@ export class ReActAgent {
       !this.hasWriteFileAction() &&
       this.isLikelySaveOutcomeClaim(answer)
     ) {
-      return "你尚未实际调用 write_file 工具。若任务包含保存/修改文件，必须先调用 write_file 并基于真实工具结果再给结论。";
+      return "你尚未实际调用文件写入工具（write_file / str_replace_edit / json_edit）。若任务包含保存/修改文件，必须先调用相应工具并基于真实工具结果再给结论。";
     }
     if (
       rejectedDangerousActionCount === 0 &&
@@ -666,27 +751,28 @@ export class ReActAgent {
   ): Promise<unknown> {
     const timeout = tool.timeout ?? this.config.defaultToolTimeout;
     if (!timeout || timeout <= 0) {
-      return tool.execute(params);
+      return tool.execute(params, signal);
     }
-    return new Promise<unknown>((resolve, reject) => {
-      let settled = false;
-      const timer = setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          reject(new ToolTimeoutError(tool.name, timeout));
-        }
-      }, timeout);
 
-      const onAbort = () => {
-        if (!settled) { settled = true; clearTimeout(timer); reject(new Error("Aborted")); }
-      };
-      signal?.addEventListener("abort", onAbort, { once: true });
+    // 创建组合 AbortController：超时或父级 abort 都会触发
+    const toolAbort = new AbortController();
+    const timer = setTimeout(() => toolAbort.abort(new ToolTimeoutError(tool.name, timeout)), timeout);
 
-      tool.execute(params).then(
-        (val) => { if (!settled) { settled = true; clearTimeout(timer); signal?.removeEventListener("abort", onAbort); resolve(val); } },
-        (err) => { if (!settled) { settled = true; clearTimeout(timer); signal?.removeEventListener("abort", onAbort); reject(err); } },
-      );
-    });
+    const onParentAbort = () => toolAbort.abort(new Error("Aborted"));
+    signal?.addEventListener("abort", onParentAbort, { once: true });
+
+    try {
+      const result = await tool.execute(params, toolAbort.signal);
+      return result;
+    } catch (err) {
+      if (toolAbort.signal.aborted && toolAbort.signal.reason instanceof ToolTimeoutError) {
+        throw toolAbort.signal.reason;
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onParentAbort);
+    }
   }
 
   private buildIterationExhaustedSummary(): string {
@@ -817,6 +903,15 @@ export class ReActAgent {
       return { outputStr: msg, error: msg, errorResult: errResult };
     }
 
+    const consecutiveCheck = this.loopDetector.detectConsecutiveSameTool();
+    if (consecutiveCheck.looping) {
+      const msg = `[循环检测] 工具 ${consecutiveCheck.tool} 已连续调用 ${consecutiveCheck.count} 次。请立即使用 read_file、list_directory、search_in_files 等工具获取实际信息，不要继续空转思考。`;
+      const errResult: ToolErrorResult = { type: ToolErrorType.LoopDetected, tool: toolName, message: msg, recoverable: true };
+      this.addStep({ type: "error", content: msg, toolName, timestamp: Date.now() });
+      this.recordTrajectory({ type: "error", toolName, error: errResult });
+      return { outputStr: msg, error: msg, errorResult: errResult };
+    }
+
     if (signal?.aborted) throw new Error("Aborted");
     try {
       const output = await this.executeWithTimeout(tool, toolParams, signal);
@@ -832,7 +927,7 @@ export class ReActAgent {
       }
 
       const rawStr = typeof output === "string" ? output : JSON.stringify(output, null, 2);
-      const outputStr = truncateToolOutput(rawStr);
+      const outputStr = truncateToolOutput(rawStr, toolName);
       this.addStep({ type: "observation", content: outputStr, toolName, toolOutput: output, timestamp: Date.now() });
       this.recordTrajectory({ type: "tool_result", toolName, result: outputStr.slice(0, 200), durationMs: Date.now() - startTime });
       return { outputStr };
@@ -1032,7 +1127,24 @@ Final Answer: [最终回答]
 
   // ── Function Calling 模式（优先方案） ──
 
-  private buildFCSystemPrompt(): string {
+  /**
+   * 从用户输入和对话历史中检测当前是否为编程相关任务，
+   * 避免在纯 Q&A / 翻译 / 总结等场景中注入编程指令。
+   */
+  private detectCodingContext(userInput: string): boolean {
+    const codingPatterns = /(?:代码|编程|编码|写一个|实现|修复|debug|fix|bug|重构|refactor|编译|compile|build|构建|部署|deploy|测试|test|脚本|script|函数|function|class|组件|component|接口|interface|API|数据库|database|SQL|迁移|migration|package\.json|tsconfig|Cargo\.toml|requirements\.txt|\.py|\.ts|\.js|\.rs|\.go|\.java|\.cpp|\.vue|\.svelte|npm|yarn|pip|cargo|git|commit|merge|branch|PR|pull request|str_replace_edit|read_file|write_file|run_lint|persistent_shell|json_edit|search_in_files|list_directory|代码审查|code review|项目路径|工作上下文)/i;
+    if (codingPatterns.test(userInput)) return true;
+    const recentHistory = this.history.slice(-6);
+    for (const step of recentHistory) {
+      if (step.type === "action" && step.toolName) {
+        const codingTools = ["str_replace_edit", "write_file", "json_edit", "run_lint", "persistent_shell", "read_file", "read_file_range", "search_in_files", "list_directory", "ckg_search_function", "ckg_search_class"];
+        if (codingTools.includes(step.toolName)) return true;
+      }
+    }
+    return false;
+  }
+
+  private buildFCSystemPrompt(userInput?: string): string {
     const modeHint = this.mode === "plan"
       ? `\n\n## 当前模式: Plan（只读分析）\n你正处于 Plan 模式，只能使用只读工具（信息收集、搜索、读取）。不能执行修改操作。\n完成分析后调用 exit_plan_mode 切换到 Execute 模式再执行修改。`
       : "";
@@ -1040,6 +1152,36 @@ Final Answer: [最终回答]
     const disabledHint = disabledTools.length > 0
       ? `\n\n## 已禁用的工具（连续失败过多）\n${disabledTools.join(", ")} — 请改用其他方式完成任务。`
       : "";
+
+    const isCoding = userInput ? this.detectCodingContext(userInput) : false;
+
+    const codingBlock = isCoding ? `
+
+## 编程任务工作流（7 步法）
+当任务涉及代码编写、修改、调试时，遵循以下流程：
+1. **理解需求**：仔细分析任务目标，明确要修改什么、为什么修改
+2. **探索代码**：用 read_file / read_file_range / search_in_files / list_directory 了解项目结构和相关代码
+3. **复现问题**（如适用）：用 run_shell_command 运行测试或复现 bug，确认当前行为
+4. **定位根因**：基于探索结果分析问题根源，用 sequential_thinking 梳理复杂逻辑
+5. **实施修改**：优先使用 str_replace_edit（精确替换）修改代码，仅在创建全新文件时使用 write_file
+6. **验证结果**：修改后用 read_file_range 确认改动正确，用 run_lint 检查语法/类型错误，用 run_shell_command 运行测试/构建验证
+7. **总结输出**：简要说明做了什么改动、为什么这样改、验证结果如何
+
+### 编程工具选择指南
+- **修改已有文件** → str_replace_edit (command: str_replace)：只需提供要改的那一小段，精确安全
+- **在文件中插入代码** → str_replace_edit (command: insert)：在指定行号后插入
+- **创建新文件** → str_replace_edit (command: create)：防止误覆盖已有文件
+- **完全重写文件** → write_file：仅在需要全量替换时使用
+- **编辑 JSON 配置** → json_edit：精确修改 JSON 字段，避免全文覆写出错
+- **代码检查** → run_lint：修改代码后检查语法/类型错误，自动检测项目类型
+- **执行命令** → persistent_shell（保持会话状态）或 run_shell_command（一次性命令）
+
+### 输出被截断时的恢复策略
+如果工具返回的内容被截断（出现"已省略"提示），不要猜测被省略的内容：
+- 文件内容被截断 → 用 read_file_range 指定行号范围读取具体部分
+- 搜索结果被截断 → 用 search_in_files 缩小搜索范围或添加 file_pattern 过滤
+- 命令输出被截断 → 用 run_shell_command 配合 grep/head/tail 过滤输出` : "";
+
     return `你是一个高能力智能助手 Agent，能够自主使用工具来回答问题和执行复杂任务。${modeHint}${disabledHint}
 
 ## 核心行为
@@ -1073,7 +1215,9 @@ Final Answer: [最终回答]
 - 不要在没有使用工具的情况下编造信息
 - 涉及文件操作时，必须调用对应工具
 - 如有 delegate_subtask 工具可用，可将独立子问题委派给子 Agent 并行处理
-
+- **所有文件路径必须使用绝对路径**，不要使用 ~ 或相对路径
+- **sequential_thinking 仅用于梳理复杂逻辑，禁止连续调用超过 2 次**。思考后必须立即使用 read_file / list_directory / search_in_files 等工具获取实际信息
+${codingBlock}
 ## 回答质量
 - 结论必须基于真实的工具调用结果
 - 多角度分析问题，给出全面的答案
@@ -1172,7 +1316,7 @@ Final Answer: [最终回答]
     };
 
     const messages: FCMessage[] = [
-      { role: "system", content: this.buildFCSystemPrompt() },
+      { role: "system", content: this.buildFCSystemPrompt(userInput) },
     ];
 
     for (const step of this.history) {
@@ -1208,7 +1352,7 @@ Final Answer: [最终回答]
       if (signal?.aborted) throw new Error("Aborted");
 
       // 每轮刷新 system prompt（模式切换或 doom loop 禁用工具后需要更新）
-      messages[0] = { role: "system", content: this.buildFCSystemPrompt() };
+      messages[0] = { role: "system", content: this.buildFCSystemPrompt(userInput) };
 
       const remaining = this.config.maxIterations - i;
       const isFinalWarningTurn = remaining === 1;

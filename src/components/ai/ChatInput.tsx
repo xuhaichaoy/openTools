@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import {
   Loader2,
   Square,
@@ -8,7 +8,10 @@ import {
   FileText,
   Maximize2,
   Minimize2,
+  Folder,
+  File,
 } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
 import type { InputAttachment } from "@/hooks/use-input-attachments";
 import { AttachDropdown } from "@/components/ui/AttachDropdown";
 
@@ -42,7 +45,9 @@ export interface ChatInputProps {
   attachments?: InputAttachment[];
   onRemoveAttachment?: (id: string) => void;
   onFileSelect?: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  onFileSelectNative?: () => void;
   onFolderSelect?: () => void;
+  onAddFilePath?: (path: string) => void;
   fileInputRef?: React.RefObject<HTMLInputElement | null>;
   streamStartTime?: number | null;
 }
@@ -65,14 +70,20 @@ export function ChatInput({
   attachments,
   onRemoveAttachment,
   onFileSelect,
+  onFileSelectNative,
   onFolderSelect,
+  onAddFilePath,
   fileInputRef,
   streamStartTime,
 }: ChatInputProps) {
   const [showTemplates, setShowTemplates] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [elapsed, setElapsed] = useState(0);
+  const [atQuery, setAtQuery] = useState<string | null>(null);
+  const [atSuggestions, setAtSuggestions] = useState<{ name: string; path: string; isDir: boolean }[]>([]);
+  const [atSelectedIdx, setAtSelectedIdx] = useState(0);
   const templateRef = useRef<HTMLDivElement>(null);
+  const atMenuRef = useRef<HTMLDivElement>(null);
   const internalFileInputRef = useRef<HTMLInputElement>(null);
   const fileInputEl = fileInputRef ?? internalFileInputRef;
   const useAttachments = attachments && onRemoveAttachment;
@@ -116,7 +127,127 @@ export function ChatInput({
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [showTemplates]);
 
+  // @ 提及：检测输入中的 @path 并加载路径建议
+  const fetchAtSuggestions = useCallback(async (query: string) => {
+    try {
+      // 只有一个 "/" 时，列出根目录下常见顶级目录
+      if (query === "/") {
+        const commonRoots = [
+          { name: "Users", path: "/Users", isDir: true },
+          { name: "tmp", path: "/tmp", isDir: true },
+          { name: "opt", path: "/opt", isDir: true },
+          { name: "usr", path: "/usr", isDir: true },
+          { name: "Applications", path: "/Applications", isDir: true },
+          { name: "Library", path: "/Library", isDir: true },
+        ];
+        setAtSuggestions(commonRoots);
+        setAtSelectedIdx(0);
+        return;
+      }
+
+      const lastSlash = query.lastIndexOf("/");
+      const dirPath = query.slice(0, lastSlash) || "/";
+      const lastPart = query.slice(lastSlash + 1).toLowerCase();
+
+      const raw = await invoke<string>("list_directory", { path: dirPath });
+      const entries = JSON.parse(raw) as { name: string; is_dir: boolean }[];
+      const filtered = entries
+        .filter((e) => !e.name.startsWith("."))
+        .filter((e) => !lastPart || e.name.toLowerCase().startsWith(lastPart))
+        .sort((a, b) => {
+          if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+          return a.name.localeCompare(b.name);
+        })
+        .slice(0, 15)
+        .map((e) => ({
+          name: e.name,
+          path: `${dirPath === "/" ? "" : dirPath}/${e.name}`.replace(/\/+/g, "/"),
+          isDir: e.is_dir,
+        }));
+      setAtSuggestions(filtered);
+      setAtSelectedIdx(0);
+    } catch {
+      setAtSuggestions([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (atQuery === null) return;
+    const timer = setTimeout(() => fetchAtSuggestions(atQuery), 150);
+    return () => clearTimeout(timer);
+  }, [atQuery, fetchAtSuggestions]);
+
+  const handleInputChange = useCallback((value: string, cursorPosition?: number) => {
+    setInput(value);
+    const cursorPos = cursorPosition ?? value.length;
+    const textBeforeCursor = value.slice(0, cursorPos);
+    const atMatch = textBeforeCursor.match(/@(\/[^\s]*)$/);
+    if (atMatch) {
+      setAtQuery(atMatch[1]);
+    } else {
+      setAtQuery(null);
+      setAtSuggestions([]);
+    }
+  }, [setInput]);
+
+  const selectAtSuggestion = useCallback((suggestion: { name: string; path: string; isDir: boolean }) => {
+    const textarea = inputRef.current;
+    if (!textarea) return;
+    const cursorPos = textarea.selectionStart ?? input.length;
+    const textBeforeCursor = input.slice(0, cursorPos);
+    const atMatch = textBeforeCursor.match(/@(\/[^\s]*)$/);
+    if (!atMatch) return;
+
+    if (suggestion.isDir) {
+      const newBefore = textBeforeCursor.slice(0, atMatch.index!) + `@${suggestion.path}/`;
+      const newValue = newBefore + input.slice(cursorPos);
+      setInput(newValue);
+      setAtQuery(suggestion.path + "/");
+      setTimeout(() => {
+        textarea.setSelectionRange(newBefore.length, newBefore.length);
+        textarea.focus();
+      }, 0);
+    } else {
+      const newBefore = textBeforeCursor.slice(0, atMatch.index!);
+      const rest = input.slice(cursorPos);
+      setInput(newBefore + rest);
+      setAtQuery(null);
+      setAtSuggestions([]);
+      if (onAddFilePath) {
+        onAddFilePath(suggestion.path);
+      }
+      setTimeout(() => {
+        textarea.setSelectionRange(newBefore.length, newBefore.length);
+        textarea.focus();
+      }, 0);
+    }
+  }, [input, setInput, inputRef, onAddFilePath]);
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    // @ 菜单键盘导航
+    if (atSuggestions.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setAtSelectedIdx((i) => (i + 1) % atSuggestions.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setAtSelectedIdx((i) => (i - 1 + atSuggestions.length) % atSuggestions.length);
+        return;
+      }
+      if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+        e.preventDefault();
+        selectAtSuggestion(atSuggestions[atSelectedIdx]);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setAtQuery(null);
+        setAtSuggestions([]);
+        return;
+      }
+    }
     // keyCode 229 = IME 正在处理；isComposingRef = 输入法组合中
     if (
       e.key === "Enter" &&
@@ -176,6 +307,37 @@ export function ChatInput({
           );
         })()}
 
+      {/* @ 提及路径补全 */}
+      {atSuggestions.length > 0 && (
+        <div ref={atMenuRef} className="px-2 pb-1">
+          <div className="bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg shadow-lg overflow-hidden max-h-48 overflow-y-auto">
+            <div className="px-2 py-1 border-b border-[var(--color-border)]">
+              <span className="text-[10px] text-[var(--color-text-secondary)]">
+                选择文件（Tab/Enter 确认，Esc 关闭）
+              </span>
+            </div>
+            {atSuggestions.map((s, i) => (
+              <button
+                key={s.path}
+                className={`w-full flex items-center gap-2 px-2 py-1.5 text-left text-xs transition-colors ${
+                  i === atSelectedIdx
+                    ? "bg-indigo-500/10 text-indigo-600"
+                    : "hover:bg-[var(--color-bg-hover)] text-[var(--color-text)]"
+                }`}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  selectAtSuggestion(s);
+                }}
+                onMouseEnter={() => setAtSelectedIdx(i)}
+              >
+                {s.isDir ? <Folder className="w-3.5 h-3.5 shrink-0 text-amber-500" /> : <File className="w-3.5 h-3.5 shrink-0 text-[var(--color-text-secondary)]" />}
+                <span className="truncate">{s.name}{s.isDir ? "/" : ""}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* 输入区域 */}
       <div className="p-2 pb-1">
         <div className="relative flex items-center gap-1 bg-[var(--color-bg-secondary)] p-1 px-2 rounded-xl border border-[var(--color-border)] shadow-sm focus-within:shadow-md focus-within:border-indigo-500/30 transition-all">
@@ -193,7 +355,7 @@ export function ChatInput({
                 />
               )}
               <AttachDropdown
-                onFileClick={() => (fileInputEl as React.RefObject<HTMLInputElement>)?.current?.click()}
+                onFileClick={onFileSelectNative ?? (() => (fileInputEl as React.RefObject<HTMLInputElement>)?.current?.click())}
                 onFolderClick={onFolderSelect}
                 accent="indigo"
               />
@@ -257,10 +419,13 @@ export function ChatInput({
                         </button>
                       </>
                     ) : (
-                      <div className="relative flex items-center gap-1.5 px-2 py-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] max-w-[140px]">
-                        <FileText className="w-3.5 h-3.5 text-[var(--color-text-tertiary)] shrink-0" />
-                        <span className="text-[10px] truncate text-[var(--color-text-secondary)]" title={a.name}>
-                          {a.name}
+                      <div className={`relative flex items-center gap-1.5 px-2 py-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] max-w-[180px] ${a.type === "folder" ? "border-amber-500/30 bg-amber-500/5" : ""}`}>
+                        {a.type === "folder"
+                          ? <Folder className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                          : <FileText className="w-3.5 h-3.5 text-[var(--color-text-tertiary)] shrink-0" />
+                        }
+                        <span className="text-[10px] truncate text-[var(--color-text-secondary)]" title={a.path || a.name}>
+                          {a.type === "folder" ? `📂 ${a.name}` : a.name}
                         </span>
                         <button
                           type="button"
@@ -305,7 +470,7 @@ export function ChatInput({
               }
               value={input}
               onChange={(e) => {
-                setInput(e.target.value);
+                handleInputChange(e.target.value, e.target.selectionStart ?? undefined);
                 e.target.style.height = "auto";
                 e.target.style.height = Math.min(e.target.scrollHeight, maxHeight) + "px";
               }}

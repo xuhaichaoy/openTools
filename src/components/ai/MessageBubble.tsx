@@ -403,7 +403,16 @@ export const MessageBubble = memo(function MessageBubble({
               <div
                 className={`prose prose-invert prose-base max-w-none [&_p]:leading-7 [&_p]:my-2 [&_li]:my-1 first:[&_p]:mt-0 last:[&_p]:mb-0 ${msg.streaming ? "min-h-[1.5rem]" : ""}`}
               >
-                {isPlainText && displayContent ? (
+                {msg.streaming && !displayContent ? (
+                  <div className="flex items-center gap-2 py-1">
+                    <div className="flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+                      <span className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+                      <span className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+                    </div>
+                    <span className="text-xs text-[var(--color-text-secondary)] animate-pulse">思考中...</span>
+                  </div>
+                ) : isPlainText && displayContent ? (
                   <p className="whitespace-pre-wrap leading-7 my-0">{displayContent}</p>
                 ) : (
                   <ReactMarkdown
@@ -411,10 +420,10 @@ export const MessageBubble = memo(function MessageBubble({
                     rehypePlugins={rehypePlugins}
                     components={mdComponents}
                   >
-                    {displayContent || (msg.streaming ? "▌" : "")}
+                    {displayContent || ""}
                   </ReactMarkdown>
                 )}
-                {msg.streaming && (
+                {msg.streaming && displayContent && (
                   <span className="inline-block w-1.5 h-4 bg-indigo-500 animate-pulse ml-1 align-middle" />
                 )}
                 {shouldTruncate && (

@@ -1,4 +1,4 @@
-import { useRef, useEffect, lazy, Suspense } from "react";
+import { useRef, useEffect, useState, lazy, Suspense } from "react";
 import {
   ArrowLeft,
   MessageCircle,
@@ -10,6 +10,7 @@ import {
   Plus,
   Wrench,
   Network,
+  ArrowRightCircle,
 } from "lucide-react";
 import { useDragWindow } from "@/hooks/useDragWindow";
 import { ModelSelector } from "@/components/ai/ModelSelector";
@@ -61,6 +62,15 @@ export function AICenter({
   useEffect(() => {
     useAIStore.getState().loadConfig();
   }, []);
+
+  const [mounted, setMounted] = useState({ agent: mode === "agent", cluster: mode === "cluster" });
+  useEffect(() => {
+    setMounted((prev) => {
+      if (mode === "agent" && !prev.agent) return { ...prev, agent: true };
+      if (mode === "cluster" && !prev.cluster) return { ...prev, cluster: true };
+      return prev;
+    });
+  }, [mode]);
 
   const chatRef = useRef<ChatViewHandle>(null);
   const agentRef = useRef<SmartAgentHandle>(null);
@@ -158,6 +168,13 @@ export function AICenter({
             >
               <Plus className="w-4 h-4" />
             </button>
+            <button
+              onClick={() => chatRef.current?.continueInAgent()}
+              className={iconBtn}
+              title="在 Agent 中继续（携带上下文）"
+            >
+              <ArrowRightCircle className="w-4 h-4" />
+            </button>
           </>
         )}
 
@@ -219,15 +236,21 @@ export function AICenter({
       </div>
 
       {/* ====== 内容区 ====== */}
-      <div className="flex-1 overflow-hidden">
+      <div className="flex-1 overflow-hidden relative">
         <Suspense fallback={Loading}>
-          {mode === "ask" && (
+          <div className={`absolute inset-0 ${mode === "ask" ? "" : "invisible pointer-events-none"}`}>
             <ChatView ref={chatRef} headless hideModelSelector />
+          </div>
+          {mounted.agent && (
+            <div className={`absolute inset-0 ${mode === "agent" ? "" : "invisible pointer-events-none"}`}>
+              <SmartAgentPlugin ref={agentRef} ai={ai} headless />
+            </div>
           )}
-          {mode === "agent" && (
-            <SmartAgentPlugin ref={agentRef} ai={ai} headless />
+          {mounted.cluster && (
+            <div className={`absolute inset-0 ${mode === "cluster" ? "" : "invisible pointer-events-none"}`}>
+              <ClusterPanel />
+            </div>
           )}
-          {mode === "cluster" && <ClusterPanel />}
         </Suspense>
       </div>
     </div>

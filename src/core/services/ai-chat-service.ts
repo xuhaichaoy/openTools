@@ -251,67 +251,103 @@ export async function startStreamingChat(opts: {
     }));
   }
 
-  // 监听流式 chunks
-  const unlisten = await listen<{ conversation_id: string; content: string }>(
-    "ai-stream-chunk",
-    (event) => {
-      if (event.payload.conversation_id === conversationId) {
-        const filtered = thinkFilter.process(event.payload.content);
-        if (filtered) {
-          _chunkBuffer += filtered;
-          if (_chunkRafId === null) {
-            _chunkRafId = requestAnimationFrame(flushChunkBuffer);
+  // 并行注册所有事件监听器（减少 IPC 串行等待）
+  const [
+    unlisten,
+    unlistenToolCalls,
+    unlistenToolResult,
+    unlistenToolConfirm,
+    unlistenDone,
+    unlistenError,
+  ] = await Promise.all([
+    listen<{ conversation_id: string; content: string }>(
+      "ai-stream-chunk",
+      (event) => {
+        if (event.payload.conversation_id === conversationId) {
+          const filtered = thinkFilter.process(event.payload.content);
+          if (filtered) {
+            _chunkBuffer += filtered;
+            if (_chunkRafId === null) {
+              _chunkRafId = requestAnimationFrame(flushChunkBuffer);
+            }
           }
         }
-      }
-    },
-  );
-
-  // 监听工具调用
-  const unlistenToolCalls = await listen<{
-    conversation_id: string;
-    tool_calls: ToolCallInfo[];
-  }>("ai-stream-tool-calls", (event) => {
-    if (event.payload.conversation_id === conversationId) {
-      const newCalls = event.payload.tool_calls.map((tc: any) => ({
-        id: tc.id,
-        name: tc.function.name,
-        arguments: tc.function.arguments,
-      }));
-      updateAssistant((m) => ({
-        ...m,
-        content: m.content || "正在调用工具...",
-        toolCalls: [...(m.toolCalls || []), ...newCalls],
-      }));
-    }
-  });
-
-  // 监听工具结果
-  const unlistenToolResult = await listen<{
-    conversation_id: string;
-    tool_call_id: string;
-    name: string;
-    result: string;
-  }>("ai-stream-tool-result", (event) => {
-    if (event.payload.conversation_id === conversationId) {
-      updateAssistant((m) => ({
-        ...m,
-        toolCalls: m.toolCalls?.map((tc) =>
-          tc.id === event.payload.tool_call_id
-            ? { ...tc, result: event.payload.result }
-            : tc,
-        ),
-      }));
-    }
-  });
-
-  // 监听工具确认请求
-  const unlistenToolConfirm = await listen<{
-    name: string;
-    arguments: string;
-  }>("ai-tool-confirm-request", (event) => {
-    setState({ pendingToolConfirm: event.payload });
-  });
+      },
+    ),
+    listen<{ conversation_id: string; tool_calls: ToolCallInfo[] }>(
+      "ai-stream-tool-calls",
+      (event) => {
+        if (event.payload.conversation_id === conversationId) {
+          const newCalls = event.payload.tool_calls.map((tc: any) => ({
+            id: tc.id,
+            name: tc.function.name,
+            arguments: tc.function.arguments,
+          }));
+          updateAssistant((m) => ({
+            ...m,
+            content: m.content || "正在调用工具...",
+            toolCalls: [...(m.toolCalls || []), ...newCalls],
+          }));
+        }
+      },
+    ),
+    listen<{ conversation_id: string; tool_call_id: string; name: string; result: string }>(
+      "ai-stream-tool-result",
+      (event) => {
+        if (event.payload.conversation_id === conversationId) {
+          updateAssistant((m) => ({
+            ...m,
+            toolCalls: m.toolCalls?.map((tc) =>
+              tc.id === event.payload.tool_call_id
+                ? { ...tc, result: event.payload.result }
+                : tc,
+            ),
+          }));
+        }
+      },
+    ),
+    listen<{ name: string; arguments: string }>(
+      "ai-tool-confirm-request",
+      (event) => {
+        setState({ pendingToolConfirm: event.payload });
+      },
+    ),
+    listen<{ conversation_id: string }>(
+      "ai-stream-done",
+      (event) => {
+        if (event.payload.conversation_id === conversationId) {
+          if (_chunkRafId !== null) {
+            cancelAnimationFrame(_chunkRafId);
+            _chunkRafId = null;
+          }
+          const remaining = (_chunkBuffer || "") + thinkFilter.flush();
+          _chunkBuffer = "";
+          updateAssistant((m) => ({
+            ...m,
+            content: remaining ? m.content + remaining : m.content,
+            streaming: false,
+          }));
+          setState({ isStreaming: false });
+          cleanup();
+          onPersist();
+        }
+      },
+    ),
+    listen<{ conversation_id: string; error: string }>(
+      "ai-stream-error",
+      (event) => {
+        if (event.payload.conversation_id === conversationId) {
+          updateAssistant((m) => ({
+            ...m,
+            content: `❌ ${event.payload.error}`,
+            streaming: false,
+          }));
+          setState({ isStreaming: false });
+          cleanup();
+        }
+      },
+    ),
+  ]);
 
   const cleanup = () => {
     if (_chunkRafId !== null) {
@@ -326,47 +362,6 @@ export async function startStreamingChat(opts: {
     unlistenDone();
     unlistenError();
   };
-
-  // 监听完成
-  const unlistenDone = await listen<{ conversation_id: string }>(
-    "ai-stream-done",
-    (event) => {
-      if (event.payload.conversation_id === conversationId) {
-        // 先刷出 chunk 缓冲
-        if (_chunkRafId !== null) {
-          cancelAnimationFrame(_chunkRafId);
-          _chunkRafId = null;
-        }
-        // 合并残留缓冲 + think 过滤器残留
-        const remaining = (_chunkBuffer || "") + thinkFilter.flush();
-        _chunkBuffer = "";
-        updateAssistant((m) => ({
-          ...m,
-          content: remaining ? m.content + remaining : m.content,
-          streaming: false,
-        }));
-        setState({ isStreaming: false });
-        cleanup();
-        onPersist();
-      }
-    },
-  );
-
-  // 监听错误
-  const unlistenError = await listen<{
-    conversation_id: string;
-    error: string;
-  }>("ai-stream-error", (event) => {
-    if (event.payload.conversation_id === conversationId) {
-      updateAssistant((m) => ({
-        ...m,
-        content: `❌ ${event.payload.error}`,
-        streaming: false,
-      }));
-      setState({ isStreaming: false });
-      cleanup();
-    }
-  });
 
   // 发起 AI 请求
   try {

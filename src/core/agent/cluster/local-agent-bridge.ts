@@ -34,7 +34,7 @@ function getPluginTools(): AgentTool[] {
   );
 }
 
-function getBuiltinTools(askUser?: AskUserCallback): { tools: AgentTool[]; resetPerRunState: () => void } {
+function getBuiltinTools(askUser?: AskUserCallback): { tools: AgentTool[]; resetPerRunState: () => void; notifyToolCalled: (toolName: string) => void } {
   const confirmHostFallback = async () => true;
   return createBuiltinAgentTools(confirmHostFallback, askUser);
 }

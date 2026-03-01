@@ -29,6 +29,42 @@ export async function aiChat(
   return invoke<string>('ai_chat', { messages })
 }
 
+/** 带记忆注入 + 配置路由的快捷对话（供 ContextActionPanel 等轻量场景使用） */
+export async function quickChat(
+  messages: Array<{ role: string; content: string }>,
+  options?: { config?: AIConfig },
+): Promise<string> {
+  const { getRoutedConfig } = await import('./router')
+  const {
+    appendMemoryCandidates,
+    buildMemoryPromptBlock,
+    extractMemoryCandidates,
+    recallMemories,
+  } = await import('./memory-store')
+
+  const config = options?.config ?? (await getAIConfig())
+  const routedConfig = getRoutedConfig(config)
+
+  let enriched = [...messages]
+
+  if (config.enable_long_term_memory) {
+    const lastUser = [...messages].reverse().find((m) => m.role === 'user' && m.content?.trim())
+    if (lastUser) {
+      if (config.enable_memory_auto_save) {
+        const candidates = extractMemoryCandidates(lastUser.content.trim())
+        if (candidates.length > 0) await appendMemoryCandidates(candidates)
+      }
+      if (config.enable_memory_auto_recall) {
+        const recalled = await recallMemories(lastUser.content.trim(), { topK: 6 })
+        const prompt = buildMemoryPromptBlock(recalled)
+        if (prompt) enriched = [{ role: 'system', content: prompt }, ...enriched]
+      }
+    }
+  }
+
+  return invoke<string>('ai_chat', { messages: enriched, config: routedConfig })
+}
+
 /** 流式 AI 对话（带 Function Calling） */
 export async function aiChatStream(
   conversationId: string,

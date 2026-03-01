@@ -183,7 +183,7 @@ function createLocalDevTools(
     },
     {
       name: "write_file",
-      description: "写入本地文本文件（会覆盖目标文件）",
+      description: "写入本地文本文件（会覆盖目标文件）。注意：对于已有文件的局部修改，优先使用 str_replace_edit 工具（更精确、更安全）。write_file 仅适合创建全新文件或需要完全重写的场景。",
       parameters: {
         path: { type: "string", description: "文件路径（建议绝对路径）" },
         content: { type: "string", description: "要写入的文本内容" },
@@ -200,8 +200,192 @@ function createLocalDevTools(
       },
     },
     {
+      name: "str_replace_edit",
+      description: `对文件进行精确编辑。支持三种命令：
+- str_replace: 精确替换文件中的一段文本（old_str → new_str）。old_str 必须在文件中唯一匹配。
+- insert: 在指定行号之后插入新文本。
+- create: 创建新文件（文件已存在则报错，防止误覆盖）。
+优先使用此工具而非 write_file 来修改已有文件。`,
+      parameters: {
+        command: {
+          type: "string",
+          description: "操作命令: str_replace | insert | create",
+        },
+        path: { type: "string", description: "文件绝对路径" },
+        old_str: {
+          type: "string",
+          description: "[str_replace] 要被替换的原始文本（必须与文件内容完全匹配，包括缩进和空白）",
+          required: false,
+        },
+        new_str: {
+          type: "string",
+          description: "[str_replace/create] 替换后的新文本，或 create 时的文件内容",
+          required: false,
+        },
+        insert_line: {
+          type: "integer",
+          description: "[insert] 在此行号之后插入文本（0 表示插入到文件开头）",
+          required: false,
+        },
+      },
+      dangerous: true,
+      execute: async (params) => {
+        const command = String(params.command || "").trim();
+        const path = String(params.path || "").trim();
+        if (!path) return { error: "path 不能为空" };
+        if (!["str_replace", "insert", "create"].includes(command)) {
+          return { error: `无效命令: ${command}，可选: str_replace, insert, create` };
+        }
+
+        // ── create: 创建新文件（已存在则报错） ──
+        if (command === "create") {
+          const content = String(params.new_str ?? "");
+          try {
+            const existing = await invokeTauri<string>("read_text_file", { path }).catch(() => null);
+            if (existing !== null) {
+              return { error: `文件已存在: ${path}。如需覆盖请使用 write_file，如需修改请使用 str_replace 命令。` };
+            }
+            await agentRuntimeManager.writeTextFile(path, content, {
+              confirmHostFallback,
+              allowInteractiveHostWriteWhenNoPolicyRoots: true,
+            });
+            return { success: true, path, message: `文件已创建 (${content.split("\n").length} 行)` };
+          } catch (e) {
+            return { error: `创建文件失败: ${e}` };
+          }
+        }
+
+        // ── 读取文件内容 ──
+        let fileContent: string;
+        try {
+          const result = await invokeTauri<string | { content: string }>("read_text_file", { path });
+          fileContent = typeof result === "string" ? result : result.content;
+        } catch (e) {
+          return { error: `无法读取文件 ${path}: ${e}` };
+        }
+
+        const lines = fileContent.split("\n");
+
+        // ── str_replace: 精确替换 ──
+        if (command === "str_replace") {
+          const oldStr = String(params.old_str ?? "");
+          const newStr = String(params.new_str ?? "");
+          if (!oldStr) return { error: "old_str 不能为空" };
+          if (oldStr === newStr) return { error: "old_str 和 new_str 相同，无需替换" };
+
+          // 计算匹配次数和位置
+          let matchCount = 0;
+          let searchFrom = 0;
+          const matchPositions: number[] = [];
+          while (true) {
+            const idx = fileContent.indexOf(oldStr, searchFrom);
+            if (idx === -1) break;
+            matchCount++;
+            matchPositions.push(idx);
+            searchFrom = idx + 1;
+          }
+
+          if (matchCount === 0) {
+            // 提供诊断信息帮助 LLM 修正
+            const firstLine = oldStr.split("\n")[0].trim();
+            const candidates = lines
+              .map((l, i) => ({ line: i + 1, content: l }))
+              .filter((l) => l.content.includes(firstLine))
+              .slice(0, 5);
+            return {
+              error: `old_str 在文件中未找到匹配。请确认文本完全一致（包括缩进、空格、换行）。`,
+              hint: candidates.length > 0
+                ? `首行 "${firstLine}" 出现在以下行: ${candidates.map((c) => `第${c.line}行: "${c.content.trim()}"`).join("; ")}`
+                : `首行 "${firstLine}" 在文件中未找到。请用 read_file_range 确认文件内容。`,
+            };
+          }
+
+          if (matchCount > 1) {
+            const lineNumbers = matchPositions.map((pos) => {
+              const before = fileContent.slice(0, pos);
+              return before.split("\n").length;
+            });
+            return {
+              error: `old_str 在文件中匹配了 ${matchCount} 次（行: ${lineNumbers.join(", ")}）。请提供更多上下文使其唯一匹配。`,
+            };
+          }
+
+          // 唯一匹配，执行替换
+          const newContent = fileContent.replace(oldStr, newStr);
+          try {
+            await agentRuntimeManager.writeTextFile(path, newContent, {
+              confirmHostFallback,
+              allowInteractiveHostWriteWhenNoPolicyRoots: true,
+            });
+          } catch (e) {
+            return { error: `写入文件失败: ${e}` };
+          }
+
+          // 返回编辑区域的上下文片段
+          const replaceStart = fileContent.indexOf(oldStr);
+          const beforeLines = fileContent.slice(0, replaceStart).split("\n");
+          const startLine = beforeLines.length;
+          const newLines = newContent.split("\n");
+          const snippetStart = Math.max(0, startLine - 3);
+          const snippetEnd = Math.min(newLines.length, startLine + newStr.split("\n").length + 2);
+          const snippet = newLines
+            .slice(snippetStart, snippetEnd)
+            .map((l, i) => `${snippetStart + i + 1} | ${l}`)
+            .join("\n");
+
+          return {
+            success: true,
+            path,
+            replacements: 1,
+            snippet,
+          };
+        }
+
+        // ── insert: 在指定行后插入 ──
+        if (command === "insert") {
+          const insertLine = typeof params.insert_line === "number" ? Math.floor(params.insert_line) : -1;
+          const newStr = String(params.new_str ?? "");
+          if (insertLine < 0) return { error: "insert_line 必须 >= 0（0 表示插入到文件开头）" };
+          if (insertLine > lines.length) {
+            return { error: `insert_line (${insertLine}) 超出文件总行数 (${lines.length})` };
+          }
+          if (!newStr) return { error: "new_str 不能为空" };
+
+          const insertLines = newStr.split("\n");
+          lines.splice(insertLine, 0, ...insertLines);
+          const newContent = lines.join("\n");
+
+          try {
+            await agentRuntimeManager.writeTextFile(path, newContent, {
+              confirmHostFallback,
+              allowInteractiveHostWriteWhenNoPolicyRoots: true,
+            });
+          } catch (e) {
+            return { error: `写入文件失败: ${e}` };
+          }
+
+          const snippetStart = Math.max(0, insertLine - 2);
+          const snippetEnd = Math.min(lines.length, insertLine + insertLines.length + 2);
+          const snippet = lines
+            .slice(snippetStart, snippetEnd)
+            .map((l, i) => `${snippetStart + i + 1} | ${l}`)
+            .join("\n");
+
+          return {
+            success: true,
+            path,
+            inserted_lines: insertLines.length,
+            after_line: insertLine,
+            snippet,
+          };
+        }
+
+        return { error: "未知命令" };
+      },
+    },
+    {
       name: "run_shell_command",
-      description: "执行终端命令（用于构建、测试、格式化、搜索等）",
+      description: "执行终端命令（用于构建、测试、格式化、搜索等）。每次调用独立执行，不保留工作目录等状态。如需保持会话状态（如 cd 后继续操作），请使用 persistent_shell 工具。",
       parameters: {
         command: { type: "string", description: "命令行指令" },
       },
@@ -212,6 +396,90 @@ function createLocalDevTools(
         return agentRuntimeManager.runShellCommand(command, {
           confirmHostFallback,
         });
+      },
+    },
+    {
+      name: "run_lint",
+      description: `在项目目录中运行代码检查（lint/typecheck）并返回结构化诊断结果。
+自动检测项目类型并选择合适的检查器：TypeScript 项目用 tsc + eslint，Python 用 ruff/flake8，Rust 用 cargo check。
+修改代码后建议调用此工具验证没有引入语法或类型错误。`,
+      readonly: true,
+      parameters: {
+        project_path: { type: "string", description: "项目根目录（绝对路径）" },
+        files: {
+          type: "string",
+          description: "只检查指定文件（逗号分隔的相对路径，可选。不填则检查整个项目）",
+          required: false,
+        },
+      },
+      execute: async (params) => {
+        const projectPath = String(params.project_path || "").trim();
+        if (!projectPath) return { error: "project_path 不能为空" };
+
+        const files = params.files ? String(params.files).split(",").map((f) => f.trim()).filter(Boolean) : [];
+
+        // 检测项目类型
+        const detectFile = async (name: string): Promise<boolean> => {
+          try {
+            await invokeTauri("read_text_file", { path: `${projectPath}/${name}` });
+            return true;
+          } catch { return false; }
+        };
+
+        const [hasTsConfig, hasPackageJson, hasCargoToml, hasPyproject] = await Promise.all([
+          detectFile("tsconfig.json"),
+          detectFile("package.json"),
+          detectFile("Cargo.toml"),
+          detectFile("pyproject.toml"),
+        ]);
+
+        const commands: string[] = [];
+        if (hasTsConfig) {
+          commands.push("npx tsc --noEmit --pretty 2>&1 | head -60");
+        }
+        if (hasPackageJson && !hasTsConfig) {
+          // JS 项目无 tsconfig，尝试 eslint
+          const fileArgs = files.length > 0 ? files.join(" ") : ".";
+          commands.push(`npx eslint ${fileArgs} --format compact 2>&1 | head -60`);
+        }
+        if (hasTsConfig && files.length > 0) {
+          const fileArgs = files.join(" ");
+          commands.push(`npx eslint ${fileArgs} --format compact 2>&1 | head -40`);
+        }
+        if (hasCargoToml) {
+          commands.push("cargo check --message-format short 2>&1 | head -60");
+        }
+        if (hasPyproject) {
+          commands.push("(ruff check . --output-format concise 2>/dev/null || python -m flake8 . --max-line-length 120 2>/dev/null || echo 'No Python linter found') | head -60");
+        }
+
+        if (commands.length === 0) {
+          return { note: "未检测到已知项目类型（需要 tsconfig.json / package.json / Cargo.toml / pyproject.toml）" };
+        }
+
+        const fullCommand = `cd ${JSON.stringify(projectPath)} && ${commands.join(" && echo '---' && ")}`;
+        try {
+          const result = await agentRuntimeManager.runShellCommand(fullCommand, {
+            confirmHostFallback,
+          }) as Record<string, unknown>;
+
+          const stdout = String(result.stdout || result.output || "").trim();
+          const stderr = String(result.stderr || "").trim();
+          const exitCode = typeof result.exit_code === "number" ? result.exit_code
+            : typeof result.exitCode === "number" ? result.exitCode : null;
+
+          const hasErrors = exitCode !== 0 || /error/i.test(stdout);
+          return {
+            project: projectPath,
+            checkers: commands.map((c) => c.split(" ")[0].replace("npx ", "")),
+            exit_code: exitCode,
+            has_errors: hasErrors,
+            diagnostics: stdout || "(无输出)",
+            ...(stderr ? { stderr } : {}),
+          };
+        } catch (e) {
+          return { error: `检查执行失败: ${e}` };
+        }
       },
     },
     {
@@ -562,6 +830,7 @@ export type AskUserAnswers = Record<string, string | string[]>;
 export interface BuiltinToolsResult {
   tools: AgentTool[];
   resetPerRunState: () => void;
+  notifyToolCalled: (toolName: string) => void;
 }
 
 export function createBuiltinAgentTools(
@@ -721,16 +990,15 @@ export function createBuiltinAgentTools(
   const sequentialThinkingState = {
     history: [] as Array<{ thought: string; number: number; total: number; isRevision?: boolean; revisesThought?: number; branchId?: string }>,
     branches: {} as Record<string, unknown[]>,
+    consecutiveCalls: 0,
   };
 
   tools.push(
     {
       name: "sequential_thinking",
       description:
-        `动态、可反思的逐步推理工具。将复杂问题分解为多步思考，支持修订已有结论和分支探索。
-使用场景: 分解复杂问题、规划多步执行方案、分析需要修正方向的问题、过滤无关信息。
-关键特性: 可随时调整 total_thoughts 估值；可标记修订或分支；到达末尾仍可追加步骤。
-使用建议: 初始设置 total_thoughts 为 3-8，需要时动态增加；每步聚焦一个子问题；发现错误时标记 is_revision。`,
+        `逐步推理工具。仅在需要分解复杂问题时使用，每次思考后应立即使用 read_file、list_directory 等工具获取实际信息。
+重要：不要连续调用此工具超过 3 次，思考后必须执行实际操作（读取文件、搜索代码等）再继续。`,
       readonly: true,
       parameters: {
         thought: { type: "string", description: "当前思考步骤内容" },
@@ -744,6 +1012,17 @@ export function createBuiltinAgentTools(
         needs_more_thoughts: { type: "boolean", description: "是否需要追加更多步骤", required: false },
       },
       execute: async (params) => {
+        const MAX_CONSECUTIVE = 3;
+        sequentialThinkingState.consecutiveCalls++;
+
+        if (sequentialThinkingState.consecutiveCalls > MAX_CONSECUTIVE) {
+          sequentialThinkingState.consecutiveCalls = 0;
+          return {
+            error: "已连续思考超过 3 次，请停止调用 sequential_thinking，立即使用 read_file、list_directory、search_in_files 等工具获取实际信息后再继续。",
+            next_thought_needed: false,
+          };
+        }
+
         const thought = String(params.thought || "").trim();
         if (!thought) return { error: "thought 不能为空" };
         const thoughtNumber = typeof params.thought_number === "number" ? params.thought_number : 1;
@@ -767,12 +1046,17 @@ export function createBuiltinAgentTools(
           sequentialThinkingState.branches[entry.branchId].push(entry);
         }
 
+        const warningSuffix = sequentialThinkingState.consecutiveCalls >= MAX_CONSECUTIVE
+          ? " ⚠️ 你已连续思考 3 次，下一步必须使用实际工具（read_file / list_directory / search_in_files 等）获取信息。"
+          : "";
+
         return {
           thought_number: entry.number,
           total_thoughts: entry.total,
           next_thought_needed: nextNeeded,
           branches: Object.keys(sequentialThinkingState.branches),
           thought_history_length: sequentialThinkingState.history.length,
+          ...(warningSuffix ? { warning: warningSuffix } : {}),
         };
       },
     },
@@ -962,6 +1246,312 @@ export function createBuiltinAgentTools(
   tools.push(...createLocalDevTools(confirmHostFallback));
   tools.push(createReminderTool());
 
+  // ── persistent_shell: 持久化 Shell 会话工具 ──
+  const shellSession = {
+    cwd: "",
+    env: {} as Record<string, string>,
+    history: [] as Array<{ command: string; exitCode: number | null }>,
+    timedOut: false,
+  };
+
+  tools.push({
+    name: "persistent_shell",
+    description: `持久化终端会话。与 run_shell_command 不同，此工具在多次调用间保持工作目录和环境变量状态。
+适用场景：cd 进入项目目录后连续操作、激活虚拟环境后运行命令、需要多步 shell 操作的编程任务。
+超时（120秒）后会话将被标记为失效，需传 restart=true 重启。`,
+    parameters: {
+      command: { type: "string", description: "要执行的 shell 命令" },
+      restart: {
+        type: "boolean",
+        description: "是否重启会话（清除工作目录和环境状态）",
+        required: false,
+      },
+      timeout_seconds: {
+        type: "integer",
+        description: "超时秒数（默认 120，最大 300）",
+        required: false,
+      },
+    },
+    dangerous: true,
+    execute: async (params) => {
+      const restart = params.restart === true || params.restart === "true";
+      if (restart) {
+        shellSession.cwd = "";
+        shellSession.env = {};
+        shellSession.history = [];
+        shellSession.timedOut = false;
+      }
+      if (shellSession.timedOut && !restart) {
+        return {
+          error: "会话已超时失效。请传 restart=true 重启会话后再执行命令。",
+          hint: "上次超时的命令可能仍在后台运行，请注意检查。",
+        };
+      }
+
+      const command = String(params.command || "").trim();
+      if (!command) return { error: "command 不能为空" };
+
+      const timeoutSec = Math.min(Math.max(Number(params.timeout_seconds) || 120, 5), 300);
+
+      // 构建带状态的命令：先 cd 到上次的工作目录，设置环境变量，执行命令，最后输出当前目录
+      const envPrefix = Object.entries(shellSession.env)
+        .map(([k, v]) => `export ${k}=${JSON.stringify(v)}`)
+        .join(" && ");
+      const cdPrefix = shellSession.cwd ? `cd ${JSON.stringify(shellSession.cwd)}` : "";
+      const sentinel = `__AGENT_CWD_${Date.now()}__`;
+      const parts = [cdPrefix, envPrefix, command, `echo "${sentinel}$(pwd)"`].filter(Boolean);
+      const fullCommand = parts.join(" && ");
+
+      try {
+        const resultPromise = agentRuntimeManager.runShellCommand(fullCommand, {
+          confirmHostFallback,
+        });
+
+        const timeoutPromise = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("SHELL_TIMEOUT")), timeoutSec * 1000),
+        );
+
+        const result = await Promise.race([resultPromise, timeoutPromise]) as Record<string, unknown>;
+
+        // 从输出中提取新的 cwd
+        const stdout = String(result.stdout || result.output || "");
+        const sentinelIdx = stdout.lastIndexOf(sentinel);
+        let cleanOutput = stdout;
+        if (sentinelIdx !== -1) {
+          const newCwd = stdout.slice(sentinelIdx + sentinel.length).trim();
+          if (newCwd) shellSession.cwd = newCwd;
+          cleanOutput = stdout.slice(0, sentinelIdx).trimEnd();
+        }
+
+        const exitCode = typeof result.exit_code === "number" ? result.exit_code
+          : typeof result.exitCode === "number" ? result.exitCode : null;
+
+        shellSession.history.push({ command, exitCode });
+
+        // 解析 export 命令来跟踪环境变量
+        const exportMatch = command.match(/export\s+(\w+)=(.+?)(?:\s*&&|$)/g);
+        if (exportMatch) {
+          for (const m of exportMatch) {
+            const kv = m.match(/export\s+(\w+)=(.+?)(?:\s*&&|$)/);
+            if (kv) shellSession.env[kv[1]] = kv[2].replace(/^["']|["']$/g, "");
+          }
+        }
+
+        return {
+          output: cleanOutput,
+          stderr: result.stderr || "",
+          exit_code: exitCode,
+          cwd: shellSession.cwd,
+          session_commands: shellSession.history.length,
+        };
+      } catch (e) {
+        if (e instanceof Error && e.message === "SHELL_TIMEOUT") {
+          shellSession.timedOut = true;
+          return {
+            error: `命令执行超时（${timeoutSec}秒）。会话已失效，请传 restart=true 重启。`,
+            command,
+            timeout_seconds: timeoutSec,
+          };
+        }
+        return { error: `命令执行失败: ${e}` };
+      }
+    },
+  });
+
+  // ── json_edit: JSON 文件精确编辑工具 ──
+  tools.push({
+    name: "json_edit",
+    description: `精确编辑 JSON 文件（如 package.json, tsconfig.json 等配置文件）。支持四种操作：
+- view: 查看指定路径的值（如 "dependencies.react"）
+- set: 设置指定路径的值
+- add: 在指定路径添加新字段
+- remove: 删除指定路径的字段
+使用点号分隔的路径（如 "compilerOptions.strict"），数组用数字索引（如 "scripts.0"）。`,
+    parameters: {
+      path: { type: "string", description: "JSON 文件的绝对路径" },
+      operation: {
+        type: "string",
+        description: "操作类型: view | set | add | remove",
+      },
+      json_path: {
+        type: "string",
+        description: '目标字段路径，用点号分隔（如 "dependencies.react"、"compilerOptions.strict"）。空字符串表示根对象。',
+      },
+      value: {
+        type: "string",
+        description: '[set/add] 要设置的值（JSON 格式字符串，如 \'"hello"\'、\'true\'、\'{ "key": "val" }\'）',
+        required: false,
+      },
+    },
+    dangerous: true,
+    execute: async (params) => {
+      const filePath = String(params.path || "").trim();
+      const operation = String(params.operation || "").trim();
+      const jsonPath = String(params.json_path ?? "").trim();
+
+      if (!filePath) return { error: "path 不能为空" };
+      if (!["view", "set", "add", "remove"].includes(operation)) {
+        return { error: `无效操作: ${operation}，可选: view, set, add, remove` };
+      }
+
+      // 读取并解析 JSON
+      let fileContent: string;
+      let jsonData: unknown;
+      try {
+        const result = await invokeTauri<string | { content: string }>("read_text_file", { path: filePath });
+        fileContent = typeof result === "string" ? result : result.content;
+        jsonData = JSON.parse(fileContent);
+      } catch (e) {
+        return { error: `读取或解析 JSON 失败: ${e}` };
+      }
+
+      // 路径解析辅助
+      const pathParts = jsonPath ? jsonPath.split(".") : [];
+
+      const getByPath = (obj: unknown, parts: string[]): unknown => {
+        let current = obj;
+        for (const part of parts) {
+          if (current === null || current === undefined) return undefined;
+          if (Array.isArray(current)) {
+            const idx = parseInt(part, 10);
+            current = isNaN(idx) ? undefined : current[idx];
+          } else if (typeof current === "object") {
+            current = (current as Record<string, unknown>)[part];
+          } else {
+            return undefined;
+          }
+        }
+        return current;
+      };
+
+      const setByPath = (obj: unknown, parts: string[], value: unknown): boolean => {
+        if (parts.length === 0) return false;
+        let current = obj;
+        for (let i = 0; i < parts.length - 1; i++) {
+          if (current === null || current === undefined || typeof current !== "object") return false;
+          const part = parts[i];
+          if (Array.isArray(current)) {
+            const idx = parseInt(part, 10);
+            if (isNaN(idx)) return false;
+            current = current[idx];
+          } else {
+            current = (current as Record<string, unknown>)[part];
+          }
+        }
+        if (current === null || current === undefined || typeof current !== "object") return false;
+        const lastPart = parts[parts.length - 1];
+        if (Array.isArray(current)) {
+          const idx = parseInt(lastPart, 10);
+          if (isNaN(idx)) return false;
+          current[idx] = value;
+        } else {
+          (current as Record<string, unknown>)[lastPart] = value;
+        }
+        return true;
+      };
+
+      const deleteByPath = (obj: unknown, parts: string[]): boolean => {
+        if (parts.length === 0) return false;
+        const parent = parts.length === 1 ? obj : getByPath(obj, parts.slice(0, -1));
+        if (parent === null || parent === undefined || typeof parent !== "object") return false;
+        const lastPart = parts[parts.length - 1];
+        if (Array.isArray(parent)) {
+          const idx = parseInt(lastPart, 10);
+          if (isNaN(idx) || idx >= parent.length) return false;
+          parent.splice(idx, 1);
+        } else {
+          if (!(lastPart in (parent as Record<string, unknown>))) return false;
+          delete (parent as Record<string, unknown>)[lastPart];
+        }
+        return true;
+      };
+
+      // ── view ──
+      if (operation === "view") {
+        const value = pathParts.length === 0 ? jsonData : getByPath(jsonData, pathParts);
+        if (value === undefined) {
+          return { error: `路径 "${jsonPath}" 不存在`, available_keys: typeof jsonData === "object" && jsonData !== null ? Object.keys(jsonData as Record<string, unknown>).slice(0, 20) : [] };
+        }
+        return { path: jsonPath || "(root)", value };
+      }
+
+      // 解析 value 参数
+      let parsedValue: unknown;
+      if (operation === "set" || operation === "add") {
+        const rawValue = String(params.value ?? "");
+        if (rawValue === "" && operation !== "add") return { error: "value 不能为空" };
+        try {
+          parsedValue = rawValue === "" ? null : JSON.parse(rawValue);
+        } catch {
+          // 如果不是合法 JSON，当作字符串
+          parsedValue = rawValue;
+        }
+      }
+
+      // ── set ──
+      if (operation === "set") {
+        if (pathParts.length === 0) {
+          jsonData = parsedValue;
+        } else {
+          const existing = getByPath(jsonData, pathParts);
+          if (existing === undefined) {
+            return { error: `路径 "${jsonPath}" 不存在。如需添加新字段请使用 add 操作。` };
+          }
+          if (!setByPath(jsonData, pathParts, parsedValue)) {
+            return { error: `无法设置路径 "${jsonPath}"` };
+          }
+        }
+      }
+
+      // ── add ──
+      if (operation === "add") {
+        if (pathParts.length === 0) {
+          return { error: "add 操作需要指定 json_path" };
+        }
+        const existing = getByPath(jsonData, pathParts);
+        if (existing !== undefined) {
+          return { error: `路径 "${jsonPath}" 已存在（当前值: ${JSON.stringify(existing).slice(0, 100)}）。如需修改请使用 set 操作。` };
+        }
+        // 确保父路径存在
+        const parentParts = pathParts.slice(0, -1);
+        const parent = parentParts.length === 0 ? jsonData : getByPath(jsonData, parentParts);
+        if (parent === null || parent === undefined || typeof parent !== "object") {
+          return { error: `父路径 "${parentParts.join(".")}" 不存在或不是对象/数组` };
+        }
+        if (!setByPath(jsonData, pathParts, parsedValue)) {
+          return { error: `无法在路径 "${jsonPath}" 添加值` };
+        }
+      }
+
+      // ── remove ──
+      if (operation === "remove") {
+        if (pathParts.length === 0) {
+          return { error: "remove 操作需要指定 json_path" };
+        }
+        if (!deleteByPath(jsonData, pathParts)) {
+          return { error: `路径 "${jsonPath}" 不存在或无法删除` };
+        }
+      }
+
+      // 写回文件（保持 2 空格缩进 + 尾换行，与常见 JSON 格式一致）
+      try {
+        const newContent = JSON.stringify(jsonData, null, 2) + "\n";
+        await agentRuntimeManager.writeTextFile(filePath, newContent, {
+          confirmHostFallback,
+          allowInteractiveHostWriteWhenNoPolicyRoots: true,
+        });
+        return {
+          success: true,
+          operation,
+          path: jsonPath || "(root)",
+          new_value: operation === "remove" ? "(deleted)" : getByPath(jsonData, pathParts),
+        };
+      } catch (e) {
+        return { error: `写入 JSON 文件失败: ${e}` };
+      }
+    },
+  });
+
   const isMac =
     typeof navigator !== "undefined" &&
     navigator.platform.toLowerCase().includes("mac");
@@ -982,6 +1572,16 @@ export function createBuiltinAgentTools(
       askUserCalled = false;
       sequentialThinkingState.history = [];
       sequentialThinkingState.branches = {};
+      sequentialThinkingState.consecutiveCalls = 0;
+      shellSession.cwd = "";
+      shellSession.env = {};
+      shellSession.history = [];
+      shellSession.timedOut = false;
+    },
+    notifyToolCalled: (toolName: string) => {
+      if (toolName !== "sequential_thinking") {
+        sequentialThinkingState.consecutiveCalls = 0;
+      }
     },
   };
 }

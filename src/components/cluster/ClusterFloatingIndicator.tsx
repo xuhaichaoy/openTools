@@ -30,6 +30,7 @@ function formatElapsed(ms: number) {
 
 export function ClusterFloatingIndicator() {
   const aiCenterMode = useAppStore((s) => s.aiCenterMode);
+  const currentView = useAppStore((s) => s.currentView());
   const clusterSessions = useClusterStore((s) => s.sessions);
   const agentInfo = useAgentRunningStore((s) => s.info);
   const agentAbort = useAgentRunningStore((s) => s.abortFn);
@@ -124,8 +125,9 @@ export function ClusterFloatingIndicator() {
 
   if (items.length === 0) return null;
 
-  // Don't show if user is already on the corresponding page
-  if (items.length === 1) {
+  // Don't show if user is already viewing the corresponding AI Center tab
+  const isOnAiCenter = currentView === "ai-center";
+  if (isOnAiCenter && items.length === 1) {
     const onlyItem = items[0];
     if (
       (onlyItem.key === "cluster" && aiCenterMode === "cluster") ||

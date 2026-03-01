@@ -19,12 +19,11 @@ const DOCUMENT_EXT = new Set([
 ]);
 const MAX_TEXT_FILE_BYTES = 100 * 1024;
 const MAX_TOTAL_TEXT_BYTES = 500 * 1024;
-const MAX_FOLDER_DEPTH = 3;
-const MAX_FOLDER_FILES = 50;
+const MAX_FOLDER_DEPTH = 2;
 
 export interface InputAttachment {
   id: string;
-  type: "image" | "text_file" | "document";
+  type: "image" | "text_file" | "document" | "folder";
   name: string;
   path?: string;
   preview?: string;
@@ -43,33 +42,55 @@ function genId(): string {
   return `att-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
 
-async function collectFilesFromDir(
+
+const IGNORED_DIRS = new Set([
+  ".git", ".svn", ".hg", "node_modules", ".next", ".nuxt",
+  "dist", "build", "target", "__pycache__", ".venv", "venv",
+  ".idea", ".vscode", ".DS_Store", ".cache", "coverage",
+]);
+
+async function buildDirTree(
   dirPath: string,
   depth: number,
   maxDepth: number,
-  maxFiles: number,
-  collected: { path: string; name: string; isDir: boolean }[],
-): Promise<void> {
-  if (depth > maxDepth || collected.length >= maxFiles) return;
+  prefix: string,
+): Promise<string> {
+  if (depth > maxDepth) return "";
   try {
     const raw = await invoke<string>("list_directory", { path: dirPath });
-    const entries = JSON.parse(raw) as { name: string; is_dir: boolean }[];
-    for (const e of entries) {
-      if (collected.length >= maxFiles) break;
-      const fullPath = `${dirPath}/${e.name}`.replace(/\/+/g, "/");
-      if (e.is_dir) {
-        await collectFilesFromDir(fullPath, depth + 1, maxDepth, maxFiles, collected);
-      } else {
-        collected.push({ path: fullPath, name: e.name, isDir: false });
+    let entries = JSON.parse(raw) as { name: string; is_dir: boolean }[];
+    entries = entries.filter((e) => !e.name.startsWith(".") && !IGNORED_DIRS.has(e.name));
+    entries.sort((a, b) => {
+      if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+    const lines: string[] = [];
+    for (let i = 0; i < entries.length; i++) {
+      const e = entries[i];
+      const isLast = i === entries.length - 1;
+      const connector = isLast ? "└── " : "├── ";
+      const childPrefix = isLast ? "    " : "│   ";
+      lines.push(`${prefix}${connector}${e.name}${e.is_dir ? "/" : ""}`);
+      if (e.is_dir && depth < maxDepth) {
+        const sub = await buildDirTree(
+          `${dirPath}/${e.name}`.replace(/\/+/g, "/"),
+          depth + 1,
+          maxDepth,
+          `${prefix}${childPrefix}`,
+        );
+        if (sub) lines.push(sub);
       }
     }
+    return lines.join("\n");
   } catch {
-    // ignore single dir read errors
+    return "";
   }
 }
 
 export function useInputAttachments() {
   const [attachments, setAttachments] = useState<InputAttachment[]>([]);
+  const [folderRoots, setFolderRoots] = useState<string[]>([]);
+  const [folderTree, setFolderTree] = useState("");
 
   const imagePaths = attachments
     .filter((a) => a.type === "image" && a.path)
@@ -78,10 +99,50 @@ export function useInputAttachments() {
     .filter((a) => a.type === "image" && a.preview)
     .map((a) => a.preview!);
 
-  const fileContextBlock = attachments
-    .filter((a) => (a.type === "text_file" || a.type === "document") && a.textContent)
-    .map((a) => `### ${a.name}\n${a.textContent}`)
+  const textAttachments = attachments.filter(
+    (a) => (a.type === "text_file" || a.type === "document") && a.textContent,
+  );
+
+  const detectedRoots = (() => {
+    const allPaths = [
+      ...folderRoots,
+      ...textAttachments.map((a) => a.path).filter(Boolean) as string[],
+    ];
+    if (allPaths.length === 0) return [];
+    if (folderRoots.length > 0) return [...folderRoots];
+    const parts = allPaths.map((p) => p.split("/"));
+    const common: string[] = [];
+    for (let i = 0; i < parts[0].length; i++) {
+      const seg = parts[0][i];
+      if (parts.every((p) => p[i] === seg)) common.push(seg);
+      else break;
+    }
+    const root = common.join("/");
+    return root && root !== "/" ? [root] : [];
+  })();
+
+  const fileItems = textAttachments
+    .map((a) => `### 📄 ${a.path || a.name}\n\`\`\`\n${a.textContent}\n\`\`\``)
     .join("\n\n---\n\n");
+
+  const hasFolders = folderRoots.length > 0;
+  const hasFiles = textAttachments.length > 0;
+
+  const contextHeader = detectedRoots.length > 0
+    ? `## 🗂️ 工作上下文\n${detectedRoots.map((r) => `- 项目路径: \`${r}\``).join("\n")}\n\n> ${
+        hasFolders && !hasFiles
+          ? "用户提供了项目目录，请使用 read_file / list_directory / search_in_files 等工具按需读取文件内容。不要猜测文件内容。"
+          : hasFiles
+            ? "以下是用户提供的文件内容（路径均为绝对路径），请根据用户指令进行处理。"
+            : ""
+      }`
+    : "";
+
+  const fileContextBlock = [
+    contextHeader,
+    folderTree ? `## 📂 目录结构\n\`\`\`\n${folderTree}\n\`\`\`` : "",
+    fileItems,
+  ].filter(Boolean).join("\n\n---\n\n");
 
   const hasAttachments = attachments.length > 0;
 
@@ -248,6 +309,52 @@ export function useInputAttachments() {
     });
   }, []);
 
+  const handleFileSelectNative = useCallback(async () => {
+    try {
+      const selected = await open({
+        multiple: true,
+        directory: false,
+        title: "选择文件",
+        filters: [
+          {
+            name: "代码和文本",
+            extensions: [
+              "txt", "md", "json", "yaml", "yml", "toml", "xml", "csv", "log",
+              "js", "ts", "jsx", "tsx", "mjs", "cjs",
+              "py", "rs", "go", "java", "c", "cpp", "h", "hpp", "swift", "kt", "rb", "php",
+              "sh", "sql", "css", "scss", "less", "html", "htm", "vue", "svelte",
+              "dockerfile", "makefile", "ini", "cfg", "conf",
+              "r", "lua", "dart", "scala", "groovy", "zig",
+            ],
+          },
+          {
+            name: "图片",
+            extensions: ["jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "ico", "avif"],
+          },
+          {
+            name: "文档",
+            extensions: ["pdf", "doc", "docx", "rtf", "odt"],
+          },
+          { name: "所有文件", extensions: ["*"] },
+        ],
+      });
+      if (!selected) return;
+      const paths = Array.isArray(selected) ? selected : [selected];
+      for (const filePath of paths) {
+        const extName = ext(filePath);
+        if (IMAGE_EXT.has(extName)) {
+          await addImageFromPath(filePath);
+        } else if (DOCUMENT_EXT.has(extName)) {
+          await addDocumentFile(filePath);
+        } else {
+          await addTextFile(filePath);
+        }
+      }
+    } catch (err) {
+      handleError(err, { context: "选择文件", silent: true });
+    }
+  }, [addImageFromPath, addTextFile, addDocumentFile]);
+
   const handleFileSelect = useCallback(
     async (e: ChangeEvent<HTMLInputElement>) => {
       const files = e.target.files;
@@ -267,7 +374,6 @@ export function useInputAttachments() {
           }).catch(() => "");
           if (content) addTextFileFromFile(file, content);
         } else if (DOCUMENT_EXT.has(extName)) {
-          // 文档文件需要通过原生后端路径处理
           const content = await new Promise<string>((resolve, reject) => {
             const reader = new FileReader();
             reader.onload = () => resolve(String(reader.result ?? ""));
@@ -291,49 +397,135 @@ export function useInputAttachments() {
         title: "选择文件夹",
       });
       if (!selected || typeof selected !== "string") return;
-      const collected: { path: string; name: string; isDir: boolean }[] = [];
-      await collectFilesFromDir(
-        selected,
-        0,
-        MAX_FOLDER_DEPTH,
-        MAX_FOLDER_FILES,
-        collected,
-      );
-      for (const f of collected) {
-        const extName = ext(f.name);
-        if (IMAGE_EXT.has(extName)) {
-          await addImageFromPath(f.path);
-        } else if (TEXT_EXT.has(extName)) {
-          await addTextFile(f.path);
-        } else if (DOCUMENT_EXT.has(extName)) {
-          await addDocumentFile(f.path);
-        }
-      }
+
+      setFolderRoots((prev) => prev.includes(selected) ? prev : [...prev, selected]);
+
+      const tree = await buildDirTree(selected, 0, MAX_FOLDER_DEPTH, "");
+      setFolderTree((prev) => prev ? `${prev}\n\n${selected}/\n${tree}` : `${selected}/\n${tree}`);
+
+      const folderName = selected.replace(/^.*[/\\]/, "") || selected;
+      setAttachments((prev) => {
+        if (prev.some((a) => a.type === "folder" && a.path === selected)) return prev;
+        return [
+          ...prev,
+          {
+            id: genId(),
+            type: "folder" as const,
+            name: folderName,
+            path: selected,
+            size: 0,
+          },
+        ];
+      });
     } catch (err) {
       handleError(err, { context: "选择文件夹", silent: true });
     }
-  }, [addImageFromPath, addTextFile, addDocumentFile]);
+  }, []);
+
+  const handleDrop = useCallback(async (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    // Tauri drag-and-drop: file paths from native side
+    const tauriPaths = (e as unknown as { dataTransfer?: { files?: FileList } }).dataTransfer?.files;
+    if (tauriPaths && tauriPaths.length > 0) {
+      for (let i = 0; i < tauriPaths.length; i++) {
+        const file = tauriPaths[i];
+        const extName = ext(file.name);
+        if (IMAGE_EXT.has(extName)) {
+          await addImageFromBlob(file);
+        } else if (TEXT_EXT.has(extName) || DOCUMENT_EXT.has(extName)) {
+          const content = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result ?? ""));
+            reader.onerror = reject;
+            reader.readAsText(file, "utf-8");
+          }).catch(() => "");
+          if (content) {
+            const bytes = new TextEncoder().encode(content).length;
+            if (bytes <= MAX_TEXT_FILE_BYTES) {
+              setAttachments((prev) => {
+                const currentTotal = prev
+                  .filter((a) => a.type === "text_file")
+                  .reduce((s, a) => s + (a.textContent?.length ?? 0), 0);
+                if (currentTotal + bytes > MAX_TOTAL_TEXT_BYTES) return prev;
+                return [
+                  ...prev,
+                  {
+                    id: genId(),
+                    type: "text_file" as const,
+                    name: file.name,
+                    textContent: content,
+                    size: bytes,
+                  },
+                ];
+              });
+            }
+          }
+        }
+      }
+    }
+  }, [addImageFromBlob]);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  }, []);
 
   const removeAttachment = useCallback((id: string) => {
-    setAttachments((prev) => prev.filter((a) => a.id !== id));
+    setAttachments((prev) => {
+      const removing = prev.find((a) => a.id === id);
+      if (removing?.type === "folder" && removing.path) {
+        const removedPath = removing.path;
+        setFolderRoots((roots) => roots.filter((r) => r !== removedPath));
+        setFolderTree((tree) => {
+          const lines = tree.split("\n");
+          const idx = lines.findIndex((l) => l.startsWith(removedPath));
+          if (idx < 0) return tree;
+          let end = idx + 1;
+          while (end < lines.length && (lines[end].startsWith("│") || lines[end].startsWith("├") || lines[end].startsWith("└") || lines[end].startsWith("  ") || lines[end] === "")) end++;
+          lines.splice(idx, end - idx);
+          return lines.join("\n").trim();
+        });
+      }
+      return prev.filter((a) => a.id !== id);
+    });
   }, []);
 
   const clearAttachments = useCallback(() => {
     setAttachments([]);
+    setFolderRoots([]);
+    setFolderTree("");
   }, []);
+
+  const attachmentSummary = (() => {
+    const parts: string[] = [];
+    const folders = attachments.filter((a) => a.type === "folder");
+    const files = attachments.filter((a) => a.type === "text_file" || a.type === "document");
+    const images = attachments.filter((a) => a.type === "image");
+    for (const f of folders) parts.push(`📂 ${f.path || f.name}`);
+    if (files.length > 0) parts.push(`📄 ${files.length} 个文件`);
+    if (images.length > 0) parts.push(`🖼️ ${images.length} 张图片`);
+    return parts.join("  ");
+  })();
 
   return {
     attachments,
     imagePaths,
     imagePreviews,
     fileContextBlock,
+    attachmentSummary,
     hasAttachments,
     handlePaste,
+    handleDrop,
+    handleDragOver,
     handleFileSelect,
+    handleFileSelectNative,
     handleFolderSelect,
     removeAttachment,
     clearAttachments,
     addImageFromBlob,
     addImageFromPath,
+    addTextFile,
   };
 }

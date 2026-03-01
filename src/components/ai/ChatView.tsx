@@ -16,10 +16,13 @@ import {
   Download,
   Search,
   X,
+  ChevronUp,
+  ChevronDown,
 } from "lucide-react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
 import { useAIStore } from "@/store/ai-store";
+import { useAppStore } from "@/store/app-store";
 import { useToast } from "@/components/ui/Toast";
 import { handleError } from "@/core/errors";
 import { useInputAttachments } from "@/hooks/use-input-attachments";
@@ -36,6 +39,8 @@ export interface ChatViewHandle {
   exportChat: () => void;
   newChat: () => void;
   hasMessages: () => boolean;
+  /** 将当前 Ask 对话上下文传递到 Agent 模式继续 */
+  continueInAgent: () => void;
 }
 
 export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideModelSelector?: boolean; headless?: boolean }>(function ChatView({ onBack, hideModelSelector, headless }, ref) {
@@ -46,16 +51,22 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
     imagePaths,
     imagePreviews,
     fileContextBlock,
+    attachmentSummary,
     handlePaste,
     handleFileSelect,
+    handleFileSelectNative,
     handleFolderSelect,
+    handleDrop,
+    handleDragOver,
     removeAttachment,
     clearAttachments,
+    addTextFile,
   } = useInputAttachments();
   const [showHistory, setShowHistory] = useState(false);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [currentMatchIdx, setCurrentMatchIdx] = useState(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -84,6 +95,28 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
   const { onMouseDown } = useDragWindow();
   const conversation = getCurrentConversation();
   const messages = useMemo(() => conversation?.messages ?? [], [conversation]);
+  const matchedIndices = useMemo(() => {
+    if (!searchQuery.trim()) return [] as number[];
+    const q = searchQuery.toLowerCase();
+    return messages.reduce<number[]>((acc, m, i) => {
+      if (m.content.toLowerCase().includes(q)) acc.push(i);
+      return acc;
+    }, []);
+  }, [messages, searchQuery]);
+
+  // 搜索词变化时重置到第一个匹配
+  useEffect(() => {
+    setCurrentMatchIdx(0);
+  }, [searchQuery]);
+
+  // 导航到当前匹配消息
+  useEffect(() => {
+    if (matchedIndices.length === 0 || !messagesContainerRef.current) return;
+    const msgIdx = matchedIndices[currentMatchIdx];
+    const el = messagesContainerRef.current.querySelector(`[data-msg-index="${msgIdx}"]`);
+    el?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [currentMatchIdx, matchedIndices]);
+
   const visibleMemoryCandidates = useMemo(() => {
     const filtered = memoryCandidates.filter(
       (candidate) =>
@@ -118,6 +151,16 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
       inputRef.current?.focus();
     },
     hasMessages: () => messages.length > 0,
+    continueInAgent: () => {
+      if (messages.length === 0) return;
+      const recent = messages.slice(-6);
+      const summary = recent
+        .map((m) => `[${m.role === "user" ? "用户" : "助手"}]: ${m.content.slice(0, 300)}${m.content.length > 300 ? "…" : ""}`)
+        .join("\n");
+      const query = `以下是之前的对话上下文，请基于此继续执行任务：\n\n${summary}`;
+      useAppStore.getState().setPendingAgentInitialQuery(query);
+      useAppStore.getState().setAiCenterMode("agent");
+    },
   }));
 
   // 初次进入自动聚焦输入框
@@ -287,22 +330,22 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
     }
 
     const imagesToSend = imagePaths.length > 0 ? [...imagePaths] : undefined;
-    const content = fileContextBlock
-      ? `${fileContextBlock}\n\n---\n\n${trimmed || "请根据以上附件内容回答。"}`
-      : (trimmed || "请描述这张图片");
+    const defaultPrompt = fileContextBlock
+      ? "请阅读以上文件内容，等待我的下一步指令。"
+      : "请描述这张图片";
+    const userText = trimmed || defaultPrompt;
+    const content = attachmentSummary ? `${attachmentSummary}\n${userText}` : userText;
+    const contextPrefix = fileContextBlock.trim() || undefined;
     setInput("");
     clearAttachments();
     if (inputRef.current) {
       inputRef.current.style.height = "auto";
     }
-    await sendMessage(content, imagesToSend);
+    await sendMessage(content, imagesToSend, contextPrefix);
   };
 
   return (
-    <div className="flex h-full bg-[var(--color-bg)] relative">
-      {/* 工具确认对话框 */}
-      <ToolConfirmDialog />
-
+    <div className="flex h-full bg-[var(--color-bg)] relative" onDrop={handleDrop} onDragOver={handleDragOver}>
       {/* 对话历史侧边栏 */}
       <ChatHistory show={showHistory} onClose={() => setShowHistory(false)} />
 
@@ -403,19 +446,47 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
                 if (e.key === "Escape") {
                   setShowSearch(false);
                   setSearchQuery("");
+                } else if (e.key === "Enter" && matchedIndices.length > 0) {
+                  e.preventDefault();
+                  if (e.shiftKey) {
+                    setCurrentMatchIdx((prev) => (prev - 1 + matchedIndices.length) % matchedIndices.length);
+                  } else {
+                    setCurrentMatchIdx((prev) => (prev + 1) % matchedIndices.length);
+                  }
                 }
               }}
             />
             {searchQuery && (
               <span className="text-[10px] text-[var(--color-text-secondary)] shrink-0">
-                {
-                  messages.filter((m) =>
-                    m.content.toLowerCase().includes(searchQuery.toLowerCase()),
-                  ).length
-                }{" "}
-                条匹配
+                {matchedIndices.length > 0
+                  ? `${currentMatchIdx + 1}/${matchedIndices.length}`
+                  : "0 条匹配"}
               </span>
             )}
+            <button
+              onClick={() =>
+                setCurrentMatchIdx((prev) =>
+                  matchedIndices.length === 0 ? 0 : (prev - 1 + matchedIndices.length) % matchedIndices.length,
+                )
+              }
+              disabled={matchedIndices.length === 0}
+              className="p-1 rounded-md hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)] disabled:opacity-30"
+              title="上一个匹配"
+            >
+              <ChevronUp className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() =>
+                setCurrentMatchIdx((prev) =>
+                  matchedIndices.length === 0 ? 0 : (prev + 1) % matchedIndices.length,
+                )
+              }
+              disabled={matchedIndices.length === 0}
+              className="p-1 rounded-md hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)] disabled:opacity-30"
+              title="下一个匹配"
+            >
+              <ChevronDown className="w-3.5 h-3.5" />
+            </button>
             <button
               onClick={() => {
                 setShowSearch(false);
@@ -470,13 +541,18 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
             const isSearchMatch =
               !searchQuery ||
               msg.content.toLowerCase().includes(searchQuery.toLowerCase());
+            const isCurrentMatch =
+              searchQuery && matchedIndices[currentMatchIdx] === idx;
             return (
               <div
                 key={msg.id}
+                data-msg-index={idx}
                 className={
-                  searchQuery && !isSearchMatch
-                    ? "opacity-20 transition-opacity"
-                    : "transition-opacity"
+                  isCurrentMatch
+                    ? "ring-1 ring-[var(--color-accent)] rounded-lg transition-all"
+                    : searchQuery && !isSearchMatch
+                      ? "opacity-20 transition-opacity"
+                      : "transition-opacity"
                 }
               >
                 <MessageBubble
@@ -487,16 +563,17 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
               </div>
             );
           })}
+          <ToolConfirmDialog />
           <div ref={messagesEndRef} />
 
           {/* 滚动到底部按钮 */}
           {showScrollBtn && (
             <button
               onClick={scrollToBottom}
-              className="sticky bottom-2 left-1/2 -translate-x-1/2 w-8 h-8 rounded-full bg-[var(--color-bg-secondary)] border border-[var(--color-border)] shadow-lg flex items-center justify-center text-[var(--color-text-secondary)] hover:text-[var(--color-text)] hover:bg-[var(--color-bg-hover)] transition-all z-10"
+              className="sticky bottom-2 left-1/2 -translate-x-1/2 w-7 h-7 rounded-full bg-[var(--color-bg)]/60 border border-[var(--color-border)]/40 shadow-sm flex items-center justify-center text-[var(--color-text-secondary)]/50 hover:text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)]/80 transition-all z-10 backdrop-blur-sm"
               title="滚动到底部"
             >
-              <ArrowDown className="w-4 h-4" />
+              <ArrowDown className="w-3.5 h-3.5" />
             </button>
           )}
         </div>
@@ -554,7 +631,9 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
           attachments={attachments}
           onRemoveAttachment={removeAttachment}
           onFileSelect={handleFileSelect}
+          onFileSelectNative={handleFileSelectNative}
           onFolderSelect={handleFolderSelect}
+          onAddFilePath={addTextFile}
           previewImage={previewImage}
           setPreviewImage={setPreviewImage}
           inputRef={inputRef}

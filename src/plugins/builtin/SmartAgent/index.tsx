@@ -90,11 +90,16 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       imagePaths,
       imagePreviews,
       fileContextBlock,
+      attachmentSummary,
       handlePaste,
       handleFileSelect,
+      handleFileSelectNative,
       handleFolderSelect,
+      handleDrop,
+      handleDragOver,
       removeAttachment,
       clearAttachments,
+      addTextFile,
     } = useInputAttachments();
 
     const [confirmDialog, setConfirmDialog] = useState<{
@@ -261,6 +266,7 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       input,
       imagePaths,
       fileContextBlock,
+      attachmentSummary,
       setInput,
       clearAssets: clearAttachments,
       executeAgentTask,
@@ -335,7 +341,7 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
     }), [handleClear, availableTools.length, handleNewSession, sessions.length, toggleWorkbenchTab]);
 
     return (
-      <div className="flex h-full bg-[var(--color-bg)] text-[var(--color-text)] relative">
+      <div className="flex h-full bg-[var(--color-bg)] text-[var(--color-text)] relative" onDrop={handleDrop} onDragOver={handleDragOver}>
         <AgentHistoryDrawer
           visible={showHistory}
           sessions={sessions}
@@ -442,6 +448,8 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
             attachments={attachments}
             onRemoveAttachment={removeAttachment}
             onFolderSelect={handleFolderSelect}
+            onFileSelectNative={handleFileSelectNative}
+            onAddFilePath={addTextFile}
             inputRef={inputRef}
             fileInputRef={fileInputRef}
           />

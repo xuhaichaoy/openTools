@@ -467,6 +467,7 @@ export function ClusterPanel() {
     attachments,
     imagePaths,
     fileContextBlock,
+    attachmentSummary,
     handlePaste,
     handleFileSelect,
     handleFolderSelect,
@@ -605,10 +606,12 @@ export function ClusterPanel() {
     const hasAttachments = attachments.length > 0;
     if ((!trimmed && !hasAttachments) || busy) return;
 
-    const content = fileContextBlock.trim()
-      ? (trimmed ? `${fileContextBlock}\n\n---\n\n${trimmed}` : `${fileContextBlock}\n\n请根据以上附件内容完成任务。`)
-      : trimmed;
-    const sessionId = createSession(content || "（无文字描述）", mode, aiConfig.model, imagePaths.length > 0 ? imagePaths : undefined);
+    const userText = trimmed || (fileContextBlock.trim() ? "请了解项目结构，等待下一步指令。" : "（无文字描述）");
+    const displayQuery = attachmentSummary ? `${attachmentSummary}\n${userText}` : userText;
+    const fullQuery = fileContextBlock.trim()
+      ? `${fileContextBlock}\n\n---\n\n${userText}`
+      : userText;
+    const sessionId = createSession(displayQuery, mode, aiConfig.model, imagePaths.length > 0 ? imagePaths : undefined);
     setInput("");
     clearAttachments();
     setBusy(true);
@@ -639,10 +642,13 @@ export function ClusterPanel() {
       },
     });
 
+    if (fileContextBlock.trim()) {
+      orchestrator.setProjectContext(fileContextBlock.trim());
+    }
     setActiveOrchestrator(sessionId, orchestrator, abortController);
 
     try {
-      const result = await orchestrator.execute(content || "", mode, imagePaths.length > 0 ? imagePaths : undefined);
+      const result = await orchestrator.execute(fullQuery, mode, imagePaths.length > 0 ? imagePaths : undefined);
       const plan = orchestrator.getMessageBus().getContext("_plan") as
         | ClusterPlan
         | undefined;
@@ -661,7 +667,7 @@ export function ClusterPanel() {
       clearActiveOrchestrator();
       if (!unmountedRef.current) setBusy(false);
     }
-  }, [input, attachments, fileContextBlock, imagePaths, mode, busy, autoReview, humanApproval, createSession, clearAttachments, aiConfig.model, handlePlanApproval, confirmDangerousAction, askUser]);
+  }, [input, attachments, fileContextBlock, attachmentSummary, imagePaths, mode, busy, autoReview, humanApproval, createSession, clearAttachments, aiConfig.model, handlePlanApproval, confirmDangerousAction, askUser]);
 
   const handleAbort = useCallback(() => {
     abortActiveOrchestrator();

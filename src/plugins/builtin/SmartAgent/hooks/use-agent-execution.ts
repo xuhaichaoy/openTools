@@ -334,7 +334,7 @@ export function useAgentExecution({
       const retryBackoffMs = aiConfig.agent_retry_backoff_ms ?? 5000;
 
       try {
-        let effectiveQuery = opts?.systemHint ? `${query}\n\n${opts.systemHint}` : query;
+        let effectiveQuery = opts?.systemHint ? `${opts.systemHint}\n\n---\n\n${query}` : query;
         if (opts?.images?.length) {
           effectiveQuery += `\n\n[系统提示] 用户已附带 ${opts.images.length} 张图片，这些图片已自动包含在本次对话中，你可以直接看到并分析它们。请勿使用截图工具或其他方式重新获取图片，直接基于已有图片进行分析即可。`;
         }
@@ -417,10 +417,6 @@ export function useAgentExecution({
   useEffect(() => {
     return () => {
       clearTimers();
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-        abortControllerRef.current = null;
-      }
     };
   }, [clearTimers]);
 

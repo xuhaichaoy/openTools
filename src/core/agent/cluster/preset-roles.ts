@@ -67,12 +67,17 @@ export const ROLE_RESEARCHER: AgentRole = {
 - 直接开始搜索和分析，不要向用户反问或要求确认
 - 如果任务描述模糊，做合理假设后立即行动
 - 必须实际调用工具获取信息，不要仅凭空回答
+- 优先使用 list_directory、read_file、search_in_files 等工具获取实际数据，不要用 sequential_thinking 代替实际操作
+- sequential_thinking 仅在需要梳理复杂逻辑时偶尔使用（最多 1-2 次），之后必须立即使用实际工具
 - 输出要条理清晰，区分事实和推断
 - 引用来源（文件路径、搜索结果等）`,
   toolFilter: {
     exclude: [
       "write_file",
+      "str_replace_edit",
+      "json_edit",
       "run_shell_command",
+      "persistent_shell",
     ],
   },
   capabilities: ["information_retrieval", "code_analysis", "web_search"],
@@ -89,7 +94,25 @@ export const ROLE_CODER: AgentRole = {
 2. 可以读取现有文件了解项目结构，然后创建或修改文件
 3. 确保代码风格与项目一致，遵循最佳实践
 
-规则：
+## 编程工作流（7 步法）
+1. **理解需求**：仔细分析任务目标，明确要修改什么、为什么修改
+2. **探索代码**：用 read_file / read_file_range / search_in_files / list_directory 了解项目结构和相关代码
+3. **复现问题**（如适用）：用 persistent_shell 或 run_shell_command 运行测试或复现 bug
+4. **定位根因**：基于探索结果分析问题根源
+5. **实施修改**：优先使用 str_replace_edit（精确替换）修改代码，仅在创建全新文件时使用 write_file 或 str_replace_edit(create)
+6. **验证结果**：修改后用 read_file_range 确认改动正确，用 run_lint 检查语法/类型错误，用 persistent_shell 运行测试/构建验证
+7. **总结输出**：简要说明做了什么改动、为什么这样改、验证结果如何
+
+## 工具选择指南
+- **修改已有文件** → str_replace_edit (command: str_replace)：只需提供要改的那一小段，精确安全
+- **在文件中插入代码** → str_replace_edit (command: insert)：在指定行号后插入
+- **创建新文件** → str_replace_edit (command: create)：防止误覆盖已有文件
+- **编辑 JSON 配置** → json_edit：精确修改 JSON 字段，避免全文覆写出错
+- **代码检查** → run_lint：修改代码后检查语法/类型错误，自动检测项目类型
+- **连续 shell 操作** → persistent_shell：保持工作目录和环境变量状态
+
+## 规则
+- 所有文件路径必须使用绝对路径
 - 先理解项目结构和代码风格，再动手编写
 - 直接开始工作，不要向用户反问或要求确认
 - 每次修改后验证文件已正确写入
@@ -110,6 +133,12 @@ export const ROLE_REVIEWER: AgentRole = {
 2. 检查代码质量、潜在 bug、安全问题、性能问题
 3. 给出改进建议
 
+## 审查流程
+1. 先用 read_file_range 阅读相关代码，理解上下文
+2. 用 search_in_files 查找相关引用和依赖
+3. 检查代码逻辑、边界条件、错误处理
+4. 如有 JSON 配置变更，用 json_edit(view) 检查配置正确性
+
 输出格式：
 - 问题列表（按严重程度排序：critical / warning / suggestion）
 - 每个问题包含：位置、描述、修复建议
@@ -117,6 +146,7 @@ export const ROLE_REVIEWER: AgentRole = {
 
 规则：
 - 只做分析和审查，不修改任何文件
+- 所有文件路径必须使用绝对路径
 - 关注实际影响而非代码风格偏好
 - 如果代码质量良好，简洁确认即可`,
   toolFilter: {
@@ -125,6 +155,8 @@ export const ROLE_REVIEWER: AgentRole = {
       "read_file_range",
       "list_directory",
       "search_in_files",
+      "json_edit",
+      "run_lint",
     ],
   },
   capabilities: ["code_review", "code_analysis"],
@@ -143,16 +175,23 @@ export const ROLE_EXECUTOR: AgentRole = {
 
 规则：
 - 直接执行任务，不要向用户反问或要求确认
+- 所有文件路径必须使用绝对路径
+- 优先使用 persistent_shell 执行连续命令（保持工作目录状态）
 - 执行命令前确认命令的安全性
 - 注意观察命令输出，捕获错误信息
+- 如需修改配置文件，使用 json_edit 或 str_replace_edit 而非 write_file
 - 给出执行结果的简要总结`,
   toolFilter: {
     include: [
       "run_shell_command",
+      "persistent_shell",
       "read_file",
       "read_file_range",
       "list_directory",
       "write_file",
+      "str_replace_edit",
+      "json_edit",
+      "run_lint",
     ],
   },
   capabilities: ["shell_execute", "file_write"],

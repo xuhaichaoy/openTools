@@ -81,7 +81,7 @@ interface AIState {
 
   createConversation: () => string;
   getCurrentConversation: () => Conversation | null;
-  sendMessage: (content: string, images?: string[]) => Promise<void>;
+  sendMessage: (content: string, images?: string[], contextPrefix?: string) => Promise<void>;
   setCurrentConversation: (id: string) => void;
   deleteConversation: (id: string) => void;
   renameConversation: (id: string, title: string) => void;
@@ -483,7 +483,7 @@ export const useAIStore = create<AIState>((set, get) => ({
     await get().sendMessage(newContent);
   },
 
-  sendMessage: async (content: string, images?: string[]) => {
+  sendMessage: async (content: string, images?: string[], contextPrefix?: string) => {
     const state = get();
     let conversationId = state.currentConversationId;
 
@@ -520,48 +520,63 @@ export const useAIStore = create<AIState>((set, get) => ({
       ),
     }));
 
+    // 记忆候选提取（非阻塞，不影响 API 请求速度）
     if (state.config.enable_long_term_memory && state.config.enable_memory_auto_save) {
-      try {
-        const candidates = extractMemoryCandidates(content, {
-          conversationId: conversationId ?? undefined,
-        });
-        if (candidates.length > 0) {
-          await appendMemoryCandidates(candidates);
-          const nextCandidates = await listMemoryCandidates();
-          set({ memoryCandidates: nextCandidates });
+      const candidateConvId = conversationId ?? undefined;
+      Promise.resolve().then(async () => {
+        try {
+          const candidates = extractMemoryCandidates(content, { conversationId: candidateConvId });
+          if (candidates.length > 0) {
+            await appendMemoryCandidates(candidates);
+            const nextCandidates = await listMemoryCandidates();
+            set({ memoryCandidates: nextCandidates });
+          }
+        } catch (e) {
+          handleError(e, { context: "提取长期记忆候选", silent: true });
         }
-      } catch (e) {
-        handleError(e, { context: "提取长期记忆候选", silent: true });
-      }
+      });
     }
 
-    // 构造 API 消息
+    // 构造 API 消息（同步，极快）
     const conversation = get().conversations.find(
       (c) => c.id === conversationId,
     );
     const apiMessages = (conversation?.messages || [])
       .filter((m) => !m.streaming)
-      .map((m) => ({
-        role: m.role,
-        content: m.content,
-        ...(m.images && m.images.length > 0 ? { images: m.images } : {}),
-      }));
+      .map((m) => {
+        const isCurrentUser = m.id === userMessage.id;
+        const msgContent = isCurrentUser && contextPrefix
+          ? `${contextPrefix}\n\n---\n\n${m.content}`
+          : m.content;
+        return {
+          role: m.role,
+          content: msgContent,
+          ...(m.images && m.images.length > 0 ? { images: m.images } : {}),
+        };
+      });
 
-    if (state.config.enable_long_term_memory && state.config.enable_memory_auto_recall) {
-      try {
-        const memories = await recallMemories(content, {
+    // 记忆召回和 API 请求并行执行：不让记忆召回阻塞请求发出
+    const memoryRecallPromise = (state.config.enable_long_term_memory && state.config.enable_memory_auto_recall)
+      ? recallMemories(content, {
           conversationId: conversationId ?? undefined,
           topK: 6,
-        });
-        const memoryPrompt = buildMemoryPromptBlock(memories);
-        if (memoryPrompt) {
-          apiMessages.unshift({
-            role: "system",
-            content: memoryPrompt,
-          });
-        }
-      } catch (e) {
-        handleError(e, { context: "召回长期记忆", silent: true });
+        }).catch((e) => {
+          handleError(e, { context: "召回长期记忆", silent: true });
+          return [] as Awaited<ReturnType<typeof recallMemories>>;
+        })
+      : Promise.resolve([] as Awaited<ReturnType<typeof recallMemories>>);
+
+    // 如果记忆召回能在 200ms 内完成，则注入到 apiMessages 中；否则不等待直接发请求
+    const MEMORY_TIMEOUT_MS = 200;
+    const memories = await Promise.race([
+      memoryRecallPromise,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), MEMORY_TIMEOUT_MS)),
+    ]);
+
+    if (memories && memories.length > 0) {
+      const memoryPrompt = buildMemoryPromptBlock(memories);
+      if (memoryPrompt) {
+        apiMessages.unshift({ role: "system", content: memoryPrompt });
       }
     }
 

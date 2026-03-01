@@ -6,6 +6,7 @@ interface UseAgentRunActionsParams {
   input: string;
   imagePaths: string[];
   fileContextBlock: string;
+  attachmentSummary: string;
   setInput: Dispatch<SetStateAction<string>>;
   clearAssets: () => void;
   executeAgentTask: (
@@ -30,6 +31,7 @@ export function useAgentRunActions({
   input,
   imagePaths,
   fileContextBlock,
+  attachmentSummary,
   setInput,
   clearAssets,
   executeAgentTask,
@@ -39,16 +41,18 @@ export function useAgentRunActions({
     const hasContent = input.trim() || imagePaths.length > 0 || fileContextBlock.trim().length > 0;
     if (!ai || !hasContent) return;
 
-    let query = input.trim();
-    if (fileContextBlock.trim()) {
-      query = query ? `${fileContextBlock}\n\n---\n\n${query}` : `${fileContextBlock}\n\n请根据以上附件内容完成任务。`;
-    }
+    const userText = input.trim() || (fileContextBlock.trim() ? "请了解项目结构，等待下一步指令。" : "");
+    const query = attachmentSummary ? `${attachmentSummary}\n${userText}` : userText;
+    const systemHint = fileContextBlock.trim() || undefined;
 
     setInput("");
     clearAssets();
 
-    await executeAgentTask(query, { images: imagePaths.length > 0 ? imagePaths : undefined });
-  }, [ai, input, imagePaths, fileContextBlock, setInput, clearAssets, executeAgentTask]);
+    await executeAgentTask(query, {
+      images: imagePaths.length > 0 ? imagePaths : undefined,
+      systemHint,
+    });
+  }, [ai, input, imagePaths, fileContextBlock, attachmentSummary, setInput, clearAssets, executeAgentTask]);
 
   const handleStop = useCallback(() => {
     stopExecution();

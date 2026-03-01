@@ -1,5 +1,5 @@
-import React from "react";
-import { Bot } from "lucide-react";
+import React, { useState, useEffect, useCallback } from "react";
+import { Bot, ArrowDown } from "lucide-react";
 import type { AgentTask } from "@/store/agent-store";
 import type { ExecutionWaitingStage, RunningPhase } from "../core/ui-state";
 import { AgentTaskBlock } from "./AgentTaskBlock";
@@ -12,7 +12,6 @@ interface AgentTaskTimelineProps {
   scrollRef: React.RefObject<HTMLDivElement | null>;
   collapsedTaskProcesses: Set<string>;
   expandedSteps: Set<string>;
-  /** 稳定引用（useCallback），直接传给 AgentTaskBlock 避免内联箭头函数 */
   onToggleTaskProcess: (taskId: string) => void;
   onToggleStep: (key: string) => void;
 }
@@ -28,8 +27,25 @@ export function AgentTaskTimeline({
   onToggleTaskProcess,
   onToggleStep,
 }: AgentTaskTimelineProps) {
+  const [showScrollBtn, setShowScrollBtn] = useState(false);
+
+  useEffect(() => {
+    const container = scrollRef.current;
+    if (!container) return;
+    const handleScroll = () => {
+      const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+      setShowScrollBtn(distanceFromBottom > 200);
+    };
+    container.addEventListener("scroll", handleScroll, { passive: true });
+    return () => container.removeEventListener("scroll", handleScroll);
+  }, [scrollRef]);
+
+  const scrollToBottom = useCallback(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+  }, [scrollRef]);
+
   return (
-    <div ref={scrollRef} className="flex-1 overflow-auto p-4 space-y-4">
+    <div ref={scrollRef} className="flex-1 overflow-auto p-4 space-y-4 relative">
       {tasks.length === 0 && !busy && (
         <div className="text-center text-[var(--color-text-secondary)] py-12">
           <Bot className="w-12 h-12 mx-auto mb-3 opacity-20" />
@@ -53,6 +69,16 @@ export function AgentTaskTimeline({
           onToggleStep={onToggleStep}
         />
       ))}
+
+      {showScrollBtn && (
+        <button
+          onClick={scrollToBottom}
+          className="sticky bottom-2 left-1/2 -translate-x-1/2 w-7 h-7 rounded-full bg-[var(--color-bg)]/60 border border-[var(--color-border)]/40 shadow-sm flex items-center justify-center text-[var(--color-text-secondary)]/50 hover:text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)]/80 transition-all z-10 backdrop-blur-sm"
+          title="滚动到底部"
+        >
+          <ArrowDown className="w-3.5 h-3.5" />
+        </button>
+      )}
     </div>
   );
 }
