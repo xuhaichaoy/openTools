@@ -6,6 +6,7 @@ import rehypeHighlight from "rehype-highlight";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { useAIStore } from "@/store/ai-store";
 import { ToolCallDisplay } from "./ToolCallDisplay";
+import type { ChatMessage } from "@/core/ai/types";
 
 /** 用 Tauri FS 读文件转 blob URL，绕过 asset:// 协议白名单限制 */
 export function ChatImage({
@@ -258,8 +259,16 @@ export const MessageBubble = memo(function MessageBubble({
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState(msg.content);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
   const { editAndResend, isStreaming } = useAIStore();
   const editRef = useRef<HTMLTextAreaElement>(null);
+
+  // 长文本截断阈值（字符数）
+  const TRUNCATE_LENGTH = 2000;
+  const shouldTruncate = !isUser && !expanded && msg.content.length > TRUNCATE_LENGTH && !msg.streaming;
+  const displayContent = shouldTruncate 
+    ? msg.content.slice(0, TRUNCATE_LENGTH) + "\n\n..."
+    : msg.content;
 
   const handleEditSubmit = () => {
     const trimmed = editText.trim();
@@ -340,10 +349,26 @@ export const MessageBubble = memo(function MessageBubble({
                     },
                   }}
                 >
-                  {msg.content || (msg.streaming ? "▌" : "")}
+                  {displayContent || (msg.streaming ? "▌" : "")}
                 </ReactMarkdown>
                 {msg.streaming && (
                   <span className="inline-block w-1.5 h-4 bg-indigo-500 animate-pulse ml-1 align-middle" />
+                )}
+                {shouldTruncate && (
+                  <button
+                    onClick={() => setExpanded(true)}
+                    className="mt-2 text-xs text-indigo-400 hover:text-indigo-300 transition-colors underline"
+                  >
+                    展开全部 ({msg.content.length.toLocaleString()} 字符)
+                  </button>
+                )}
+                {!shouldTruncate && expanded && msg.content.length > TRUNCATE_LENGTH && (
+                  <button
+                    onClick={() => setExpanded(false)}
+                    className="mt-2 text-xs text-indigo-400 hover:text-indigo-300 transition-colors underline"
+                  >
+                    收起
+                  </button>
                 )}
               </div>
             </div>
@@ -394,7 +419,7 @@ export const MessageBubble = memo(function MessageBubble({
               {/* 用户消息图片 */}
               {msg.images && msg.images.length > 0 && (
                 <div className="flex gap-1.5 flex-wrap mb-1.5">
-                  {msg.images.map((imgPath, i) => (
+                  {msg.images.map((imgPath: string, i: number) => (
                     <ChatImage
                       key={i}
                       path={imgPath}
