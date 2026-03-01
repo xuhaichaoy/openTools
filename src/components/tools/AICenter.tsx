@@ -57,6 +57,11 @@ export function AICenter({
     }
   }, [setMode]);
 
+  // 每次进入 AI 中心时从磁盘恢复模型选择，避免离开再回来后显示被重置
+  useEffect(() => {
+    useAIStore.getState().loadConfig();
+  }, []);
+
   const chatRef = useRef<ChatViewHandle>(null);
   const agentRef = useRef<SmartAgentHandle>(null);
 

@@ -1,13 +1,17 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
-import { HelpCircle, Send, Check, ChevronLeft, ChevronRight } from "lucide-react";
+import { HelpCircle, Send, Check, ChevronLeft, ChevronRight, X, Bot, Network } from "lucide-react";
 import type {
   AskUserQuestion,
   AskUserAnswers,
 } from "../core/default-tools";
+import type { AskUserSource } from "@/store/ask-user-store";
 
 interface AskUserDialogProps {
   questions: AskUserQuestion[];
   onSubmit: (answers: AskUserAnswers) => void;
+  onDismiss?: () => void;
+  source?: AskUserSource;
+  taskDescription?: string;
 }
 
 function SingleSelect({
@@ -172,12 +176,18 @@ function TextInput({
   );
 }
 
-export function AskUserDialog({ questions, onSubmit }: AskUserDialogProps) {
+const SOURCE_CONFIG: Record<AskUserSource, { icon: typeof Bot; label: string; color: string }> = {
+  agent: { icon: Bot, label: "Agent", color: "text-blue-500" },
+  cluster: { icon: Network, label: "Cluster", color: "text-cyan-500" },
+};
+
+export function AskUserDialog({ questions, onSubmit, onDismiss, source = "agent", taskDescription }: AskUserDialogProps) {
   const [step, setStep] = useState(0);
   const [singleAnswers, setSingleAnswers] = useState<Record<string, string | null>>({});
   const [multiAnswers, setMultiAnswers] = useState<Record<string, Set<string>>>({});
   const [textAnswers, setTextAnswers] = useState<Record<string, string>>({});
   const [customTexts, setCustomTexts] = useState<Record<string, string>>({});
+  const [showTaskDetail, setShowTaskDetail] = useState(false);
   const textInputRef = useRef<HTMLTextAreaElement>(null);
 
   const total = questions.length;
@@ -185,6 +195,9 @@ export function AskUserDialog({ questions, onSubmit }: AskUserDialogProps) {
   const current = questions[step];
   const isLast = step === total - 1;
   const isFirst = step === 0;
+
+  const cfg = SOURCE_CONFIG[source];
+  const SourceIcon = cfg.icon;
 
   useEffect(() => {
     if (current?.type === "text") {
@@ -239,24 +252,55 @@ export function AskUserDialog({ questions, onSubmit }: AskUserDialogProps) {
   if (!current) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-      <div className="bg-[var(--color-bg)] border border-[var(--color-border)] rounded-xl shadow-2xl w-[460px] max-h-[80vh] flex flex-col">
+    <div className="fixed bottom-4 right-4 z-[9999] animate-in fade-in slide-in-from-bottom-4 duration-300 w-[420px]">
+      <div className="bg-[var(--color-bg)] border border-[var(--color-border)] rounded-xl shadow-2xl flex flex-col max-h-[70vh]">
         {/* Header */}
-        <div className="flex items-center justify-between p-4 pb-2">
+        <div className="flex items-center justify-between px-4 pt-3 pb-2">
           <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-full bg-blue-500/10 flex items-center justify-center shrink-0">
-              <HelpCircle className="w-4 h-4 text-blue-500" />
+            <div className={`w-7 h-7 rounded-full bg-blue-500/10 flex items-center justify-center shrink-0`}>
+              <SourceIcon className={`w-3.5 h-3.5 ${cfg.color}`} />
             </div>
-            <h3 className="text-sm font-semibold text-[var(--color-text)]">
-              Agent 需要你的输入
-            </h3>
+            <div className="flex flex-col">
+              <h3 className="text-sm font-semibold text-[var(--color-text)] leading-tight">
+                {cfg.label} 需要你的输入
+              </h3>
+              {isMultiStep && (
+                <span className="text-[10px] text-[var(--color-text-secondary)] tabular-nums">
+                  问题 {step + 1} / {total}
+                </span>
+              )}
+            </div>
           </div>
-          {isMultiStep && (
-            <span className="text-xs text-[var(--color-text-secondary)] tabular-nums">
-              {step + 1} / {total}
-            </span>
+          {onDismiss && (
+            <button
+              onClick={onDismiss}
+              className="p-1 rounded-md hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)] hover:text-[var(--color-text)] transition-colors"
+              title="跳过"
+            >
+              <X className="w-4 h-4" />
+            </button>
           )}
         </div>
+
+        {/* Task description */}
+        {taskDescription && (
+          <div className="px-4 pb-2">
+            <button
+              onClick={() => setShowTaskDetail(!showTaskDetail)}
+              className="text-[11px] text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors flex items-center gap-1"
+            >
+              <ChevronRight className={`w-3 h-3 transition-transform ${showTaskDetail ? "rotate-90" : ""}`} />
+              查看任务详情
+            </button>
+            {showTaskDetail && (
+              <div className="mt-1.5 px-2.5 py-2 rounded-lg bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
+                <p className="text-xs text-[var(--color-text-secondary)] leading-relaxed whitespace-pre-wrap line-clamp-6">
+                  {taskDescription}
+                </p>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Progress bar */}
         {isMultiStep && (
@@ -326,11 +370,11 @@ export function AskUserDialog({ questions, onSubmit }: AskUserDialogProps) {
         </div>
 
         {/* Footer buttons */}
-        <div className="p-4 pt-2 flex items-center gap-2">
+        <div className="px-4 py-3 pt-2 flex items-center gap-2 border-t border-[var(--color-border)]">
           {isMultiStep && !isFirst && (
             <button
               onClick={() => setStep((s) => Math.max(s - 1, 0))}
-              className="flex items-center gap-1 px-3 py-2.5 rounded-lg border border-[var(--color-border)] text-[var(--color-text-secondary)] text-sm hover:bg-[var(--color-bg-secondary)] transition-colors"
+              className="flex items-center gap-1 px-3 py-2 rounded-lg border border-[var(--color-border)] text-[var(--color-text-secondary)] text-sm hover:bg-[var(--color-bg-secondary)] transition-colors"
             >
               <ChevronLeft className="w-3.5 h-3.5" />
               上一题
@@ -339,7 +383,7 @@ export function AskUserDialog({ questions, onSubmit }: AskUserDialogProps) {
           <button
             onClick={handleNext}
             disabled={!isCurrentAnswered()}
-            className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-blue-500 text-white text-sm font-medium hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            className="flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-blue-500 text-white text-sm font-medium hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
             {isLast ? (
               <>

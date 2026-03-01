@@ -108,11 +108,11 @@ export function ClusterPlanView({ plan, instances }: ClusterPlanViewProps) {
                         </span>
                       )}
                     </div>
-                    <p className="text-[var(--color-text-secondary)] line-clamp-1 text-[10px] leading-tight">
+                    <p className="text-[var(--color-text-secondary)] line-clamp-2 text-[10px] leading-tight" title={step.task}>
                       {step.task}
                     </p>
                     {inst?.error && (
-                      <p className="text-red-500 text-[10px] mt-0.5 line-clamp-1">
+                      <p className="text-red-500 text-[10px] mt-0.5 line-clamp-2" title={inst.error}>
                         {inst.error}
                       </p>
                     )}

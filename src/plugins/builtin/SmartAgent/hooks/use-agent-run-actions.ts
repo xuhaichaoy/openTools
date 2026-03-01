@@ -4,7 +4,8 @@ import type { MToolsAI } from "@/core/plugin-system/plugin-interface";
 interface UseAgentRunActionsParams {
   ai?: MToolsAI;
   input: string;
-  pendingImages: string[];
+  imagePaths: string[];
+  fileContextBlock: string;
   setInput: Dispatch<SetStateAction<string>>;
   clearAssets: () => void;
   executeAgentTask: (
@@ -13,6 +14,7 @@ interface UseAgentRunActionsParams {
       sessionId?: string;
       taskId?: string;
       systemHint?: string;
+      images?: string[];
     },
   ) => Promise<void>;
   stopExecution: () => void;
@@ -26,29 +28,27 @@ interface UseAgentRunActionsResult {
 export function useAgentRunActions({
   ai,
   input,
-  pendingImages,
+  imagePaths,
+  fileContextBlock,
   setInput,
   clearAssets,
   executeAgentTask,
   stopExecution,
 }: UseAgentRunActionsParams): UseAgentRunActionsResult {
   const handleRun = useCallback(async () => {
-    if (!ai || (!input.trim() && pendingImages.length === 0)) return;
+    const hasContent = input.trim() || imagePaths.length > 0 || fileContextBlock.trim().length > 0;
+    if (!ai || !hasContent) return;
 
     let query = input.trim();
-    const imagePaths = [...pendingImages];
-    if (imagePaths.length > 0) {
-      const imageInfo = imagePaths.join("\n");
-      query = query
-        ? `${query}\n\n[用户附带了以下图片文件]\n${imageInfo}`
-        : `请分析以下图片文件:\n${imageInfo}`;
+    if (fileContextBlock.trim()) {
+      query = query ? `${fileContextBlock}\n\n---\n\n${query}` : `${fileContextBlock}\n\n请根据以上附件内容完成任务。`;
     }
 
     setInput("");
     clearAssets();
 
-    await executeAgentTask(query);
-  }, [ai, input, pendingImages, setInput, clearAssets, executeAgentTask]);
+    await executeAgentTask(query, { images: imagePaths.length > 0 ? imagePaths : undefined });
+  }, [ai, input, imagePaths, fileContextBlock, setInput, clearAssets, executeAgentTask]);
 
   const handleStop = useCallback(() => {
     stopExecution();

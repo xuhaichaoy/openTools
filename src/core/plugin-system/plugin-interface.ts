@@ -32,7 +32,7 @@ export interface AIRequestPolicy {
 export interface MToolsAI {
   /** 单轮对话 */
   chat(options: {
-    messages: { role: "system" | "user" | "assistant"; content: string }[];
+    messages: { role: "system" | "user" | "assistant"; content: string; images?: string[] }[];
     model?: string;
     temperature?: number;
     requestPolicy?: AIRequestPolicy;
@@ -41,7 +41,7 @@ export interface MToolsAI {
 
   /** 流式对话 */
   stream(options: {
-    messages: { role: string; content: string }[];
+    messages: { role: string; content: string; images?: string[] }[];
     requestPolicy?: AIRequestPolicy;
     signal?: AbortSignal;
     onChunk: (chunk: string) => void;
@@ -54,7 +54,7 @@ export interface MToolsAI {
    * 返回值区分两种结果：纯文本回复 或 工具调用请求。
    */
   streamWithTools?(options: {
-    messages: { role: string; content: string | null; tool_calls?: AIToolCall[]; tool_call_id?: string; name?: string }[];
+    messages: { role: string; content: string | null; images?: string[]; tool_calls?: AIToolCall[]; tool_call_id?: string; name?: string }[];
     tools: AIToolDefinition[];
     signal?: AbortSignal;
     onChunk: (chunk: string) => void;

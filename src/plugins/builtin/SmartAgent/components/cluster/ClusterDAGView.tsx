@@ -21,7 +21,7 @@ const ROLE_COLORS: Record<string, { border: string; bg: string; text: string }> 
   executor: { border: "border-red-400", bg: "bg-red-500/10", text: "text-red-600" },
 };
 
-const DEFAULT_COLORS = { border: "border-gray-400", bg: "bg-gray-500/10", text: "text-gray-600" };
+const DEFAULT_COLORS = { border: "border-[var(--color-border)]", bg: "bg-[var(--color-bg-secondary)]", text: "text-[var(--color-text-secondary)]" };
 
 interface DAGNode {
   step: { id: string; role: string; task: string; dependencies: string[] };
@@ -39,7 +39,7 @@ function StatusIcon({ status }: { status?: string }) {
     case "running":
       return <Loader2 className={`${size} text-blue-500 animate-spin`} />;
     default:
-      return <Circle className={`${size} text-gray-400`} />;
+      return <Circle className={`${size} text-[var(--color-text-tertiary)]`} />;
   }
 }
 
@@ -110,7 +110,7 @@ export function ClusterDAGView({ plan, instances }: ClusterDAGViewProps) {
           >
             <polygon
               points="0 0, 8 3, 0 6"
-              className="fill-gray-400"
+              className="fill-[var(--color-text-tertiary)]"
             />
           </marker>
         </defs>
@@ -137,7 +137,7 @@ export function ClusterDAGView({ plan, instances }: ClusterDAGViewProps) {
               key={i}
               d={`M ${x1} ${y1} C ${midX} ${y1}, ${midX} ${y2}, ${x2} ${y2}`}
               fill="none"
-              className="stroke-gray-400"
+              className="stroke-[var(--color-text-tertiary)]"
               strokeWidth={1.5}
               markerEnd="url(#arrowhead)"
             />
@@ -165,7 +165,7 @@ export function ClusterDAGView({ plan, instances }: ClusterDAGViewProps) {
                         ? "stroke-green-400"
                         : inst?.status === "error"
                           ? "stroke-red-400"
-                          : "stroke-gray-300"
+                          : "stroke-[var(--color-border)]"
                   }`}
                 />
                 <foreignObject width={NODE_W} height={NODE_H}>
@@ -175,11 +175,11 @@ export function ClusterDAGView({ plan, instances }: ClusterDAGViewProps) {
                       <span className={`text-[11px] font-medium ${colors.text}`}>
                         {node.step.role}
                       </span>
-                      <span className="text-[10px] text-gray-400">
+                      <span className="text-[10px] text-[var(--color-text-tertiary)]">
                         {node.step.id}
                       </span>
                     </div>
-                    <p className="text-[10px] text-gray-500 line-clamp-2 mt-0.5 leading-tight">
+                    <p className="text-[10px] text-[var(--color-text-secondary)] line-clamp-2 mt-0.5 leading-tight" title={node.step.task}>
                       {node.step.task}
                     </p>
                   </div>

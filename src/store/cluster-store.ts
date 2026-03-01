@@ -15,6 +15,10 @@ export interface ClusterSession {
   id: string;
   query: string;
   mode?: ClusterMode;
+  /** 该次任务使用的模型名称（创建时写入，用于在任务名称后展示） */
+  model?: string;
+  /** 用户附带的图片路径 */
+  images?: string[];
   status: ClusterSessionStatus;
   plan?: ClusterPlan;
   instances: AgentInstance[];
@@ -30,7 +34,7 @@ interface ClusterState {
   sessions: ClusterSession[];
   currentSessionId: string | null;
 
-  createSession: (query: string, mode?: ClusterMode) => string;
+  createSession: (query: string, mode?: ClusterMode, model?: string, images?: string[]) => string;
   getCurrentSession: () => ClusterSession | null;
   setCurrentSession: (id: string) => void;
   updateSession: (id: string, patch: Partial<ClusterSession>) => void;
@@ -50,12 +54,14 @@ export const useClusterStore = create<ClusterState>()(
       sessions: [],
       currentSessionId: null,
 
-      createSession: (query, mode) => {
+      createSession: (query, mode, model, images) => {
         const id = generateId();
         const session: ClusterSession = {
           id,
           query,
           mode,
+          model,
+          images,
           status: "idle",
           instances: [],
           messages: [],
@@ -141,7 +147,12 @@ export const useClusterStore = create<ClusterState>()(
       storage: tauriPersistStorage("cluster-sessions.json", "集群会话"),
       partialize: (state) => ({
         sessions: state.sessions
-          .filter((s) => s.status === "done" || s.status === "error")
+          .map((s) => {
+            if (s.status !== "done" && s.status !== "error") {
+              return { ...s, status: "error" as const, finishedAt: s.finishedAt ?? Date.now() };
+            }
+            return s;
+          })
           .slice(0, MAX_PERSISTED_SESSIONS)
           .map((s) => ({
             ...s,

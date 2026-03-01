@@ -1,4 +1,4 @@
-import React, { useCallback } from "react";
+import React, { useCallback, useState } from "react";
 import {
   Loader2,
   ChevronDown,
@@ -8,11 +8,13 @@ import {
   Eye,
   MessageCircle,
   AlertCircle,
+  X,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import type { AgentTask } from "@/store/agent-store";
+import { ChatImage } from "@/components/ai/MessageBubble";
 import {
   getExecutionWaitingStageLabel,
   type ExecutionWaitingStage,
@@ -129,6 +131,7 @@ function AgentTaskBlockInner({
   expandedSteps,
   onToggleStep,
 }: AgentTaskBlockProps) {
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
   const isRunningTask = isRunning && isLastTask;
   // 稳定化 onToggleProcess 绑定，避免内联箭头函数破坏子组件 memo
   const handleToggleProcess = useCallback(
@@ -181,6 +184,18 @@ function AgentTaskBlockInner({
         <p className="text-[15px] mt-1 leading-snug break-words text-[var(--color-text)]">
           {task.query}
         </p>
+        {task.images && task.images.length > 0 && (
+          <div className="flex flex-wrap gap-2 mt-2">
+            {task.images.map((img) => (
+              <ChatImage
+                key={img}
+                path={img}
+                className="w-16 h-16 object-cover rounded-md border border-[var(--color-border)] cursor-pointer hover:opacity-80 transition-opacity"
+                onClick={(blobUrl) => setPreviewImage(blobUrl)}
+              />
+            ))}
+          </div>
+        )}
       </div>
 
       {task.steps.length > 0 && effectiveStatus !== "running" && (
@@ -295,6 +310,25 @@ function AgentTaskBlockInner({
 
       {!isLastTask && (
         <div className="border-t border-dashed border-[var(--color-border)]/70 my-1" />
+      )}
+
+      {previewImage && (
+        <div
+          className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 backdrop-blur-sm cursor-zoom-out animate-in fade-in duration-200"
+          onClick={() => setPreviewImage(null)}
+        >
+          <img
+            src={previewImage}
+            alt="预览大图"
+            className="max-w-[90vw] max-h-[90vh] object-contain rounded-lg shadow-2xl animate-in zoom-in-95 duration-200"
+          />
+          <button
+            className="absolute top-6 right-6 p-2 rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors shadow-lg"
+            onClick={() => setPreviewImage(null)}
+          >
+            <X className="w-6 h-6" />
+          </button>
+        </div>
       )}
     </div>
   );

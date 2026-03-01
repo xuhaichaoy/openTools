@@ -40,6 +40,15 @@ export function ModelSelector() {
     }
   }, [config.source, ownKeys.length, loadOwnKeys]);
 
+  // 自有 Key：仅当「已有选中但不在当前列表」时回退到第一个（避免 config 未加载完就被覆盖）
+  useEffect(() => {
+    if (config.source !== "own_key" || ownKeys.length === 0) return;
+    const currentId = config.active_own_key_id;
+    if (!currentId) return;
+    if (ownKeys.some((k) => k.id === currentId)) return;
+    selectOwnKeyModel(ownKeys[0].id);
+  }, [config.source, config.active_own_key_id, ownKeys, selectOwnKeyModel]);
+
   // 团队模式下先确保 teams 已加载
   useEffect(() => {
     if (config.source === "team" && !teamsLoaded) {

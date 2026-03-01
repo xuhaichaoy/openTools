@@ -25,11 +25,12 @@ export function clearActiveOrchestrator(): void {
   active = null;
 }
 
-export function abortActiveOrchestrator(): void {
+export async function abortActiveOrchestrator(): Promise<void> {
   if (active) {
-    active.abortController.abort();
-    active.orchestrator.abort();
+    const { abortController, orchestrator } = active;
     active = null;
+    abortController.abort();
+    await orchestrator.abort();
   }
 }
 

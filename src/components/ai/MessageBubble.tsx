@@ -1,13 +1,60 @@
-import { memo, useCallback, useRef } from "react";
-import { useState } from "react";
+import { memo, useCallback, useRef, useState, useEffect } from "react";
 import { User, Bot, Copy, Check, RefreshCw, Pencil, X } from "lucide-react";
-import type { ChatMessage } from "@/store/ai-store";
-import { useAIStore } from "@/store/ai-store";
-import { ToolCallDisplay } from "./ToolCallDisplay";
-import { pathToMtpluginUrl } from "@/components/tools/ScreenCaptureWidgets";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
+import { readFile } from "@tauri-apps/plugin-fs";
+import { useAIStore } from "@/store/ai-store";
+import { ToolCallDisplay } from "./ToolCallDisplay";
+
+/** 用 Tauri FS 读文件转 blob URL，绕过 asset:// 协议白名单限制 */
+export function ChatImage({
+  path,
+  className,
+  onClick,
+}: {
+  path: string;
+  className?: string;
+  onClick?: (blobUrl: string) => void;
+}) {
+  const [blobUrl, setBlobUrl] = useState("");
+  useEffect(() => {
+    let url = "";
+    readFile(path)
+      .then((bytes) => {
+        const ext = path.split(".").pop()?.toLowerCase() ?? "png";
+        const mime =
+          ext === "jpg" || ext === "jpeg"
+            ? "image/jpeg"
+            : ext === "gif"
+              ? "image/gif"
+              : ext === "webp"
+                ? "image/webp"
+                : "image/png";
+        const blob = new Blob([bytes], { type: mime });
+        url = URL.createObjectURL(blob);
+        setBlobUrl(url);
+      })
+      .catch(() => {});
+    return () => {
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [path]);
+  if (!blobUrl)
+    return (
+      <div
+        className={`bg-[var(--color-bg-secondary)] animate-pulse rounded-lg ${className ?? ""}`}
+      />
+    );
+  return (
+    <img
+      src={blobUrl}
+      alt="附件图片"
+      className={className}
+      onClick={() => onClick?.(blobUrl)}
+    />
+  );
+}
 
 /** 从 React 子节点递归取出纯文本（rehype-highlight 会把代码变成 span 等，不能直接用 String(children)） */
 function getTextFromChildren(children: React.ReactNode): string {
@@ -348,14 +395,11 @@ export const MessageBubble = memo(function MessageBubble({
               {msg.images && msg.images.length > 0 && (
                 <div className="flex gap-1.5 flex-wrap mb-1.5">
                   {msg.images.map((imgPath, i) => (
-                    <img
+                    <ChatImage
                       key={i}
-                      src={pathToMtpluginUrl(imgPath)}
-                      alt={`图片 ${i + 1}`}
+                      path={imgPath}
                       className="max-w-[200px] max-h-[200px] object-cover rounded-lg cursor-zoom-in hover:opacity-90 transition-opacity"
-                      onClick={() =>
-                        setPreviewImage(pathToMtpluginUrl(imgPath))
-                      }
+                      onClick={(url) => setPreviewImage(url)}
                     />
                   ))}
                 </div>

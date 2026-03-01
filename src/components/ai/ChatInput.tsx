@@ -5,7 +5,10 @@ import {
   Zap,
   X,
   ArrowLeft,
+  FileText,
 } from "lucide-react";
+import type { InputAttachment } from "@/hooks/use-input-attachments";
+import { AttachDropdown } from "@/components/ui/AttachDropdown";
 
 const PROMPT_TEMPLATES = [
   { icon: "🌐", label: "翻译为英文", prompt: "请将以下内容翻译为英文，保持原意和语气：\n\n" },
@@ -33,6 +36,12 @@ export interface ChatInputProps {
   inputRef: React.RefObject<HTMLTextAreaElement | null>;
   isComposingRef: React.MutableRefObject<boolean>;
   messages: { content?: string; streaming?: boolean }[];
+  /** 统一附件（图片+文本文件），与 pendingImages 二选一；提供时显示文件/文件夹按钮 */
+  attachments?: InputAttachment[];
+  onRemoveAttachment?: (id: string) => void;
+  onFileSelect?: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  onFolderSelect?: () => void;
+  fileInputRef?: React.RefObject<HTMLInputElement | null>;
 }
 
 export function ChatInput({
@@ -50,9 +59,29 @@ export function ChatInput({
   inputRef,
   isComposingRef,
   messages,
+  attachments,
+  onRemoveAttachment,
+  onFileSelect,
+  onFolderSelect,
+  fileInputRef,
 }: ChatInputProps) {
   const [showTemplates, setShowTemplates] = useState(false);
   const templateRef = useRef<HTMLDivElement>(null);
+  const internalFileInputRef = useRef<HTMLInputElement>(null);
+  const fileInputEl = fileInputRef ?? internalFileInputRef;
+  const useAttachments = attachments && onRemoveAttachment;
+  const hasImages = useAttachments
+    ? attachments.some((a) => a.type === "image")
+    : pendingImages.length > 0;
+  const hasAnyAttachment = useAttachments ? attachments.length > 0 : pendingImages.length > 0;
+
+  // 内容变化时（含程序预填）同步 textarea 高度，最多 3 行
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 9 * 16) + "px";
+  }, [input]);
 
   // 点击外部关闭 Prompt 模板菜单
   useEffect(() => {
@@ -116,6 +145,26 @@ export function ChatInput({
       {/* 输入区域 */}
       <div className="p-2 pb-1">
         <div className="relative flex items-center gap-1 bg-[var(--color-bg-secondary)] p-1 px-2 rounded-xl border border-[var(--color-border)] shadow-sm focus-within:shadow-md focus-within:border-indigo-500/30 transition-all">
+          {/* 文件/文件夹按钮（可选） */}
+          {(onFileSelect || onFolderSelect) && (
+            <div className="flex items-center gap-0.5 shrink-0">
+              {onFileSelect && (
+                <input
+                  ref={fileInputEl as React.RefObject<HTMLInputElement>}
+                  type="file"
+                  multiple
+                  accept="image/*,.txt,.md,.json,.yaml,.yml,.toml,.xml,.csv,.log,.js,.ts,.jsx,.tsx,.py,.rs,.go,.java,.c,.cpp,.h,.hpp,.swift,.kt,.rb,.php,.sh,.sql,.css,.html,.htm,.vue,.svelte"
+                  className="hidden"
+                  onChange={onFileSelect}
+                />
+              )}
+              <AttachDropdown
+                onFileClick={() => (fileInputEl as React.RefObject<HTMLInputElement>)?.current?.click()}
+                onFolderClick={onFolderSelect}
+                accent="indigo"
+              />
+            </div>
+          )}
           {/* Prompt 模板按钮 */}
           <div className="relative shrink-0" ref={templateRef}>
             <button
@@ -152,8 +201,46 @@ export function ChatInput({
             )}
           </div>
           <div className="flex-1 flex flex-col min-w-0">
-            {/* 图片预览区 */}
-            {pendingImagePreviews.length > 0 && (
+            {/* 附件预览区：统一附件 或 仅图片 */}
+            {useAttachments && attachments.length > 0 ? (
+              <div className="flex gap-2 flex-wrap px-2 pt-1.5 pb-1">
+                {attachments.map((a) => (
+                  <div key={a.id} className="relative group shrink-0">
+                    {a.type === "image" ? (
+                      <>
+                        <img
+                          src={a.preview ?? ""}
+                          alt={a.name}
+                          className="w-14 h-14 object-cover rounded-lg border border-[var(--color-border)] cursor-zoom-in hover:brightness-90 transition-all shadow-sm"
+                          onClick={() => a.preview && setPreviewImage(a.preview)}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => onRemoveAttachment(a.id)}
+                          className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-red-500 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-sm z-10"
+                        >
+                          <X className="w-2.5 h-2.5" />
+                        </button>
+                      </>
+                    ) : (
+                      <div className="relative flex items-center gap-1.5 px-2 py-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] max-w-[140px]">
+                        <FileText className="w-3.5 h-3.5 text-[var(--color-text-tertiary)] shrink-0" />
+                        <span className="text-[10px] truncate text-[var(--color-text-secondary)]" title={a.name}>
+                          {a.name}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => onRemoveAttachment(a.id)}
+                          className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full bg-red-500 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-sm z-10"
+                        >
+                          <X className="w-2 h-2" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : pendingImagePreviews.length > 0 ? (
               <div className="flex gap-2 flex-wrap px-2 pt-1.5 pb-1">
                 {pendingImagePreviews.map((preview, i) => (
                   <div key={i} className="relative group shrink-0">
@@ -164,6 +251,7 @@ export function ChatInput({
                       onClick={() => setPreviewImage(preview)}
                     />
                     <button
+                      type="button"
                       onClick={() => onRemoveImage(i)}
                       className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-red-500 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-sm z-10"
                     >
@@ -172,12 +260,12 @@ export function ChatInput({
                   </div>
                 ))}
               </div>
-            )}
+            ) : null}
             <textarea
               ref={inputRef}
-              className="w-full bg-transparent text-[var(--color-text)] text-[14px] px-2 outline-none resize-none min-h-[32px] max-h-[160px] placeholder:text-[var(--color-text-secondary)]/50 leading-relaxed py-2"
+              className="w-full bg-transparent text-[var(--color-text)] text-[14px] px-2 outline-none resize-none min-h-[2rem] max-h-[9rem] placeholder:text-[var(--color-text-secondary)]/50 leading-relaxed py-2"
               placeholder={
-                pendingImages.length > 0
+                hasAnyAttachment
                   ? "输入描述（可省略）..."
                   : "输入消息..."
               }
@@ -185,7 +273,7 @@ export function ChatInput({
               onChange={(e) => {
                 setInput(e.target.value);
                 e.target.style.height = "auto";
-                e.target.style.height = e.target.scrollHeight + "px";
+                e.target.style.height = Math.min(e.target.scrollHeight, 9 * 16) + "px";
               }}
               onKeyDown={handleKeyDown}
               onPaste={onPaste}
@@ -204,7 +292,7 @@ export function ChatInput({
           <button
             onClick={onSend}
             disabled={
-              isStreaming || (!input.trim() && pendingImages.length === 0)
+              isStreaming || (!input.trim() && !hasAnyAttachment)
             }
             className="p-2 rounded-full bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-40 disabled:hover:bg-indigo-600 disabled:cursor-not-allowed transition-all shadow-sm active:scale-95 shrink-0"
             aria-label="发送"

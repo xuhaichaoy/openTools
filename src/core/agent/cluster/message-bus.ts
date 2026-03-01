@@ -2,8 +2,6 @@ import type { AgentMessage, AgentMessageType } from "./types";
 
 type MessageHandler = (message: AgentMessage) => void;
 
-let nextMsgId = 0;
-
 /**
  * Agent 间通信总线：Blackboard（共享黑板）+ Pub/Sub 事件。
  *
@@ -16,6 +14,7 @@ let nextMsgId = 0;
 const MAX_MESSAGE_HISTORY = 2000;
 
 export class ClusterMessageBus {
+  private nextMsgId = 0;
   private blackboard = new Map<string, unknown>();
   private subscribers = new Map<string, MessageHandler[]>();
   private globalSubscribers: MessageHandler[] = [];
@@ -71,7 +70,7 @@ export class ClusterMessageBus {
   publish(message: Omit<AgentMessage, "id" | "timestamp">): AgentMessage {
     const full: AgentMessage = {
       ...message,
-      id: `msg-${nextMsgId++}`,
+      id: `msg-${this.nextMsgId++}`,
       timestamp: Date.now(),
     };
     this.messageHistory.push(full);

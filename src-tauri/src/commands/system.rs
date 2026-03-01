@@ -802,9 +802,9 @@ pub async fn web_fetch_url(url: String) -> Result<String, String> {
         .await
         .map_err(|e| format!("读取响应失败: {}", e))?;
 
-    // 限制返回大小
+    // 限制返回大小（按字符截断，避免在多字节字符边界 panic）
     if body.len() > 100_000 {
-        Ok(body[..100_000].to_string())
+        Ok(body.chars().take(100_000).collect())
     } else {
         Ok(body)
     }

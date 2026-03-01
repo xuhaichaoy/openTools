@@ -16,6 +16,8 @@ import { createDebouncedPersister } from "@/core/storage";
 export interface AgentTask {
   id: string;
   query: string;
+  /** 用户附带的图片路径 */
+  images?: string[];
   steps: AgentStep[];
   answer: string | null;
   status?: AgentTaskStatus;
@@ -62,7 +64,7 @@ interface AgentState {
   getCurrentSession: () => AgentSession | null;
   setCurrentSession: (id: string) => void;
   /** 向会话追加一个新任务，返回新任务的 id */
-  addTask: (sessionId: string, query: string) => string;
+  addTask: (sessionId: string, query: string, images?: string[]) => string;
   /** 更新指定任务的 steps / answer（按 taskId 查找） */
   updateTask: (
     sessionId: string,
@@ -366,7 +368,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   setCurrentSession: (id) => set({ currentSessionId: id }),
 
-  addTask: (sessionId: string, query: string) => {
+  addTask: (sessionId: string, query: string, images?: string[]) => {
     const taskId = generateId();
     set((state) => ({
       sessions: state.sessions.map((s) => {
@@ -374,6 +376,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         const newTask: AgentTask = {
           id: taskId,
           query,
+          images,
           steps: [],
           answer: null,
           status: "pending",

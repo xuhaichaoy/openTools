@@ -83,7 +83,7 @@ function StepsList({ steps }: { steps: AgentInstance["steps"] }) {
             <span className="shrink-0 text-[var(--color-text-tertiary)] w-[72px] text-right">
               {step.type}
             </span>
-            <span className="line-clamp-1">
+            <span className="line-clamp-2 min-w-0" title={step.toolName ? `${step.toolName}: ${step.content}` : step.content}>
               {step.toolName
                 ? `${step.toolName}: ${step.content}`
                 : step.content}
@@ -153,7 +153,7 @@ function InstanceCard({ instance }: { instance: AgentInstance }) {
       </button>
 
       {expanded && (
-        <div className="border-t border-[var(--color-border)] px-3 py-2 text-xs space-y-2">
+        <div className="border-t border-[var(--color-border)] px-3 py-3 text-xs space-y-3">
           {instance.error && (
             <div className="text-red-500 bg-red-500/5 px-2 py-1 rounded text-[11px]">
               {instance.error}
@@ -161,7 +161,7 @@ function InstanceCard({ instance }: { instance: AgentInstance }) {
           )}
 
           {instance.result && (
-            <div className="prose prose-sm dark:prose-invert max-w-none text-[12px]">
+            <div className="prose prose-sm dark:prose-invert max-w-none text-[13px] leading-relaxed prose-p:my-2 prose-headings:mt-3 prose-headings:mb-1.5 prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 prose-table:my-2 prose-td:py-1.5 prose-th:py-1.5">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>
                 {instance.result.length > 1000
                   ? instance.result.slice(0, 1000) + "\n\n...（已截断）"

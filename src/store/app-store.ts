@@ -39,6 +39,8 @@ export interface AppState {
   pendingEmbed: EmbedRequest | null
   /** 待处理的视图导航请求（一次性消费） */
   pendingNavigate: string | null
+  /** 从 Cluster 切到 Agent 时待注入的初始输入（一次性消费，不持久化） */
+  pendingAgentInitialQuery: string | null
 
   /** 视图栈（支持多层返回） */
   viewStack: ViewEntry[]
@@ -63,6 +65,10 @@ export interface AppState {
   requestNavigate: (viewId: string) => void
   /** 消费导航请求 */
   consumeNavigate: () => string | null
+  /** 设置待注入 Agent 的初始输入（如 Cluster「用 Agent 继续」） */
+  setPendingAgentInitialQuery: (q: string | null) => void
+  /** 消费并清空 pendingAgentInitialQuery，返回当前值 */
+  consumePendingAgentInitialQuery: () => string | null
   /** 仅重置搜索态，不修改视图栈 */
   resetSearchState: () => void
   reset: () => void
@@ -94,6 +100,7 @@ export const useAppStore = create<AppState>()(
       aiCenterMode: 'ask' as AICenterMode,
       pendingEmbed: null as EmbedRequest | null,
       pendingNavigate: null as string | null,
+      pendingAgentInitialQuery: null as string | null,
       viewStack: createRootViewStack(),
 
       setMode: (mode) => set({ mode }),
@@ -130,6 +137,12 @@ export const useAppStore = create<AppState>()(
         const current = get().pendingNavigate
         if (current) set({ pendingNavigate: null })
         return current
+      },
+      setPendingAgentInitialQuery: (q) => set({ pendingAgentInitialQuery: q }),
+      consumePendingAgentInitialQuery: () => {
+        const current = get().pendingAgentInitialQuery
+        if (current != null) set({ pendingAgentInitialQuery: null })
+        return current ?? null
       },
       resetSearchState: () =>
         set({ mode: 'search', searchValue: '', selectedIndex: 0, windowExpanded: false }),

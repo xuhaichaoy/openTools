@@ -107,8 +107,12 @@ export class LocalAgentBridge implements AgentBridge {
       useAIStore.getState().config,
     );
 
-    const contextStr = Object.keys(context).length > 0
-      ? `\n\n## 前置步骤的输出结果\n${formatContextForAgent(context)}`
+    const { _images: contextImages, ...contextForText } = context;
+    const images = Array.isArray(contextImages) && contextImages.length > 0
+      ? (contextImages as string[])
+      : undefined;
+    const contextStr = Object.keys(contextForText).length > 0
+      ? `\n\n## 前置步骤的输出结果\n${formatContextForAgent(contextForText)}`
       : "";
 
     const rolePrompt = role?.systemPrompt ?? "";
@@ -154,7 +158,7 @@ export class LocalAgentBridge implements AgentBridge {
 
     try {
       const answer = await retryAsync(
-        () => agent.run(fullQuery, signal),
+        () => agent.run(fullQuery, signal, images),
         { maxRetries: 2, baseDelayMs: 1000, signal },
       );
       return { answer, steps: collectedSteps };

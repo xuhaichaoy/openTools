@@ -233,6 +233,31 @@ export const useAIStore = create<AIState>((set, get) => ({
       }
 
       set({ ownKeys: keys });
+      // 自有 Key 下若无选中或选中已失效，默认选第一个并持久化（在 loadConfig 之后调用时生效）
+      if (keys.length > 0) {
+        const { config: c } = get();
+        if (c.source === "own_key" && (!c.active_own_key_id || !keys.some((k) => k.id === c.active_own_key_id))) {
+          const key = keys[0];
+          const newConfig: AIConfig = {
+            ...c,
+            source: "own_key",
+            team_id: undefined,
+            team_config_id: undefined,
+            protocol: key.protocol,
+            base_url: key.base_url,
+            api_key: key.api_key,
+            model: key.model,
+            temperature: key.temperature,
+            max_tokens: key.max_tokens,
+            active_own_key_id: key.id,
+          };
+          const normalized = normalizeConfig(newConfig);
+          set({ config: normalized });
+          invoke("ai_set_config", { config: normalized }).catch((e) =>
+            handleError(e, { context: "保存 AI 配置" }),
+          );
+        }
+      }
     } catch (e) {
       handleError(e, { context: "加载自有 Key 列表", silent: true });
     }

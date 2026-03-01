@@ -10,6 +10,7 @@ import {
   type ExecutionWaitingStage,
   type RunningPhase,
 } from "../core/ui-state";
+import { useAgentRunningStore } from "@/store/agent-running-store";
 
 type AgentStoreState = ReturnType<typeof useAgentStore.getState>;
 export const AGENT_EXECUTION_HEARTBEAT_INTERVAL_MS = 10_000;
@@ -38,6 +39,7 @@ interface UseAgentExecutionResult {
       sessionId?: string;
       taskId?: string;
       systemHint?: string;
+      images?: string[];
     },
   ) => Promise<void>;
   stopExecution: () => void;
@@ -75,6 +77,7 @@ export function useAgentExecution({
       setRunning(false);
       setRunningPhase(null);
       setExecutionWaitingStage(null);
+      useAgentRunningStore.getState().stop();
     }
   }, [clearTimers, setExecutionWaitingStage, setRunning, setRunningPhase]);
 
@@ -85,6 +88,7 @@ export function useAgentExecution({
         sessionId?: string;
         taskId?: string;
         systemHint?: string;
+        images?: string[];
       },
     ) => {
       if (!ai || !query.trim()) return;
@@ -136,7 +140,7 @@ export function useAgentExecution({
             }
           }
         }
-        taskId = addTask(sessionId, query);
+        taskId = addTask(sessionId, query, opts?.images);
       }
 
       if (!sessionId || !taskId) return;
@@ -148,6 +152,10 @@ export function useAgentExecution({
       setRunning(true);
       setRunningPhase("executing");
       setWaitingStageIfChanged("model_first_token");
+      useAgentRunningStore.getState().start(
+        { sessionId, query, startedAt: Date.now() },
+        () => abortControllerRef.current?.abort(),
+      );
       if (inputRef.current) inputRef.current.style.height = "auto";
       updateTask(sessionId, taskId, {
         status: "running",
@@ -326,7 +334,10 @@ export function useAgentExecution({
       const retryBackoffMs = aiConfig.agent_retry_backoff_ms ?? 5000;
 
       try {
-        const effectiveQuery = opts?.systemHint ? `${query}\n\n${opts.systemHint}` : query;
+        let effectiveQuery = opts?.systemHint ? `${query}\n\n${opts.systemHint}` : query;
+        if (opts?.images?.length) {
+          effectiveQuery += `\n\n[系统提示] 用户已附带 ${opts.images.length} 张图片，这些图片已自动包含在本次对话中，你可以直接看到并分析它们。请勿使用截图工具或其他方式重新获取图片，直接基于已有图片进行分析即可。`;
+        }
         let lastError: Error | null = null;
 
         for (let attempt = 0; attempt <= retryMax; attempt++) {
@@ -345,7 +356,7 @@ export function useAgentExecution({
           }
 
           try {
-            const result = await agent.run(effectiveQuery, abortController.signal);
+            const result = await agent.run(effectiveQuery, abortController.signal, opts?.images);
             updateTask(sessionId, taskId, { answer: result, status: "success" });
             lastError = null;
             break;
@@ -377,6 +388,7 @@ export function useAgentExecution({
         if (abortControllerRef.current === abortController) {
           clearTimers();
           setRunning(false);
+          useAgentRunningStore.getState().stop();
           abortControllerRef.current = null;
           setWaitingStageIfChanged(null);
           setRunningPhase((prev) => (prev === "executing" ? null : prev));

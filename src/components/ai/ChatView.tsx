@@ -21,6 +21,7 @@ import { writeTextFile } from "@tauri-apps/plugin-fs";
 import { useAIStore } from "@/store/ai-store";
 import { useToast } from "@/components/ui/Toast";
 import { handleError } from "@/core/errors";
+import { useInputAttachments } from "@/hooks/use-input-attachments";
 import { ModelSelector } from "./ModelSelector";
 import { MessageBubble } from "./MessageBubble";
 import { ToolConfirmDialog } from "./ToolConfirmDialog";
@@ -38,11 +39,18 @@ export interface ChatViewHandle {
 
 export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideModelSelector?: boolean; headless?: boolean }>(function ChatView({ onBack, hideModelSelector, headless }, ref) {
   const [input, setInput] = useState("");
-  const [pendingImages, setPendingImages] = useState<string[]>([]);
-  const [pendingImagePreviews, setPendingImagePreviews] = useState<string[]>(
-    [],
-  );
   const [previewImage, setPreviewImage] = useState<string | null>(null);
+  const {
+    attachments,
+    imagePaths,
+    imagePreviews,
+    fileContextBlock,
+    handlePaste,
+    handleFileSelect,
+    handleFolderSelect,
+    removeAttachment,
+    clearAttachments,
+  } = useInputAttachments();
   const [showHistory, setShowHistory] = useState(false);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
@@ -148,7 +156,7 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
 
   useEffect(() => {
     scrollToBottom();
-  }, [messages, pendingImages, pendingImagePreviews]);
+  }, [messages, attachments]);
 
   useEffect(() => {
     scrollToBottom();
@@ -242,7 +250,8 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
 
   const handleSend = async () => {
     const trimmed = input.trim();
-    if ((!trimmed && pendingImages.length === 0) || isStreaming) return;
+    const hasAttachments = attachments.length > 0;
+    if ((!trimmed && !hasAttachments) || isStreaming) return;
 
     const source = config.source || "own_key";
     if (source === "own_key" && !config.api_key) {
@@ -254,54 +263,16 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
       return;
     }
 
-    const imagesToSend =
-      pendingImages.length > 0 ? [...pendingImages] : undefined;
+    const imagesToSend = imagePaths.length > 0 ? [...imagePaths] : undefined;
+    const content = fileContextBlock
+      ? `${fileContextBlock}\n\n---\n\n${trimmed || "请根据以上附件内容回答。"}`
+      : (trimmed || "请描述这张图片");
     setInput("");
-    setPendingImages([]);
-    setPendingImagePreviews([]);
+    clearAttachments();
     if (inputRef.current) {
       inputRef.current.style.height = "auto";
     }
-    await sendMessage(trimmed || "请描述这张图片", imagesToSend);
-  };
-
-  // 粘贴图片处理
-  const handlePaste = async (e: React.ClipboardEvent) => {
-    const items = e.clipboardData?.items;
-    if (!items) return;
-    for (const item of Array.from(items)) {
-      if (item.type.startsWith("image/")) {
-        e.preventDefault();
-        const blob = item.getAsFile();
-        if (!blob) continue;
-        const reader = new FileReader();
-        reader.onload = async () => {
-          const dataUrl = reader.result as string;
-          setPendingImagePreviews((prev) => [...prev, dataUrl]);
-          const base64 = dataUrl.split(",")[1];
-          const ext = blob.type.split("/")[1] || "png";
-          const fileName = `img_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.${ext}`;
-          try {
-            const { invoke } = await import("@tauri-apps/api/core");
-            const filePath = await invoke<string>("ai_save_chat_image", {
-              imageData: base64,
-              fileName,
-            });
-            setPendingImages((prev) => [...prev, filePath]);
-          } catch (err) {
-            handleError(err, { context: "保存聊天图片", silent: true });
-            toast("warning", "图片保存失败");
-            setPendingImagePreviews((prev) => prev.slice(0, -1));
-          }
-        };
-        reader.readAsDataURL(blob);
-      }
-    }
-  };
-
-  const removeImage = (index: number) => {
-    setPendingImages((prev) => prev.filter((_, i) => i !== index));
-    setPendingImagePreviews((prev) => prev.filter((_, i) => i !== index));
+    await sendMessage(content, imagesToSend);
   };
 
   return (
@@ -555,10 +526,14 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
           onSend={handleSend}
           isStreaming={isStreaming}
           stopStreaming={stopStreaming}
-          pendingImages={pendingImages}
-          pendingImagePreviews={pendingImagePreviews}
+          pendingImages={imagePaths}
+          pendingImagePreviews={imagePreviews}
           onPaste={handlePaste}
-          onRemoveImage={removeImage}
+          onRemoveImage={() => {}}
+          attachments={attachments}
+          onRemoveAttachment={removeAttachment}
+          onFileSelect={handleFileSelect}
+          onFolderSelect={handleFolderSelect}
           previewImage={previewImage}
           setPreviewImage={setPreviewImage}
           inputRef={inputRef}

@@ -9,18 +9,23 @@ import React, {
 import type { AgentTool } from "./core/react-agent";
 import type { MToolsAI } from "@/core/plugin-system/plugin-interface";
 import { useAgentStore, type AgentTask } from "@/store/agent-store";
+import { useAppStore } from "@/store/app-store";
 import type { RuntimeFallbackContext } from "@/core/agent/runtime";
 
 import { AgentInputBar } from "./components/AgentInputBar";
-import { ConfirmDialog } from "./components/ConfirmDialog";
-import { AskUserDialog } from "./components/AskUserDialog";
+import { ConfirmDialog, type ConfirmResult } from "./components/ConfirmDialog";
+import {
+  useCommandAllowlistStore,
+  extractCommandKey,
+} from "@/store/command-allowlist-store";
+import { useAskUserStore } from "@/store/ask-user-store";
 import type { AskUserQuestion, AskUserAnswers } from "./core/default-tools";
 import { AgentWorkbenchPanel } from "./components/AgentWorkbenchPanel";
 import { AgentHistoryDrawer } from "./components/AgentHistoryDrawer";
 import { AgentTaskTimeline } from "./components/AgentTaskTimeline";
 import { AgentHeaderBar } from "./components/AgentHeaderBar";
 import { useAgentExecution } from "./hooks/use-agent-execution";
-import { useAgentInputAssets } from "./hooks/use-agent-input-assets";
+import { useInputAttachments } from "@/hooks/use-input-attachments";
 import { useAgentSessionActions } from "./hooks/use-agent-session-actions";
 import { useAgentEffects } from "./hooks/use-agent-effects";
 import { useAgentDerivedState } from "./hooks/use-agent-derived-state";
@@ -81,13 +86,16 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
     const isComposingRef = useRef(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const {
-      pendingImages,
-      pendingImagePreviews,
+      attachments,
+      imagePaths,
+      imagePreviews,
+      fileContextBlock,
       handlePaste,
       handleFileSelect,
-      removeImage,
-      clearAssets,
-    } = useAgentInputAssets();
+      handleFolderSelect,
+      removeAttachment,
+      clearAttachments,
+    } = useInputAttachments();
 
     const [confirmDialog, setConfirmDialog] = useState<{
       toolName: string;
@@ -95,17 +103,25 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       resolve: (confirmed: boolean) => void;
     } | null>(null);
 
-    const [askUserDialog, setAskUserDialog] = useState<{
-      questions: AskUserQuestion[];
-      resolve: (answers: AskUserAnswers) => void;
-    } | null>(null);
-
-    const askUser = useCallback(
-      (questions: AskUserQuestion[]) =>
-        new Promise<AskUserAnswers>((resolve) => {
-          setAskUserDialog({ questions, resolve });
-        }),
-      [],
+    const handleConfirmResult = useCallback(
+      (result: ConfirmResult) => {
+        if (!confirmDialog) return;
+        if (result.confirmed) {
+          if (result.allowLevel) {
+            const key = extractCommandKey(confirmDialog.toolName, confirmDialog.params);
+            if (result.allowLevel === "session") {
+              useCommandAllowlistStore.getState().allowSession(key);
+            } else {
+              useCommandAllowlistStore.getState().allowPersist(key);
+            }
+          }
+          confirmDialog.resolve(true);
+        } else {
+          confirmDialog.resolve(false);
+        }
+        setConfirmDialog(null);
+      },
+      [confirmDialog],
     );
 
     const confirmHostFallback = useCallback(
@@ -154,6 +170,20 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       renameSession,
     } = useAgentStore();
 
+    const askUserOpen = useAskUserStore((s) => s.open);
+
+    const askUser = useCallback(
+      (questions: AskUserQuestion[]) => {
+        const currentQuery = getCurrentSession()?.tasks?.at(-1)?.query;
+        return askUserOpen({
+          questions,
+          source: "agent",
+          taskDescription: currentQuery,
+        });
+      },
+      [askUserOpen, getCurrentSession],
+    );
+
     const currentSession = getCurrentSession();
     const tasks = currentSession?.tasks ?? EMPTY_AGENT_TASKS;
     const {
@@ -173,8 +203,8 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       setInput("");
       setExpandedSteps(new Set());
       setCollapsedTaskProcesses(new Set());
-      clearAssets();
-    }, [clearAssets]);
+      clearAttachments();
+    }, [clearAttachments]);
 
     useAgentEffects({
       ai,
@@ -202,10 +232,15 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       updateTask,
       inputRef,
       scrollRef,
-      openDangerConfirm: (toolName, params) =>
-        new Promise<boolean>((resolve) => {
+      openDangerConfirm: (toolName, params) => {
+        const key = extractCommandKey(toolName, params);
+        if (useCommandAllowlistStore.getState().isAllowed(key)) {
+          return Promise.resolve(true);
+        }
+        return new Promise<boolean>((resolve) => {
           setConfirmDialog({ toolName, params, resolve });
-        }),
+        });
+      },
       resetPerRunState,
     });
 
@@ -224,9 +259,10 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
     const { handleRun, handleStop } = useAgentRunActions({
       ai,
       input,
-      pendingImages,
+      imagePaths,
+      fileContextBlock,
       setInput,
-      clearAssets,
+      clearAssets: clearAttachments,
       executeAgentTask,
       stopExecution,
     });
@@ -234,6 +270,11 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
     useEffect(() => {
       handleRunRef.current = handleRun;
     }, [handleRun]);
+
+    useEffect(() => {
+      const q = useAppStore.getState().consumePendingAgentInitialQuery();
+      if (q) setInput(q);
+    }, []);
 
     const toggleStep = useCallback((key: string) => {
       setExpandedSteps((prev) => {
@@ -392,9 +433,15 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
                 isComposingRef.current = false;
               }, 200);
             }}
-            pendingImagePreviews={pendingImagePreviews}
+            pendingImagePreviews={imagePreviews}
             onFileSelect={handleFileSelect}
-            onRemoveImage={removeImage}
+            onRemoveImage={(i) => {
+              const img = attachments.filter((a) => a.type === "image")[i];
+              if (img) removeAttachment(img.id);
+            }}
+            attachments={attachments}
+            onRemoveAttachment={removeAttachment}
+            onFolderSelect={handleFolderSelect}
             inputRef={inputRef}
             fileInputRef={fileInputRef}
           />
@@ -404,23 +451,7 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
           <ConfirmDialog
             toolName={confirmDialog.toolName}
             params={confirmDialog.params}
-            onConfirm={() => {
-              confirmDialog.resolve(true);
-              setConfirmDialog(null);
-            }}
-            onCancel={() => {
-              confirmDialog.resolve(false);
-              setConfirmDialog(null);
-            }}
-          />
-        )}
-        {askUserDialog && (
-          <AskUserDialog
-            questions={askUserDialog.questions}
-            onSubmit={(answers) => {
-              askUserDialog.resolve(answers);
-              setAskUserDialog(null);
-            }}
+            onResult={handleConfirmResult}
           />
         )}
       </div>

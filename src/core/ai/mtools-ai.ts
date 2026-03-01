@@ -206,6 +206,7 @@ export function createMToolsAI(): MToolsAI {
             options.messages.map((m) => ({
               role: m.role,
               content: m.content,
+              ...(m.images?.length ? { images: m.images } : {}),
             })),
             effectiveConfig,
             conversationId,
@@ -299,6 +300,7 @@ export function createMToolsAI(): MToolsAI {
             options.messages.map((m) => ({
               role: m.role,
               content: m.content,
+              ...(m.images?.length ? { images: m.images } : {}),
             })),
             effectiveConfig,
             conversationId,
@@ -440,6 +442,7 @@ export function createMToolsAI(): MToolsAI {
           const finalMessages = options.messages.map((m) => ({
             role: m.role,
             content: m.content ?? "",
+            ...(m.images?.length ? { images: m.images } : {}),
             ...(m.tool_calls ? { tool_calls: m.tool_calls } : {}),
             ...(m.tool_call_id ? { tool_call_id: m.tool_call_id } : {}),
             ...(m.name ? { name: m.name } : {}),

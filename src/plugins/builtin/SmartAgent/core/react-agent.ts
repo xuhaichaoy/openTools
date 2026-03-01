@@ -1161,10 +1161,11 @@ Final Answer: [最终回答]
   /**
    * Function Calling 模式的执行循环
    */
-  private async runFC(userInput: string, signal?: AbortSignal): Promise<string> {
+  private async runFC(userInput: string, signal?: AbortSignal, images?: string[]): Promise<string> {
     type FCMessage = {
       role: string;
       content: string | null;
+      images?: string[];
       tool_calls?: AIToolCall[];
       tool_call_id?: string;
       name?: string;
@@ -1190,7 +1191,9 @@ Final Answer: [最终回答]
 
     const isComplex = this.isComplexQuery(userInput) && this.history.length === 0;
     const effectiveInput = isComplex ? this.buildPlanningHint(userInput) : userInput;
-    messages.push({ role: "user", content: effectiveInput });
+    const lastUserMsg: FCMessage = { role: "user", content: effectiveInput };
+    if (images?.length) lastUserMsg.images = images;
+    messages.push(lastUserMsg);
 
     let unknownToolCount = 0;
     let rejectedDangerousActionCount = 0;
@@ -1380,11 +1383,13 @@ Final Answer: [最终回答]
 
   // ── 文本 ReAct 模式的执行循环 ──
 
-  private async runText(userInput: string, signal?: AbortSignal): Promise<string> {
+  private async runText(userInput: string, signal?: AbortSignal, images?: string[]): Promise<string> {
     const messages = this.buildTextConversation();
     const isComplex = this.isComplexQuery(userInput) && this.history.length === 0;
     const effectiveTextInput = isComplex ? this.buildPlanningHint(userInput) : userInput;
-    messages.push({ role: "user", content: effectiveTextInput });
+    const userMsg: { role: string; content: string; images?: string[] } = { role: "user", content: effectiveTextInput };
+    if (images?.length) userMsg.images = images;
+    messages.push(userMsg);
     let rejectedDangerousActionCount = 0;
     let guardRailRetryCount = 0;
     const MAX_GUARD_RAIL_RETRIES = 2;
@@ -1527,7 +1532,7 @@ Final Answer: [最终回答]
    * 优先使用结构化 Function Calling（消除格式解析失败），
    * 如果 streamWithTools 不可用或首次调用失败则降级为文本 ReAct。
    */
-  async run(userInput: string, signal?: AbortSignal): Promise<string> {
+  async run(userInput: string, signal?: AbortSignal, images?: string[]): Promise<string> {
     if (this.running) throw new Error("Agent is already running");
     this.running = true;
     this.currentSignal = signal;
@@ -1545,7 +1550,7 @@ Final Answer: [最终回答]
 
     if (canUseFC && this.fcAvailable !== false) {
       try {
-        const result = await this.runFC(userInput, signal);
+        const result = await this.runFC(userInput, signal, images);
         this.fcAvailable = true; // 当前实例标记 FC 可用
         return result;
       } catch (e) {
@@ -1578,14 +1583,14 @@ Final Answer: [最终回答]
             content: "Function Calling 模式不可用，已自动切换至文本 ReAct 模式。",
             timestamp: Date.now(),
           });
-          return this.runText(userInput, signal);
+          return this.runText(userInput, signal, images);
         }
         throw e;
       }
     }
 
     // 文本 ReAct 模式
-    return this.runText(userInput, signal);
+    return this.runText(userInput, signal, images);
     } finally {
       this.running = false;
       this.currentSignal = undefined;
