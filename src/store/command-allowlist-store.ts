@@ -1,102 +1,75 @@
 import { create } from "zustand";
 
-const PERSIST_KEY = "mtools-command-allowlist";
+const PERSIST_KEY = "mtools-tool-trust-level";
 
-/** 从 toolName + params 提取用于匹配的"命令关键字" */
-export function extractCommandKey(
-  toolName: string,
-  params: Record<string, unknown>,
-): string {
+export type TrustLevel = "always_ask" | "auto_approve_file" | "auto_approve";
+
+export const TRUST_LEVEL_OPTIONS: {
+  value: TrustLevel;
+  label: string;
+  description: string;
+}[] = [
+  {
+    value: "always_ask",
+    label: "全部确认",
+    description: "所有危险操作（Shell 命令、文件写入等）均需手动确认",
+  },
+  {
+    value: "auto_approve_file",
+    label: "仅 Shell 需确认",
+    description: "文件读写操作自动放行，仅执行 Shell 命令时弹出确认",
+  },
+  {
+    value: "auto_approve",
+    label: "全部放行",
+    description: "所有操作自动执行，不再弹出确认对话框（请确保你信任 AI 的行为）",
+  },
+];
+
+const SHELL_TOOL_PATTERNS = [
+  "shell",
+  "run_shell",
+  "persistent_shell",
+  "command",
+];
+
+function isShellTool(toolName: string): boolean {
   const name = toolName.toLowerCase();
-
-  // Shell 命令：提取第一个 token（如 cat, ls, grep …）
-  if (name.includes("shell") || name.includes("run_shell") || name.includes("command")) {
-    const cmd = String(params.command || params.cmd || "").trim();
-    const firstToken = cmd.split(/\s+/)[0]?.replace(/^.*\//, ""); // 去掉路径前缀
-    if (firstToken) return `shell:${firstToken}`;
-    return `tool:${toolName}`;
-  }
-
-  // 其他工具直接用 toolName
-  return `tool:${toolName}`;
+  return SHELL_TOOL_PATTERNS.some((p) => name.includes(p));
 }
 
-interface CommandAllowlistState {
-  /** 本次会话允许的命令 key 集合（关闭应用后清空） */
-  sessionAllowed: Set<string>;
-  /** 永久允许的命令 key 集合（持久化到 localStorage） */
-  persistAllowed: Set<string>;
-
-  /** 检查某个命令是否已被放行 */
-  isAllowed: (key: string) => boolean;
-  /** 本次会话允许 */
-  allowSession: (key: string) => void;
-  /** 永久允许 */
-  allowPersist: (key: string) => void;
-  /** 撤销某个命令的放行（同时移除 session 和 persist） */
-  revoke: (key: string) => void;
-  /** 获取所有已放行的命令列表（用于设置页面展示） */
-  getAllAllowed: () => { key: string; level: "session" | "persist" }[];
-}
-
-function loadPersisted(): Set<string> {
+function loadTrustLevel(): TrustLevel {
   try {
     const raw = localStorage.getItem(PERSIST_KEY);
-    if (raw) return new Set(JSON.parse(raw));
+    if (raw && ["always_ask", "auto_approve_file", "auto_approve"].includes(raw)) {
+      return raw as TrustLevel;
+    }
   } catch { /* ignore */ }
-  return new Set();
+  return "always_ask";
 }
 
-function savePersisted(set: Set<string>) {
-  localStorage.setItem(PERSIST_KEY, JSON.stringify([...set]));
+interface ToolTrustState {
+  trustLevel: TrustLevel;
+  setTrustLevel: (level: TrustLevel) => void;
+  /** 给定工具名，是否需要弹出确认对话框 */
+  shouldConfirm: (toolName: string) => boolean;
 }
 
-export const useCommandAllowlistStore = create<CommandAllowlistState>(
-  (set, get) => ({
-    sessionAllowed: new Set(),
-    persistAllowed: loadPersisted(),
+export const useToolTrustStore = create<ToolTrustState>((set, get) => ({
+  trustLevel: loadTrustLevel(),
 
-    isAllowed: (key) => {
-      const { sessionAllowed, persistAllowed } = get();
-      return sessionAllowed.has(key) || persistAllowed.has(key);
-    },
+  setTrustLevel: (level) => {
+    localStorage.setItem(PERSIST_KEY, level);
+    set({ trustLevel: level });
+  },
 
-    allowSession: (key) =>
-      set((s) => {
-        const next = new Set(s.sessionAllowed);
-        next.add(key);
-        return { sessionAllowed: next };
-      }),
+  shouldConfirm: (toolName) => {
+    const { trustLevel } = get();
+    if (trustLevel === "auto_approve") return false;
+    if (trustLevel === "auto_approve_file") return isShellTool(toolName);
+    return true;
+  },
+}));
 
-    allowPersist: (key) =>
-      set((s) => {
-        const next = new Set(s.persistAllowed);
-        next.add(key);
-        savePersisted(next);
-        // 同时从 session 中移除（已升级为永久）
-        const sess = new Set(s.sessionAllowed);
-        sess.delete(key);
-        return { persistAllowed: next, sessionAllowed: sess };
-      }),
-
-    revoke: (key) =>
-      set((s) => {
-        const sess = new Set(s.sessionAllowed);
-        const pers = new Set(s.persistAllowed);
-        sess.delete(key);
-        pers.delete(key);
-        savePersisted(pers);
-        return { sessionAllowed: sess, persistAllowed: pers };
-      }),
-
-    getAllAllowed: () => {
-      const { sessionAllowed, persistAllowed } = get();
-      const result: { key: string; level: "session" | "persist" }[] = [];
-      for (const k of persistAllowed) result.push({ key: k, level: "persist" });
-      for (const k of sessionAllowed) {
-        if (!persistAllowed.has(k)) result.push({ key: k, level: "session" });
-      }
-      return result;
-    },
-  }),
-);
+/** @deprecated 兼容旧代码，迁移完毕后可删除 */
+export const useCommandAllowlistStore = useToolTrustStore;

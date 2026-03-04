@@ -14,10 +14,7 @@ import type { RuntimeFallbackContext } from "@/core/agent/runtime";
 
 import { AgentInputBar } from "./components/AgentInputBar";
 import { ConfirmDialog, type ConfirmResult } from "./components/ConfirmDialog";
-import {
-  useCommandAllowlistStore,
-  extractCommandKey,
-} from "@/store/command-allowlist-store";
+import { useToolTrustStore } from "@/store/command-allowlist-store";
 import { useAskUserStore } from "@/store/ask-user-store";
 import type { AskUserQuestion, AskUserAnswers } from "./core/default-tools";
 import { AgentWorkbenchPanel } from "./components/AgentWorkbenchPanel";
@@ -66,6 +63,7 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
     );
     const [availableTools, setAvailableTools] = useState<AgentTool[]>([]);
     const [resetPerRunState, setResetPerRunState] = useState<(() => void) | null>(null);
+    const [notifyToolCalled, setNotifyToolCalled] = useState<((toolName: string) => void) | null>(null);
     const [showWorkbench, setShowWorkbench] = useState(false);
     const [workbenchTab, setWorkbenchTab] = useState<WorkbenchTab>("tools");
     const [showHistory, setShowHistory] = useState(false);
@@ -111,19 +109,7 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
     const handleConfirmResult = useCallback(
       (result: ConfirmResult) => {
         if (!confirmDialog) return;
-        if (result.confirmed) {
-          if (result.allowLevel) {
-            const key = extractCommandKey(confirmDialog.toolName, confirmDialog.params);
-            if (result.allowLevel === "session") {
-              useCommandAllowlistStore.getState().allowSession(key);
-            } else {
-              useCommandAllowlistStore.getState().allowPersist(key);
-            }
-          }
-          confirmDialog.resolve(true);
-        } else {
-          confirmDialog.resolve(false);
-        }
+        confirmDialog.resolve(result.confirmed);
         setConfirmDialog(null);
       },
       [confirmDialog],
@@ -222,6 +208,7 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       askUser,
       setAvailableTools,
       setResetPerRunState,
+      setNotifyToolCalled,
     });
 
     const handleRunRef = useRef<(() => void | Promise<void>) | null>(null);
@@ -238,8 +225,7 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       inputRef,
       scrollRef,
       openDangerConfirm: (toolName, params) => {
-        const key = extractCommandKey(toolName, params);
-        if (useCommandAllowlistStore.getState().isAllowed(key)) {
+        if (!useToolTrustStore.getState().shouldConfirm(toolName)) {
           return Promise.resolve(true);
         }
         return new Promise<boolean>((resolve) => {
@@ -247,6 +233,7 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
         });
       },
       resetPerRunState,
+      notifyToolCalled,
     });
 
     const handleKeyDown = useCallback((e: React.KeyboardEvent) => {

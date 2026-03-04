@@ -23,6 +23,7 @@ interface UseAgentEffectsParams {
   askUser: (questions: AskUserQuestion[]) => Promise<AskUserAnswers>;
   setAvailableTools: Dispatch<SetStateAction<AgentTool[]>>;
   setResetPerRunState: Dispatch<SetStateAction<(() => void) | null>>;
+  setNotifyToolCalled: Dispatch<SetStateAction<((toolName: string) => void) | null>>;
 }
 
 export function useAgentEffects({
@@ -36,6 +37,7 @@ export function useAgentEffects({
   askUser,
   setAvailableTools,
   setResetPerRunState,
+  setNotifyToolCalled,
 }: UseAgentEffectsParams) {
   useEffect(() => {
     if (!historyLoaded) void loadHistory();
@@ -80,5 +82,6 @@ export function useAgentEffects({
     tools.push(...builtinResult.tools);
     setAvailableTools(tools);
     setResetPerRunState(() => builtinResult.resetPerRunState);
-  }, [ai, confirmHostFallback, askUser, setAvailableTools, setResetPerRunState]);
+    setNotifyToolCalled(() => builtinResult.notifyToolCalled);
+  }, [ai, confirmHostFallback, askUser, setAvailableTools, setResetPerRunState, setNotifyToolCalled]);
 }

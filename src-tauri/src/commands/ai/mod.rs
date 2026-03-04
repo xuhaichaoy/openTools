@@ -329,9 +329,7 @@ pub async fn ai_chat_stream(
     let cancellation = app.state::<StreamCancellation>();
     cancellation.reset(&conversation_id);
 
-    // RAG 预检索：
-    // - 用户显式开启自动检索时执行
-    // - 或命中产品功能问答兜底规则（避免模型不调 search_docs）
+    // RAG 预检索（带超时保护，避免阻塞 LLM 请求）
     if let Some(user_query) = non_system_messages
         .iter()
         .rev()
@@ -340,23 +338,34 @@ pub async fn ai_chat_stream(
     {
         let auto_rag = resolve_auto_rag_enabled(&config);
         let force_rag = resolve_force_rag_enabled(&config, user_query);
-        if auto_rag || force_rag {
-            let rag_results = match super::rag::rag_search(
-                app.clone(),
-                user_query.clone(),
-                Some(3),
-                None,
-            )
-            .await
-            {
-                Ok(r) => Ok(r),
-                Err(_) => {
-                    super::rag::rag_keyword_search(app.clone(), user_query.clone(), Some(3)).await
+        let skip_short = user_query.trim().chars().count() < 8 && !force_rag;
+        if (auto_rag || force_rag) && !skip_short {
+            let rag_app = app.clone();
+            let rag_query = user_query.clone();
+            let rag_future = async move {
+                match super::rag::rag_search(
+                    rag_app.clone(),
+                    rag_query.clone(),
+                    Some(3),
+                    None,
+                )
+                .await
+                {
+                    Ok(r) => Ok(r),
+                    Err(_) => {
+                        super::rag::rag_keyword_search(rag_app, rag_query, Some(3)).await
+                    }
                 }
             };
 
-            match rag_results {
-                Ok(results) if !results.is_empty() => {
+            const RAG_TIMEOUT_SECS: u64 = 3;
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(RAG_TIMEOUT_SECS),
+                rag_future,
+            )
+            .await
+            {
+                Ok(Ok(results)) if !results.is_empty() => {
                     let mut rag_context = String::from(
                         "\n\n---\n以下是从用户知识库中检索到的相关信息，请优先基于这些内容回答（如有引用请标注来源文档）：\n\n"
                     );
@@ -379,9 +388,12 @@ pub async fn ai_chat_stream(
                         config.disable_force_rag
                     );
                 }
-                Ok(_) => {}
-                Err(e) => {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
                     log::warn!("RAG 预检索失败: {}", e);
+                }
+                Err(_) => {
+                    log::warn!("RAG 预检索超时（{}s），跳过以避免阻塞 LLM 请求", RAG_TIMEOUT_SECS);
                 }
             }
         }

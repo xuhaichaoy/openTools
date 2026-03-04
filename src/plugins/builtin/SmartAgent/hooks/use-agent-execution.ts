@@ -30,6 +30,7 @@ interface UseAgentExecutionParams {
   scrollRef: MutableRefObject<HTMLDivElement | null>;
   openDangerConfirm: (toolName: string, params: Record<string, unknown>) => Promise<boolean>;
   resetPerRunState: (() => void) | null;
+  notifyToolCalled: ((toolName: string) => void) | null;
 }
 
 interface UseAgentExecutionResult {
@@ -59,6 +60,7 @@ export function useAgentExecution({
   scrollRef,
   openDangerConfirm,
   resetPerRunState,
+  notifyToolCalled,
 }: UseAgentExecutionParams): UseAgentExecutionResult {
   const abortControllerRef = useRef<AbortController | null>(null);
   const heartbeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -278,6 +280,7 @@ export function useAgentExecution({
             setWaitingStageIfChanged(confirmed ? "tool_waiting" : "model_first_token");
             return confirmed;
           },
+          onToolExecuted: notifyToolCalled ?? undefined,
         },
         (step) => {
           applyStep(step, true);

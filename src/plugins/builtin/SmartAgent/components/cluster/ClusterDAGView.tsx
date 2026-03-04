@@ -102,15 +102,16 @@ export function ClusterDAGView({ plan, instances }: ClusterDAGViewProps) {
         <defs>
           <marker
             id="arrowhead"
-            markerWidth="8"
-            markerHeight="6"
-            refX="8"
-            refY="3"
+            markerWidth="6"
+            markerHeight="4"
+            refX="6"
+            refY="2"
             orient="auto"
           >
             <polygon
-              points="0 0, 8 3, 0 6"
-              className="fill-[var(--color-text-tertiary)]"
+              points="0 0, 6 2, 0 4"
+              style={{ fill: 'var(--color-text-secondary)' }}
+              opacity={0.5}
             />
           </marker>
         </defs>
@@ -137,8 +138,9 @@ export function ClusterDAGView({ plan, instances }: ClusterDAGViewProps) {
               key={i}
               d={`M ${x1} ${y1} C ${midX} ${y1}, ${midX} ${y2}, ${x2} ${y2}`}
               fill="none"
-              className="stroke-[var(--color-text-tertiary)]"
-              strokeWidth={1.5}
+              style={{ stroke: 'var(--color-text-secondary)' }}
+              strokeWidth={2}
+              strokeOpacity={0.5}
               markerEnd="url(#arrowhead)"
             />
           );
@@ -158,15 +160,17 @@ export function ClusterDAGView({ plan, instances }: ClusterDAGViewProps) {
                   width={NODE_W}
                   height={NODE_H}
                   rx={8}
-                  className={`fill-[var(--color-bg)] stroke-1 ${
-                    inst?.status === "running"
-                      ? "stroke-blue-400"
+                  style={{
+                    fill: 'var(--color-bg)',
+                    stroke: inst?.status === "running"
+                      ? '#60a5fa'
                       : inst?.status === "done"
-                        ? "stroke-green-400"
+                        ? '#4ade80'
                         : inst?.status === "error"
-                          ? "stroke-red-400"
-                          : "stroke-[var(--color-border)]"
-                  }`}
+                          ? '#f87171'
+                          : 'var(--color-border)',
+                    strokeWidth: 1,
+                  }}
                 />
                 <foreignObject width={NODE_W} height={NODE_H}>
                   <div className="flex flex-col justify-center h-full px-3 py-2">

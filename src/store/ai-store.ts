@@ -566,8 +566,7 @@ export const useAIStore = create<AIState>((set, get) => ({
         })
       : Promise.resolve([] as Awaited<ReturnType<typeof recallMemories>>);
 
-    // 如果记忆召回能在 200ms 内完成，则注入到 apiMessages 中；否则不等待直接发请求
-    const MEMORY_TIMEOUT_MS = 200;
+    const MEMORY_TIMEOUT_MS = 500;
     const memories = await Promise.race([
       memoryRecallPromise,
       new Promise<null>((resolve) => setTimeout(() => resolve(null), MEMORY_TIMEOUT_MS)),

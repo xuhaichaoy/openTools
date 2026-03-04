@@ -44,10 +44,7 @@ import { ClusterDAGView } from "./ClusterDAGView";
 import { AgentInstancePanel } from "./AgentInstancePanel";
 import { useAskUserStore } from "@/store/ask-user-store";
 import { ConfirmDialog, type ConfirmResult } from "../ConfirmDialog";
-import {
-  useCommandAllowlistStore,
-  extractCommandKey,
-} from "@/store/command-allowlist-store";
+import { useToolTrustStore } from "@/store/command-allowlist-store";
 import type { AskUserQuestion, AskUserAnswers } from "../../core/default-tools";
 import { useInputAttachments } from "@/hooks/use-input-attachments";
 import { useToast } from "@/components/ui/Toast";
@@ -551,8 +548,7 @@ export function ClusterPanel() {
 
   const confirmDangerousAction = useCallback(
     (toolName: string, params: Record<string, unknown>): Promise<boolean> => {
-      const key = extractCommandKey(toolName, params);
-      if (useCommandAllowlistStore.getState().isAllowed(key)) {
+      if (!useToolTrustStore.getState().shouldConfirm(toolName)) {
         return Promise.resolve(true);
       }
       return new Promise((resolve) => {
@@ -566,19 +562,7 @@ export function ClusterPanel() {
 
   const handleConfirmResult = useCallback((result: ConfirmResult) => {
     if (!confirmRequest) return;
-    if (result.confirmed) {
-      if (result.allowLevel) {
-        const key = extractCommandKey(confirmRequest.toolName, confirmRequest.params);
-        if (result.allowLevel === "session") {
-          useCommandAllowlistStore.getState().allowSession(key);
-        } else {
-          useCommandAllowlistStore.getState().allowPersist(key);
-        }
-      }
-      confirmResolveRef.current?.(true);
-    } else {
-      confirmResolveRef.current?.(false);
-    }
+    confirmResolveRef.current?.(result.confirmed);
     confirmResolveRef.current = null;
     setConfirmRequest(null);
   }, [confirmRequest]);
@@ -767,6 +751,14 @@ export function ClusterPanel() {
 
       <div className="px-4 py-3 border-b border-[var(--color-border)] space-y-2">
         <div className="flex gap-2">
+          <div className="flex flex-col gap-1 shrink-0">
+            <AttachDropdown
+              onFileClick={() => clusterFileInputRef.current?.click()}
+              onFolderClick={handleFolderSelect}
+              disabled={busy}
+              accent="accent"
+            />
+          </div>
           <div className="flex-1 flex flex-col gap-1.5">
             {attachments.length > 0 && (
               <div className="flex gap-2 flex-wrap">
@@ -814,14 +806,6 @@ export function ClusterPanel() {
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
               disabled={busy}
-            />
-          </div>
-          <div className="flex flex-col gap-1 shrink-0">
-            <AttachDropdown
-              onFileClick={() => clusterFileInputRef.current?.click()}
-              onFolderClick={handleFolderSelect}
-              disabled={busy}
-              accent="accent"
             />
           </div>
           <input

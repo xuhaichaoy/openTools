@@ -1,4 +1,4 @@
-import { useState, useEffect, type CSSProperties } from "react";
+import React, { useState, useEffect, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useAIStore } from "@/store/ai-store";
 import { useRAGStore } from "@/store/rag-store";
@@ -18,6 +18,8 @@ import {
   Shield,
   Key,
   ShieldAlert,
+  ShieldCheck,
+  ShieldOff,
   MessageSquare,
   BookOpen,
   Smartphone,
@@ -34,6 +36,11 @@ import {
   EyeOff,
   Save,
 } from "lucide-react";
+import {
+  useToolTrustStore,
+  TRUST_LEVEL_OPTIONS,
+  type TrustLevel,
+} from "@/store/command-allowlist-store";
 
 const BRAND = "#F28F36";
 
@@ -414,9 +421,11 @@ export function AIModelTab() {
 
           {config.enable_advanced_tools && (
             <div className="text-[10px] text-amber-600 bg-amber-500/5 rounded-lg px-3 py-2 border border-amber-500/10">
-              已启用高级工具：执行命令、读写文件、列出目录、获取系统信息、打开网址、打开文件/目录、获取进程列表。其中执行命令、写入文件、打开路径为危险操作，执行前需要你确认。
+              已启用高级工具：执行命令、读写文件、列出目录、获取系统信息、打开网址、打开文件/目录、获取进程列表。其中执行命令、写入文件、打开路径为危险操作。
             </div>
           )}
+
+          {config.enable_advanced_tools && <TrustLevelSelector />}
 
           <div className="pt-2 border-t border-[var(--color-border)]/50 space-y-2">
             <div className="flex items-center gap-1.5">
@@ -786,6 +795,62 @@ export function AIModelTab() {
           <p className="text-[10px] text-[var(--color-text-secondary)]">
             留空则使用默认提示词；填写后会追加到默认提示词之后。建议将可长期复用的内容写入“长期记忆”而不是提示词。
           </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── 操作确认策略选择器 ──
+
+const TRUST_LEVEL_ICONS: Record<TrustLevel, React.ReactNode> = {
+  always_ask: <ShieldCheck className="w-3.5 h-3.5 text-green-500" />,
+  auto_approve_file: <ShieldAlert className="w-3.5 h-3.5 text-amber-500" />,
+  auto_approve: <ShieldOff className="w-3.5 h-3.5 text-red-500" />,
+};
+
+function TrustLevelSelector() {
+  const trustLevel = useToolTrustStore((s) => s.trustLevel);
+  const setTrustLevel = useToolTrustStore((s) => s.setTrustLevel);
+
+  return (
+    <div className="pt-2 border-t border-[var(--color-border)]/50 space-y-2">
+      <div className="flex items-center gap-1.5">
+        {TRUST_LEVEL_ICONS[trustLevel]}
+        <span className="text-xs text-[var(--color-text)]">操作确认策略</span>
+      </div>
+      <p className="text-[10px] text-[var(--color-text-secondary)]">
+        控制 AI 执行危险操作时是否弹出确认对话框，对内置聊天和 SmartAgent 同时生效。
+      </p>
+      <div className="space-y-1.5">
+        {TRUST_LEVEL_OPTIONS.map(({ value, label, description }) => {
+          const selected = trustLevel === value;
+          return (
+            <button
+              key={value}
+              onClick={() => setTrustLevel(value)}
+              className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg border text-left transition-colors text-xs ${
+                selected
+                  ? "border-[var(--color-accent)] bg-[var(--color-accent)]/5"
+                  : "border-[var(--color-border)] hover:bg-[var(--color-bg-hover)]"
+              }`}
+            >
+              {TRUST_LEVEL_ICONS[value]}
+              <div className="flex-1 min-w-0">
+                <span className={selected ? "font-medium text-[var(--color-accent)]" : "text-[var(--color-text)]"}>
+                  {label}
+                </span>
+                <span className="text-[10px] text-[var(--color-text-secondary)] ml-2">
+                  {description}
+                </span>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+      {trustLevel === "auto_approve" && (
+        <div className="text-[10px] text-red-500/80 bg-red-500/5 rounded-lg px-3 py-2 border border-red-500/10">
+          全部放行模式下，AI 的所有操作将直接执行，请确保你了解潜在风险。
         </div>
       )}
     </div>

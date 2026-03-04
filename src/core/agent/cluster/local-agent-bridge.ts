@@ -99,6 +99,7 @@ export class LocalAgentBridge implements AgentBridge {
     const ai = getMToolsAI();
     const builtinResult = getBuiltinTools(this.askUser);
     builtinResult.resetPerRunState();
+    const { notifyToolCalled } = builtinResult;
     const allTools = [...getPluginTools(), ...builtinResult.tools];
     const role = options?.role;
     const tools = role ? filterToolsForRole(allTools, role) : allTools;
@@ -123,13 +124,7 @@ export class LocalAgentBridge implements AgentBridge {
       try { await memoryStore.load(); } catch { /* ignore */ }
     }
     const userMemory = memoryStore.getMemoriesForPrompt();
-
-    const memoryParts: string[] = [];
-    if (rolePrompt) memoryParts.push(`## 角色设定\n${rolePrompt}`);
-    if (userMemory) memoryParts.push(`## 用户偏好\n${userMemory}`);
-    const combinedMemory = memoryParts.length > 0
-      ? "\n\n" + memoryParts.join("\n\n")
-      : undefined;
+    const userMemoryPrompt = userMemory ? `\n\n## 用户偏好\n${userMemory}` : undefined;
 
     const collectedSteps: AgentStep[] = [];
     this.abortController = new AbortController();
@@ -146,9 +141,11 @@ export class LocalAgentBridge implements AgentBridge {
         fcCompatibilityKey,
         temperature: role?.temperature,
         initialMode: role?.readonly ? "plan" : "execute",
-        userMemoryPrompt: combinedMemory,
+        userMemoryPrompt: userMemoryPrompt,
+        roleOverride: rolePrompt || undefined,
         dangerousToolPatterns: ["write_file", "run_shell_command", "native_"],
         confirmDangerousAction: this.confirmDangerousAction,
+        onToolExecuted: notifyToolCalled,
       },
       (step) => {
         collectedSteps.push(step);

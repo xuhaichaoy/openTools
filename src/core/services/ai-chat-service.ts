@@ -308,7 +308,12 @@ export async function startStreamingChat(opts: {
     ),
     listen<{ name: string; arguments: string }>(
       "ai-tool-confirm-request",
-      (event) => {
+      async (event) => {
+        const { useToolTrustStore } = await import("@/store/command-allowlist-store");
+        if (!useToolTrustStore.getState().shouldConfirm(event.payload.name)) {
+          await invoke("ai_confirm_tool", { approved: true });
+          return;
+        }
         setState({ pendingToolConfirm: event.payload });
       },
     ),

@@ -837,7 +837,6 @@ export function createBuiltinAgentTools(
   confirmHostFallback: (context: RuntimeFallbackContext) => Promise<boolean>,
   askUser?: (questions: AskUserQuestion[]) => Promise<AskUserAnswers>,
 ): BuiltinToolsResult {
-  let askUserCalled = false;
   const tools: AgentTool[] = [
     {
       name: "get_current_time",
@@ -900,37 +899,43 @@ export function createBuiltinAgentTools(
     },
   ];
 
+  let askUserCallCount = 0;
   if (askUser) {
     tools.push({
       name: "ask_user",
       description:
-        "向用户提问并等待回答（弹出交互对话框，显示选项供用户选择）。需要用户输入时必须调用此工具，绝不要在回复文本中直接提问。调用时必须提供 options 参数给出可选项，用户也可以忽略选项自行输入。此工具每轮只能调用一次，需要多个问题时用 extra_questions 参数。示例: ask_user(question='保存为什么格式？', options='Markdown,TXT,PDF')",
+        `向用户提问（弹出交互对话框）。最多调用 2 次，第一次就用 extra_questions 把所有问题问完。
+获得回答后立即执行任务，不要反复追问。
+示例: ask_user(question='搜索什么主题？', options='技术文档,学术论文,新闻', extra_questions='[{"question":"具体关键词？","type":"text"},{"question":"语言偏好？","options":["中文","英文"]}]')`,
       parameters: {
         question: {
           type: "string",
-          description: "问题内容，要清晰具体",
+          description: "主问题，要清晰具体",
         },
         type: {
           type: "string",
-          description: "问题类型: single(单选,默认), multi(多选), text(仅自由输入)。",
+          description: "问题类型: single(单选,默认), multi(多选), text(仅自由输入)",
           required: false,
         },
         options: {
           type: "string",
-          description: "选项列表，逗号分隔，必须提供。如: '在线搜索,本地文件,知识库'。用户始终可以额外自定义输入",
+          description: "选项列表，逗号分隔。如: '在线搜索,本地文件,知识库'。type 为 text 时可不传",
+          required: false,
         },
         extra_questions: {
           type: "string",
-          description: "如需同时问多个问题，传 JSON 数组: [{\"question\":\"...\",\"type\":\"single\",\"options\":[\"A\",\"B\"]}]。可选参数，单个问题时不需要",
+          description: `追加问题（JSON 数组），一次性问完所有需要的信息。格式: [{"question":"...","type":"single","options":["A","B"]}]`,
           required: false,
         },
       },
       execute: async (params) => {
-        if (askUserCalled) {
+        askUserCallCount++;
+        if (askUserCallCount > 2) {
           return {
-            error: "ask_user 每轮只能调用一次。请根据用户上次回答继续执行任务，不要再次提问。",
+            error: "ask_user 已调用 2 次，不要再向用户提问。请根据已有信息直接执行任务并给出结果。",
           };
         }
+
         const mainQ = String(params.question || "").trim();
         if (!mainQ) return { error: "question 不能为空" };
 
@@ -973,14 +978,19 @@ export function createBuiltinAgentTools(
           }
         }
 
-        askUserCalled = true;
+        const hint = askUserCallCount > 1
+          ? { tip: "提示：可以用 extra_questions 参数把多个问题合并到一次调用中，减少打扰用户。" }
+          : {};
+
         try {
           const answers = await askUser(questions);
-          return extraQuestionsParseError
-            ? { answers, warning: "extra_questions JSON 格式无法解析，仅展示了主问题" }
-            : { answers };
+          return {
+            answers,
+            ...(extraQuestionsParseError ? { warning: "extra_questions JSON 格式无法解析，仅展示了主问题" } : {}),
+            ...hint,
+          };
         } catch (e) {
-          askUserCalled = false;
+          askUserCallCount--;
           return { error: `ask_user 执行失败: ${e}` };
         }
       },
@@ -1569,7 +1579,7 @@ export function createBuiltinAgentTools(
   return {
     tools,
     resetPerRunState: () => {
-      askUserCalled = false;
+      askUserCallCount = 0;
       sequentialThinkingState.history = [];
       sequentialThinkingState.branches = {};
       sequentialThinkingState.consecutiveCalls = 0;

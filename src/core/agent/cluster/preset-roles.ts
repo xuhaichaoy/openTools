@@ -47,7 +47,9 @@ export const ROLE_PLANNER: AgentRole = {
 - 子任务描述不能含糊（如"搜索一些资料"），要明确搜索什么、目标是什么、输出什么
 - 所有子 Agent 无法与用户交互，所以任务描述必须自包含，不能留下需要用户确认的内容
 - parallel_split 模式下：所有步骤的 dependencies 必须为 []，role 必须相同
-- multi_role 模式下：至少使用两种不同的 role`,
+- multi_role 模式下：至少使用两种不同的 role
+
+用中文输出。`,
   capabilities: ["task_decomposition", "planning"],
   maxIterations: 5,
   temperature: 0.7,
@@ -68,9 +70,10 @@ export const ROLE_RESEARCHER: AgentRole = {
 - 如果任务描述模糊，做合理假设后立即行动
 - 必须实际调用工具获取信息，不要仅凭空回答
 - 优先使用 list_directory、read_file、search_in_files 等工具获取实际数据，不要用 sequential_thinking 代替实际操作
-- sequential_thinking 仅在需要梳理复杂逻辑时偶尔使用（最多 1-2 次），之后必须立即使用实际工具
+- sequential_thinking 仅在需要梳理复杂逻辑时使用（最多 3 次），之后必须立即使用实际工具
 - 输出要条理清晰，区分事实和推断
-- 引用来源（文件路径、搜索结果等）`,
+- 引用来源（文件路径、搜索结果等）
+- 用中文回答`,
   toolFilter: {
     exclude: [
       "write_file",
@@ -116,7 +119,10 @@ export const ROLE_CODER: AgentRole = {
 - 先理解项目结构和代码风格，再动手编写
 - 直接开始工作，不要向用户反问或要求确认
 - 每次修改后验证文件已正确写入
-- 给出代码修改的简要说明`,
+- 给出代码修改的简要说明
+- sequential_thinking 仅用于梳理复杂逻辑（最多 3 次），思考后必须立即使用实际工具
+- 工具失败时分析根因，尝试替代方案而非简单重试
+- 用中文回答`,
   toolFilter: {
     exclude: ["web_search", "web_fetch"],
   },
@@ -148,7 +154,8 @@ export const ROLE_REVIEWER: AgentRole = {
 - 只做分析和审查，不修改任何文件
 - 所有文件路径必须使用绝对路径
 - 关注实际影响而非代码风格偏好
-- 如果代码质量良好，简洁确认即可`,
+- 如果代码质量良好，简洁确认即可
+- 用中文回答`,
   toolFilter: {
     include: [
       "read_file",
@@ -180,7 +187,10 @@ export const ROLE_EXECUTOR: AgentRole = {
 - 执行命令前确认命令的安全性
 - 注意观察命令输出，捕获错误信息
 - 如需修改配置文件，使用 json_edit 或 str_replace_edit 而非 write_file
-- 给出执行结果的简要总结`,
+- sequential_thinking 仅用于梳理复杂逻辑（最多 3 次），思考后必须立即使用实际工具
+- 工具失败时分析根因，尝试替代方案而非简单重试
+- 给出执行结果的简要总结
+- 用中文回答`,
   toolFilter: {
     include: [
       "run_shell_command",

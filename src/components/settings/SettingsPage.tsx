@@ -1,16 +1,14 @@
 import { useState } from "react";
-import { ArrowLeft, Bot, Monitor, ShieldCheck, Shield } from "lucide-react";
+import { ArrowLeft, Bot, Monitor, ShieldCheck } from "lucide-react";
 import { AISettings } from "./AISettings";
 import { GeneralSettings } from "./GeneralSettings";
 import { CredentialSettings } from "@/components/data-forge/CredentialSettings";
-import { CommandAllowlistSettings } from "./CommandAllowlistSettings";
 import { useDragWindow } from "@/hooks/useDragWindow";
 
 const tabs = [
   { id: "ai", label: "AI 模型", icon: Bot },
   { id: "general", label: "通用", icon: Monitor },
   { id: "credentials", label: "凭证", icon: ShieldCheck },
-  { id: "allowlist", label: "命令放行", icon: Shield },
 ] as const;
 
 type TabId = (typeof tabs)[number]["id"];
@@ -60,7 +58,6 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
         {activeTab === "ai" && <AISettings />}
         {activeTab === "general" && <GeneralSettings />}
         {activeTab === "credentials" && <CredentialSettings />}
-        {activeTab === "allowlist" && <CommandAllowlistSettings />}
       </div>
     </div>
   );

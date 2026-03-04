@@ -87,6 +87,8 @@ interface SimpleAIMessage {
   content?: string;
 }
 
+const MEMORY_INJECT_TIMEOUT_MS = 500;
+
 async function injectMemoryForMessages(
   messages: SimpleAIMessage[],
   config: AIConfig,
@@ -102,24 +104,32 @@ async function injectMemoryForMessages(
   const userText = lastUser.content.trim();
 
   if (config.enable_memory_auto_save) {
-    const candidates = extractMemoryCandidates(userText, {
-      conversationId,
+    Promise.resolve().then(async () => {
+      try {
+        const candidates = extractMemoryCandidates(userText, { conversationId });
+        if (candidates.length > 0) {
+          await appendMemoryCandidates(candidates);
+        }
+      } catch { /* non-critical */ }
     });
-    if (candidates.length > 0) {
-      await appendMemoryCandidates(candidates);
-    }
   }
 
   if (!config.enable_memory_auto_recall) return messages;
 
-  const recalled = await recallMemories(userText, {
-    conversationId,
-    topK: 6,
-  });
-  const memoryPrompt = buildMemoryPromptBlock(recalled);
-  if (!memoryPrompt) return messages;
+  try {
+    const recalled = await Promise.race([
+      recallMemories(userText, { conversationId, topK: 6 }),
+      new Promise<null>((r) => setTimeout(() => r(null), MEMORY_INJECT_TIMEOUT_MS)),
+    ]);
+    if (recalled) {
+      const memoryPrompt = buildMemoryPromptBlock(recalled);
+      if (memoryPrompt) {
+        return [{ role: "system", content: memoryPrompt }, ...messages];
+      }
+    }
+  } catch { /* non-critical, proceed without memory */ }
 
-  return [{ role: "system", content: memoryPrompt }, ...messages];
+  return messages;
 }
 
 /**

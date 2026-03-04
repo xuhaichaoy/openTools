@@ -258,7 +258,11 @@ async fn get_embeddings(app: &AppHandle, texts: &[String]) -> Result<Vec<Vec<f32
         "input": texts,
     });
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
     let resp = client
         .post(&url)
         .header("Authorization", format!("Bearer {}", api_key))

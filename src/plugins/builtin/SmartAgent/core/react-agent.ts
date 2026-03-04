@@ -91,6 +91,10 @@ export interface AgentConfig {
   initialMode?: AgentMode;
   /** 工具级全局默认超时（毫秒） */
   defaultToolTimeout?: number;
+  /** 每次工具成功执行后的回调（用于通知外部状态重置，如 sequential_thinking 计数器） */
+  onToolExecuted?: (toolName: string) => void;
+  /** 角色覆盖：设置后替换默认身份描述（用于 Cluster 子 Agent 注入角色身份） */
+  roleOverride?: string;
 }
 
 const DEFAULT_CONFIG: AgentConfig = {
@@ -230,13 +234,13 @@ function compactMessages<
     const recentGroups = toolCallGroups.slice(-keepCount);
     const discardedGroups = toolCallGroups.slice(0, -keepCount || toolCallGroups.length);
 
-    // 为被丢弃的部分生成摘要
     const discardedMessages = discardedGroups.flat().concat(
       nonGroupMessages.filter((m) => !recentGroups.flat().includes(m)),
     );
     if (discardedMessages.length > 0) {
       const summary = summarizeDiscardedMiddle(discardedMessages);
       result.push({ role: "user", content: summary } as unknown as T);
+      result.push({ role: "assistant", content: "好的，我已了解之前的执行历史，继续当前任务。" } as unknown as T);
     }
 
     const compactedGroups = recentGroups.map((group) =>
@@ -334,7 +338,12 @@ const LOOP_DETECTOR_WINDOW = 6;
 const LOOP_DETECTOR_THRESHOLD = 3;
 const DOOM_LOOP_CONSECUTIVE_FAILURES = 3;
 const SAME_TOOL_CONSECUTIVE_LIMIT = 3;
-const THINKING_ONLY_TOOLS = new Set(["sequential_thinking"]);
+const CONSECUTIVE_LIMIT_TOOLS = new Set(["sequential_thinking"]);
+const LOOP_DETECT_EXEMPT_TOOLS = new Set([
+  "get_current_time", "get_system_info", "calculate",
+  "native_calendar_list", "native_reminder_lists", "native_shortcuts_list",
+  "native_app_list", "native_app_list_interactive",
+]);
 
 class LoopDetector {
   private recentCalls: string[] = [];
@@ -369,7 +378,9 @@ class LoopDetector {
     }
     for (const [key, count] of counts) {
       if (count >= LOOP_DETECTOR_THRESHOLD) {
-        return { looping: true, tool: key.split("::")[0] };
+        const toolName = key.split("::")[0];
+        if (LOOP_DETECT_EXEMPT_TOOLS.has(toolName)) continue;
+        return { looping: true, tool: toolName };
       }
     }
     return { looping: false };
@@ -378,13 +389,14 @@ class LoopDetector {
   detectConsecutiveSameTool(): { looping: boolean; tool?: string; count?: number } {
     if (!this.lastToolName) return { looping: false };
     const count = this.consecutiveToolCounts.get(this.lastToolName) ?? 0;
-    if (count >= SAME_TOOL_CONSECUTIVE_LIMIT && THINKING_ONLY_TOOLS.has(this.lastToolName)) {
+    if (count >= SAME_TOOL_CONSECUTIVE_LIMIT && CONSECUTIVE_LIMIT_TOOLS.has(this.lastToolName)) {
       return { looping: true, tool: this.lastToolName, count };
     }
     return { looping: false };
   }
 
   recordFailure(toolName: string): void {
+    if (LOOP_DETECT_EXEMPT_TOOLS.has(toolName)) return;
     const count = (this.consecutiveFailures.get(toolName) ?? 0) + 1;
     this.consecutiveFailures.set(toolName, count);
     if (count >= DOOM_LOOP_CONSECUTIVE_FAILURES) {
@@ -466,6 +478,9 @@ export class ReActAgent {
   private running = false;
   private currentSignal?: AbortSignal;
   private loopDetector = new LoopDetector();
+  private approvedDangerousKeys = new Set<string>();
+  /** 缓存已成功执行的 tool+params → 输出，避免重复执行 */
+  private successfulCallCache = new Map<string, string>();
   private mode: AgentMode = "execute";
   private trajectory: TrajectoryEntry[] = [];
 
@@ -584,6 +599,49 @@ export class ReActAgent {
       this.isLikelyUserRefusalClaim(answer)
     ) {
       return "不要假设用户已经拒绝授权。仅可基于真实工具调用结果给出结论；若未触发确认，请继续执行并给出结果。";
+    }
+    if (!this.hasAnyToolAction() && this.isLikelyAskingUser(answer)) {
+      return "严禁在回复文本中向用户提问。如果需要用户提供信息，必须调用 ask_user 工具（会弹出交互对话框）。请调用 ask_user 工具来提问，不要用文字回复提问。";
+    }
+    const toolCallInText = this.detectToolCallInText(answer);
+    if (toolCallInText) {
+      return `你在回复文本中写出了工具调用"${toolCallInText}"，但并没有真正执行。请直接调用该工具，不要把工具调用写在文字里。`;
+    }
+    return null;
+  }
+
+  private hasAnyToolAction(): boolean {
+    return this.steps.some((s) => s.type === "action");
+  }
+
+  private isLikelyAskingUser(text: string): boolean {
+    const strongPatterns = [
+      /请告诉我/,
+      /请提供.*(?:信息|内容|文件|路径)/,
+      /请输入/,
+      /请选择.*(?:方案|选项|模式)/,
+      /请指定/,
+      /直接.*发给我/,
+      /请问您/,
+    ];
+    const weakPatterns = [
+      /您(?:想|希望|能否|可以).*(?:吗|呢|\?|？)/,
+      /你(?:想|希望|能否|可以).*(?:吗|呢|\?|？)/,
+      /(?:什么|哪个|哪些|哪种).*(?:\?|？)/,
+    ];
+    const strongCount = strongPatterns.filter((p) => p.test(text)).length;
+    if (strongCount >= 2) return true;
+    const weakCount = weakPatterns.filter((p) => p.test(text)).length;
+    return strongCount >= 1 && weakCount >= 1;
+  }
+
+  private detectToolCallInText(text: string): string | null {
+    const toolNames = this.getAvailableTools().map((t) => t.name);
+    for (const name of toolNames) {
+      const pattern = new RegExp(`(?:调用工具|Action|tool_call)[:\\s]*${name}\\s*\\(`, "i");
+      if (pattern.test(text)) return name;
+      const callPattern = new RegExp(`${name}\\(\\s*\\{`, "i");
+      if (callPattern.test(text)) return name;
     }
     return null;
   }
@@ -878,21 +936,6 @@ export class ReActAgent {
     });
     this.recordTrajectory({ type: "tool_call", toolName, toolParams, mode: this.mode });
 
-    const isDangerous =
-      !!tool.dangerous ||
-      !!this.config.dangerousToolPatterns?.some((p) =>
-        toolName.toLowerCase().includes(p.toLowerCase()),
-      );
-    if (isDangerous && this.config.confirmDangerousAction) {
-      this.addStep({ type: "observation", content: `等待用户确认执行 ${toolName}`, toolName, timestamp: Date.now() });
-      const confirmed = await this.config.confirmDangerousAction(toolName, toolParams);
-      if (!confirmed) {
-        this.addStep({ type: "observation", content: "用户拒绝执行此操作", toolName, timestamp: Date.now() });
-        return { outputStr: "用户拒绝执行此操作", rejected: true };
-      }
-      this.addStep({ type: "observation", content: "用户已确认执行此操作", toolName, timestamp: Date.now() });
-    }
-
     this.loopDetector.record(toolName, toolParams);
     const loopCheck = this.loopDetector.detect();
     if (loopCheck.looping) {
@@ -905,11 +948,44 @@ export class ReActAgent {
 
     const consecutiveCheck = this.loopDetector.detectConsecutiveSameTool();
     if (consecutiveCheck.looping) {
-      const msg = `[循环检测] 工具 ${consecutiveCheck.tool} 已连续调用 ${consecutiveCheck.count} 次。请立即使用 read_file、list_directory、search_in_files 等工具获取实际信息，不要继续空转思考。`;
+      const toolHint = consecutiveCheck.tool === "ask_user"
+        ? "ask_user 连续调用过多。请用 extra_questions 参数把多个问题合并到一次调用中，减少对用户的打扰。先根据已有信息执行任务，需要更多信息时再合并提问。"
+        : "请立即使用 read_file、list_directory、search_in_files 等工具获取实际信息，不要继续空转思考。";
+      const msg = `[循环检测] 工具 ${consecutiveCheck.tool} 已连续调用 ${consecutiveCheck.count} 次。${toolHint}`;
       const errResult: ToolErrorResult = { type: ToolErrorType.LoopDetected, tool: toolName, message: msg, recoverable: true };
       this.addStep({ type: "error", content: msg, toolName, timestamp: Date.now() });
       this.recordTrajectory({ type: "error", toolName, error: errResult });
       return { outputStr: msg, error: msg, errorResult: errResult };
+    }
+
+    const cacheKey = `${toolName}::${JSON.stringify(toolParams)}`;
+    const cachedResult = this.successfulCallCache.get(cacheKey);
+    if (cachedResult) {
+      const hint = `[重复调用拦截] 该工具已用相同参数成功执行过，以下是上次的结果（无需再次调用）:\n${cachedResult}\n\n请直接基于此结果回答用户问题，不要再调用同一工具。`;
+      this.addStep({ type: "observation", content: hint, toolName, toolOutput: cachedResult, timestamp: Date.now() });
+      this.recordTrajectory({ type: "tool_result", toolName, result: "(cached)", durationMs: 0 });
+      return { outputStr: hint };
+    }
+
+    const isDangerous =
+      !!tool.dangerous ||
+      !!this.config.dangerousToolPatterns?.some((p) =>
+        toolName.toLowerCase().includes(p.toLowerCase()),
+      );
+    if (isDangerous && this.config.confirmDangerousAction) {
+      const dangerousKey = `${toolName}::${JSON.stringify(toolParams)}`;
+      if (this.approvedDangerousKeys.has(dangerousKey)) {
+        this.addStep({ type: "observation", content: "已自动放行（同参数已确认过）", toolName, timestamp: Date.now() });
+      } else {
+        this.addStep({ type: "observation", content: `等待用户确认执行 ${toolName}`, toolName, timestamp: Date.now() });
+        const confirmed = await this.config.confirmDangerousAction(toolName, toolParams);
+        if (!confirmed) {
+          this.addStep({ type: "observation", content: "用户拒绝执行此操作", toolName, timestamp: Date.now() });
+          return { outputStr: "用户拒绝执行此操作", rejected: true };
+        }
+        this.approvedDangerousKeys.add(dangerousKey);
+        this.addStep({ type: "observation", content: "用户已确认执行此操作", toolName, timestamp: Date.now() });
+      }
     }
 
     if (signal?.aborted) throw new Error("Aborted");
@@ -917,7 +993,13 @@ export class ReActAgent {
       const output = await this.executeWithTimeout(tool, toolParams, signal);
       if (signal?.aborted) throw new Error("Aborted");
 
-      this.loopDetector.recordSuccess(toolName);
+      const hasToolError = output && typeof output === "object" && "error" in output && typeof (output as Record<string, unknown>).error === "string";
+      if (hasToolError) {
+        this.loopDetector.recordFailure(toolName);
+      } else {
+        this.loopDetector.recordSuccess(toolName);
+        this.config.onToolExecuted?.(toolName);
+      }
 
       const quickAnswer = this.buildQuickAnswerFromTool(userInput, toolName, output);
       if (quickAnswer) {
@@ -928,6 +1010,11 @@ export class ReActAgent {
 
       const rawStr = typeof output === "string" ? output : JSON.stringify(output, null, 2);
       const outputStr = truncateToolOutput(rawStr, toolName);
+
+      if (!hasToolError) {
+        this.successfulCallCache.set(cacheKey, outputStr);
+      }
+
       this.addStep({ type: "observation", content: outputStr, toolName, toolOutput: output, timestamp: Date.now() });
       this.recordTrajectory({ type: "tool_result", toolName, result: outputStr.slice(0, 200), durationMs: Date.now() - startTime });
       return { outputStr };
@@ -946,7 +1033,7 @@ export class ReActAgent {
 
   // ── 文本 ReAct 模式（降级方案） ──
 
-  private buildSystemPrompt(): string {
+  private buildSystemPrompt(userInput?: string): string {
     const availableTools = this.getAvailableTools();
     const toolDescriptions = availableTools
       .map((t) => {
@@ -963,7 +1050,25 @@ export class ReActAgent {
       ? "\n\n**当前为 Plan 模式（只读），仅可使用只读工具。完成分析后调用 exit_plan_mode 切换到执行模式。**"
       : "";
 
-    return `你是一个高能力智能助手 Agent，使用 ReAct (Reasoning + Acting) 框架来自主回答问题和执行复杂任务。${modeHint}
+    const disabledTools = this.loopDetector.getDisabledTools();
+    const disabledHint = disabledTools.length > 0
+      ? `\n\n已禁用的工具（连续失败过多）: ${disabledTools.join(", ")} — 请改用其他方式。`
+      : "";
+
+    const isCoding = userInput ? this.detectCodingContext(userInput) : false;
+    const codingHint = isCoding ? `
+
+## 编程任务工作流
+1. 理解需求 → 2. 用 read_file / search_in_files 探索代码 → 3. 复现问题 → 4. 定位根因 → 5. 用 str_replace_edit 修改 → 6. 用 run_lint 验证 → 7. 总结
+- 修改文件优先用 str_replace_edit，创建新文件用 str_replace_edit(create)
+- 输出被截断时用 read_file_range 分段读取` : "";
+
+    const textIdentityBlock = this.config.roleOverride
+      ? `${this.config.roleOverride}\n禁止自称 Claude、GPT 或任何第三方厂商的助手。`
+      : `你是 51ToolBox 内置的智能助手 Agent。禁止自称 Claude、GPT 或任何第三方厂商的助手。`;
+
+    return `${textIdentityBlock}
+你是一个高能力智能助手 Agent，使用 ReAct (Reasoning + Acting) 框架来自主回答问题和执行复杂任务。${modeHint}${disabledHint}
 
 可用工具:
 ${toolDescriptions}
@@ -984,9 +1089,17 @@ Final Answer: [最终回答]
 2. 每次只使用一个工具
 3. Action Input 必须是有效的 JSON
 4. 仔细分析 Observation 结果再决定下一步
-5. 如果信息不足但可推断，做合理假设并继续
-6. **严禁在 Final Answer 中向用户提问**。需要信息时必须用 ask_user 工具（会弹出交互对话框）
-7. 调用 ask_user 时**必须提供 options 参数**，且**只能调用一次**，用 extra_questions 一次问完所有问题
+5. **工具返回成功结果后，禁止用相同参数再次调用同一工具**。结果已经拿到了，直接在 Thought 中分析它并给出 Final Answer
+6. 如果信息不足但可推断，做合理假设并继续
+7. **严禁在 Final Answer 中向用户提问**。需要信息时必须用 ask_user 工具（会弹出交互对话框）
+8. ask_user **最多调用 2 次**，第一次就用 extra_questions 把所有问题问完，获得回答后立即执行
+9. **严禁在 Final Answer 中写工具调用**（如"调用工具: web_search(...)"），必须用 Action/Action Input 格式真正调用
+10. **所有文件路径必须使用绝对路径**，不要使用 ~ 或相对路径
+11. **sequential_thinking 仅用于梳理复杂逻辑，禁止连续调用超过 3 次**
+
+## 模式切换
+- 面对复杂任务时，可先调用 enter_plan_mode 进入只读分析模式
+- 方案确定后调用 exit_plan_mode 切回执行模式
 
 ## 复杂任务策略
 - **任务分解**: 遇到复杂任务先拆分为子步骤，在 Thought 中列出计划
@@ -995,18 +1108,18 @@ Final Answer: [最终回答]
 - **错误恢复**: 工具失败时在 Thought 中分析根因，尝试替代方案
 - **多角度分析**: 复杂问题从多角度思考，给出全面答案
 - **记住偏好**: 发现用户明确偏好时，用 save_user_memory 工具记录${this.config.userMemoryPrompt || ""}
-
+${codingHint}
 用中文回答`;
   }
 
-  private buildTextConversation(): {
+  private buildTextConversation(userInput?: string): {
     role: "system" | "user" | "assistant";
     content: string;
   }[] {
     const messages: {
       role: "system" | "user" | "assistant";
       content: string;
-    }[] = [{ role: "system", content: this.buildSystemPrompt() }];
+    }[] = [{ role: "system", content: this.buildSystemPrompt(userInput) }];
 
     // 添加历史记录
     for (const step of this.history) {
@@ -1132,14 +1245,21 @@ Final Answer: [最终回答]
    * 避免在纯 Q&A / 翻译 / 总结等场景中注入编程指令。
    */
   private detectCodingContext(userInput: string): boolean {
-    const codingPatterns = /(?:代码|编程|编码|写一个|实现|修复|debug|fix|bug|重构|refactor|编译|compile|build|构建|部署|deploy|测试|test|脚本|script|函数|function|class|组件|component|接口|interface|API|数据库|database|SQL|迁移|migration|package\.json|tsconfig|Cargo\.toml|requirements\.txt|\.py|\.ts|\.js|\.rs|\.go|\.java|\.cpp|\.vue|\.svelte|npm|yarn|pip|cargo|git|commit|merge|branch|PR|pull request|str_replace_edit|read_file|write_file|run_lint|persistent_shell|json_edit|search_in_files|list_directory|代码审查|code review|项目路径|工作上下文)/i;
-    if (codingPatterns.test(userInput)) return true;
+    const strongPatterns = /(?:代码|编程|编码|修复|debug|fix\b|bug|重构|refactor|编译|compile|str_replace_edit|read_file|write_file|run_lint|persistent_shell|json_edit|search_in_files|代码审查|code review|package\.json|tsconfig|Cargo\.toml|requirements\.txt)/i;
+    if (strongPatterns.test(userInput)) return true;
+    const weakPatterns = [
+      /(?:写一个|实现|创建)/i, /(?:函数|function|class|组件|component|接口|interface)/i,
+      /(?:构建|部署|deploy|测试|test|脚本|script)/i, /(?:数据库|database|SQL|迁移|migration)/i,
+      /(?:npm|yarn|pip|cargo)/i, /(?:git|commit|merge|branch|PR|pull request)/i,
+      /(?:\.py|\.ts|\.js|\.rs|\.go|\.java|\.cpp|\.vue)\b/i, /(?:API|build)\b/i,
+      /(?:项目路径|工作上下文)/i,
+    ];
+    const weakCount = weakPatterns.filter((p) => p.test(userInput)).length;
+    if (weakCount >= 2) return true;
     const recentHistory = this.history.slice(-6);
+    const codingTools = new Set(["str_replace_edit", "write_file", "json_edit", "run_lint", "persistent_shell", "read_file", "read_file_range", "search_in_files", "list_directory", "ckg_search_function", "ckg_search_class"]);
     for (const step of recentHistory) {
-      if (step.type === "action" && step.toolName) {
-        const codingTools = ["str_replace_edit", "write_file", "json_edit", "run_lint", "persistent_shell", "read_file", "read_file_range", "search_in_files", "list_directory", "ckg_search_function", "ckg_search_class"];
-        if (codingTools.includes(step.toolName)) return true;
-      }
+      if (step.type === "action" && step.toolName && codingTools.has(step.toolName)) return true;
     }
     return false;
   }
@@ -1182,7 +1302,12 @@ Final Answer: [最终回答]
 - 搜索结果被截断 → 用 search_in_files 缩小搜索范围或添加 file_pattern 过滤
 - 命令输出被截断 → 用 run_shell_command 配合 grep/head/tail 过滤输出` : "";
 
-    return `你是一个高能力智能助手 Agent，能够自主使用工具来回答问题和执行复杂任务。${modeHint}${disabledHint}
+    const identityBlock = this.config.roleOverride
+      ? `${this.config.roleOverride}\n禁止自称 Claude、GPT 或任何第三方厂商的助手。`
+      : `你是 51ToolBox 内置的智能助手 Agent。禁止自称 Claude、GPT 或任何第三方厂商的助手。被问"你是谁"时，回答：你是 51ToolBox 内置助手。`;
+
+    return `${identityBlock}
+你是一个高能力智能助手 Agent，能够自主使用工具来回答问题和执行复杂任务。${modeHint}${disabledHint}
 
 ## 核心行为
 - 收到任务后立即开始执行，尽量自主完成
@@ -1193,9 +1318,9 @@ Final Answer: [最终回答]
   · 有多个合理方案需要用户选择（如保存格式、目标路径）
   · 操作不可逆且影响范围不明确（如批量删除、覆盖文件）
   · 缺少必要的参数（如收件人、密码、具体日期等）
-- 调用 ask_user 时**必须提供 options 参数**列出你认为合理的选项（用户也可以忽略选项自由输入）
-- **ask_user 只能调用一次**。如需了解多项信息，用 extra_questions 参数在一次调用中问完所有问题，不要多次调用
-- 示例: ask_user(question="您想搜索什么类型的资料？", options="技术文档,学术论文,新闻资讯", extra_questions='[{"question":"请描述具体主题","type":"text"}]')
+- **ask_user 最多调用 2 次**。第一次调用时用 extra_questions 参数把所有相关问题合并到一次调用中
+- 获得用户回答后立即执行任务，不要反复追问。如果用户回答不够详细，基于合理推断继续
+- 示例: ask_user(question="搜索什么主题？", options="技术文档,学术论文,新闻", extra_questions='[{"question":"具体关键词？","type":"text"},{"question":"语言？","options":["中文","英文"]}]')
 - 用中文回答
 
 ## 模式切换
@@ -1210,13 +1335,14 @@ Final Answer: [最终回答]
 5. **错误恢复**：工具失败时分析根因，尝试替代方案而非简单重试
 
 ## 工具使用规则
-- 需要工具时直接调用
+- 需要工具时直接调用，**严禁在回复文本中写出工具调用**（如"调用工具: web_search(...)"），必须通过 function call 真正执行
 - 仔细分析工具返回结果再决定下一步
+- **工具返回成功结果后，禁止用相同参数再次调用同一工具**。结果已经拿到了，直接使用它来回答
 - 不要在没有使用工具的情况下编造信息
 - 涉及文件操作时，必须调用对应工具
 - 如有 delegate_subtask 工具可用，可将独立子问题委派给子 Agent 并行处理
 - **所有文件路径必须使用绝对路径**，不要使用 ~ 或相对路径
-- **sequential_thinking 仅用于梳理复杂逻辑，禁止连续调用超过 2 次**。思考后必须立即使用 read_file / list_directory / search_in_files 等工具获取实际信息
+- **sequential_thinking 仅用于梳理复杂逻辑，禁止连续调用超过 3 次**。思考后必须立即使用 read_file / list_directory / search_in_files 等工具获取实际信息
 ${codingBlock}
 ## 回答质量
 - 结论必须基于真实的工具调用结果
@@ -1299,7 +1425,7 @@ ${codingBlock}
       .filter((t) => !t.name.startsWith("native_") && !hiddenInHint.has(t.name))
       .map((t) => t.name)
       .slice(0, 12);
-    return `${userInput}\n\n[系统引导] 这是一个需要多步执行的任务。请先在内部制定执行计划（不要输出给用户），明确：\n1. 需要分几步完成\n2. 每步使用什么工具（可用: ${toolNames.join(", ")}）\n3. 各步骤之间的依赖关系\n然后按计划逐步执行。`;
+    return `${userInput}\n\n[系统引导] 这是一个需要多步执行的复杂任务。请先制定简要的执行计划，明确：\n1. 需要分几步完成\n2. 每步使用什么工具（可用: ${toolNames.join(", ")}）\n3. 各步骤之间的依赖关系\n然后按计划逐步执行，直接开始行动。`;
   }
 
   /**
@@ -1319,17 +1445,21 @@ ${codingBlock}
       { role: "system", content: this.buildFCSystemPrompt(userInput) },
     ];
 
-    for (const step of this.history) {
-      if (step.type === "answer") {
-        messages.push({ role: "assistant", content: step.content });
-      } else if (step.type === "action") {
-        const paramStr = step.toolInput ? JSON.stringify(step.toolInput) : "";
-        messages.push({
-          role: "assistant",
-          content: `调用工具: ${step.toolName || "unknown"}(${paramStr})`,
-        });
-      } else if (step.type === "observation") {
-        messages.push({ role: "user", content: `上次执行结果: ${step.content}` });
+    if (this.history.length > 0) {
+      const historyParts: string[] = [];
+      for (const step of this.history) {
+        if (step.type === "action") {
+          historyParts.push(`[执行] ${step.toolName}(${step.toolInput ? JSON.stringify(step.toolInput) : ""})`);
+        } else if (step.type === "observation") {
+          const obs = step.content.length > 300 ? step.content.slice(0, 300) + "..." : step.content;
+          historyParts.push(`[结果] ${obs}`);
+        } else if (step.type === "answer") {
+          historyParts.push(`[回答] ${step.content}`);
+        }
+      }
+      if (historyParts.length > 0) {
+        messages.push({ role: "user", content: `[历史执行记录]\n${historyParts.join("\n")}` });
+        messages.push({ role: "assistant", content: "好的，我已了解之前的执行历史，继续处理当前任务。" });
       }
     }
 
@@ -1528,7 +1658,7 @@ ${codingBlock}
   // ── 文本 ReAct 模式的执行循环 ──
 
   private async runText(userInput: string, signal?: AbortSignal, images?: string[]): Promise<string> {
-    const messages = this.buildTextConversation();
+    const messages = this.buildTextConversation(userInput);
     const isComplex = this.isComplexQuery(userInput) && this.history.length === 0;
     const effectiveTextInput = isComplex ? this.buildPlanningHint(userInput) : userInput;
     const userMsg: { role: string; content: string; images?: string[] } = { role: "user", content: effectiveTextInput };
@@ -1581,11 +1711,12 @@ ${codingBlock}
 
       const trimmed = responseContent.trim();
       const prevTrimmed = prevResponseContent.trim();
-      const isSimilar = trimmed.length > 0 && prevTrimmed.length > 0 &&
-        trimmed.slice(0, 120) === prevTrimmed.slice(0, 120);
+      const compareLen = Math.min(300, trimmed.length, prevTrimmed.length);
+      const isSimilar = compareLen > 20 &&
+        trimmed.slice(0, compareLen) === prevTrimmed.slice(0, compareLen);
       if (isSimilar) {
         staleCount++;
-        if (staleCount >= 1) {
+        if (staleCount >= 2) {
           this.addStep({ type: "answer", content: trimmed, timestamp: Date.now() });
           return trimmed;
         }
@@ -1684,6 +1815,8 @@ ${codingBlock}
     this.trajectory = [];
     this.lastStreamingAnswer = "";
     this.loopDetector.reset();
+    this.approvedDangerousKeys.clear();
+    this.successfulCallCache.clear();
     this.mode = this.config.initialMode ?? "execute";
 
     try {

@@ -1,25 +1,17 @@
 import React, { useState } from "react";
 import { createPortal } from "react-dom";
-import { AlertCircle, ChevronDown, ChevronRight, Shield, ShieldCheck } from "lucide-react";
-import {
-  extractCommandKey,
-} from "@/store/command-allowlist-store";
+import { AlertCircle, ChevronDown, ChevronRight } from "lucide-react";
 
-export type ConfirmResult =
-  | { confirmed: false }
-  | { confirmed: true; allowLevel?: "session" | "persist" };
+export interface ConfirmResult {
+  confirmed: boolean;
+}
 
 interface ConfirmDialogProps {
   toolName: string;
   params: Record<string, unknown>;
   onResult: (result: ConfirmResult) => void;
-  /** @deprecated 兼容旧接口 */
-  onConfirm?: () => void;
-  /** @deprecated 兼容旧接口 */
-  onCancel?: () => void;
 }
 
-/** 将工具名 + 参数转为用户友好的自然语言描述 */
 function describeAction(
   toolName: string,
   params: Record<string, unknown>,
@@ -52,41 +44,13 @@ function describeAction(
   return `即将调用工具 ${toolName}`;
 }
 
-/** 将 commandKey 转为用户友好的显示名 */
-function formatCommandKey(key: string): string {
-  if (key.startsWith("shell:")) return key.slice(6);
-  if (key.startsWith("tool:")) return key.slice(5);
-  return key;
-}
-
 export function ConfirmDialog({
   toolName,
   params,
   onResult,
-  onConfirm,
-  onCancel,
 }: ConfirmDialogProps) {
   const [showDetail, setShowDetail] = useState(false);
   const description = describeAction(toolName, params);
-  const commandKey = extractCommandKey(toolName, params);
-  const displayKey = formatCommandKey(commandKey);
-
-  const handleConfirmOnce = () => {
-    if (onResult) onResult({ confirmed: true });
-    else onConfirm?.();
-  };
-  const handleAllowSession = () => {
-    if (onResult) onResult({ confirmed: true, allowLevel: "session" });
-    else onConfirm?.();
-  };
-  const handleAllowPersist = () => {
-    if (onResult) onResult({ confirmed: true, allowLevel: "persist" });
-    else onConfirm?.();
-  };
-  const handleCancel = () => {
-    if (onResult) onResult({ confirmed: false });
-    else onCancel?.();
-  };
 
   const dialog = (
     <div className="fixed inset-0 z-9999 flex items-center justify-center bg-black/40 backdrop-blur-sm">
@@ -100,12 +64,10 @@ export function ConfirmDialog({
           </h3>
         </div>
 
-        {/* 自然语言描述 */}
         <p className="text-sm text-[var(--color-text)] mb-3 leading-relaxed">
           {description}
         </p>
 
-        {/* 可折叠的参数详情 */}
         <div className="mb-4">
           <button
             onClick={() => setShowDetail((v) => !v)}
@@ -128,43 +90,19 @@ export function ConfirmDialog({
           )}
         </div>
 
-        {/* 操作按钮 */}
-        <div className="flex flex-col gap-2">
-          {/* 主要操作行 */}
-          <div className="flex gap-2 justify-end">
-            <button
-              onClick={handleCancel}
-              className="px-3 py-1.5 text-xs rounded-lg border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] transition-colors"
-            >
-              拒绝
-            </button>
-            <button
-              onClick={handleConfirmOnce}
-              className="px-3 py-1.5 text-xs rounded-lg bg-amber-500 hover:bg-amber-600 text-white transition-colors"
-            >
-              允许执行
-            </button>
-          </div>
-
-          {/* 放行操作行 */}
-          <div className="flex gap-2 justify-end border-t border-[var(--color-border)] pt-2">
-            <button
-              onClick={handleAllowSession}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-green-500 transition-colors"
-              title={`本次运行期间自动放行 ${displayKey}`}
-            >
-              <Shield className="w-3 h-3" />
-              本次允许 <code className="text-[10px] bg-[var(--color-bg-secondary)] px-1 rounded">{displayKey}</code>
-            </button>
-            <button
-              onClick={handleAllowPersist}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-green-500/30 text-green-500/80 hover:bg-green-500/10 hover:text-green-500 transition-colors"
-              title={`以后一直自动放行 ${displayKey}`}
-            >
-              <ShieldCheck className="w-3 h-3" />
-              永久允许
-            </button>
-          </div>
+        <div className="flex gap-2 justify-end">
+          <button
+            onClick={() => onResult({ confirmed: false })}
+            className="px-3 py-1.5 text-xs rounded-lg border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] transition-colors"
+          >
+            拒绝
+          </button>
+          <button
+            onClick={() => onResult({ confirmed: true })}
+            className="px-3 py-1.5 text-xs rounded-lg bg-amber-500 hover:bg-amber-600 text-white transition-colors"
+          >
+            允许执行
+          </button>
         </div>
       </div>
     </div>

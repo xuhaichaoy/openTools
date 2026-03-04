@@ -36,7 +36,6 @@ import { AvatarPicker } from "@/components/common/AvatarPicker";
 import { resolveAvatarUrl } from "@/utils/avatar";
 import { ServerConfigTab } from "./components/ServerConfigTab";
 import { CredentialSettings } from "@/components/data-forge/CredentialSettings";
-import { CommandAllowlistSettings } from "@/components/settings/CommandAllowlistSettings";
 import { useDragWindow } from "@/hooks/useDragWindow";
 
 const BRAND = "#F28F36";
@@ -48,7 +47,6 @@ type TabId =
   | "settings"
   | "ai-model"
   | "credentials"
-  | "allowlist"
   | "shortcuts"
   | "server"
   | "energy-logs"
@@ -66,7 +64,6 @@ export default function ManagementCenter({ onBack }: MToolsPluginProps) {
     { id: "settings", icon: Settings, label: "通用设置", group: "偏好设置" },
     { id: "ai-model", icon: Cpu, label: "AI 模型", group: "偏好设置" },
     { id: "credentials", icon: ShieldCheck, label: "凭证管理", group: "偏好设置" },
-    { id: "allowlist", icon: ShieldCheck, label: "命令放行", group: "偏好设置" },
     { id: "server", icon: Server, label: "服务器地址", group: "偏好设置" },
     // "shortcuts" (快捷方式) 暂未实现，隐藏入口直到完成
   ];
@@ -145,11 +142,6 @@ export default function ManagementCenter({ onBack }: MToolsPluginProps) {
           {activeTab === "credentials" && (
             <div className="max-w-xl mx-auto">
               <CredentialSettings />
-            </div>
-          )}
-          {activeTab === "allowlist" && (
-            <div className="max-w-xl mx-auto">
-              <CommandAllowlistSettings />
             </div>
           )}
           {activeTab === "energy-logs" && <EnergyLogsTab />}
