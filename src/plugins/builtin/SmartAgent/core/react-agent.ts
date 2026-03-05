@@ -588,6 +588,12 @@ export class ReActAgent {
     rejectedDangerousActionCount: number,
   ): string | null {
     if (
+      (this.hasAnyToolAction() || this.hasSaveLikeIntent(userInput)) &&
+      this.isLikelyExecutionConfirmation(answer)
+    ) {
+      return "不要在文本里向用户请求“是否继续执行/请确认继续”。如需用户确认，必须调用 ask_user 工具并在拿到回答后继续执行。";
+    }
+    if (
       this.hasSaveLikeIntent(userInput) &&
       !this.hasWriteFileAction() &&
       this.isLikelySaveOutcomeClaim(answer)
@@ -633,6 +639,21 @@ export class ReActAgent {
     if (strongCount >= 2) return true;
     const weakCount = weakPatterns.filter((p) => p.test(text)).length;
     return strongCount >= 1 && weakCount >= 1;
+  }
+
+  private isLikelyExecutionConfirmation(text: string): boolean {
+    const normalized = text.replace(/\s+/g, "");
+    const patterns = [
+      /是否继续执行/,
+      /要不要继续执行/,
+      /需不需要继续执行/,
+      /请确认继续/,
+      /是否执行修改/,
+      /确认(?:后)?继续/,
+      /继续(?:执行|修改).*(?:吗|？|\?)/,
+      /是否(?:继续|执行|覆盖|提交).*(?:吗|？|\?)/,
+    ];
+    return patterns.some((p) => p.test(normalized));
   }
 
   private detectToolCallInText(text: string): string | null {
@@ -1115,10 +1136,12 @@ ${codingHint}
   private buildTextConversation(userInput?: string): {
     role: "system" | "user" | "assistant";
     content: string;
+    images?: string[];
   }[] {
     const messages: {
       role: "system" | "user" | "assistant";
       content: string;
+      images?: string[];
     }[] = [{ role: "system", content: this.buildSystemPrompt(userInput) }];
 
     // 添加历史记录
@@ -1661,7 +1684,7 @@ ${codingBlock}
     const messages = this.buildTextConversation(userInput);
     const isComplex = this.isComplexQuery(userInput) && this.history.length === 0;
     const effectiveTextInput = isComplex ? this.buildPlanningHint(userInput) : userInput;
-    const userMsg: { role: string; content: string; images?: string[] } = { role: "user", content: effectiveTextInput };
+    const userMsg: { role: "user"; content: string; images?: string[] } = { role: "user", content: effectiveTextInput };
     if (images?.length) userMsg.images = images;
     messages.push(userMsg);
     let rejectedDangerousActionCount = 0;

@@ -23,6 +23,7 @@ import {
 } from "@/components/icons/animated";
 
 import { createElement } from "react";
+import { Terminal, Database } from "lucide-react";
 import { APP_CLOUD_NAME } from "@/config/app-branding";
 
 // ── 壳组件 (懒加载) ──
@@ -88,6 +89,8 @@ const SnippetsPlugin = lazy(() =>
 );
 const BookmarksPlugin = lazy(() => import("./Bookmarks/index"));
 const ManagementCenterPlugin = lazy(() => import("./ManagementCenter/index"));
+const SSHManagerPlugin = lazy(() => import("./SSHManager/index"));
+const DatabaseClientPlugin = lazy(() => import("./DatabaseClient/index"));
 
 // 这 7 个内置插件改为“插件市场安装后可用”
 export const MARKET_INSTALL_REQUIRED_BUILTIN_PLUGIN_IDS = [
@@ -751,6 +754,34 @@ export const builtinPlugins: MToolsPlugin[] = [
       },
     ],
   },
+  // ── SSH 管理器 ──
+  {
+    id: "ssh-manager",
+    tier: "extension",
+    name: "SSH 管理",
+    description: "SSH 远程连接、终端、SFTP 文件管理",
+    icon: createElement(Terminal, { className: "w-6 h-6 text-cyan-500" }),
+    color: "text-cyan-500 bg-cyan-500/10",
+    category: "工具",
+    keywords: ["ssh", "终端", "terminal", "远程", "服务器", "sftp", "连接"],
+    viewId: "ssh-manager",
+    render: (props) => createElement(SSHManagerPlugin, props),
+  },
+
+  // ── 数据库客户端 ──
+  {
+    id: "database-client",
+    tier: "extension",
+    name: "数据库",
+    description: "数据库客户端 — SQLite / PostgreSQL / MySQL / MongoDB",
+    icon: createElement(Database, { className: "w-6 h-6 text-blue-500" }),
+    color: "text-blue-500 bg-blue-500/10",
+    category: "数据",
+    keywords: ["数据库", "database", "sql", "sqlite", "postgres", "mysql", "mongodb", "查询", "query"],
+    viewId: "database-client",
+    render: (props) => createElement(DatabaseClientPlugin, props),
+  },
+
   {
     id: "management-center",
     tier: "core",

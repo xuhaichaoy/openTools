@@ -13,9 +13,9 @@ import { useAppStore } from "@/store/app-store";
 import type { RuntimeFallbackContext } from "@/core/agent/runtime";
 
 import { AgentInputBar } from "./components/AgentInputBar";
-import { ConfirmDialog, type ConfirmResult } from "./components/ConfirmDialog";
 import { useToolTrustStore } from "@/store/command-allowlist-store";
 import { useAskUserStore } from "@/store/ask-user-store";
+import { useConfirmDialogStore } from "@/store/confirm-dialog-store";
 import type { AskUserQuestion, AskUserAnswers } from "./core/default-tools";
 import { AgentWorkbenchPanel } from "./components/AgentWorkbenchPanel";
 import { AgentHistoryDrawer } from "./components/AgentHistoryDrawer";
@@ -52,6 +52,35 @@ interface SmartAgentProps {
 }
 
 const EMPTY_AGENT_TASKS: AgentTask[] = [];
+const AGENT_SETTINGS_KEY = "mtools-agent-settings";
+
+interface AgentRuntimeSettings {
+  codingMode: boolean;
+  largeProjectMode: boolean;
+}
+
+function loadAgentSettings(): AgentRuntimeSettings {
+  try {
+    const raw = localStorage.getItem(AGENT_SETTINGS_KEY);
+    if (!raw) return { codingMode: false, largeProjectMode: false };
+    const parsed = JSON.parse(raw) as Partial<AgentRuntimeSettings>;
+    const codingMode = !!parsed.codingMode;
+    return {
+      codingMode,
+      largeProjectMode: codingMode && !!parsed.largeProjectMode,
+    };
+  } catch {
+    return { codingMode: false, largeProjectMode: false };
+  }
+}
+
+function saveAgentSettings(settings: AgentRuntimeSettings): void {
+  try {
+    localStorage.setItem(AGENT_SETTINGS_KEY, JSON.stringify(settings));
+  } catch {
+    // ignore write errors
+  }
+}
 
 const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
   function SmartAgentPlugin({ onBack, ai, headless }, ref) {
@@ -79,6 +108,12 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       useState<ScheduledFilterMode>("all");
     const [scheduledSortMode, setScheduledSortMode] =
       useState<ScheduledSortMode>("next_run_asc");
+    const [codingMode, setCodingMode] = useState(
+      () => loadAgentSettings().codingMode,
+    );
+    const [largeProjectMode, setLargeProjectMode] = useState(
+      () => loadAgentSettings().largeProjectMode,
+    );
     const scrollRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLTextAreaElement>(null);
     const isComposingRef = useRef(false);
@@ -99,44 +134,25 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       clearAttachments,
       addTextFile,
     } = useInputAttachments();
-
-    const [confirmDialog, setConfirmDialog] = useState<{
-      toolName: string;
-      params: Record<string, unknown>;
-      resolve: (confirmed: boolean) => void;
-    } | null>(null);
-
-    const handleConfirmResult = useCallback(
-      (result: ConfirmResult) => {
-        if (!confirmDialog) return;
-        confirmDialog.resolve(result.confirmed);
-        setConfirmDialog(null);
-      },
-      [confirmDialog],
-    );
+    const openConfirmDialog = useConfirmDialogStore((s) => s.open);
 
     const confirmHostFallback = useCallback(
       (context: RuntimeFallbackContext) =>
-        new Promise<boolean>((resolve) => {
-          const toolName =
+        openConfirmDialog({
+          source: "agent",
+          toolName:
             context.action === "run_shell_command"
               ? "run_shell_command_host_fallback"
-              : "write_file_host_fallback";
-          const warning =
-            typeof context.reason === "string" && context.reason.trim()
-              ? context.reason
-              : "该操作需要你的确认。";
-
-          setConfirmDialog({
-            toolName,
-            params: {
-              ...context,
-              warning,
-            },
-            resolve,
-          });
+              : "write_file_host_fallback",
+          params: {
+            ...context,
+            warning:
+              typeof context.reason === "string" && context.reason.trim()
+                ? context.reason
+                : "该操作需要你的确认。",
+          },
         }),
-      [],
+      [openConfirmDialog],
     );
 
     const {
@@ -228,8 +244,10 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
         if (!useToolTrustStore.getState().shouldConfirm(toolName)) {
           return Promise.resolve(true);
         }
-        return new Promise<boolean>((resolve) => {
-          setConfirmDialog({ toolName, params, resolve });
+        return openConfirmDialog({
+          source: "agent",
+          toolName,
+          params,
         });
       },
       resetPerRunState,
@@ -254,6 +272,8 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       imagePaths,
       fileContextBlock,
       attachmentSummary,
+      codingMode,
+      largeProjectMode,
       setInput,
       clearAssets: clearAttachments,
       executeAgentTask,
@@ -261,13 +281,19 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
     });
 
     useEffect(() => {
+      saveAgentSettings({ codingMode, largeProjectMode });
+    }, [codingMode, largeProjectMode]);
+
+    useEffect(() => {
       handleRunRef.current = handleRun;
     }, [handleRun]);
 
+    const pendingAgentInitialQuery = useAppStore((s) => s.pendingAgentInitialQuery);
     useEffect(() => {
-      const q = useAppStore.getState().consumePendingAgentInitialQuery();
-      if (q) setInput(q);
-    }, []);
+      if (!pendingAgentInitialQuery) return;
+      setInput(pendingAgentInitialQuery);
+      useAppStore.getState().setPendingAgentInitialQuery(null);
+    }, [pendingAgentInitialQuery]);
 
     const toggleStep = useCallback((key: string) => {
       setExpandedSteps((prev) => {
@@ -437,18 +463,24 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
             onFolderSelect={handleFolderSelect}
             onFileSelectNative={handleFileSelectNative}
             onAddFilePath={addTextFile}
+            codingMode={codingMode}
+            largeProjectMode={largeProjectMode}
+            onToggleCodingMode={() => {
+              setCodingMode((prev) => {
+                const next = !prev;
+                if (!next) setLargeProjectMode(false);
+                return next;
+              });
+            }}
+            onToggleLargeProjectMode={() => {
+              setCodingMode(true);
+              setLargeProjectMode((prev) => !prev);
+            }}
             inputRef={inputRef}
             fileInputRef={fileInputRef}
           />
         </div>
 
-        {confirmDialog && (
-          <ConfirmDialog
-            toolName={confirmDialog.toolName}
-            params={confirmDialog.params}
-            onResult={handleConfirmResult}
-          />
-        )}
       </div>
     );
   },

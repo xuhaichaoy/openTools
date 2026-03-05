@@ -26,6 +26,10 @@ interface AgentInputBarProps {
   onFolderSelect?: () => void;
   onFileSelectNative?: () => void;
   onAddFilePath?: (path: string) => void;
+  codingMode?: boolean;
+  largeProjectMode?: boolean;
+  onToggleCodingMode?: () => void;
+  onToggleLargeProjectMode?: () => void;
 }
 
 export function AgentInputBar({
@@ -50,6 +54,10 @@ export function AgentInputBar({
   onFolderSelect,
   onFileSelectNative,
   onAddFilePath,
+  codingMode = false,
+  largeProjectMode = false,
+  onToggleCodingMode,
+  onToggleLargeProjectMode,
 }: AgentInputBarProps) {
   const useAttachments = attachments && onRemoveAttachment;
   const hasAttachments = useAttachments ? attachments.length > 0 : pendingImagePreviews.length > 0;
@@ -319,6 +327,34 @@ export function AgentInputBar({
         </div>
 
         <div className="flex items-center gap-1 shrink-0 self-end mb-0.5">
+          {onToggleCodingMode && (
+            <button
+              type="button"
+              onClick={onToggleCodingMode}
+              className={`text-[10px] px-2 py-1 rounded-full border transition-colors ${
+                codingMode
+                  ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-600"
+                  : "border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]"
+              }`}
+              title="切换 Coding 模式（仅影响代码任务）"
+            >
+              Coding
+            </button>
+          )}
+          {codingMode && onToggleLargeProjectMode && (
+            <button
+              type="button"
+              onClick={onToggleLargeProjectMode}
+              className={`text-[10px] px-2 py-1 rounded-full border transition-colors ${
+                largeProjectMode
+                  ? "border-cyan-500/40 bg-cyan-500/15 text-cyan-600"
+                  : "border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]"
+              }`}
+              title="切换大项目策略（分阶段推进、提高预算）"
+            >
+              大项目
+            </button>
+          )}
           {running && (
             <button
               onClick={onStop}

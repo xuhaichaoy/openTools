@@ -6,15 +6,22 @@ import { useAIStore } from "@/store/ai-store";
 import { useAgentMemoryStore } from "@/store/agent-memory-store";
 import { buildAgentFCCompatibilityKey } from "@/core/agent/fc-compatibility";
 import {
+  getEnhancedAgentMaxIterations,
+  normalizeCodingExecutionProfile,
+  type CodingExecutionProfile,
+} from "@/core/agent/coding-profile";
+import {
   getExecutionWaitingStageLabel,
   type ExecutionWaitingStage,
   type RunningPhase,
 } from "../core/ui-state";
 import { useAgentRunningStore } from "@/store/agent-running-store";
+import { recordAIRouteEvent } from "@/store/ai-route-store";
 
 type AgentStoreState = ReturnType<typeof useAgentStore.getState>;
 export const AGENT_EXECUTION_HEARTBEAT_INTERVAL_MS = 10_000;
 export const AGENT_EXECUTION_TIMEOUT_MS = 600_000;
+export const AGENT_MODEL_STALL_TIMEOUT_MS = 90_000;
 
 interface UseAgentExecutionParams {
   ai?: MToolsAI;
@@ -30,7 +37,7 @@ interface UseAgentExecutionParams {
   scrollRef: MutableRefObject<HTMLDivElement | null>;
   openDangerConfirm: (toolName: string, params: Record<string, unknown>) => Promise<boolean>;
   resetPerRunState: (() => void) | null;
-  notifyToolCalled: ((toolName: string) => void) | null;
+  notifyToolCalled?: ((toolName: string) => void) | null;
 }
 
 interface UseAgentExecutionResult {
@@ -41,6 +48,7 @@ interface UseAgentExecutionResult {
       taskId?: string;
       systemHint?: string;
       images?: string[];
+      runProfile?: CodingExecutionProfile;
     },
   ) => Promise<void>;
   stopExecution: () => void;
@@ -91,6 +99,7 @@ export function useAgentExecution({
         taskId?: string;
         systemHint?: string;
         images?: string[];
+        runProfile?: CodingExecutionProfile;
       },
     ) => {
       if (!ai || !query.trim()) return;
@@ -147,7 +156,16 @@ export function useAgentExecution({
 
       if (!sessionId || !taskId) return;
 
+      recordAIRouteEvent({
+        mode: "agent",
+        source: "agent_run",
+        taskId: sessionId,
+        queryPreview: query.length > 120 ? `${query.slice(0, 120)}...` : query,
+      });
+
+      let latestWaitingStage: ExecutionWaitingStage | null = null;
       const setWaitingStageIfChanged = (stage: ExecutionWaitingStage | null) => {
+        latestWaitingStage = stage;
         setExecutionWaitingStage((prev) => (prev === stage ? prev : stage));
       };
 
@@ -171,6 +189,7 @@ export function useAgentExecution({
       const runStartedAt = Date.now();
       let lastProgressAt = runStartedAt;
       let timeoutAborted = false;
+      let modelStallAborted = false;
       clearTimers();
       let lastHeartbeatStage: ExecutionWaitingStage | null = null;
       const existingTask = useAgentStore
@@ -252,16 +271,35 @@ export function useAgentExecution({
       const userMemoryPrompt = memoryStore.getMemoriesForPrompt();
 
       const aiConfig = useAIStore.getState().config;
+      const runProfile = normalizeCodingExecutionProfile(opts?.runProfile);
+      const maxIterations = getEnhancedAgentMaxIterations(
+        aiConfig.agent_max_iterations ?? 25,
+        runProfile,
+      );
+
+      if (runProfile.codingMode) {
+        applyStep(
+          {
+            type: "observation",
+            content: runProfile.largeProjectMode
+              ? "已启用 Coding 模式（大项目）：将按阶段推进并提高迭代预算。"
+              : "已启用 Coding 模式：将优先走先读后改、改后验证流程。",
+            timestamp: Date.now(),
+          },
+          false,
+        );
+      }
 
       const agent = new ReActAgent(
         ai,
         availableTools,
         {
-          maxIterations: aiConfig.agent_max_iterations ?? 25,
+          maxIterations,
           temperature: aiConfig.temperature ?? 0.7,
           verbose: true,
           fcCompatibilityKey,
           userMemoryPrompt: userMemoryPrompt || undefined,
+          ...(runProfile.largeProjectMode ? { contextLimit: 160_000 } : {}),
           dangerousToolPatterns: [
             "write_file",
             "open_path",
@@ -313,6 +351,25 @@ export function useAgentExecution({
           return "model_first_token";
         })();
         setWaitingStageIfChanged(waitingStage);
+        const modelLikelyStalled =
+          idleMs >= AGENT_MODEL_STALL_TIMEOUT_MS &&
+          (waitingStage === "model_first_token" ||
+            waitingStage === "model_generating");
+        if (modelLikelyStalled) {
+          modelStallAborted = true;
+          applyStep(
+            {
+              type: "observation",
+              content: `检测到模型长时间无进展（>${Math.floor(
+                AGENT_MODEL_STALL_TIMEOUT_MS / 1000,
+              )}s），将自动中断本次执行。`,
+              timestamp: now,
+            },
+            false,
+          );
+          abortController.abort("MODEL_STALL_TIMEOUT");
+          return;
+        }
         if (waitingStage === lastHeartbeatStage) {
           return;
         }
@@ -345,6 +402,7 @@ export function useAgentExecution({
 
         for (let attempt = 0; attempt <= retryMax; attempt++) {
           if (abortController.signal.aborted) throw new Error("Aborted");
+          modelStallAborted = false;
 
           if (attempt > 0) {
             const delay = retryBackoffMs * Math.pow(2, attempt - 1);
@@ -364,12 +422,21 @@ export function useAgentExecution({
             lastError = null;
             break;
           } catch (e) {
-            if ((e as Error).message === "Aborted") throw e;
-            lastError = e as Error;
-            const errMsg = String(e);
+            const aborted = (e as Error).message === "Aborted";
+            if (aborted) {
+              if (timeoutAborted) throw e;
+              if (modelStallAborted) {
+                throw new Error("MODEL_STALL_TIMEOUT");
+              } else {
+                throw e;
+              }
+            } else {
+              lastError = e as Error;
+            }
+            const errMsg = String(lastError);
             const isRetryable = /rate.?limit|429|503|500|timeout|ECONNRESET|network/i.test(errMsg);
             if (!isRetryable || attempt >= retryMax) {
-              throw e;
+              throw lastError;
             }
           }
         }
@@ -377,11 +444,14 @@ export function useAgentExecution({
         if (lastError) throw lastError;
       } catch (e) {
         const aborted = (e as Error).message === "Aborted";
+        const modelStall = String(e).includes("MODEL_STALL_TIMEOUT");
         const msg = aborted
           ? timeoutAborted
             ? `Agent 执行超时（${Math.floor(AGENT_EXECUTION_TIMEOUT_MS / 1000)} 秒）已自动停止，请拆分任务后重试。`
             : "任务已通过用户请求停止。"
-          : `Agent 执行失败: ${e}`;
+          : modelStall
+            ? "模型长时间无响应，已自动中断本次执行。请重试或切换模型后再试。"
+            : `Agent 执行失败: ${e}`;
         updateTask(sessionId, taskId, {
           answer: msg,
           status: aborted && !timeoutAborted ? "cancelled" : "error",

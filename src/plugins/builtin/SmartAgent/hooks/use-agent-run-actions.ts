@@ -1,5 +1,10 @@
 import { useCallback, type Dispatch, type SetStateAction } from "react";
 import type { MToolsAI } from "@/core/plugin-system/plugin-interface";
+import {
+  buildAgentCodingSystemHint,
+  mergeSystemHints,
+  type CodingExecutionProfile,
+} from "@/core/agent/coding-profile";
 
 interface UseAgentRunActionsParams {
   ai?: MToolsAI;
@@ -7,6 +12,8 @@ interface UseAgentRunActionsParams {
   imagePaths: string[];
   fileContextBlock: string;
   attachmentSummary: string;
+  codingMode?: boolean;
+  largeProjectMode?: boolean;
   setInput: Dispatch<SetStateAction<string>>;
   clearAssets: () => void;
   executeAgentTask: (
@@ -16,6 +23,7 @@ interface UseAgentRunActionsParams {
       taskId?: string;
       systemHint?: string;
       images?: string[];
+      runProfile?: CodingExecutionProfile;
     },
   ) => Promise<void>;
   stopExecution: () => void;
@@ -32,6 +40,8 @@ export function useAgentRunActions({
   imagePaths,
   fileContextBlock,
   attachmentSummary,
+  codingMode = false,
+  largeProjectMode = false,
   setInput,
   clearAssets,
   executeAgentTask,
@@ -43,7 +53,13 @@ export function useAgentRunActions({
 
     const userText = input.trim() || (fileContextBlock.trim() ? "请了解项目结构，等待下一步指令。" : "");
     const query = attachmentSummary ? `${attachmentSummary}\n${userText}` : userText;
-    const systemHint = fileContextBlock.trim() || undefined;
+    const systemHint = mergeSystemHints(
+      fileContextBlock.trim() || undefined,
+      buildAgentCodingSystemHint({ codingMode, largeProjectMode }),
+    );
+    const runProfile = codingMode
+      ? { codingMode, largeProjectMode }
+      : undefined;
 
     setInput("");
     clearAssets();
@@ -51,8 +67,20 @@ export function useAgentRunActions({
     await executeAgentTask(query, {
       images: imagePaths.length > 0 ? imagePaths : undefined,
       systemHint,
+      ...(runProfile ? { runProfile } : {}),
     });
-  }, [ai, input, imagePaths, fileContextBlock, attachmentSummary, setInput, clearAssets, executeAgentTask]);
+  }, [
+    ai,
+    input,
+    imagePaths,
+    fileContextBlock,
+    attachmentSummary,
+    codingMode,
+    largeProjectMode,
+    setInput,
+    clearAssets,
+    executeAgentTask,
+  ]);
 
   const handleStop = useCallback(() => {
     stopExecution();

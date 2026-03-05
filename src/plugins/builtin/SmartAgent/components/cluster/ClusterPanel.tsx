@@ -8,7 +8,6 @@ import {
   ChevronRight,
   Trash2,
   CheckCircle,
-  XCircle,
   Settings2,
   ShieldCheck,
   Copy,
@@ -28,40 +27,66 @@ import { useAIStore } from "@/store/ai-store";
 import { ClusterOrchestrator } from "@/core/agent/cluster/cluster-orchestrator";
 import {
   setActiveOrchestrator,
-  getActiveOrchestrator,
+  getActiveSessionIds,
+  getActiveOrchestratorCount,
   clearActiveOrchestrator,
   abortActiveOrchestrator,
+  abortAllActiveOrchestrators,
+  isClusterRunning,
   setClusterPanelVisible,
 } from "@/core/agent/cluster/active-orchestrator";
 import type {
   ClusterMode,
   ClusterSessionStatus,
   ClusterPlan,
-  PlanApprovalRequest,
 } from "@/core/agent/cluster/types";
 import { ClusterPlanView } from "./ClusterPlanView";
 import { ClusterDAGView } from "./ClusterDAGView";
 import { AgentInstancePanel } from "./AgentInstancePanel";
 import { useAskUserStore } from "@/store/ask-user-store";
-import { ConfirmDialog, type ConfirmResult } from "../ConfirmDialog";
 import { useToolTrustStore } from "@/store/command-allowlist-store";
+import { useConfirmDialogStore } from "@/store/confirm-dialog-store";
+import { useClusterPlanApprovalStore } from "@/store/cluster-plan-approval-store";
 import type { AskUserQuestion, AskUserAnswers } from "../../core/default-tools";
 import { useInputAttachments } from "@/hooks/use-input-attachments";
 import { useToast } from "@/components/ui/Toast";
 import { handleError } from "@/core/errors";
-import { useAppStore } from "@/store/app-store";
+import { routeToAICenter } from "@/core/ai/ai-center-routing";
+import { recordAIRouteEvent } from "@/store/ai-route-store";
 
 const SETTINGS_KEY = "mtools-cluster-settings";
+const MAX_ACTIVE_CLUSTER_TASKS = 3;
 
-function loadSettings(): { autoReview: boolean; humanApproval: boolean } {
-  try {
-    const raw = localStorage.getItem(SETTINGS_KEY);
-    if (raw) return JSON.parse(raw);
-  } catch { /* ignore */ }
-  return { autoReview: false, humanApproval: false };
+interface ClusterPanelSettings {
+  autoReview: boolean;
+  humanApproval: boolean;
+  codingMode: boolean;
+  largeProjectMode: boolean;
 }
 
-function saveSettings(s: { autoReview: boolean; humanApproval: boolean }) {
+function loadSettings(): ClusterPanelSettings {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<ClusterPanelSettings>;
+      const codingMode = !!parsed.codingMode;
+      return {
+        autoReview: !!parsed.autoReview,
+        humanApproval: !!parsed.humanApproval,
+        codingMode,
+        largeProjectMode: codingMode && !!parsed.largeProjectMode,
+      };
+    }
+  } catch { /* ignore */ }
+  return {
+    autoReview: false,
+    humanApproval: false,
+    codingMode: false,
+    largeProjectMode: false,
+  };
+}
+
+function saveSettings(s: ClusterPanelSettings) {
   try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); } catch { /* ignore */ }
 }
 
@@ -147,8 +172,6 @@ function SessionCard({
   const [copied, setCopied] = useState(false);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const { toast } = useToast();
-  const setPendingAgentInitialQuery = useAppStore((s) => s.setPendingAgentInitialQuery);
-  const setAiCenterMode = useAppStore((s) => s.setAiCenterMode);
 
   const handleCopyQuery = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -192,8 +215,13 @@ function SessionCard({
     const report = session.result.finalAnswer;
     const truncated = report.length > 2000 ? report.slice(0, 2000) + "\n\n...（完整内容见上方 Cluster 报告）" : report;
     const prefilled = `根据以下 Cluster 分析报告，请帮我改进/修复或按报告执行（可在此补充具体诉求，如：修复其中的问题、把建议落地为代码、保存为文档等）：\n\n${truncated}`;
-    setPendingAgentInitialQuery(prefilled);
-    setAiCenterMode("agent");
+    routeToAICenter({
+      mode: "agent",
+      source: "cluster_continue_to_agent",
+      agentInitialQuery: prefilled,
+      taskId: session.id,
+      navigate: false,
+    });
   };
 
   return (
@@ -366,98 +394,22 @@ function SessionCard({
   );
 }
 
-function PlanApprovalDialog({
-  plan,
-  onApprove,
-  onReject,
-}: {
-  plan: ClusterPlan;
-  onApprove: () => void;
-  onReject: () => void;
-}) {
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onReject();
-      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) onApprove();
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onApprove, onReject]);
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-      <div className="bg-[var(--color-bg)] border border-[var(--color-border)] rounded-xl shadow-2xl max-w-lg w-full mx-4 overflow-hidden">
-        <div className="px-5 py-4 border-b border-[var(--color-border)]">
-          <div className="flex items-center gap-2">
-            <ShieldCheck className="w-5 h-5 text-[var(--color-accent)]" />
-            <h3 className="text-sm font-semibold">审批执行计划</h3>
-          </div>
-          <p className="text-xs text-[var(--color-text-secondary)] mt-1">
-            请确认以下计划是否可以执行（Esc 拒绝，⌘+Enter 批准）
-          </p>
-        </div>
-
-        <div className="px-5 py-4 max-h-80 overflow-auto space-y-2">
-          <div className="text-xs text-[var(--color-text-secondary)]">
-            模式: {plan.mode === "multi_role" ? "多角色协作" : "并行分治"} · {plan.steps.length} 个步骤
-          </div>
-          {plan.steps.map((step) => (
-            <div key={step.id} className="border border-[var(--color-border)] rounded-lg px-3 py-2 text-xs">
-              <div className="flex items-center gap-2 mb-1">
-                <span className="font-medium text-[var(--color-accent)]">{step.role}</span>
-                <span className="text-[var(--color-text-tertiary)]">{step.id}</span>
-                {step.reviewAfter && (
-                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600">自动审查</span>
-                )}
-              </div>
-              <p className="text-[var(--color-text-secondary)]">{step.task}</p>
-              {step.dependencies.length > 0 && (
-                <p className="text-[10px] text-[var(--color-text-tertiary)] mt-1">
-                  依赖: {step.dependencies.join(", ")}
-                </p>
-              )}
-            </div>
-          ))}
-        </div>
-
-        <div className="px-5 py-3 border-t border-[var(--color-border)] flex justify-end gap-2">
-          <button
-            className="flex items-center gap-1.5 px-4 py-2 text-xs rounded-lg border border-[var(--color-border)] hover:bg-[var(--color-bg-hover)] transition-colors"
-            onClick={onReject}
-          >
-            <XCircle className="w-3.5 h-3.5" />
-            拒绝
-          </button>
-          <button
-            className="flex items-center gap-1.5 px-4 py-2 text-xs rounded-lg bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity"
-            onClick={onApprove}
-          >
-            <CheckCircle className="w-3.5 h-3.5" />
-            批准执行
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export function ClusterPanel() {
   const savedSettings = loadSettings();
   const [input, setInput] = useState("");
   const [mode, setMode] = useState<ClusterMode>("parallel_split");
-  const [busy, setBusy] = useState(() => !!getActiveOrchestrator());
+  const [runningCount, setRunningCount] = useState(() => getActiveOrchestratorCount());
   const [showSettings, setShowSettings] = useState(false);
   const [autoReview, setAutoReview] = useState(savedSettings.autoReview);
   const [humanApproval, setHumanApproval] = useState(savedSettings.humanApproval);
+  const [codingMode, setCodingMode] = useState(savedSettings.codingMode);
+  const [largeProjectMode, setLargeProjectMode] = useState(
+    savedSettings.largeProjectMode,
+  );
   const unmountedRef = useRef(false);
-
-  const [approvalPlan, setApprovalPlan] = useState<ClusterPlan | null>(null);
-  const approvalResolveRef = useRef<((result: PlanApprovalRequest) => void) | null>(null);
-
-  const [confirmRequest, setConfirmRequest] = useState<{ toolName: string; params: Record<string, unknown> } | null>(null);
-  const confirmResolveRef = useRef<((result: boolean) => void) | null>(null);
-
-  const askUserDismiss = useAskUserStore((s) => s.dismiss);
+  const { toast } = useToast();
+  const openConfirmDialog = useConfirmDialogStore((s) => s.open);
+  const openPlanApprovalDialog = useClusterPlanApprovalStore((s) => s.open);
 
   const clusterFileInputRef = useRef<HTMLInputElement>(null);
   const {
@@ -477,118 +429,78 @@ export function ClusterPanel() {
   const currentSessionId = useClusterStore((s) => s.currentSessionId);
   const createSession = useClusterStore((s) => s.createSession);
   const setCurrentSession = useClusterStore((s) => s.setCurrentSession);
-  const updateSession = useClusterStore((s) => s.updateSession);
-  const updateInstance = useClusterStore((s) => s.updateInstance);
   const deleteAllSessions = useClusterStore((s) => s.deleteAllSessions);
+  const hasAnyRunning = runningCount > 0;
+  const currentSessionRunning = !!(currentSessionId && isClusterRunning(currentSessionId));
 
   useEffect(() => {
-    saveSettings({ autoReview, humanApproval });
-  }, [autoReview, humanApproval]);
+    saveSettings({ autoReview, humanApproval, codingMode, largeProjectMode });
+  }, [autoReview, humanApproval, codingMode, largeProjectMode]);
 
   useEffect(() => {
     unmountedRef.current = false;
     setClusterPanelVisible(true);
 
-    const active = getActiveOrchestrator();
-    if (active) {
+    const activeSessionIds = getActiveSessionIds();
+    if (activeSessionIds.length > 0) {
       const { setCurrentSession: setSession } = useClusterStore.getState();
-      setSession(active.sessionId);
+      setSession(activeSessionIds[0]);
     }
 
     const syncTimer = setInterval(() => {
-      const running = !!getActiveOrchestrator();
-      setBusy((prev) => (prev !== running ? running : prev));
+      const nextCount = getActiveOrchestratorCount();
+      setRunningCount((prev) => (prev !== nextCount ? nextCount : prev));
     }, 500);
 
     return () => {
       unmountedRef.current = true;
       setClusterPanelVisible(false);
       clearInterval(syncTimer);
-      if (approvalResolveRef.current) {
-        approvalResolveRef.current({ plan: {} as ClusterPlan, status: "rejected" });
-        approvalResolveRef.current = null;
-      }
-      if (confirmResolveRef.current) {
-        confirmResolveRef.current(false);
-        confirmResolveRef.current = null;
-      }
-      askUserDismiss();
     };
   }, []);
-
-  const handlePlanApproval = useCallback(
-    (request: PlanApprovalRequest): Promise<PlanApprovalRequest> => {
-      return new Promise((resolve) => {
-        if (unmountedRef.current) {
-          resolve({ plan: request.plan, status: "rejected" });
-          return;
-        }
-        setApprovalPlan(request.plan);
-        approvalResolveRef.current = resolve;
-      });
-    },
-    [],
-  );
-
-  const handleApprove = useCallback(() => {
-    if (approvalResolveRef.current && approvalPlan) {
-      approvalResolveRef.current({ plan: approvalPlan, status: "approved" });
-      approvalResolveRef.current = null;
-      setApprovalPlan(null);
-    }
-  }, [approvalPlan]);
-
-  const handleReject = useCallback(() => {
-    if (approvalResolveRef.current && approvalPlan) {
-      approvalResolveRef.current({ plan: approvalPlan, status: "rejected" });
-      approvalResolveRef.current = null;
-      setApprovalPlan(null);
-    }
-  }, [approvalPlan]);
 
   const confirmDangerousAction = useCallback(
     (toolName: string, params: Record<string, unknown>): Promise<boolean> => {
       if (!useToolTrustStore.getState().shouldConfirm(toolName)) {
         return Promise.resolve(true);
       }
-      return new Promise((resolve) => {
-        if (unmountedRef.current) { resolve(false); return; }
-        setConfirmRequest({ toolName, params });
-        confirmResolveRef.current = resolve;
+      return openConfirmDialog({
+        source: "cluster",
+        toolName,
+        params,
       });
     },
-    [],
+    [openConfirmDialog],
   );
-
-  const handleConfirmResult = useCallback((result: ConfirmResult) => {
-    if (!confirmRequest) return;
-    confirmResolveRef.current?.(result.confirmed);
-    confirmResolveRef.current = null;
-    setConfirmRequest(null);
-  }, [confirmRequest]);
 
   const askUserOpen = useAskUserStore((s) => s.open);
 
   const askUser = useCallback(
-    (questions: AskUserQuestion[]): Promise<AskUserAnswers> => {
-      if (unmountedRef.current) {
-        const empty: AskUserAnswers = {};
-        for (const q of questions) empty[q.id] = "";
-        return Promise.resolve(empty);
-      }
-      return askUserOpen({
+    (questions: AskUserQuestion[]): Promise<AskUserAnswers> =>
+      askUserOpen({
         questions,
         source: "cluster",
         taskDescription: input.trim() || undefined,
-      });
-    },
+      }),
     [askUserOpen, input],
+  );
+
+  const handlePlanApproval = useCallback(
+    (plan: ClusterPlan, sessionId: string) =>
+      openPlanApprovalDialog({ plan, sessionId }),
+    [openPlanApprovalDialog],
   );
 
   const handleRun = useCallback(async () => {
     const trimmed = input.trim();
     const hasAttachments = attachments.length > 0;
-    if ((!trimmed && !hasAttachments) || busy) return;
+    if (!trimmed && !hasAttachments) return;
+
+    const activeCount = getActiveOrchestratorCount();
+    if (activeCount >= MAX_ACTIVE_CLUSTER_TASKS) {
+      toast("warning", `当前最多同时运行 ${MAX_ACTIVE_CLUSTER_TASKS} 个集群任务`);
+      return;
+    }
 
     const userText = trimmed || (fileContextBlock.trim() ? "请了解项目结构，等待下一步指令。" : "（无文字描述）");
     const displayQuery = attachmentSummary ? `${attachmentSummary}\n${userText}` : userText;
@@ -596,20 +508,29 @@ export function ClusterPanel() {
       ? `${fileContextBlock}\n\n---\n\n${userText}`
       : userText;
     const sessionId = createSession(displayQuery, mode, aiConfig.model, imagePaths.length > 0 ? imagePaths : undefined);
+    recordAIRouteEvent({
+      mode: "cluster",
+      source: "cluster_run",
+      taskId: sessionId,
+      queryPreview: displayQuery.slice(0, 120),
+    });
     setInput("");
     clearAttachments();
-    setBusy(true);
 
     const abortController = new AbortController();
 
     const orchestrator = new ClusterOrchestrator({
-      maxConcurrency: 4,
+      maxConcurrency: codingMode && largeProjectMode ? 3 : 4,
       signal: abortController.signal,
-      autoReviewCodeSteps: autoReview,
-      maxReviewRetries: 2,
+      autoReviewCodeSteps: autoReview || codingMode,
+      maxReviewRetries: codingMode ? 3 : 2,
+      codingMode,
+      largeProjectMode,
       confirmDangerousAction,
       askUser,
-      onPlanApproval: humanApproval ? handlePlanApproval : undefined,
+      onPlanApproval: humanApproval
+        ? (request) => handlePlanApproval(request.plan, sessionId)
+        : undefined,
       onStatusChange: (status) => {
         useClusterStore.getState().updateSession(sessionId, { status });
       },
@@ -630,6 +551,7 @@ export function ClusterPanel() {
       orchestrator.setProjectContext(fileContextBlock.trim());
     }
     setActiveOrchestrator(sessionId, orchestrator, abortController);
+    setRunningCount(getActiveOrchestratorCount());
 
     try {
       const result = await orchestrator.execute(fullQuery, mode, imagePaths.length > 0 ? imagePaths : undefined);
@@ -648,15 +570,22 @@ export function ClusterPanel() {
         finishedAt: Date.now(),
       });
     } finally {
-      clearActiveOrchestrator();
-      if (!unmountedRef.current) setBusy(false);
+      clearActiveOrchestrator(sessionId);
+      if (!unmountedRef.current) {
+        setRunningCount(getActiveOrchestratorCount());
+      }
     }
-  }, [input, attachments, fileContextBlock, attachmentSummary, imagePaths, mode, busy, autoReview, humanApproval, createSession, clearAttachments, aiConfig.model, handlePlanApproval, confirmDangerousAction, askUser]);
+  }, [input, attachments, fileContextBlock, attachmentSummary, imagePaths, mode, autoReview, humanApproval, codingMode, largeProjectMode, createSession, clearAttachments, aiConfig.model, handlePlanApproval, confirmDangerousAction, askUser, toast]);
 
   const handleAbort = useCallback(() => {
-    abortActiveOrchestrator();
-    setBusy(false);
-  }, []);
+    const targetSessionId =
+      currentSessionId && isClusterRunning(currentSessionId)
+        ? currentSessionId
+        : undefined;
+    void abortActiveOrchestrator(targetSessionId).finally(() => {
+      setRunningCount(getActiveOrchestratorCount());
+    });
+  }, [currentSessionId]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -670,22 +599,6 @@ export function ClusterPanel() {
 
   return (
     <div className="flex flex-col h-full">
-      {approvalPlan && (
-        <PlanApprovalDialog
-          plan={approvalPlan}
-          onApprove={handleApprove}
-          onReject={handleReject}
-        />
-      )}
-
-      {confirmRequest && (
-        <ConfirmDialog
-          toolName={confirmRequest.toolName}
-          params={confirmRequest.params}
-          onResult={handleConfirmResult}
-        />
-      )}
-
       <div className="flex items-center justify-between px-4 py-2.5 border-b border-[var(--color-border)]">
         <div className="flex items-center gap-2">
           <Network className="w-4 h-4 text-[var(--color-accent)]" />
@@ -693,6 +606,11 @@ export function ClusterPanel() {
           <span className="text-xs text-[var(--color-text-tertiary)]">
             ({sessions.length})
           </span>
+          {hasAnyRunning && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-500">
+              运行中 {runningCount}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -709,9 +627,10 @@ export function ClusterPanel() {
             <button
               className="text-xs text-[var(--color-text-tertiary)] hover:text-red-500 transition-colors flex items-center gap-1"
               onClick={() => {
-                if (busy) {
-                  abortActiveOrchestrator();
-                  setBusy(false);
+                if (hasAnyRunning) {
+                  void abortAllActiveOrchestrators().finally(() => {
+                    setRunningCount(getActiveOrchestratorCount());
+                  });
                 }
                 deleteAllSessions();
               }}
@@ -746,6 +665,32 @@ export function ClusterPanel() {
             />
             <span>计划审批 (执行前人工确认)</span>
           </label>
+          <label className="flex items-center gap-2 text-xs cursor-pointer">
+            <input
+              type="checkbox"
+              checked={codingMode}
+              onChange={(e) => {
+                const checked = e.target.checked;
+                setCodingMode(checked);
+                if (!checked) setLargeProjectMode(false);
+              }}
+              className="rounded border-[var(--color-border)]"
+            />
+            <span>Coding 模式（仅影响代码类任务）</span>
+          </label>
+          <label className="flex items-center gap-2 text-xs cursor-pointer">
+            <input
+              type="checkbox"
+              checked={largeProjectMode}
+              onChange={(e) => {
+                const checked = e.target.checked;
+                setCodingMode(true);
+                setLargeProjectMode(checked);
+              }}
+              className="rounded border-[var(--color-border)]"
+            />
+            <span>大项目策略（分阶段 + 提高预算）</span>
+          </label>
         </div>
       )}
 
@@ -755,7 +700,7 @@ export function ClusterPanel() {
             <AttachDropdown
               onFileClick={() => clusterFileInputRef.current?.click()}
               onFolderClick={handleFolderSelect}
-              disabled={busy}
+              disabled={false}
               accent="accent"
             />
           </div>
@@ -805,7 +750,7 @@ export function ClusterPanel() {
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
-              disabled={busy}
+              disabled={false}
             />
           </div>
           <input
@@ -859,26 +804,40 @@ export function ClusterPanel() {
                 审批
               </span>
             )}
+            {codingMode && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-600">
+                Coding
+              </span>
+            )}
+            {codingMode && largeProjectMode && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-500/10 text-cyan-600">
+                大项目
+              </span>
+            )}
           </div>
           <div className="flex-1" />
-          {busy ? (
+          {hasAnyRunning && (
             <button
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-red-500/10 text-red-600 rounded-lg hover:bg-red-500/20 transition-colors"
               onClick={handleAbort}
             >
               <Square className="w-3 h-3" />
-              停止
-            </button>
-          ) : (
-            <button
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-[var(--color-accent)] text-white rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50"
-              onClick={handleRun}
-              disabled={!input.trim() && attachments.length === 0}
-            >
-              <Play className="w-3 h-3" />
-              执行
+              {currentSessionRunning ? "停止当前" : "停止最近"}
             </button>
           )}
+          <button
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-[var(--color-accent)] text-white rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50"
+            onClick={handleRun}
+            disabled={(!input.trim() && attachments.length === 0) || runningCount >= MAX_ACTIVE_CLUSTER_TASKS}
+            title={
+              runningCount >= MAX_ACTIVE_CLUSTER_TASKS
+                ? `最多同时运行 ${MAX_ACTIVE_CLUSTER_TASKS} 个集群任务`
+                : undefined
+            }
+          >
+            <Play className="w-3 h-3" />
+            执行
+          </button>
         </div>
       </div>
 

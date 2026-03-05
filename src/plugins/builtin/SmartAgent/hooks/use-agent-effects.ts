@@ -11,6 +11,8 @@ import {
   type BuiltinToolsResult,
 } from "../core/default-tools";
 import { shouldAutoCollapseProcess } from "../core/ui-state";
+import { useMcpStore } from "@/store/mcp-store";
+import { invoke } from "@tauri-apps/api/core";
 
 interface UseAgentEffectsParams {
   ai?: MToolsAI;
@@ -80,6 +82,66 @@ export function useAgentEffects({
     );
     const builtinResult: BuiltinToolsResult = createBuiltinAgentTools(confirmHostFallback, askUser);
     tools.push(...builtinResult.tools);
+
+    // Merge MCP server tools into agent tool list
+    const mcpState = useMcpStore.getState();
+    const mcpToolDefs = mcpState.getAllMcpTools();
+    for (const def of mcpToolDefs) {
+      const parts = def.name.match(/^mcp_([^_]+)_(.+)$/);
+      const serverId = parts?.[1] ?? "";
+      const realToolName = parts?.[2] ?? def.name;
+      const server = mcpState.servers.find((s) => s.id === serverId);
+
+      const params: Record<string, { type: string; description?: string }> = {};
+      if (def.input_schema && typeof def.input_schema === "object") {
+        const schema = def.input_schema as Record<string, unknown>;
+        const props = (schema.properties ?? {}) as Record<string, { type?: string; description?: string }>;
+        for (const [k, v] of Object.entries(props)) {
+          params[k] = { type: v.type ?? "string", description: v.description };
+        }
+      }
+
+      tools.push({
+        name: def.name,
+        description: def.description ?? `MCP tool: ${realToolName}`,
+        parameters: Object.keys(params).length > 0 ? params : { input: { type: "string", description: "Tool input" } },
+        execute: async (args) => {
+          try {
+            const message = JSON.stringify({
+              jsonrpc: "2.0",
+              id: Date.now(),
+              method: "tools/call",
+              params: { name: realToolName, arguments: args },
+            });
+
+            let response: string;
+            if (server?.transport === "sse" && server.url) {
+              response = await invoke<string>("mcp_send_sse_message", {
+                url: server.url,
+                message,
+                headers: server.headers ?? null,
+              });
+            } else {
+              response = await invoke<string>("send_mcp_message", {
+                serverId,
+                message,
+              });
+            }
+
+            const parsed = JSON.parse(response);
+            if (parsed.error) return { error: parsed.error.message ?? JSON.stringify(parsed.error) };
+            const content = parsed.result?.content;
+            if (Array.isArray(content)) {
+              return content.map((c: { text?: string }) => c.text ?? "").join("\n");
+            }
+            return parsed.result;
+          } catch (e) {
+            return { error: `MCP tool call failed: ${e}` };
+          }
+        },
+      });
+    }
+
     setAvailableTools(tools);
     setResetPerRunState(() => builtinResult.resetPerRunState);
     setNotifyToolCalled(() => builtinResult.notifyToolCalled);

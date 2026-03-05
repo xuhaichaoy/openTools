@@ -1,8 +1,9 @@
 import { JsonCollection, SyncableCollection, type SyncMeta } from "@/core/database/index";
+import { invoke } from "@tauri-apps/api/core";
 
-export type AIMemoryKind = "preference" | "fact" | "goal" | "constraint";
+export type AIMemoryKind = "preference" | "fact" | "goal" | "constraint" | "project_context" | "conversation_summary";
 export type AIMemoryScope = "global" | "conversation";
-export type AIMemorySource = "user" | "assistant" | "system";
+export type AIMemorySource = "user" | "assistant" | "system" | "agent";
 
 export interface AIMemoryItem extends SyncMeta {
   id: string;
@@ -403,7 +404,11 @@ export function buildMemoryPromptBlock(memories: AIMemoryItem[]): string {
           ? "目标"
           : memory.kind === "preference"
             ? "偏好"
-            : "事实";
+            : memory.kind === "project_context"
+              ? "项目"
+              : memory.kind === "conversation_summary"
+                ? "摘要"
+                : "事实";
     return `${index + 1}. [${label}] ${trimMemoryContent(memory.content, 180)}`;
   });
 
@@ -411,4 +416,157 @@ export function buildMemoryPromptBlock(memories: AIMemoryItem[]): string {
     "以下是用户确认过的长期记忆，请在回答中优先遵循（如与当前明确指令冲突，以当前指令为准）：",
     ...lines,
   ].join("\n");
+}
+
+// ── Unified Agent Memory Support ──
+
+const AGENT_KIND_MAP: Record<string, AIMemoryKind> = {
+  preference: "preference",
+  fact: "fact",
+  pattern: "preference",
+};
+
+export async function addMemoryFromAgent(
+  key: string,
+  value: string,
+  category: string = "preference",
+): Promise<AIMemoryItem | null> {
+  const content = `${key}: ${value}`;
+  const sanitized = sanitizeCandidateStrict(content);
+  if (!sanitized.ok) return null;
+
+  const text = sanitized.sanitized;
+  const normalized = normalizeForCompare(text);
+  const kind = AGENT_KIND_MAP[category] ?? inferKind(text);
+  const tags = inferTags(text);
+  const importance = inferImportance(kind, text);
+  const now = Date.now();
+
+  const memories = await aiMemoryDb.getAll();
+  const existing = memories.find(
+    (item) => !item.deleted && normalizeForCompare(item.content) === normalized,
+  );
+
+  if (existing) {
+    return (
+      (await aiMemoryDb.update(existing.id, {
+        content: trimMemoryContent(text),
+        kind,
+        tags: [...new Set([...(existing.tags || []), ...tags])],
+        importance: Math.max(existing.importance ?? 0.5, importance),
+        updated_at: now,
+        use_count: (existing.use_count || 0) + 1,
+      })) ?? null
+    );
+  }
+
+  return await aiMemoryDb.create({
+    id: createId("mem"),
+    content: trimMemoryContent(text),
+    kind,
+    tags,
+    scope: "global",
+    importance,
+    confidence: 0.8,
+    source: "agent",
+    created_at: now,
+    updated_at: now,
+    last_used_at: null,
+    use_count: 1,
+    deleted: false,
+  });
+}
+
+// ── Semantic Recall (embedding-based) ──
+
+export async function semanticRecall(
+  query: string,
+  options?: RecallOptions,
+): Promise<AIMemoryItem[]> {
+  const topK = options?.topK ?? DEFAULT_RECALL_TOP_K;
+
+  // Try RAG embedding search first; fall back to keyword-based recall
+  try {
+    const results = await invoke<Array<{ content: string; score: number }>>("rag_search", {
+      query,
+      topK,
+      collection: "ai_memory",
+    });
+    if (results && results.length > 0) {
+      const all = await aiMemoryDb.getAll();
+      const contentMap = new Map(all.filter((m) => !m.deleted).map((m) => [normalizeForCompare(m.content), m]));
+      const matched: AIMemoryItem[] = [];
+      for (const r of results) {
+        const found = contentMap.get(normalizeForCompare(r.content));
+        if (found) matched.push(found);
+      }
+      if (matched.length > 0) return matched;
+    }
+  } catch {
+    // RAG not available for memory collection, fall back
+  }
+
+  return recallMemories(query, options);
+}
+
+// ── Migrate Agent Memory from localStorage ──
+
+export async function migrateAgentMemory(): Promise<number> {
+  const STORAGE_KEY = "agent_user_memory";
+  let migrated = 0;
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return 0;
+    const items = JSON.parse(raw) as Array<{
+      key: string;
+      value: string;
+      category: string;
+      createdAt: number;
+      usedCount: number;
+    }>;
+    for (const item of items) {
+      await addMemoryFromAgent(item.key, item.value, item.category);
+      migrated++;
+    }
+    localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    // migration is best-effort
+  }
+  return migrated;
+}
+
+// ── Update/Edit Memory ──
+
+export async function updateMemoryContent(
+  memoryId: string,
+  content: string,
+): Promise<AIMemoryItem | null> {
+  const sanitized = sanitizeCandidateStrict(content);
+  if (!sanitized.ok) return null;
+  return (
+    (await aiMemoryDb.update(memoryId, {
+      content: trimMemoryContent(sanitized.sanitized),
+      kind: inferKind(sanitized.sanitized),
+      tags: inferTags(sanitized.sanitized),
+      updated_at: Date.now(),
+    })) ?? null
+  );
+}
+
+// ── Get Memory Stats ──
+
+export async function getMemoryStats(): Promise<{
+  total: number;
+  byKind: Record<string, number>;
+  bySource: Record<string, number>;
+}> {
+  const all = await aiMemoryDb.getAll();
+  const active = all.filter((m) => !m.deleted);
+  const byKind: Record<string, number> = {};
+  const bySource: Record<string, number> = {};
+  for (const m of active) {
+    byKind[m.kind] = (byKind[m.kind] || 0) + 1;
+    bySource[m.source] = (bySource[m.source] || 0) + 1;
+  }
+  return { total: active.length, byKind, bySource };
 }

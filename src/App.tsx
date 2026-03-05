@@ -4,9 +4,11 @@ import { LoginModal } from "@/components/auth/LoginModal";
 import { SyncManager } from "@/components/auth/SyncManager";
 import { ClusterFloatingIndicator } from "@/components/cluster/ClusterFloatingIndicator";
 import { GlobalAskUserDialog } from "@/components/global/GlobalAskUserDialog";
+import { GlobalConfirmDialog } from "@/components/global/GlobalConfirmDialog";
+import { GlobalClusterPlanApprovalDialog } from "@/components/global/GlobalClusterPlanApprovalDialog";
 import { MainViewRouter } from "@/components/app/MainViewRouter";
 import { useAppStore } from "@/store/app-store";
-import { useAIStore } from "@/store/ai-store";
+import { routeToAICenter } from "@/core/ai/ai-center-routing";
 
 import { registry } from "@/core/plugin-system/registry";
 import { usePluginEmbed } from "@/shell/usePluginEmbed";
@@ -79,18 +81,17 @@ function MainApp() {
   // ── Submit handler ──
   const handleSubmit = useCallback(
     (value: string, currentMode: string, images?: string[]) => {
-      if (
-        currentMode === "ai" ||
-        value.startsWith("ai ") ||
-        (images && images.length > 0)
-      ) {
+      if (currentMode === "ai" || value.startsWith("ai ") || (images && images.length > 0)) {
         const query = value.startsWith("ai ") ? value.slice(3) : value;
-        const finalQuery =
-          query.trim() || (images?.length ? "请描述这张图片" : "");
-
+        const finalQuery = query.trim() || (images?.length ? "请描述这张图片" : "");
         if (finalQuery || (images && images.length > 0)) {
-          useAIStore.getState().sendMessage(finalQuery, images);
-          pushView("ai-center");
+          routeToAICenter({
+            mode: "ask",
+            source: "main_search_submit",
+            query: finalQuery,
+            images,
+            pushView,
+          });
         }
         return;
       }
@@ -98,12 +99,14 @@ function MainApp() {
       if (value.startsWith("/ ")) {
         const cmd = value.slice(2).trim();
         if (cmd) {
-          useAIStore
-            .getState()
-            .sendMessage(`请执行以下 shell 命令并解释结果：\`${cmd}\``);
+          routeToAICenter({
+            mode: "agent",
+            source: "main_shell_shortcut",
+            agentInitialQuery: `请执行以下 shell 命令并解释结果：\`${cmd}\``,
+            note: "main search bar shortcut",
+            pushView,
+          });
         }
-        useAppStore.getState().setAiInitialMode("agent");
-        pushView("ai-center");
         return;
       }
 
@@ -149,6 +152,8 @@ function MainApp() {
       <LoginModal />
       <SyncManager />
       <ClusterFloatingIndicator />
+      <GlobalConfirmDialog />
+      <GlobalClusterPlanApprovalDialog />
       <GlobalAskUserDialog />
     </div>
   );

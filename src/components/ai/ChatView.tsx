@@ -22,7 +22,6 @@ import {
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
 import { useAIStore } from "@/store/ai-store";
-import { useAppStore } from "@/store/app-store";
 import { useToast } from "@/components/ui/Toast";
 import { handleError } from "@/core/errors";
 import { useInputAttachments } from "@/hooks/use-input-attachments";
@@ -32,6 +31,7 @@ import { ToolConfirmDialog } from "./ToolConfirmDialog";
 import { ChatInput } from "./ChatInput";
 import { ChatHistory } from "./ChatHistory";
 import { useDragWindow } from "@/hooks/useDragWindow";
+import { routeToAICenter } from "@/core/ai/ai-center-routing";
 
 export interface ChatViewHandle {
   toggleHistory: () => void;
@@ -158,8 +158,12 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
         .map((m) => `[${m.role === "user" ? "用户" : "助手"}]: ${m.content.slice(0, 300)}${m.content.length > 300 ? "…" : ""}`)
         .join("\n");
       const query = `以下是之前的对话上下文，请基于此继续执行任务：\n\n${summary}`;
-      useAppStore.getState().setPendingAgentInitialQuery(query);
-      useAppStore.getState().setAiCenterMode("agent");
+      routeToAICenter({
+        mode: "agent",
+        source: "ask_continue_to_agent",
+        agentInitialQuery: query,
+        navigate: false,
+      });
     },
   }));
 
@@ -569,7 +573,7 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
           {/* 滚动到底部按钮 */}
           {showScrollBtn && (
             <button
-              onClick={scrollToBottom}
+              onClick={() => scrollToBottom()}
               className="sticky bottom-2 left-1/2 -translate-x-1/2 w-7 h-7 rounded-full bg-[var(--color-bg)]/60 border border-[var(--color-border)]/40 shadow-sm flex items-center justify-center text-[var(--color-text-secondary)]/50 hover:text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)]/80 transition-all z-10 backdrop-blur-sm"
               title="滚动到底部"
             >

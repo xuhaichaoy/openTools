@@ -304,7 +304,7 @@ describe("useAgentExecution", () => {
     expect(lastCall?.[2]?.answer).toBe("mock-result");
   });
 
-  it("reports timeout error when execution exceeds timeout", async () => {
+  it("reports timeout or model-stall error when execution exceeds progress thresholds", async () => {
     vi.useFakeTimers();
     hoisted.runMode = "timeout";
     hoisted.fakeStoreState = {
@@ -359,10 +359,11 @@ describe("useAgentExecution", () => {
       await runPromise;
     });
 
-    const timeoutMessageCall = updateTask.mock.calls.find((call) =>
-      String(call?.[2]?.answer || "").includes("超时"),
-    );
-    expect(timeoutMessageCall).toBeTruthy();
+    const timeoutOrStallMessageCall = updateTask.mock.calls.find((call) => {
+      const answer = String(call?.[2]?.answer || "");
+      return answer.includes("超时") || answer.includes("无响应");
+    });
+    expect(timeoutOrStallMessageCall).toBeTruthy();
     vi.useRealTimers();
   });
 });

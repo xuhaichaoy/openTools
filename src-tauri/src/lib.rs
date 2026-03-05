@@ -220,6 +220,8 @@ pub fn run() {
             commands::plugin::PluginDevState::new(),
         ))
         .manage(commands::mcp::McpServerManager::new())
+        .manage(commands::ssh::SshManager::new())
+        .manage(commands::database::DatabaseManager::new())
         .manage(commands::ding::DingManager::new())
         // 自定义协议：为插件文件提供 Tauri IPC 支持
         // 用 mtplugin://localhost/绝对路径 替代 file:// URL
@@ -445,12 +447,41 @@ pub fn run() {
             commands::mcp::start_mcp_stdio_server,
             commands::mcp::stop_mcp_server,
             commands::mcp::send_mcp_message,
+            commands::mcp::mcp_send_sse_message,
+            commands::mcp::mcp_save_config,
+            commands::mcp::mcp_load_config,
+            commands::mcp::mcp_list_servers,
+            commands::mcp::mcp_get_server_status,
             commands::translate::translate_text,
             commands::collection::collection_get_all,
             commands::collection::collection_create,
             commands::collection::collection_update,
             commands::collection::collection_delete,
             commands::collection::collection_set_all,
+            // ── SSH ──
+            commands::ssh::ssh_connect,
+            commands::ssh::ssh_disconnect,
+            commands::ssh::ssh_shell_open,
+            commands::ssh::ssh_shell_write,
+            commands::ssh::ssh_shell_resize,
+            commands::ssh::ssh_sftp_list,
+            commands::ssh::ssh_sftp_read,
+            commands::ssh::ssh_sftp_write,
+            commands::ssh::ssh_sftp_mkdir,
+            commands::ssh::ssh_sftp_remove,
+            commands::ssh::ssh_sftp_rename,
+            commands::ssh::ssh_save_connections,
+            commands::ssh::ssh_load_connections,
+            // ── Database ──
+            commands::database::db_connect,
+            commands::database::db_disconnect,
+            commands::database::db_test_connection,
+            commands::database::db_execute_query,
+            commands::database::db_list_schemas,
+            commands::database::db_list_tables,
+            commands::database::db_describe_table,
+            commands::database::db_save_connections,
+            commands::database::db_load_connections,
             // ── Native Apps ──
             commands::native_apps::native_calendar_list,
             commands::native_apps::native_calendar_create_event,

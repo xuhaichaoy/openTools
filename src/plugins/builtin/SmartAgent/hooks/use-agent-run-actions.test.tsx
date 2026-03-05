@@ -46,7 +46,9 @@ describe("useAgentRunActions", () => {
           params={{
             ai: {} as never,
             input: "看一下桌面红楼内容",
-            pendingImages: [],
+            imagePaths: [],
+            fileContextBlock: "",
+            attachmentSummary: "",
             setInput: vi.fn(),
             clearAssets: vi.fn(),
             executeAgentTask,
@@ -61,7 +63,10 @@ describe("useAgentRunActions", () => {
     });
 
     expect(executeAgentTask).toHaveBeenCalledTimes(1);
-    expect(executeAgentTask).toHaveBeenCalledWith("看一下桌面红楼内容");
+    expect(executeAgentTask).toHaveBeenCalledWith("看一下桌面红楼内容", {
+      images: undefined,
+      systemHint: undefined,
+    });
   });
 
   it("calls executeAgentTask for complex requirements (no plan routing)", async () => {
@@ -77,7 +82,9 @@ describe("useAgentRunActions", () => {
           params={{
             ai: {} as never,
             input: "给我一个完整实施计划，包含里程碑和排期",
-            pendingImages: [],
+            imagePaths: [],
+            fileContextBlock: "",
+            attachmentSummary: "",
             setInput: vi.fn(),
             clearAssets: vi.fn(),
             executeAgentTask,
@@ -94,6 +101,10 @@ describe("useAgentRunActions", () => {
     expect(executeAgentTask).toHaveBeenCalledTimes(1);
     expect(executeAgentTask).toHaveBeenCalledWith(
       "给我一个完整实施计划，包含里程碑和排期",
+      {
+        images: undefined,
+        systemHint: undefined,
+      },
     );
   });
 
@@ -110,7 +121,9 @@ describe("useAgentRunActions", () => {
           params={{
             ai: {} as never,
             input: "追问内容",
-            pendingImages: [],
+            imagePaths: [],
+            fileContextBlock: "",
+            attachmentSummary: "",
             setInput: vi.fn(),
             clearAssets: vi.fn(),
             executeAgentTask,
@@ -125,10 +138,13 @@ describe("useAgentRunActions", () => {
     });
 
     expect(executeAgentTask).toHaveBeenCalledTimes(1);
-    expect(executeAgentTask).toHaveBeenCalledWith("追问内容");
+    expect(executeAgentTask).toHaveBeenCalledWith("追问内容", {
+      images: undefined,
+      systemHint: undefined,
+    });
   });
 
-  it("appends image info to query when images are provided", async () => {
+  it("passes image paths via execute options", async () => {
     const executeAgentTask = vi.fn(async (_query: string) => undefined);
     let hookValue: ReturnType<typeof useAgentRunActions> | null = null;
 
@@ -141,7 +157,9 @@ describe("useAgentRunActions", () => {
           params={{
             ai: {} as never,
             input: "分析这张图",
-            pendingImages: ["/tmp/test.png"],
+            imagePaths: ["/tmp/test.png"],
+            fileContextBlock: "",
+            attachmentSummary: "",
             setInput: vi.fn(),
             clearAssets: vi.fn(),
             executeAgentTask,
@@ -156,8 +174,9 @@ describe("useAgentRunActions", () => {
     });
 
     expect(executeAgentTask).toHaveBeenCalledTimes(1);
-    const calledQuery = executeAgentTask.mock.calls[0][0];
-    expect(calledQuery).toContain("分析这张图");
-    expect(calledQuery).toContain("/tmp/test.png");
+    expect(executeAgentTask).toHaveBeenCalledWith("分析这张图", {
+      images: ["/tmp/test.png"],
+      systemHint: undefined,
+    });
   });
 });

@@ -386,6 +386,7 @@ function createLocalDevTools(
     {
       name: "run_shell_command",
       description: "执行终端命令（用于构建、测试、格式化、搜索等）。每次调用独立执行，不保留工作目录等状态。如需保持会话状态（如 cd 后继续操作），请使用 persistent_shell 工具。",
+      timeout: 240_000,
       parameters: {
         command: { type: "string", description: "命令行指令" },
       },
@@ -459,9 +460,9 @@ function createLocalDevTools(
 
         const fullCommand = `cd ${JSON.stringify(projectPath)} && ${commands.join(" && echo '---' && ")}`;
         try {
-          const result = await agentRuntimeManager.runShellCommand(fullCommand, {
+          const result = (await agentRuntimeManager.runShellCommand(fullCommand, {
             confirmHostFallback,
-          }) as Record<string, unknown>;
+          })) as unknown as Record<string, unknown>;
 
           const stdout = String(result.stdout || result.output || "").trim();
           const stderr = String(result.stderr || "").trim();
@@ -1242,11 +1243,11 @@ export function createBuiltinAgentTools(
       const key = String(params.key || "").trim();
       const value = String(params.value || "").trim();
       if (!key || !value) return { error: "key 和 value 不能为空" };
-      const category = (params.category as "preference" | "fact" | "pattern") || "preference";
+      const category = String(params.category || "preference");
       try {
-        const { useAgentMemoryStore } = await import("@/store/agent-memory-store");
-        useAgentMemoryStore.getState().addMemory(key, value, category);
-        return { status: "saved", key, value };
+        const { addMemoryFromAgent } = await import("@/core/ai/memory-store");
+        const saved = await addMemoryFromAgent(key, value, category);
+        return saved ? { status: "saved", key, value } : { status: "filtered", reason: "content filtered" };
       } catch (e) {
         return { error: `保存记忆失败: ${e}` };
       }
@@ -1321,7 +1322,7 @@ export function createBuiltinAgentTools(
           setTimeout(() => reject(new Error("SHELL_TIMEOUT")), timeoutSec * 1000),
         );
 
-        const result = await Promise.race([resultPromise, timeoutPromise]) as Record<string, unknown>;
+        const result = (await Promise.race([resultPromise, timeoutPromise])) as unknown as Record<string, unknown>;
 
         // 从输出中提取新的 cwd
         const stdout = String(result.stdout || result.output || "");

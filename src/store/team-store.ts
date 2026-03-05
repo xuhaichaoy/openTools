@@ -362,8 +362,10 @@ export const useTeamStore = create<TeamState>((set, get) => ({
   },
 }));
 
-useAuthStore.subscribe((state, prev) => {
-  if (prev.isLoggedIn !== state.isLoggedIn) {
-    useTeamStore.getState().reset();
-  }
-});
+if (typeof useAuthStore.subscribe === "function") {
+  useAuthStore.subscribe((state, prev) => {
+    if (prev.isLoggedIn !== state.isLoggedIn) {
+      useTeamStore.getState().reset();
+    }
+  });
+}

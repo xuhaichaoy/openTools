@@ -36,9 +36,6 @@ const ClusterPanel = lazy(() =>
   ),
 );
 
-/** 检测用户输入是否适合 Agent 模式（包含执行类关键词） */
-const AGENT_KEYWORDS = /(?:执行|运行|打开|创建|删除|文件|目录|命令|shell|终端|安装|部署|下载|上传|移动|复制|重命名)/i;
-
 export function AICenter({
   onBack,
   context,

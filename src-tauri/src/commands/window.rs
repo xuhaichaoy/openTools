@@ -1,7 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Manager};
-
-static IS_DRAGGING: AtomicBool = AtomicBool::new(false);
 
 /// 切换主窗口显隐
 #[tauri::command]
@@ -55,46 +52,19 @@ pub async fn show_window_cmd(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 开始拖拽窗口（nchao 方式：记录初始位置，轮询鼠标移动）
+/// 开始拖拽窗口（使用 Tauri 原生 API）
 #[tauri::command]
 pub async fn start_drag(app: AppHandle) -> Result<(), String> {
     let window = app.get_webview_window("main").ok_or("找不到主窗口")?;
-
-    // 获取窗口当前位置
-    let win_pos = window.outer_position().map_err(|e| e.to_string())?;
-    // 获取鼠标当前位置
-    let cursor = window.cursor_position().map_err(|e| e.to_string())?;
-
-    let win_x = win_pos.x;
-    let win_y = win_pos.y;
-    let mouse_x = cursor.x as i32;
-    let mouse_y = cursor.y as i32;
-
-    IS_DRAGGING.store(true, Ordering::SeqCst);
-
-    let win = window.clone();
-    std::thread::spawn(move || {
-        while IS_DRAGGING.load(Ordering::SeqCst) {
-            if let Ok(cur) = win.cursor_position() {
-                let dx = cur.x as i32 - mouse_x;
-                let dy = cur.y as i32 - mouse_y;
-                let new_x = win_x + dx;
-                let new_y = win_y + dy;
-                let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
-                    x: new_x,
-                    y: new_y,
-                }));
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-    });
-
+    window
+        .start_dragging()
+        .map_err(|e| format!("开始拖拽失败: {}", e))?;
     Ok(())
 }
 
-/// 停止拖拽窗口
+/// 停止拖拽窗口（原生拖拽不需要手动停止，但保留接口兼容前端）
 #[tauri::command]
 pub async fn stop_drag() -> Result<(), String> {
-    IS_DRAGGING.store(false, Ordering::SeqCst);
+    // 原生拖拽由系统管理，无需手动处理
     Ok(())
 }

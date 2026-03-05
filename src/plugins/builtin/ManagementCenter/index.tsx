@@ -19,6 +19,8 @@ import {
   Moon,
   Info,
   Keyboard,
+  Plug,
+  Brain,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
@@ -32,6 +34,8 @@ import { AIModelTab } from "./components/AIModelTab";
 import { TeamTab } from "./components/TeamTab";
 import { MyDataTab } from "./components/MyDataTab";
 import { EnergyLogsTab } from "./components/EnergyLogsTab";
+import { MCPTab } from "./components/MCPTab";
+import { MemoryTab } from "./components/MemoryTab";
 import { AvatarPicker } from "@/components/common/AvatarPicker";
 import { resolveAvatarUrl } from "@/utils/avatar";
 import { ServerConfigTab } from "./components/ServerConfigTab";
@@ -46,6 +50,8 @@ type TabId =
   | "team"
   | "settings"
   | "ai-model"
+  | "mcp"
+  | "memory"
   | "credentials"
   | "shortcuts"
   | "server"
@@ -63,6 +69,8 @@ export default function ManagementCenter({ onBack }: MToolsPluginProps) {
     { id: "team", icon: Users, label: "团队空间", group: "个人中心" },
     { id: "settings", icon: Settings, label: "通用设置", group: "偏好设置" },
     { id: "ai-model", icon: Cpu, label: "AI 模型", group: "偏好设置" },
+    { id: "mcp", icon: Plug, label: "MCP 服务器", group: "偏好设置" },
+    { id: "memory", icon: Brain, label: "AI 记忆", group: "偏好设置" },
     { id: "credentials", icon: ShieldCheck, label: "凭证管理", group: "偏好设置" },
     { id: "server", icon: Server, label: "服务器地址", group: "偏好设置" },
     // "shortcuts" (快捷方式) 暂未实现，隐藏入口直到完成
@@ -138,6 +146,8 @@ export default function ManagementCenter({ onBack }: MToolsPluginProps) {
           {activeTab === "team" && <TeamTab />}
           {activeTab === "settings" && <GeneralSettingsTab />}
           {activeTab === "ai-model" && <AIModelTab />}
+          {activeTab === "mcp" && <MCPTab />}
+          {activeTab === "memory" && <MemoryTab />}
           {activeTab === "server" && <ServerConfigTab />}
           {activeTab === "credentials" && (
             <div className="max-w-xl mx-auto">

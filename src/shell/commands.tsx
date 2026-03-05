@@ -8,12 +8,12 @@ import {
   Zap,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
-import { useAIStore } from "@/store/ai-store";
 import { commandRouter } from "./CommandRouter";
 import { registry } from "@/core/plugin-system/registry";
 import { useAppStore } from "@/store/app-store";
 import { usePluginStore } from "@/store/plugin-store";
 import { handleError } from "@/core/errors";
+import { routeToAICenter } from "@/core/ai/ai-center-routing";
 
 function ensureBuiltinPluginInstalled(
   viewId: string,
@@ -64,8 +64,12 @@ commandRouter.register({
     color: "text-indigo-500 bg-indigo-500/10",
     category: "AI",
     action: () => {
-      useAIStore.getState().sendMessage(query);
-      ctx.pushView("ai-center");
+      routeToAICenter({
+        mode: "ask",
+        source: "command_palette_ai",
+        query,
+        pushView: ctx.pushView,
+      });
     },
   }],
 });
@@ -124,8 +128,12 @@ commandRouter.register({
     category: "Agent",
     action: () => {
       if (cmd.trim()) {
-        useAIStore.getState().sendMessage(`请执行以下 shell 命令并解释结果：\`${cmd.trim()}\``);
-        ctx.pushView("ai-center");
+        routeToAICenter({
+          mode: "agent",
+          source: "command_palette_shell",
+          agentInitialQuery: `请执行以下 shell 命令并解释结果：\`${cmd.trim()}\``,
+          pushView: ctx.pushView,
+        });
       }
     },
   }],
