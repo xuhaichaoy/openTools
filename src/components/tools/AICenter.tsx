@@ -73,8 +73,9 @@ export function AICenter({
   const agentRef = useRef<SmartAgentHandle>(null);
 
   const { onMouseDown } = useDragWindow();
-  const { conversations } = useAIStore();
-  const { sessions, scheduledTasks } = useAgentStore();
+  const conversationCount = useAIStore((s) => s.conversations.length);
+  const agentSessionCount = useAgentStore((s) => s.sessions.length);
+  const scheduledTaskCount = useAgentStore((s) => s.scheduledTasks.length);
   const clusterSessionCount = useClusterStore((s) => s.sessions.length);
 
   const Loading = (
@@ -138,9 +139,9 @@ export function AICenter({
               title="对话历史"
             >
               <History className="w-4 h-4" />
-              {conversations.length > 1 && (
+              {conversationCount > 1 && (
                 <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 bg-indigo-500 text-white text-[7px] rounded-full flex items-center justify-center font-medium">
-                  {conversations.length > 99 ? "99+" : conversations.length}
+                  {conversationCount > 99 ? "99+" : conversationCount}
                 </span>
               )}
             </button>
@@ -184,9 +185,9 @@ export function AICenter({
               title="任务历史"
             >
               <History className="w-4 h-4" />
-              {sessions.length > 1 && (
+              {agentSessionCount > 1 && (
                 <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 bg-emerald-500 text-white text-[7px] rounded-full flex items-center justify-center font-medium">
-                  {sessions.length > 99 ? "99+" : sessions.length}
+                  {agentSessionCount > 99 ? "99+" : agentSessionCount}
                 </span>
               )}
             </button>
@@ -203,9 +204,9 @@ export function AICenter({
               title="编排任务"
             >
               <Clock3 className="w-3.5 h-3.5" />
-              {scheduledTasks.length > 0 && (
+              {scheduledTaskCount > 0 && (
                 <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 bg-amber-500 text-white text-[7px] rounded-full flex items-center justify-center font-medium">
-                  {scheduledTasks.length > 99 ? "99+" : scheduledTasks.length}
+                  {scheduledTaskCount > 99 ? "99+" : scheduledTaskCount}
                 </span>
               )}
             </button>
@@ -245,7 +246,7 @@ export function AICenter({
           )}
           {mounted.cluster && (
             <div className={`absolute inset-0 ${mode === "cluster" ? "" : "invisible pointer-events-none"}`}>
-              <ClusterPanel />
+              <ClusterPanel active={mode === "cluster"} />
             </div>
           )}
         </Suspense>

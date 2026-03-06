@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   Loader2,
   ChevronDown,
@@ -9,6 +9,8 @@ import {
   MessageCircle,
   AlertCircle,
   X,
+  Copy,
+  Check,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -132,6 +134,8 @@ function AgentTaskBlockInner({
   onToggleStep,
 }: AgentTaskBlockProps) {
   const [previewImage, setPreviewImage] = useState<string | null>(null);
+  const [queryCopied, setQueryCopied] = useState(false);
+  const copyResetTimerRef = useRef<number | null>(null);
   const isRunningTask = isRunning && isLastTask;
   // 稳定化 onToggleProcess 绑定，避免内联箭头函数破坏子组件 memo
   const handleToggleProcess = useCallback(
@@ -160,6 +164,28 @@ function AgentTaskBlockInner({
     cancelled: "已取消",
   };
 
+  useEffect(() => {
+    return () => {
+      if (copyResetTimerRef.current !== null) {
+        window.clearTimeout(copyResetTimerRef.current);
+      }
+    };
+  }, []);
+
+  const handleCopyQuery = useCallback(() => {
+    navigator.clipboard.writeText(task.query).then(() => {
+      setQueryCopied(true);
+      if (copyResetTimerRef.current !== null) {
+        window.clearTimeout(copyResetTimerRef.current);
+      }
+      copyResetTimerRef.current = window.setTimeout(() => {
+        setQueryCopied(false);
+      }, 1200);
+    }).catch(() => {
+      setQueryCopied(false);
+    });
+  }, [task.query]);
+
   return (
     <div className="space-y-1.5">
       <div className="rounded-lg bg-sky-500/[0.06] px-2.5 py-2">
@@ -175,11 +201,31 @@ function AgentTaskBlockInner({
             )}
             {statusLabelMap[effectiveStatus] || "待执行"}
           </span>
-          {lastStep && (
-            <span className="text-[10px] text-[var(--color-text-secondary)] ml-auto">
-              {formatClock(lastStep.timestamp)}
-            </span>
-          )}
+          <div className="ml-auto flex items-center gap-1">
+            {lastStep && (
+              <span className="text-[10px] text-[var(--color-text-secondary)]">
+                {formatClock(lastStep.timestamp)}
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={handleCopyQuery}
+              className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-md border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] transition-colors"
+              title="复制提问"
+            >
+              {queryCopied ? (
+                <>
+                  <Check className="w-3 h-3" />
+                  已复制
+                </>
+              ) : (
+                <>
+                  <Copy className="w-3 h-3" />
+                  复制
+                </>
+              )}
+            </button>
+          </div>
         </div>
         <p className="text-[15px] mt-1 leading-snug break-words text-[var(--color-text)]">
           {task.query}

@@ -13,7 +13,9 @@ dist
 dist-ssr
 *.local
 
+src-tauri/target
 crates/screen-capture-helper/target
+crates/**/target
 
 # Editor directories and files
 .vscode/*

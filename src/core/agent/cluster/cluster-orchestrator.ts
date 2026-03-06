@@ -28,6 +28,7 @@ import type {
 
 const CLUSTER_EXECUTION_TIMEOUT_MS = 1_800_000; // 30 minutes
 const STEP_EXECUTION_TIMEOUT_MS = 300_000; // 5 minutes per step
+const STEP_EXECUTION_TIMEOUT_OPENCLAW_MS = 600_000; // 10 minutes per step
 
 /**
  * Retry wrapper for ai.chat calls — handles transient network / decoding errors.
@@ -59,7 +60,7 @@ async function retryChat(
 export interface ClusterOrchestratorOptions {
   maxConcurrency?: number;
   signal?: AbortSignal;
-  /** 全局执行超时（ms），默认 600s */
+  /** 全局执行超时（ms），默认 1800s */
   timeoutMs?: number;
   onStatusChange?: (status: ClusterSessionStatus) => void;
   onInstanceUpdate?: (instance: AgentInstance) => void;
@@ -75,6 +76,7 @@ export interface ClusterOrchestratorOptions {
   autoReviewCodeSteps?: boolean;
   codingMode?: boolean;
   largeProjectMode?: boolean;
+  openClawMode?: boolean;
 }
 
 /**
@@ -268,6 +270,7 @@ export class ClusterOrchestrator {
     const codingPlannerHint = getClusterPlannerCodingHint({
       codingMode: this.options.codingMode,
       largeProjectMode: this.options.largeProjectMode,
+      openClawMode: this.options.openClawMode,
     });
 
     const imageHint = this.runImages?.length
@@ -299,17 +302,6 @@ ${forceMode ? `强制使用模式: ${forceMode}` : "根据任务复杂度自动�
     };
     const response = await retryChat(ai, chatParams, this.signal);
 
-    let planJson = extractJson(response.content);
-
-    if (!planJson) {
-      const repaired = repairJsonString(response.content);
-      planJson = repaired ? extractJson(repaired) : null;
-    }
-
-    if (!planJson) {
-      throw new Error(`Planner 未返回有效的 JSON 计划: ${response.content.slice(0, 200)}`);
-    }
-
     type ParsedStep = {
       id?: string;
       role?: string;
@@ -331,11 +323,61 @@ ${forceMode ? `强制使用模式: ${forceMode}` : "根据任务复杂度自动�
       plan?: { steps?: ParsedStep[] } | ParsedStep[];
     };
 
-    let parsed: ParsedPlan;
-    try {
-      parsed = JSON.parse(planJson) as ParsedPlan;
-    } catch {
-      throw new Error(`Planner 返回的 JSON 解析失败: ${planJson.slice(0, 200)}`);
+    let {
+      value: parsed,
+      json: planJson,
+      error: parseError,
+    } = parseFirstValidJsonObject<ParsedPlan>(response.content);
+
+    if (!parsed) {
+      this.emitProgress("plan_retry", {
+        reason: "planner_invalid_json_first_pass",
+        error: parseError,
+        raw: response.content.slice(0, 300),
+      });
+
+      const retryResponse = await retryChat(
+        ai,
+        {
+          ...chatParams,
+          messages: [
+            ...chatParams.messages,
+            {
+              role: "user" as const,
+              content:
+                "你上一轮输出不是有效 JSON。请重新输出一个合法 JSON 对象，不要代码块，不要解释文字。仅包含 mode 和 steps 字段，steps 不超过 6。",
+            },
+          ],
+        },
+        this.signal,
+        1,
+      );
+
+      ({
+        value: parsed,
+        json: planJson,
+        error: parseError,
+      } = parseFirstValidJsonObject<ParsedPlan>(retryResponse.content));
+    }
+
+    if (!parsed) {
+      this.emitProgress("plan_retry", {
+        reason: "planner_invalid_json_fallback_single_step",
+        error: parseError,
+        raw: response.content.slice(0, 300),
+      });
+      const fallbackMode: ClusterMode = forceMode ?? "parallel_split";
+      const fallbackSteps: ClusterStep[] = [{
+        id: "step_1",
+        role: "researcher",
+        task: query,
+        dependencies: [],
+        outputKey: "step_1_result",
+      }];
+      const fallbackPlan = createClusterPlan(fallbackMode, fallbackSteps);
+      this.messageBus.setContext("_query", query);
+      this.messageBus.setContext("_plan", fallbackPlan);
+      return fallbackPlan;
     }
 
     const rawSteps: ParsedStep[] =
@@ -635,6 +677,7 @@ ${forceMode ? `强制使用模式: ${forceMode}` : "根据任务复杂度自动�
       const codingHint = getClusterStepCodingHint(role.id, {
         codingMode: this.options.codingMode,
         largeProjectMode: this.options.largeProjectMode,
+        openClawMode: this.options.openClawMode,
       });
       const projectBlock = this.projectContext ? `\n\n${this.projectContext}` : "";
       const prefix = [autonomyHint, codingHint].filter(Boolean).join("\n");
@@ -652,7 +695,10 @@ ${forceMode ? `强制使用模式: ${forceMode}` : "根据任务复杂度自动�
       }
 
       const stepAbort = new AbortController();
-      const stepTimer = setTimeout(() => stepAbort.abort("单步执行超时"), STEP_EXECUTION_TIMEOUT_MS);
+      const stepTimeoutMs = this.options.openClawMode
+        ? STEP_EXECUTION_TIMEOUT_OPENCLAW_MS
+        : STEP_EXECUTION_TIMEOUT_MS;
+      const stepTimer = setTimeout(() => stepAbort.abort("单步执行超时"), stepTimeoutMs);
       const onGlobalAbort = () => stepAbort.abort(this.signal.reason);
       this.signal.addEventListener("abort", onGlobalAbort, { once: true });
 
@@ -667,6 +713,7 @@ ${forceMode ? `强制使用模式: ${forceMode}` : "根据任务复杂度自动�
             {
               codingMode: this.options.codingMode,
               largeProjectMode: this.options.largeProjectMode,
+              openClawMode: this.options.openClawMode,
             },
           ),
           onStep: (s) => {
@@ -798,6 +845,7 @@ ${stepResult}
           {
             codingMode: this.options.codingMode,
             largeProjectMode: this.options.largeProjectMode,
+            openClawMode: this.options.openClawMode,
           },
         ),
         onStep: (s) => {
@@ -897,6 +945,7 @@ ${stepResult}
       getClusterAggregateBudgets({
         codingMode: this.options.codingMode,
         largeProjectMode: this.options.largeProjectMode,
+        openClawMode: this.options.openClawMode,
       });
     const coderStepCount = plan.steps.filter((s) => s.role === "coder").length;
     const otherStepCount = plan.steps.length - coderStepCount;
@@ -1013,19 +1062,108 @@ function repairJsonString(text: string): string | null {
 }
 
 function extractJson(text: string): string | null {
-  const jsonBlockMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-  if (jsonBlockMatch) return jsonBlockMatch[1].trim();
+  return parseFirstValidJsonObject<Record<string, unknown>>(text).json;
+}
 
-  const braceMatch = text.match(/\{[\s\S]*\}/);
-  if (braceMatch) {
+function parseFirstValidJsonObject<T = Record<string, unknown>>(text: string): {
+  value: T | null;
+  json: string | null;
+  error?: string;
+} {
+  let lastError: string | undefined;
+  for (const candidate of collectJsonCandidates(text)) {
     try {
-      JSON.parse(braceMatch[0]);
-      return braceMatch[0];
-    } catch {
-      // not valid JSON
+      const parsed = JSON.parse(candidate);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        lastError = "JSON 不是对象";
+        continue;
+      }
+      return {
+        value: parsed as T,
+        json: candidate,
+      };
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
     }
   }
-  return null;
+  return {
+    value: null,
+    json: null,
+    ...(lastError ? { error: lastError } : {}),
+  };
+}
+
+function collectJsonCandidates(text: string): string[] {
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+  const push = (value?: string | null) => {
+    if (!value) return;
+    const trimmed = value.trim();
+    if (!trimmed || seen.has(trimmed)) return;
+    seen.add(trimmed);
+    candidates.push(trimmed);
+  };
+
+  const fenceRegex = /```(?:json)?\s*\n?([\s\S]*?)\n?```/gi;
+  for (const match of text.matchAll(fenceRegex)) {
+    push(match[1]);
+  }
+
+  for (const balanced of extractBalancedJsonObjects(text)) {
+    push(balanced);
+    push(repairJsonString(balanced));
+  }
+
+  push(repairJsonString(text));
+  return candidates;
+}
+
+function extractBalancedJsonObjects(text: string, maxCandidates = 12): string[] {
+  const results: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (ch === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (ch === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === "\"") {
+      inString = true;
+      continue;
+    }
+
+    if (ch === "{") {
+      if (depth === 0) start = i;
+      depth += 1;
+      continue;
+    }
+
+    if (ch === "}" && depth > 0) {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        results.push(text.slice(start, i + 1));
+        start = -1;
+        if (results.length >= maxCandidates) break;
+      }
+    }
+  }
+
+  return results;
 }
 
 function isErrorResult(val: unknown): val is { error: string } {

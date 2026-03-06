@@ -1,0 +1,8 @@
+.git/
+node_modules/
+dist/
+dist-ssr/
+src-tauri/target/
+crates/**/target/
+
+!official-plugins/dist/

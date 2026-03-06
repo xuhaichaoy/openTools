@@ -1,4 +1,5 @@
 use base64::Engine;
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -391,6 +392,7 @@ const DEFAULT_FILE_RANGE_MAX_LINES: usize = 400;
 const DEFAULT_SEARCH_MAX_RESULTS: usize = 200;
 const MAX_FILE_BYTES_FOR_SEARCH: u64 = 2 * 1024 * 1024;
 const MAX_SEARCH_FILES: usize = 5000;
+const PROJECT_IGNORE_FILES: [&str; 3] = [".gitignore", ".ignore", ".rgignore"];
 
 /// 校验 Shell 命令是否安全
 pub(crate) fn validate_shell_command(command: &str) -> Result<(), String> {
@@ -417,6 +419,37 @@ fn should_skip_search_dir(name: &str) -> bool {
         name,
         ".git" | "node_modules" | "target" | "dist" | "build" | ".next" | ".cache"
     )
+}
+
+fn build_project_ignore_matcher(root_path: &Path) -> Option<Gitignore> {
+    let mut builder = GitignoreBuilder::new(root_path);
+    let mut added_any = false;
+
+    for filename in PROJECT_IGNORE_FILES {
+        let candidate = root_path.join(filename);
+        if candidate.exists() {
+            builder.add(candidate);
+            added_any = true;
+        }
+    }
+
+    if !added_any {
+        return None;
+    }
+
+    match builder.build() {
+        Ok(matcher) => Some(matcher),
+        Err(err) => {
+            log::warn!("构建 ignore 规则失败: {}", err);
+            None
+        }
+    }
+}
+
+fn is_path_ignored(path: &Path, is_dir: bool, matcher: Option<&Gitignore>) -> bool {
+    matcher
+        .map(|m| m.matched(path, is_dir).is_ignore())
+        .unwrap_or(false)
 }
 
 fn matches_file_pattern(path: &Path, file_pattern: Option<&str>) -> bool {
@@ -508,6 +541,7 @@ fn search_file_for_query(
 fn collect_search_matches(
     dir_path: &Path,
     root_path: &Path,
+    ignore_matcher: Option<&Gitignore>,
     query: &str,
     case_sensitive: bool,
     file_pattern: Option<&str>,
@@ -534,6 +568,11 @@ fn collect_search_matches(
         if file_type.is_symlink() {
             continue;
         }
+
+        if is_path_ignored(&path, file_type.is_dir(), ignore_matcher) {
+            continue;
+        }
+
         if file_type.is_dir() {
             let name = entry.file_name();
             if should_skip_search_dir(&name.to_string_lossy()) {
@@ -542,6 +581,7 @@ fn collect_search_matches(
             if collect_search_matches(
                 &path,
                 root_path,
+                ignore_matcher,
                 query,
                 case_sensitive,
                 file_pattern,
@@ -726,10 +766,12 @@ pub async fn search_in_files(
         .clamp(1, 1000);
     let mut scanned_files = 0usize;
     let mut matches = Vec::<CodeSearchMatch>::new();
+    let ignore_matcher = build_project_ignore_matcher(&root);
 
     let truncated = collect_search_matches(
         &root,
         &root,
+        ignore_matcher.as_ref(),
         &query,
         case_sensitive,
         file_pattern.as_deref(),

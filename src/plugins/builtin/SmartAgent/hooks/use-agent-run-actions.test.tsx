@@ -179,4 +179,47 @@ describe("useAgentRunActions", () => {
       systemHint: undefined,
     });
   });
+
+  it("passes OpenClaw profile when enabled", async () => {
+    const executeAgentTask = vi.fn(async (_query: string) => undefined);
+    let hookValue: ReturnType<typeof useAgentRunActions> | null = null;
+
+    act(() => {
+      root.render(
+        <HookHarness
+          onReady={(value) => {
+            hookValue = value;
+          }}
+          params={{
+            ai: {} as never,
+            input: "修复这个模块并验证",
+            imagePaths: [],
+            fileContextBlock: "",
+            attachmentSummary: "",
+            codingMode: true,
+            largeProjectMode: true,
+            openClawMode: true,
+            setInput: vi.fn(),
+            clearAssets: vi.fn(),
+            executeAgentTask,
+            stopExecution: vi.fn(),
+          }}
+        />,
+      );
+    });
+
+    await act(async () => {
+      await hookValue!.handleRun();
+    });
+
+    expect(executeAgentTask).toHaveBeenCalledTimes(1);
+    const call = executeAgentTask.mock.calls[0];
+    expect(call?.[0]).toBe("修复这个模块并验证");
+    expect(call?.[1]?.runProfile).toEqual({
+      codingMode: true,
+      largeProjectMode: true,
+      openClawMode: true,
+    });
+    expect(String(call?.[1]?.systemHint || "")).toContain("OpenClaw");
+  });
 });

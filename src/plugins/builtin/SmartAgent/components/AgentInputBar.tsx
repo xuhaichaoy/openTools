@@ -28,8 +28,10 @@ interface AgentInputBarProps {
   onAddFilePath?: (path: string) => void;
   codingMode?: boolean;
   largeProjectMode?: boolean;
+  openClawMode?: boolean;
   onToggleCodingMode?: () => void;
   onToggleLargeProjectMode?: () => void;
+  onToggleOpenClawMode?: () => void;
 }
 
 export function AgentInputBar({
@@ -56,11 +58,15 @@ export function AgentInputBar({
   onAddFilePath,
   codingMode = false,
   largeProjectMode = false,
+  openClawMode = false,
   onToggleCodingMode,
   onToggleLargeProjectMode,
+  onToggleOpenClawMode,
 }: AgentInputBarProps) {
+  type ExecutionMode = "standard" | "large" | "openclaw";
   const useAttachments = attachments && onRemoveAttachment;
   const hasAttachments = useAttachments ? attachments.length > 0 : pendingImagePreviews.length > 0;
+  const executionMode: ExecutionMode = openClawMode ? "openclaw" : largeProjectMode ? "large" : "standard";
 
   const [atQuery, setAtQuery] = useState<string | null>(null);
   const [atSuggestions, setAtSuggestions] = useState<{ name: string; path: string; isDir: boolean }[]>([]);
@@ -192,6 +198,26 @@ export function AgentInputBar({
     }
     onKeyDown(e);
   }, [atSuggestions, atSelectedIdx, selectAtSuggestion, onKeyDown]);
+
+  const handleExecutionModeChange = useCallback((nextMode: ExecutionMode) => {
+    if (!codingMode || !onToggleLargeProjectMode || !onToggleOpenClawMode) {
+      return;
+    }
+
+    if (nextMode === "standard") {
+      if (openClawMode) onToggleOpenClawMode();
+      if (largeProjectMode) onToggleLargeProjectMode();
+      return;
+    }
+
+    if (nextMode === "large") {
+      if (openClawMode) onToggleOpenClawMode();
+      if (!largeProjectMode) onToggleLargeProjectMode();
+      return;
+    }
+
+    if (!openClawMode) onToggleOpenClawMode();
+  }, [codingMode, largeProjectMode, onToggleLargeProjectMode, onToggleOpenClawMode, openClawMode]);
 
   return (
     <div className="p-2 pb-1 border-t border-[var(--color-border)]">
@@ -341,19 +367,23 @@ export function AgentInputBar({
               Coding
             </button>
           )}
-          {codingMode && onToggleLargeProjectMode && (
-            <button
-              type="button"
-              onClick={onToggleLargeProjectMode}
-              className={`text-[10px] px-2 py-1 rounded-full border transition-colors ${
-                largeProjectMode
-                  ? "border-cyan-500/40 bg-cyan-500/15 text-cyan-600"
-                  : "border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]"
+          {codingMode && onToggleLargeProjectMode && onToggleOpenClawMode && (
+            <select
+              value={executionMode}
+              onChange={(e) => handleExecutionModeChange(e.target.value as ExecutionMode)}
+              className={`text-[10px] px-2 py-1 rounded-full border transition-colors bg-transparent outline-none ${
+                openClawMode
+                  ? "border-rose-500/40 bg-rose-500/15 text-rose-600"
+                  : largeProjectMode
+                    ? "border-cyan-500/40 bg-cyan-500/15 text-cyan-600"
+                    : "border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]"
               }`}
-              title="切换大项目策略（分阶段推进、提高预算）"
+              title="执行档位：标准 / 大项目 / OpenClaw"
             >
-              大项目
-            </button>
+              <option value="standard">标准</option>
+              <option value="large">大项目</option>
+              <option value="openclaw">OpenClaw</option>
+            </select>
           )}
           {running && (
             <button

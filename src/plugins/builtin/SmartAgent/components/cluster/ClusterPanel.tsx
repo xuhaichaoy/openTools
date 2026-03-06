@@ -62,6 +62,7 @@ interface ClusterPanelSettings {
   humanApproval: boolean;
   codingMode: boolean;
   largeProjectMode: boolean;
+  openClawMode: boolean;
 }
 
 function loadSettings(): ClusterPanelSettings {
@@ -69,12 +70,14 @@ function loadSettings(): ClusterPanelSettings {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<ClusterPanelSettings>;
-      const codingMode = !!parsed.codingMode;
+      const requestedOpenClawMode = !!parsed.openClawMode;
+      const codingMode = requestedOpenClawMode || !!parsed.codingMode;
       return {
         autoReview: !!parsed.autoReview,
         humanApproval: !!parsed.humanApproval,
         codingMode,
-        largeProjectMode: codingMode && !!parsed.largeProjectMode,
+        largeProjectMode: codingMode && (requestedOpenClawMode || !!parsed.largeProjectMode),
+        openClawMode: requestedOpenClawMode && codingMode,
       };
     }
   } catch { /* ignore */ }
@@ -83,6 +86,7 @@ function loadSettings(): ClusterPanelSettings {
     humanApproval: false,
     codingMode: false,
     largeProjectMode: false,
+    openClawMode: false,
   };
 }
 
@@ -394,7 +398,7 @@ function SessionCard({
   );
 }
 
-export function ClusterPanel() {
+export function ClusterPanel({ active = true }: { active?: boolean }) {
   const savedSettings = loadSettings();
   const [input, setInput] = useState("");
   const [mode, setMode] = useState<ClusterMode>("parallel_split");
@@ -406,6 +410,7 @@ export function ClusterPanel() {
   const [largeProjectMode, setLargeProjectMode] = useState(
     savedSettings.largeProjectMode,
   );
+  const [openClawMode, setOpenClawMode] = useState(savedSettings.openClawMode);
   const unmountedRef = useRef(false);
   const { toast } = useToast();
   const openConfirmDialog = useConfirmDialogStore((s) => s.open);
@@ -434,12 +439,20 @@ export function ClusterPanel() {
   const currentSessionRunning = !!(currentSessionId && isClusterRunning(currentSessionId));
 
   useEffect(() => {
-    saveSettings({ autoReview, humanApproval, codingMode, largeProjectMode });
-  }, [autoReview, humanApproval, codingMode, largeProjectMode]);
+    saveSettings({ autoReview, humanApproval, codingMode, largeProjectMode, openClawMode });
+  }, [autoReview, humanApproval, codingMode, largeProjectMode, openClawMode]);
 
   useEffect(() => {
     unmountedRef.current = false;
-    setClusterPanelVisible(true);
+    return () => {
+      unmountedRef.current = true;
+      setClusterPanelVisible(false);
+    };
+  }, []);
+
+  useEffect(() => {
+    setClusterPanelVisible(active);
+    if (!active) return;
 
     const activeSessionIds = getActiveSessionIds();
     if (activeSessionIds.length > 0) {
@@ -447,17 +460,16 @@ export function ClusterPanel() {
       setSession(activeSessionIds[0]);
     }
 
+    setRunningCount(getActiveOrchestratorCount());
     const syncTimer = setInterval(() => {
       const nextCount = getActiveOrchestratorCount();
       setRunningCount((prev) => (prev !== nextCount ? nextCount : prev));
     }, 500);
 
     return () => {
-      unmountedRef.current = true;
-      setClusterPanelVisible(false);
       clearInterval(syncTimer);
     };
-  }, []);
+  }, [active]);
 
   const confirmDangerousAction = useCallback(
     (toolName: string, params: Record<string, unknown>): Promise<boolean> => {
@@ -520,12 +532,13 @@ export function ClusterPanel() {
     const abortController = new AbortController();
 
     const orchestrator = new ClusterOrchestrator({
-      maxConcurrency: codingMode && largeProjectMode ? 3 : 4,
+      maxConcurrency: openClawMode ? 2 : codingMode && largeProjectMode ? 3 : 4,
       signal: abortController.signal,
-      autoReviewCodeSteps: autoReview || codingMode,
-      maxReviewRetries: codingMode ? 3 : 2,
-      codingMode,
-      largeProjectMode,
+      autoReviewCodeSteps: autoReview || codingMode || openClawMode,
+      maxReviewRetries: openClawMode ? 4 : codingMode ? 3 : 2,
+      codingMode: codingMode || openClawMode,
+      largeProjectMode: largeProjectMode || openClawMode,
+      openClawMode,
       confirmDangerousAction,
       askUser,
       onPlanApproval: humanApproval
@@ -575,7 +588,7 @@ export function ClusterPanel() {
         setRunningCount(getActiveOrchestratorCount());
       }
     }
-  }, [input, attachments, fileContextBlock, attachmentSummary, imagePaths, mode, autoReview, humanApproval, codingMode, largeProjectMode, createSession, clearAttachments, aiConfig.model, handlePlanApproval, confirmDangerousAction, askUser, toast]);
+  }, [input, attachments, fileContextBlock, attachmentSummary, imagePaths, mode, autoReview, humanApproval, codingMode, largeProjectMode, openClawMode, createSession, clearAttachments, aiConfig.model, handlePlanApproval, confirmDangerousAction, askUser, toast]);
 
   const handleAbort = useCallback(() => {
     const targetSessionId =
@@ -672,7 +685,10 @@ export function ClusterPanel() {
               onChange={(e) => {
                 const checked = e.target.checked;
                 setCodingMode(checked);
-                if (!checked) setLargeProjectMode(false);
+                if (!checked) {
+                  setLargeProjectMode(false);
+                  setOpenClawMode(false);
+                }
               }}
               className="rounded border-[var(--color-border)]"
             />
@@ -686,10 +702,28 @@ export function ClusterPanel() {
                 const checked = e.target.checked;
                 setCodingMode(true);
                 setLargeProjectMode(checked);
+                if (!checked) setOpenClawMode(false);
               }}
               className="rounded border-[var(--color-border)]"
             />
             <span>大项目策略（分阶段 + 提高预算）</span>
+          </label>
+          <label className="flex items-center gap-2 text-xs cursor-pointer">
+            <input
+              type="checkbox"
+              checked={openClawMode}
+              onChange={(e) => {
+                const checked = e.target.checked;
+                setOpenClawMode(checked);
+                if (checked) {
+                  setCodingMode(true);
+                  setLargeProjectMode(true);
+                  setAutoReview(true);
+                }
+              }}
+              className="rounded border-[var(--color-border)]"
+            />
+            <span>OpenClaw 档位（强约束执行 + 更高预算）</span>
           </label>
         </div>
       )}
@@ -812,6 +846,11 @@ export function ClusterPanel() {
             {codingMode && largeProjectMode && (
               <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-500/10 text-cyan-600">
                 大项目
+              </span>
+            )}
+            {openClawMode && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-rose-500/10 text-rose-600">
+                OpenClaw
               </span>
             )}
           </div>

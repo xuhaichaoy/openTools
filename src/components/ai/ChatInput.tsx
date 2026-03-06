@@ -503,13 +503,13 @@ export function ChatInput({
                 <ArrowLeft className="w-5 h-5 rotate-90" />
               )}
             </button>
-            <button
+            {/* <button
               onClick={() => setExpanded((v) => !v)}
               className="p-1 rounded-md text-[var(--color-text-secondary)] hover:text-[var(--color-text)] hover:bg-[var(--color-bg-hover)] transition-colors"
               title={expanded ? "收起输入框" : "展开输入框"}
             >
               {expanded ? <Minimize2 className="w-3 h-3" /> : <Maximize2 className="w-3 h-3" />}
-            </button>
+            </button> */}
           </div>
         </div>
         <div className="flex items-center justify-between text-[10px] text-[var(--color-text-secondary)] mt-1 opacity-60 px-1">

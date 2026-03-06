@@ -499,6 +499,11 @@ pub fn run() {
             commands::native_apps::win_open_settings,
         ])
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            {
+                // Hide app icon from Dock (menu-bar/accessory app behavior).
+                let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            }
             let suppress_hide = Arc::new(AtomicUsize::new(0));
             setup_tray(app, &suppress_hide)?;
             setup_shortcuts(app, &suppress_hide)?;

@@ -20,6 +20,7 @@ const DOCUMENT_EXT = new Set([
 const MAX_TEXT_FILE_BYTES = 100 * 1024;
 const MAX_TOTAL_TEXT_BYTES = 500 * 1024;
 const MAX_FOLDER_DEPTH = 2;
+const MAX_TREE_NODES = 800;
 
 export interface InputAttachment {
   id: string;
@@ -49,34 +50,173 @@ const IGNORED_DIRS = new Set([
   ".idea", ".vscode", ".DS_Store", ".cache", "coverage",
 ]);
 
+const IGNORE_FILENAMES = [".gitignore", ".ignore", ".rgignore"];
+
+interface IgnoreRule {
+  negated: boolean;
+  regex: RegExp;
+}
+
+function normalizePathLike(path: string): string {
+  return path.replace(/\\/g, "/").replace(/\/+/g, "/").replace(/\/$/, "") || "/";
+}
+
+function globToRegex(glob: string): string {
+  let output = "";
+  for (let i = 0; i < glob.length; i++) {
+    const ch = glob[i];
+    if (ch === "*") {
+      if (glob[i + 1] === "*") {
+        output += ".*";
+        i++;
+      } else {
+        output += "[^/]*";
+      }
+      continue;
+    }
+    if (ch === "?") {
+      output += "[^/]";
+      continue;
+    }
+    output += ch.replace(/[\\^$+?.()|[\]{}]/g, "\\$&");
+  }
+  return output;
+}
+
+function parseIgnoreRule(rawLine: string): IgnoreRule | null {
+  let line = rawLine.trim();
+  if (!line || line.startsWith("#")) return null;
+
+  let negated = false;
+  if (line.startsWith("!")) {
+    negated = true;
+    line = line.slice(1).trim();
+    if (!line) return null;
+  }
+
+  const rooted = line.startsWith("/");
+  if (rooted) line = line.slice(1);
+  const directoryOnly = line.endsWith("/");
+  if (directoryOnly) line = line.replace(/\/+$/, "");
+  if (!line) return null;
+
+  const hasSlash = line.includes("/");
+  const body = globToRegex(line);
+  let source = "";
+
+  if (directoryOnly) {
+    source = rooted
+      ? `^${body}(?:/.*)?$`
+      : `(?:^|.*/)${body}(?:/.*)?$`;
+  } else if (rooted) {
+    source = `^${body}$`;
+  } else if (hasSlash) {
+    source = `(?:^|.*/)${body}$`;
+  } else {
+    source = `(?:^|.*/)${body}$`;
+  }
+
+  try {
+    return {
+      negated,
+      regex: new RegExp(source),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseIgnoreRules(content: string): IgnoreRule[] {
+  const rules: IgnoreRule[] = [];
+  for (const line of content.split(/\r?\n/)) {
+    const parsed = parseIgnoreRule(line);
+    if (parsed) rules.push(parsed);
+  }
+  return rules;
+}
+
+async function loadIgnoreRules(rootPath: string): Promise<IgnoreRule[]> {
+  const rules: IgnoreRule[] = [];
+  for (const filename of IGNORE_FILENAMES) {
+    const path = normalizePathLike(`${rootPath}/${filename}`);
+    try {
+      const content = await invoke<string>("read_text_file", { path });
+      rules.push(...parseIgnoreRules(content));
+    } catch {
+      // ignore file not found / unreadable
+    }
+  }
+  return rules;
+}
+
+function createIgnoreMatcher(rootPath: string, rules: IgnoreRule[]): (absolutePath: string, isDir: boolean) => boolean {
+  if (rules.length === 0) return () => false;
+  const normalizedRoot = normalizePathLike(rootPath);
+  return (absolutePath, isDir) => {
+    const fullPath = normalizePathLike(absolutePath);
+    let relative = fullPath;
+    if (fullPath === normalizedRoot) return false;
+    if (fullPath.startsWith(`${normalizedRoot}/`)) {
+      relative = fullPath.slice(normalizedRoot.length + 1);
+    }
+    const candidate = isDir ? relative.replace(/\/+$/, "") : relative;
+    if (!candidate) return false;
+
+    let ignored = false;
+    for (const rule of rules) {
+      if (rule.regex.test(candidate)) {
+        ignored = !rule.negated;
+      }
+    }
+    return ignored;
+  };
+}
+
 async function buildDirTree(
   dirPath: string,
   depth: number,
   maxDepth: number,
   prefix: string,
+  isIgnored: (absolutePath: string, isDir: boolean) => boolean,
+  state: { visited: number; truncated: boolean },
 ): Promise<string> {
-  if (depth > maxDepth) return "";
+  if (depth > maxDepth || state.truncated) return "";
   try {
     const raw = await invoke<string>("list_directory", { path: dirPath });
     let entries = JSON.parse(raw) as { name: string; is_dir: boolean }[];
-    entries = entries.filter((e) => !e.name.startsWith(".") && !IGNORED_DIRS.has(e.name));
+    entries = entries.filter((e) => {
+      if (!e.name || e.name.startsWith(".") || IGNORED_DIRS.has(e.name)) return false;
+      const fullPath = normalizePathLike(`${dirPath}/${e.name}`);
+      return !isIgnored(fullPath, e.is_dir);
+    });
     entries.sort((a, b) => {
       if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
       return a.name.localeCompare(b.name);
     });
     const lines: string[] = [];
     for (let i = 0; i < entries.length; i++) {
+      if (state.truncated) break;
       const e = entries[i];
       const isLast = i === entries.length - 1;
       const connector = isLast ? "└── " : "├── ";
       const childPrefix = isLast ? "    " : "│   ";
+
+      if (state.visited >= MAX_TREE_NODES) {
+        state.truncated = true;
+        lines.push(`${prefix}${connector}... (目录过大，已截断)`);
+        break;
+      }
+
+      state.visited += 1;
       lines.push(`${prefix}${connector}${e.name}${e.is_dir ? "/" : ""}`);
-      if (e.is_dir && depth < maxDepth) {
+      if (e.is_dir && depth < maxDepth && !isIgnored(normalizePathLike(`${dirPath}/${e.name}`), true)) {
         const sub = await buildDirTree(
           `${dirPath}/${e.name}`.replace(/\/+/g, "/"),
           depth + 1,
           maxDepth,
           `${prefix}${childPrefix}`,
+          isIgnored,
+          state,
         );
         if (sub) lines.push(sub);
       }
@@ -131,7 +271,7 @@ export function useInputAttachments() {
   const contextHeader = detectedRoots.length > 0
     ? `## 🗂️ 工作上下文\n${detectedRoots.map((r) => `- 项目路径: \`${r}\``).join("\n")}\n\n> ${
         hasFolders && !hasFiles
-          ? "用户提供了项目目录，请使用 read_file / list_directory / search_in_files 等工具按需读取文件内容。不要猜测文件内容。"
+          ? "用户提供了项目目录（已按 .gitignore/.ignore/.rgignore 过滤），请使用 read_file / list_directory / search_in_files 等工具按需读取文件内容。不要猜测文件内容。"
           : hasFiles
             ? "以下是用户提供的文件内容（路径均为绝对路径），请根据用户指令进行处理。"
             : ""
@@ -400,8 +540,19 @@ export function useInputAttachments() {
 
       setFolderRoots((prev) => prev.includes(selected) ? prev : [...prev, selected]);
 
-      const tree = await buildDirTree(selected, 0, MAX_FOLDER_DEPTH, "");
-      setFolderTree((prev) => prev ? `${prev}\n\n${selected}/\n${tree}` : `${selected}/\n${tree}`);
+      const ignoreRules = await loadIgnoreRules(selected);
+      const isIgnored = createIgnoreMatcher(selected, ignoreRules);
+      const treeState = { visited: 0, truncated: false };
+      const tree = await buildDirTree(
+        selected,
+        0,
+        MAX_FOLDER_DEPTH,
+        "",
+        isIgnored,
+        treeState,
+      );
+      const treeWithHint = `${selected}/\n${tree}`;
+      setFolderTree((prev) => (prev ? `${prev}\n\n${treeWithHint}` : treeWithHint));
 
       const folderName = selected.replace(/^.*[/\\]/, "") || selected;
       setAttachments((prev) => {

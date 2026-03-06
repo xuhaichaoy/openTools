@@ -14,6 +14,7 @@ interface UseAgentRunActionsParams {
   attachmentSummary: string;
   codingMode?: boolean;
   largeProjectMode?: boolean;
+  openClawMode?: boolean;
   setInput: Dispatch<SetStateAction<string>>;
   clearAssets: () => void;
   executeAgentTask: (
@@ -42,6 +43,7 @@ export function useAgentRunActions({
   attachmentSummary,
   codingMode = false,
   largeProjectMode = false,
+  openClawMode = false,
   setInput,
   clearAssets,
   executeAgentTask,
@@ -55,10 +57,10 @@ export function useAgentRunActions({
     const query = attachmentSummary ? `${attachmentSummary}\n${userText}` : userText;
     const systemHint = mergeSystemHints(
       fileContextBlock.trim() || undefined,
-      buildAgentCodingSystemHint({ codingMode, largeProjectMode }),
+      buildAgentCodingSystemHint({ codingMode, largeProjectMode, openClawMode }),
     );
-    const runProfile = codingMode
-      ? { codingMode, largeProjectMode }
+    const runProfile = (codingMode || openClawMode)
+      ? { codingMode, largeProjectMode, openClawMode }
       : undefined;
 
     setInput("");
@@ -77,6 +79,7 @@ export function useAgentRunActions({
     attachmentSummary,
     codingMode,
     largeProjectMode,
+    openClawMode,
     setInput,
     clearAssets,
     executeAgentTask,

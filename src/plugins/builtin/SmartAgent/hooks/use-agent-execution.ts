@@ -21,7 +21,9 @@ import { recordAIRouteEvent } from "@/store/ai-route-store";
 type AgentStoreState = ReturnType<typeof useAgentStore.getState>;
 export const AGENT_EXECUTION_HEARTBEAT_INTERVAL_MS = 10_000;
 export const AGENT_EXECUTION_TIMEOUT_MS = 600_000;
+export const AGENT_EXECUTION_TIMEOUT_LARGE_PROJECT_MS = 1_800_000;
 export const AGENT_MODEL_STALL_TIMEOUT_MS = 90_000;
+export const AGENT_MODEL_STALL_TIMEOUT_LARGE_PROJECT_MS = 180_000;
 
 interface UseAgentExecutionParams {
   ai?: MToolsAI;
@@ -276,13 +278,21 @@ export function useAgentExecution({
         aiConfig.agent_max_iterations ?? 25,
         runProfile,
       );
+      const timeoutMs = runProfile.largeProjectMode || runProfile.openClawMode
+        ? AGENT_EXECUTION_TIMEOUT_LARGE_PROJECT_MS
+        : AGENT_EXECUTION_TIMEOUT_MS;
+      const modelStallTimeoutMs = runProfile.largeProjectMode || runProfile.openClawMode
+        ? AGENT_MODEL_STALL_TIMEOUT_LARGE_PROJECT_MS
+        : AGENT_MODEL_STALL_TIMEOUT_MS;
 
       if (runProfile.codingMode) {
         applyStep(
           {
             type: "observation",
             content: runProfile.largeProjectMode
-              ? "已启用 Coding 模式（大项目）：将按阶段推进并提高迭代预算。"
+              ? runProfile.openClawMode
+                ? "已启用 OpenClaw（大项目强约束）：将按阶段推进、限定扫描范围并提高执行预算。"
+                : "已启用 Coding 模式（大项目）：将按阶段推进并提高迭代预算。"
               : "已启用 Coding 模式：将优先走先读后改、改后验证流程。",
             timestamp: Date.now(),
           },
@@ -352,7 +362,7 @@ export function useAgentExecution({
         })();
         setWaitingStageIfChanged(waitingStage);
         const modelLikelyStalled =
-          idleMs >= AGENT_MODEL_STALL_TIMEOUT_MS &&
+          idleMs >= modelStallTimeoutMs &&
           (waitingStage === "model_first_token" ||
             waitingStage === "model_generating");
         if (modelLikelyStalled) {
@@ -361,7 +371,7 @@ export function useAgentExecution({
             {
               type: "observation",
               content: `检测到模型长时间无进展（>${Math.floor(
-                AGENT_MODEL_STALL_TIMEOUT_MS / 1000,
+                modelStallTimeoutMs / 1000,
               )}s），将自动中断本次执行。`,
               timestamp: now,
             },
@@ -388,7 +398,7 @@ export function useAgentExecution({
         if (abortControllerRef.current !== abortController) return;
         timeoutAborted = true;
         abortController.abort();
-      }, AGENT_EXECUTION_TIMEOUT_MS);
+      }, timeoutMs);
 
       const retryMax = aiConfig.agent_retry_max ?? 3;
       const retryBackoffMs = aiConfig.agent_retry_backoff_ms ?? 5000;
@@ -447,7 +457,7 @@ export function useAgentExecution({
         const modelStall = String(e).includes("MODEL_STALL_TIMEOUT");
         const msg = aborted
           ? timeoutAborted
-            ? `Agent 执行超时（${Math.floor(AGENT_EXECUTION_TIMEOUT_MS / 1000)} 秒）已自动停止，请拆分任务后重试。`
+            ? `Agent 执行超时（${Math.floor(timeoutMs / 1000)} 秒）已自动停止，请拆分任务后重试。`
             : "任务已通过用户请求停止。"
           : modelStall
             ? "模型长时间无响应，已自动中断本次执行。请重试或切换模型后再试。"

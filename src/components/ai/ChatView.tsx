@@ -32,6 +32,7 @@ import { ChatInput } from "./ChatInput";
 import { ChatHistory } from "./ChatHistory";
 import { useDragWindow } from "@/hooks/useDragWindow";
 import { routeToAICenter } from "@/core/ai/ai-center-routing";
+import { useShallow } from "zustand/shallow";
 
 export interface ChatViewHandle {
   toggleHistory: () => void;
@@ -89,7 +90,22 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
     loadMemoryCandidates,
     confirmMemoryCandidate,
     dismissMemoryCandidate,
-  } = useAIStore();
+  } = useAIStore(
+    useShallow((s) => ({
+      getCurrentConversation: s.getCurrentConversation,
+      sendMessage: s.sendMessage,
+      isStreaming: s.isStreaming,
+      config: s.config,
+      conversations: s.conversations,
+      currentConversationId: s.currentConversationId,
+      createConversation: s.createConversation,
+      stopStreaming: s.stopStreaming,
+      memoryCandidates: s.memoryCandidates,
+      loadMemoryCandidates: s.loadMemoryCandidates,
+      confirmMemoryCandidate: s.confirmMemoryCandidate,
+      dismissMemoryCandidate: s.dismissMemoryCandidate,
+    })),
+  );
 
   const { toast } = useToast();
   const { onMouseDown } = useDragWindow();

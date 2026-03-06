@@ -27,6 +27,7 @@ import { useAgentSessionActions } from "./hooks/use-agent-session-actions";
 import { useAgentEffects } from "./hooks/use-agent-effects";
 import { useAgentDerivedState } from "./hooks/use-agent-derived-state";
 import { useAgentRunActions } from "./hooks/use-agent-run-actions";
+import { useShallow } from "zustand/shallow";
 import {
   type ExecutionWaitingStage,
   type RunningPhase,
@@ -57,20 +58,23 @@ const AGENT_SETTINGS_KEY = "mtools-agent-settings";
 interface AgentRuntimeSettings {
   codingMode: boolean;
   largeProjectMode: boolean;
+  openClawMode: boolean;
 }
 
 function loadAgentSettings(): AgentRuntimeSettings {
   try {
     const raw = localStorage.getItem(AGENT_SETTINGS_KEY);
-    if (!raw) return { codingMode: false, largeProjectMode: false };
+    if (!raw) return { codingMode: false, largeProjectMode: false, openClawMode: false };
     const parsed = JSON.parse(raw) as Partial<AgentRuntimeSettings>;
-    const codingMode = !!parsed.codingMode;
+    const requestedOpenClawMode = !!parsed.openClawMode;
+    const codingMode = requestedOpenClawMode || !!parsed.codingMode;
     return {
       codingMode,
-      largeProjectMode: codingMode && !!parsed.largeProjectMode,
+      largeProjectMode: codingMode && (requestedOpenClawMode || !!parsed.largeProjectMode),
+      openClawMode: requestedOpenClawMode && codingMode,
     };
   } catch {
-    return { codingMode: false, largeProjectMode: false };
+    return { codingMode: false, largeProjectMode: false, openClawMode: false };
   }
 }
 
@@ -113,6 +117,9 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
     );
     const [largeProjectMode, setLargeProjectMode] = useState(
       () => loadAgentSettings().largeProjectMode,
+    );
+    const [openClawMode, setOpenClawMode] = useState(
+      () => loadAgentSettings().openClawMode,
     );
     const scrollRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -175,7 +182,29 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       deleteSession,
       deleteAllSessions,
       renameSession,
-    } = useAgentStore();
+    } = useAgentStore(
+      useShallow((s) => ({
+        sessions: s.sessions,
+        scheduledTasks: s.scheduledTasks,
+        currentSessionId: s.currentSessionId,
+        historyLoaded: s.historyLoaded,
+        loadHistory: s.loadHistory,
+        loadScheduledTasks: s.loadScheduledTasks,
+        createScheduledTask: s.createScheduledTask,
+        pauseScheduledTask: s.pauseScheduledTask,
+        resumeScheduledTask: s.resumeScheduledTask,
+        cancelScheduledTask: s.cancelScheduledTask,
+        createSession: s.createSession,
+        getCurrentSession: s.getCurrentSession,
+        setCurrentSession: s.setCurrentSession,
+        updateSession: s.updateSession,
+        addTask: s.addTask,
+        updateTask: s.updateTask,
+        deleteSession: s.deleteSession,
+        deleteAllSessions: s.deleteAllSessions,
+        renameSession: s.renameSession,
+      })),
+    );
 
     const askUserOpen = useAskUserStore((s) => s.open);
 
@@ -272,8 +301,9 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       imagePaths,
       fileContextBlock,
       attachmentSummary,
-      codingMode,
-      largeProjectMode,
+      codingMode: codingMode || openClawMode,
+      largeProjectMode: largeProjectMode || openClawMode,
+      openClawMode,
       setInput,
       clearAssets: clearAttachments,
       executeAgentTask,
@@ -281,8 +311,8 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
     });
 
     useEffect(() => {
-      saveAgentSettings({ codingMode, largeProjectMode });
-    }, [codingMode, largeProjectMode]);
+      saveAgentSettings({ codingMode, largeProjectMode, openClawMode });
+    }, [codingMode, largeProjectMode, openClawMode]);
 
     useEffect(() => {
       handleRunRef.current = handleRun;
@@ -468,13 +498,31 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
             onToggleCodingMode={() => {
               setCodingMode((prev) => {
                 const next = !prev;
-                if (!next) setLargeProjectMode(false);
+                if (!next) {
+                  setLargeProjectMode(false);
+                  setOpenClawMode(false);
+                }
                 return next;
               });
             }}
             onToggleLargeProjectMode={() => {
               setCodingMode(true);
-              setLargeProjectMode((prev) => !prev);
+              setLargeProjectMode((prev) => {
+                const next = !prev;
+                if (!next) setOpenClawMode(false);
+                return next;
+              });
+            }}
+            openClawMode={openClawMode}
+            onToggleOpenClawMode={() => {
+              setOpenClawMode((prev) => {
+                const next = !prev;
+                if (next) {
+                  setCodingMode(true);
+                  setLargeProjectMode(true);
+                }
+                return next;
+              });
             }}
             inputRef={inputRef}
             fileInputRef={fileInputRef}
