@@ -18,6 +18,16 @@ const MAX_RECENT_TOOLS = 20
 export type AIInitialMode = 'ask' | 'agent' | 'cluster'
 export type AICenterMode = 'ask' | 'agent' | 'cluster'
 
+export interface AgentHandoff {
+  query: string
+  /** 传递的文件/文件夹附件绝对路径 */
+  attachmentPaths?: string[]
+  /** 来源模式标识，用于跨模式会话追溯 */
+  sourceMode?: AICenterMode
+  /** 来源会话/对话 ID，用于跨模式加载历史 */
+  sourceSessionId?: string
+}
+
 export interface EmbedRequest {
   pluginId: string
   featureCode: string
@@ -39,8 +49,8 @@ export interface AppState {
   pendingEmbed: EmbedRequest | null
   /** 待处理的视图导航请求（一次性消费） */
   pendingNavigate: string | null
-  /** 从 Cluster 切到 Agent 时待注入的初始输入（一次性消费，不持久化） */
-  pendingAgentInitialQuery: string | null
+  /** 从 Ask/Cluster 切到 Agent 时待注入的初始输入（一次性消费，不持久化） */
+  pendingAgentHandoff: AgentHandoff | null
 
   /** 视图栈（支持多层返回） */
   viewStack: ViewEntry[]
@@ -65,10 +75,10 @@ export interface AppState {
   requestNavigate: (viewId: string) => void
   /** 消费导航请求 */
   consumeNavigate: () => string | null
-  /** 设置待注入 Agent 的初始输入（如 Cluster「用 Agent 继续」） */
-  setPendingAgentInitialQuery: (q: string | null) => void
-  /** 消费并清空 pendingAgentInitialQuery，返回当前值 */
-  consumePendingAgentInitialQuery: () => string | null
+  /** 设置待注入 Agent 的初始输入（如 Ask/Cluster「用 Agent 继续」） */
+  setPendingAgentHandoff: (h: AgentHandoff | null) => void
+  /** 消费并清空 pendingAgentHandoff，返回当前值 */
+  consumePendingAgentHandoff: () => AgentHandoff | null
   /** 仅重置搜索态，不修改视图栈 */
   resetSearchState: () => void
   reset: () => void
@@ -100,7 +110,7 @@ export const useAppStore = create<AppState>()(
       aiCenterMode: 'ask' as AICenterMode,
       pendingEmbed: null as EmbedRequest | null,
       pendingNavigate: null as string | null,
-      pendingAgentInitialQuery: null as string | null,
+      pendingAgentHandoff: null as AgentHandoff | null,
       viewStack: createRootViewStack(),
 
       setMode: (mode) => set({ mode }),
@@ -138,10 +148,10 @@ export const useAppStore = create<AppState>()(
         if (current) set({ pendingNavigate: null })
         return current
       },
-      setPendingAgentInitialQuery: (q) => set({ pendingAgentInitialQuery: q }),
-      consumePendingAgentInitialQuery: () => {
-        const current = get().pendingAgentInitialQuery
-        if (current != null) set({ pendingAgentInitialQuery: null })
+      setPendingAgentHandoff: (h) => set({ pendingAgentHandoff: h }),
+      consumePendingAgentHandoff: () => {
+        const current = get().pendingAgentHandoff
+        if (current != null) set({ pendingAgentHandoff: null })
         return current ?? null
       },
       resetSearchState: () =>

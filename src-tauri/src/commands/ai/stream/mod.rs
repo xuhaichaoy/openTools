@@ -9,6 +9,12 @@ pub struct ToolConfirmationState {
     pub pending: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<bool>>>,
 }
 
+// ── 前端工具桥接状态（Ask 模式调用 MCP/插件工具） ──
+
+pub struct FrontendToolState {
+    pub pending: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<Result<String, String>>>>,
+}
+
 // ── 流式取消状态 ──
 
 pub struct StreamCancellation {

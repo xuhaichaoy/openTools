@@ -295,6 +295,28 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       }
     }, []);
 
+    const [pendingSourceHandoff, setPendingSourceHandoff] = useState<
+      import("@/store/agent-store").AgentSession["sourceHandoff"] | null
+    >(null);
+
+    const pendingHandoff = useAppStore((s) => s.pendingAgentHandoff);
+    useEffect(() => {
+      if (!pendingHandoff) return;
+      setInput(pendingHandoff.query);
+      if (pendingHandoff.attachmentPaths?.length) {
+        for (const p of pendingHandoff.attachmentPaths) {
+          void addTextFile(p);
+        }
+      }
+      if (pendingHandoff.sourceMode && pendingHandoff.sourceSessionId) {
+        setPendingSourceHandoff({
+          sourceMode: pendingHandoff.sourceMode,
+          sourceSessionId: pendingHandoff.sourceSessionId,
+        });
+      }
+      useAppStore.getState().setPendingAgentHandoff(null);
+    }, [pendingHandoff, addTextFile]);
+
     const { handleRun, handleStop } = useAgentRunActions({
       ai,
       input,
@@ -304,6 +326,7 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       codingMode: codingMode || openClawMode,
       largeProjectMode: largeProjectMode || openClawMode,
       openClawMode,
+      pendingSourceHandoff,
       setInput,
       clearAssets: clearAttachments,
       executeAgentTask,
@@ -318,12 +341,11 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       handleRunRef.current = handleRun;
     }, [handleRun]);
 
-    const pendingAgentInitialQuery = useAppStore((s) => s.pendingAgentInitialQuery);
     useEffect(() => {
-      if (!pendingAgentInitialQuery) return;
-      setInput(pendingAgentInitialQuery);
-      useAppStore.getState().setPendingAgentInitialQuery(null);
-    }, [pendingAgentInitialQuery]);
+      if (running && pendingSourceHandoff) {
+        setPendingSourceHandoff(null);
+      }
+    }, [running, pendingSourceHandoff]);
 
     const toggleStep = useCallback((key: string) => {
       setExpandedSteps((prev) => {
@@ -451,6 +473,17 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
               void cancelScheduledTask(taskId);
             }}
           />
+
+          {currentSession?.sourceHandoff && (
+            <div className="mx-4 mt-2 mb-1 flex items-center gap-1.5 text-xs text-indigo-400/80">
+              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+              </svg>
+              <span>
+                从 {currentSession.sourceHandoff.sourceMode === "ask" ? "Ask" : currentSession.sourceHandoff.sourceMode === "cluster" ? "Cluster" : currentSession.sourceHandoff.sourceMode} 对话延续
+              </span>
+            </div>
+          )}
 
           <AgentTaskTimeline
             tasks={tasks}

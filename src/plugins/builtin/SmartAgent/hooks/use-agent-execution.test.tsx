@@ -247,7 +247,7 @@ describe("useAgentExecution", () => {
     expect(lastCall?.[2]?.answer).toContain("停止");
   });
 
-  it("updates answer during streaming answer steps", async () => {
+  it("does not overwrite final answer field during streaming answer steps", async () => {
     hoisted.fakeStoreState = {
       currentSessionId: "target",
       sessions: [
@@ -299,7 +299,7 @@ describe("useAgentExecution", () => {
     const hasStreamingAnswerUpdate = updateTask.mock.calls.some(
       (call) => call?.[2]?.answer === "streaming-answer",
     );
-    expect(hasStreamingAnswerUpdate).toBe(true);
+    expect(hasStreamingAnswerUpdate).toBe(false);
     const lastCall = updateTask.mock.calls.at(-1);
     expect(lastCall?.[2]?.answer).toBe("mock-result");
   });

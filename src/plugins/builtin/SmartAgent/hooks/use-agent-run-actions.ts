@@ -2,9 +2,9 @@ import { useCallback, type Dispatch, type SetStateAction } from "react";
 import type { MToolsAI } from "@/core/plugin-system/plugin-interface";
 import {
   buildAgentCodingSystemHint,
-  mergeSystemHints,
   type CodingExecutionProfile,
 } from "@/core/agent/coding-profile";
+import type { AgentSession } from "@/store/agent-store";
 
 interface UseAgentRunActionsParams {
   ai?: MToolsAI;
@@ -15,6 +15,8 @@ interface UseAgentRunActionsParams {
   codingMode?: boolean;
   largeProjectMode?: boolean;
   openClawMode?: boolean;
+  /** 来自跨模式 handoff 的来源信息 */
+  pendingSourceHandoff?: AgentSession["sourceHandoff"] | null;
   setInput: Dispatch<SetStateAction<string>>;
   clearAssets: () => void;
   executeAgentTask: (
@@ -23,8 +25,10 @@ interface UseAgentRunActionsParams {
       sessionId?: string;
       taskId?: string;
       systemHint?: string;
+      codingHint?: string;
       images?: string[];
       runProfile?: CodingExecutionProfile;
+      sourceHandoff?: AgentSession["sourceHandoff"];
     },
   ) => Promise<void>;
   stopExecution: () => void;
@@ -44,6 +48,7 @@ export function useAgentRunActions({
   codingMode = false,
   largeProjectMode = false,
   openClawMode = false,
+  pendingSourceHandoff,
   setInput,
   clearAssets,
   executeAgentTask,
@@ -55,10 +60,8 @@ export function useAgentRunActions({
 
     const userText = input.trim() || (fileContextBlock.trim() ? "请了解项目结构，等待下一步指令。" : "");
     const query = attachmentSummary ? `${attachmentSummary}\n${userText}` : userText;
-    const systemHint = mergeSystemHints(
-      fileContextBlock.trim() || undefined,
-      buildAgentCodingSystemHint({ codingMode, largeProjectMode, openClawMode }),
-    );
+    const systemHint = fileContextBlock.trim() || undefined;
+    const codingHint = buildAgentCodingSystemHint({ codingMode, largeProjectMode, openClawMode });
     const runProfile = (codingMode || openClawMode)
       ? { codingMode, largeProjectMode, openClawMode }
       : undefined;
@@ -69,7 +72,9 @@ export function useAgentRunActions({
     await executeAgentTask(query, {
       images: imagePaths.length > 0 ? imagePaths : undefined,
       systemHint,
+      codingHint: codingHint || undefined,
       ...(runProfile ? { runProfile } : {}),
+      ...(pendingSourceHandoff ? { sourceHandoff: pendingSourceHandoff } : {}),
     });
   }, [
     ai,
@@ -80,6 +85,7 @@ export function useAgentRunActions({
     codingMode,
     largeProjectMode,
     openClawMode,
+    pendingSourceHandoff,
     setInput,
     clearAssets,
     executeAgentTask,

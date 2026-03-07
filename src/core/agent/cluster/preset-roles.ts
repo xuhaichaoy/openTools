@@ -33,7 +33,8 @@ export const ROLE_PLANNER: AgentRole = {
       "role": "researcher | coder | reviewer | executor",
       "task": "子任务的详细描述，要足够清晰以便独立完成",
       "dependencies": [],
-      "outputKey": "step_1_result"
+      "outputKey": "step_1_result",
+      "critical": true
     }
   ]
 }
@@ -42,6 +43,7 @@ export const ROLE_PLANNER: AgentRole = {
 - dependencies 为空数组表示该步骤无前置依赖，可立即执行
 - dependencies 包含其他 step 的 id 表示需要等那些步骤完成后才能开始
 - outputKey 用于标识该步骤的输出，后续步骤可通过 inputMapping 引用
+- critical（默认 true）：标记为关键步骤。关键步骤失败后，所有依赖它的下游步骤将被自动跳过。设为 false 表示该步骤失败不影响下游
 - 尽量让无依赖的步骤并行执行以提高效率
 - 每个子任务的 task 描述必须足够详细和具体，包含完整的上下文和预期输出格式
 - 子任务描述不能含糊（如"搜索一些资料"），要明确搜索什么、目标是什么、输出什么

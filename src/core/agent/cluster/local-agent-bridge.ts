@@ -1,6 +1,8 @@
 import { getMToolsAI } from "@/core/ai/mtools-ai";
 import { useAIStore } from "@/store/ai-store";
 import { useAgentMemoryStore } from "@/store/agent-memory-store";
+import { loadAndResolveSkills } from "@/store/skill-store";
+import { applySkillToolFilter } from "@/core/agent/skills/skill-resolver";
 import { buildAgentFCCompatibilityKey } from "@/core/agent/fc-compatibility";
 import { registry } from "@/core/plugin-system/registry";
 import {
@@ -119,12 +121,17 @@ export class LocalAgentBridge implements AgentBridge {
     const rolePrompt = role?.systemPrompt ?? "";
     const fullQuery = `${task}${contextStr}`;
 
-    const memoryStore = useAgentMemoryStore.getState();
-    if (!memoryStore.loaded) {
-      try { await memoryStore.load(); } catch { /* ignore */ }
+    let memorySnap = useAgentMemoryStore.getState();
+    if (!memorySnap.loaded) {
+      try { await memorySnap.load(); memorySnap = useAgentMemoryStore.getState(); } catch { /* ignore */ }
     }
-    const userMemory = memoryStore.getMemoriesForPrompt();
+    const userMemory = memorySnap.getMemoriesForPrompt();
     const userMemoryPrompt = userMemory ? `\n\n## 用户偏好\n${userMemory}` : undefined;
+
+    const skillCtx = await loadAndResolveSkills(task, role?.id);
+    const skillsPrompt = skillCtx.mergedSystemPrompt || undefined;
+    const hasCodingWorkflowSkill = skillCtx.activeSkillIds.includes("builtin-coding-workflow");
+    const toolsAfterSkills = applySkillToolFilter(tools, skillCtx.mergedToolFilter);
 
     const collectedSteps: AgentStep[] = [];
     this.abortController = new AbortController();
@@ -134,7 +141,7 @@ export class LocalAgentBridge implements AgentBridge {
 
     const agent = new ReActAgent(
       ai,
-      tools,
+      toolsAfterSkills,
       {
         maxIterations: options?.maxIterations ?? role?.maxIterations ?? 10,
         verbose: true,
@@ -142,6 +149,8 @@ export class LocalAgentBridge implements AgentBridge {
         temperature: role?.temperature,
         initialMode: role?.readonly ? "plan" : "execute",
         userMemoryPrompt: userMemoryPrompt,
+        skillsPrompt,
+        skipInternalCodingBlock: hasCodingWorkflowSkill,
         roleOverride: rolePrompt || undefined,
         dangerousToolPatterns: ["write_file", "run_shell_command", "native_"],
         confirmDangerousAction: this.confirmDangerousAction,

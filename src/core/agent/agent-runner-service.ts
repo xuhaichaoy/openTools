@@ -16,6 +16,8 @@ import {
   type AgentStep,
   type AgentTool,
 } from "@/plugins/builtin/SmartAgent/core/react-agent";
+import { loadAndResolveSkills } from "@/store/skill-store";
+import { applySkillToolFilter } from "@/core/agent/skills/skill-resolver";
 
 type QueueItem = {
   task: AgentScheduledTask;
@@ -375,14 +377,21 @@ export class AgentRunnerService {
       last_started_at: startedAt,
     });
 
+    const skillCtx = await loadAndResolveSkills(task.query);
+    const skillsPrompt = skillCtx.mergedSystemPrompt || undefined;
+    const hasCodingWorkflowSkill = skillCtx.activeSkillIds.includes("builtin-coding-workflow");
+    const toolsForRun = applySkillToolFilter(availableTools, skillCtx.mergedToolFilter);
+
     const collectedSteps: AgentStep[] = [];
     const agent = new ReActAgent(
       ai,
-      availableTools,
+      toolsForRun,
       {
         maxIterations: 8,
         verbose: true,
         fcCompatibilityKey,
+        skillsPrompt,
+        skipInternalCodingBlock: hasCodingWorkflowSkill,
       },
       (step) => {
         const findLastIdx = (pred: (s: AgentStep) => boolean) => {

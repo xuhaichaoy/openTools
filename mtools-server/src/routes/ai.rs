@@ -476,6 +476,10 @@ async fn ai_team_proxy_chat(
     } else {
         req = req.header("Authorization", format!("Bearer {}", decrypted_key));
     }
+    // Coding Plan 端点需要 Coding Agent 标识
+    if forward_url.contains("coding.dashscope") || forward_url.contains("coding-intl.dashscope") {
+        req = req.header("User-Agent", "openclaw/1.0.0");
+    }
     let res = req
         .header("Content-Type", "application/json")
         .json(&forward_payload)

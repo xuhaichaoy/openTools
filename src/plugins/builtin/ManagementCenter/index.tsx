@@ -21,6 +21,7 @@ import {
   Keyboard,
   Plug,
   Brain,
+  Sparkles,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
@@ -40,6 +41,7 @@ import { AvatarPicker } from "@/components/common/AvatarPicker";
 import { resolveAvatarUrl } from "@/utils/avatar";
 import { ServerConfigTab } from "./components/ServerConfigTab";
 import { CredentialSettings } from "@/components/data-forge/CredentialSettings";
+import { SkillsManager } from "@/components/ai/SkillsManager";
 import { useDragWindow } from "@/hooks/useDragWindow";
 
 const BRAND = "#F28F36";
@@ -50,6 +52,7 @@ type TabId =
   | "team"
   | "settings"
   | "ai-model"
+  | "skills"
   | "mcp"
   | "memory"
   | "credentials"
@@ -69,6 +72,7 @@ export default function ManagementCenter({ onBack }: MToolsPluginProps) {
     { id: "team", icon: Users, label: "团队空间", group: "个人中心" },
     { id: "settings", icon: Settings, label: "通用设置", group: "偏好设置" },
     { id: "ai-model", icon: Cpu, label: "AI 模型", group: "偏好设置" },
+    { id: "skills", icon: Sparkles, label: "AI 技能", group: "偏好设置" },
     { id: "mcp", icon: Plug, label: "MCP 服务器", group: "偏好设置" },
     { id: "memory", icon: Brain, label: "AI 记忆", group: "偏好设置" },
     { id: "credentials", icon: ShieldCheck, label: "凭证管理", group: "偏好设置" },
@@ -146,6 +150,11 @@ export default function ManagementCenter({ onBack }: MToolsPluginProps) {
           {activeTab === "team" && <TeamTab />}
           {activeTab === "settings" && <GeneralSettingsTab />}
           {activeTab === "ai-model" && <AIModelTab />}
+          {activeTab === "skills" && (
+            <div className="max-w-xl mx-auto">
+              <SkillsManager />
+            </div>
+          )}
           {activeTab === "mcp" && <MCPTab />}
           {activeTab === "memory" && <MemoryTab />}
           {activeTab === "server" && <ServerConfigTab />}

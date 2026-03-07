@@ -88,6 +88,7 @@ export async function aiComplexityCheck(
     ],
     temperature: 0.1,
     signal,
+    skipTools: true,
   });
 
   try {

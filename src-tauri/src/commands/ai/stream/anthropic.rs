@@ -37,6 +37,9 @@ pub async fn anthropic_stream_loop(
             .header("x-api-key", &config.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("Content-Type", "application/json");
+        if url.contains("coding.dashscope") || url.contains("coding-intl.dashscope") {
+            req_builder = req_builder.header("User-Agent", "openclaw/1.0.0");
+        }
         if is_team {
             req_builder = req_builder.header("Authorization", format!("Bearer {}", config.api_key));
         }

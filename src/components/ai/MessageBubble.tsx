@@ -1,11 +1,12 @@
 import { memo, useCallback, useRef, useState, useEffect, useMemo } from "react";
-import { User, Bot, Copy, Check, RefreshCw, Pencil, X } from "lucide-react";
+import { User, Bot, Copy, Check, RefreshCw, Pencil, X, ArrowRight } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { useAIStore } from "@/store/ai-store";
 import { ToolCallDisplay } from "./ToolCallDisplay";
+import { routeToAICenter } from "@/core/ai/ai-center-routing";
 import type { ChatMessage } from "@/core/ai/types";
 
 // ── 图片 blob URL LRU 缓存 ──
@@ -443,6 +444,32 @@ export const MessageBubble = memo(function MessageBubble({
                   </button>
                 )}
               </div>
+              {msg.suggestAgentUpgrade && !msg.streaming && (
+                <button
+                  onClick={() => {
+                    const aiState = useAIStore.getState();
+                    const lastMsgs = aiState.conversations
+                      .flatMap((c) => c.messages).slice(-6);
+                    const summary = lastMsgs
+                      .map((m) => `[${m.role === "user" ? "用户" : "助手"}]: ${m.content.slice(0, 400)}`)
+                      .join("\n");
+                    routeToAICenter({
+                      mode: "agent",
+                      source: "ask_continue_to_agent",
+                      agentHandoff: {
+                        query: `以下是之前的对话上下文，请基于此继续执行任务：\n\n${summary}`,
+                        sourceMode: "ask",
+                        sourceSessionId: aiState.currentConversationId ?? undefined,
+                      },
+                      navigate: false,
+                    });
+                  }}
+                  className="mt-2 flex items-center gap-1 text-xs text-indigo-400 hover:text-indigo-300 transition-colors"
+                >
+                  <ArrowRight className="w-3 h-3" />
+                  此任务涉及多步工具调用，建议在 Agent 模式中继续
+                </button>
+              )}
             </div>
           ) : editing ? (
             <div className="space-y-2">

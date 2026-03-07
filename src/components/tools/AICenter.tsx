@@ -11,6 +11,8 @@ import {
   Wrench,
   Network,
   ArrowRightCircle,
+  Sparkles,
+  X,
 } from "lucide-react";
 import { useDragWindow } from "@/hooks/useDragWindow";
 import { ModelSelector } from "@/components/ai/ModelSelector";
@@ -19,6 +21,7 @@ import { useAgentStore } from "@/store/agent-store";
 import { useClusterStore } from "@/store/cluster-store";
 import { useAppStore } from "@/store/app-store";
 import { isClusterRunning } from "@/core/agent/cluster/active-orchestrator";
+import { SkillsManager } from "@/components/ai/SkillsManager";
 import type { PluginContext } from "@/core/plugin-system/context";
 import type { ChatViewHandle } from "@/components/ai/ChatView";
 import type { SmartAgentHandle } from "@/plugins/builtin/SmartAgent/index";
@@ -71,6 +74,7 @@ export function AICenter({
 
   const chatRef = useRef<ChatViewHandle>(null);
   const agentRef = useRef<SmartAgentHandle>(null);
+  const [showSkills, setShowSkills] = useState(false);
 
   const { onMouseDown } = useDragWindow();
   const conversationCount = useAIStore((s) => s.conversations.length);
@@ -230,6 +234,15 @@ export function AICenter({
         )}
 
         <div className="flex-1" />
+
+        <button
+          onClick={() => setShowSkills((v) => !v)}
+          className={`${iconBtn} ${showSkills ? "text-[var(--color-accent)]" : ""}`}
+          title="技能管理"
+        >
+          <Sparkles className="w-3.5 h-3.5" />
+        </button>
+
         <ModelSelector />
       </div>
 
@@ -250,6 +263,31 @@ export function AICenter({
             </div>
           )}
         </Suspense>
+
+        {/* Skills 侧栏面板 */}
+        {showSkills && (
+          <>
+            <div
+              className="absolute inset-0 bg-black/10 z-10"
+              onClick={() => setShowSkills(false)}
+            />
+            <aside className="absolute right-0 top-0 bottom-0 z-20 w-[340px] max-w-[90vw] border-l border-[var(--color-border)] bg-[var(--color-bg)] shadow-2xl flex flex-col">
+              <div className="px-3 py-2 border-b border-[var(--color-border)] flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-[var(--color-accent)]" />
+                <span className="text-xs font-semibold flex-1">技能管理</span>
+                <button
+                  onClick={() => setShowSkills(false)}
+                  className="p-0.5 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <div className="flex-1 overflow-auto p-3">
+                <SkillsManager compact />
+              </div>
+            </aside>
+          </>
+        )}
       </div>
     </div>
   );

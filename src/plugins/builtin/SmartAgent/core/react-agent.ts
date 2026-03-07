@@ -16,6 +16,7 @@ import type {
   AIToolCall,
 } from "@/core/plugin-system/plugin-interface";
 import type { PluginAction } from "@/core/plugin-system/plugin-interface";
+import { applyContextBudget, type PromptSection } from "@/core/agent/context-budget";
 
 // ── 结构化工具错误类型（借鉴 Kimi CLI 四层体系） ──
 
@@ -95,6 +96,14 @@ export interface AgentConfig {
   onToolExecuted?: (toolName: string) => void;
   /** 角色覆盖：设置后替换默认身份描述（用于 Cluster 子 Agent 注入角色身份） */
   roleOverride?: string;
+  /** Skill 系统注入的领域知识和行为约束（由 skill-resolver 生成） */
+  skillsPrompt?: string;
+  /** 跳过内置的 detectCodingContext + codingBlock，由 Skills 系统统一提供编程指引 */
+  skipInternalCodingBlock?: boolean;
+  /** Coding Execution Policy（注入 system prompt 而非 user message，避免占历史空间） */
+  codingHint?: string;
+  /** system prompt 总 token 预算（0 = 不限，默认不限） */
+  contextBudget?: number;
 }
 
 const DEFAULT_CONFIG: AgentConfig = {
@@ -742,6 +751,8 @@ export class ReActAgent {
             dangerousToolPatterns: this.config.dangerousToolPatterns,
             confirmDangerousAction: this.config.confirmDangerousAction,
             userMemoryPrompt: this.config.userMemoryPrompt,
+            skillsPrompt: this.config.skillsPrompt,
+            skipInternalCodingBlock: this.config.skipInternalCodingBlock,
             contextLimit: this.config.contextLimit,
             initialMode: this.config.initialMode,
             defaultToolTimeout: this.config.defaultToolTimeout,
@@ -1055,6 +1066,8 @@ export class ReActAgent {
   // ── 文本 ReAct 模式（降级方案） ──
 
   private buildSystemPrompt(userInput?: string): string {
+    const s = this.buildSharedPromptSections(userInput);
+
     const availableTools = this.getAvailableTools();
     const toolDescriptions = availableTools
       .map((t) => {
@@ -1070,26 +1083,15 @@ export class ReActAgent {
     const modeHint = this.mode === "plan"
       ? "\n\n**当前为 Plan 模式（只读），仅可使用只读工具。完成分析后调用 exit_plan_mode 切换到执行模式。**"
       : "";
+    const disabledSection = s.disabledHint ? `\n\n${s.disabledHint}` : "";
 
-    const disabledTools = this.loopDetector.getDisabledTools();
-    const disabledHint = disabledTools.length > 0
-      ? `\n\n已禁用的工具（连续失败过多）: ${disabledTools.join(", ")} — 请改用其他方式。`
-      : "";
-
-    const isCoding = userInput ? this.detectCodingContext(userInput) : false;
-    const codingHint = isCoding ? `
-
-## 编程任务工作流
+    const codingHint = s.isCoding ? `## 编程任务工作流
 1. 理解需求 → 2. 用 read_file / search_in_files 探索代码 → 3. 复现问题 → 4. 定位根因 → 5. 用 str_replace_edit 修改 → 6. 用 run_lint 验证 → 7. 总结
 - 修改文件优先用 str_replace_edit，创建新文件用 str_replace_edit(create)
 - 输出被截断时用 read_file_range 分段读取` : "";
 
-    const textIdentityBlock = this.config.roleOverride
-      ? `${this.config.roleOverride}\n禁止自称 Claude、GPT 或任何第三方厂商的助手。`
-      : `你是 51ToolBox 内置的智能助手 Agent。禁止自称 Claude、GPT 或任何第三方厂商的助手。`;
-
-    return `${textIdentityBlock}
-你是一个高能力智能助手 Agent，使用 ReAct (Reasoning + Acting) 框架来自主回答问题和执行复杂任务。${modeHint}${disabledHint}
+    const identityAndRules = `${s.identityBlock}
+你是一个高能力智能助手 Agent，使用 ReAct (Reasoning + Acting) 框架来自主回答问题和执行复杂任务。${modeHint}${disabledSection}
 
 可用工具:
 ${toolDescriptions}
@@ -1110,27 +1112,31 @@ Final Answer: [最终回答]
 2. 每次只使用一个工具
 3. Action Input 必须是有效的 JSON
 4. 仔细分析 Observation 结果再决定下一步
-5. **工具返回成功结果后，禁止用相同参数再次调用同一工具**。结果已经拿到了，直接在 Thought 中分析它并给出 Final Answer
+5. **工具返回成功结果后，禁止用相同参数再次调用同一工具**
 6. 如果信息不足但可推断，做合理假设并继续
-7. **严禁在 Final Answer 中向用户提问**。需要信息时必须用 ask_user 工具（会弹出交互对话框）
-8. ask_user **最多调用 2 次**，第一次就用 extra_questions 把所有问题问完，获得回答后立即执行
-9. **严禁在 Final Answer 中写工具调用**（如"调用工具: web_search(...)"），必须用 Action/Action Input 格式真正调用
-10. **所有文件路径必须使用绝对路径**，不要使用 ~ 或相对路径
+7. **严禁在 Final Answer 中向用户提问**。需要信息时必须用 ask_user 工具
+8. ask_user **最多调用 2 次**，第一次就用 extra_questions 把所有问题问完
+9. **严禁在 Final Answer 中写工具调用**，必须用 Action/Action Input 格式真正调用
+10. **所有文件路径必须使用绝对路径**
 11. **sequential_thinking 仅用于梳理复杂逻辑，禁止连续调用超过 3 次**
 
-## 模式切换
-- 面对复杂任务时，可先调用 enter_plan_mode 进入只读分析模式
-- 方案确定后调用 exit_plan_mode 切回执行模式
+${s.modeSwitching}
 
-## 复杂任务策略
-- **任务分解**: 遇到复杂任务先拆分为子步骤，在 Thought 中列出计划
-- **信息收集优先**: 在给结论前先用工具收集充分信息
-- **结果验证**: 关键操作后通过查询验证结果
-- **错误恢复**: 工具失败时在 Thought 中分析根因，尝试替代方案
-- **多角度分析**: 复杂问题从多角度思考，给出全面答案
-- **记住偏好**: 发现用户明确偏好时，用 save_user_memory 工具记录${this.config.userMemoryPrompt || ""}
-${codingHint}
+${s.taskStrategy}
+
 用中文回答`;
+
+    const sections: PromptSection[] = [
+      { name: "identity_rules", content: identityAndRules, priority: 10 },
+      { name: "codingBlock", content: codingHint, priority: 30, maxTokens: 400 },
+      { name: "skills", content: s.skillsBlock, priority: 40, maxTokens: 600 },
+      { name: "memory", content: s.memoryBlock ? `- **记住偏好**: 发现用户明确偏好时，用 save_user_memory 工具记录${s.memoryBlock}` : "", priority: 50, maxTokens: 400 },
+      { name: "codingHint", content: s.codingHintBlock, priority: 60, maxTokens: 500 },
+    ];
+
+    const budget = this.config.contextBudget ?? 0;
+    const result = applyContextBudget(sections, budget);
+    return result.sections.map((sec) => sec.content).join("\n\n");
   }
 
   private buildTextConversation(userInput?: string): {
@@ -1287,20 +1293,35 @@ ${codingHint}
     return false;
   }
 
-  private buildFCSystemPrompt(userInput?: string): string {
-    const modeHint = this.mode === "plan"
-      ? `\n\n## 当前模式: Plan（只读分析）\n你正处于 Plan 模式，只能使用只读工具（信息收集、搜索、读取）。不能执行修改操作。\n完成分析后调用 exit_plan_mode 切换到 Execute 模式再执行修改。`
-      : "";
+  /**
+   * 两种模式共享的 prompt 段落和决策。
+   * FC / Text builder 各自从此取用，避免重复。
+   */
+  private buildSharedPromptSections(userInput?: string) {
+    const identityBlock = this.config.roleOverride
+      ? `${this.config.roleOverride}\n禁止自称 Claude、GPT 或任何第三方厂商的助手。`
+      : `你是 51ToolBox 内置的智能助手 Agent。禁止自称 Claude、GPT 或任何第三方厂商的助手。被问"你是谁"时，回答：你是 51ToolBox 内置助手。`;
+
     const disabledTools = this.loopDetector.getDisabledTools();
     const disabledHint = disabledTools.length > 0
-      ? `\n\n## 已禁用的工具（连续失败过多）\n${disabledTools.join(", ")} — 请改用其他方式完成任务。`
+      ? `已禁用的工具（连续失败过多）: ${disabledTools.join(", ")} — 请改用其他方式。`
       : "";
 
-    const isCoding = userInput ? this.detectCodingContext(userInput) : false;
+    const isCoding = !this.config.skipInternalCodingBlock && userInput
+      ? this.detectCodingContext(userInput) : false;
 
-    const codingBlock = isCoding ? `
+    const modeSwitching = `## 模式切换
+- 面对复杂任务时，可先调用 enter_plan_mode 进入只读分析模式，收集信息和制定方案
+- 方案确定后调用 exit_plan_mode 切回执行模式进行实际操作`;
 
-## 编程任务工作流（7 步法）
+    const taskStrategy = `## 复杂任务处理策略
+1. **任务分解**：遇到复杂任务时，先在内部将其拆分为多个子步骤，按顺序逐步完成
+2. **深度推理**：每一步执行前，先分析当前已知信息和目标的差距，选择最有效的工具
+3. **信息收集优先**：在给出结论前，先充分收集必要信息（读文件、搜索、查询系统状态等）
+4. **结果验证**：完成关键操作后，通过读取或查询验证结果是否正确
+5. **错误恢复**：工具失败时分析根因，尝试替代方案而非简单重试`;
+
+    const codingBlock = isCoding ? `## 编程任务工作流（7 步法）
 当任务涉及代码编写、修改、调试时，遵循以下流程：
 1. **理解需求**：仔细分析任务目标，明确要修改什么、为什么修改
 2. **探索代码**：用 read_file / read_file_range / search_in_files / list_directory 了解项目结构和相关代码
@@ -1325,12 +1346,33 @@ ${codingHint}
 - 搜索结果被截断 → 用 search_in_files 缩小搜索范围或添加 file_pattern 过滤
 - 命令输出被截断 → 用 run_shell_command 配合 grep/head/tail 过滤输出` : "";
 
-    const identityBlock = this.config.roleOverride
-      ? `${this.config.roleOverride}\n禁止自称 Claude、GPT 或任何第三方厂商的助手。`
-      : `你是 51ToolBox 内置的智能助手 Agent。禁止自称 Claude、GPT 或任何第三方厂商的助手。被问"你是谁"时，回答：你是 51ToolBox 内置助手。`;
+    const skillsBlock = this.config.skillsPrompt || "";
+    const memoryBlock = this.config.userMemoryPrompt || "";
+    const codingHintBlock = this.config.codingHint || "";
 
-    return `${identityBlock}
-你是一个高能力智能助手 Agent，能够自主使用工具来回答问题和执行复杂任务。${modeHint}${disabledHint}
+    return {
+      identityBlock,
+      disabledHint,
+      isCoding,
+      codingBlock,
+      modeSwitching,
+      taskStrategy,
+      skillsBlock,
+      memoryBlock,
+      codingHintBlock,
+    };
+  }
+
+  private buildFCSystemPrompt(userInput?: string): string {
+    const s = this.buildSharedPromptSections(userInput);
+
+    const modeHint = this.mode === "plan"
+      ? `\n\n## 当前模式: Plan（只读分析）\n你正处于 Plan 模式，只能使用只读工具（信息收集、搜索、读取）。不能执行修改操作。\n完成分析后调用 exit_plan_mode 切换到 Execute 模式再执行修改。`
+      : "";
+    const disabledSection = s.disabledHint ? `\n\n## ${s.disabledHint}` : "";
+
+    const identityAndRules = `${s.identityBlock}
+你是一个高能力智能助手 Agent，能够自主使用工具来回答问题和执行复杂任务。${modeHint}${disabledSection}
 
 ## 核心行为
 - 收到任务后立即开始执行，尽量自主完成
@@ -1343,19 +1385,11 @@ ${codingHint}
   · 缺少必要的参数（如收件人、密码、具体日期等）
 - **ask_user 最多调用 2 次**。第一次调用时用 extra_questions 参数把所有相关问题合并到一次调用中
 - 获得用户回答后立即执行任务，不要反复追问。如果用户回答不够详细，基于合理推断继续
-- 示例: ask_user(question="搜索什么主题？", options="技术文档,学术论文,新闻", extra_questions='[{"question":"具体关键词？","type":"text"},{"question":"语言？","options":["中文","英文"]}]')
 - 用中文回答
 
-## 模式切换
-- 面对复杂任务时，可先调用 enter_plan_mode 进入只读分析模式，收集信息和制定方案
-- 方案确定后调用 exit_plan_mode 切回执行模式进行实际操作
+${s.modeSwitching}
 
-## 复杂任务处理策略
-1. **任务分解**：遇到复杂任务时，先在内部将其拆分为多个子步骤，按顺序逐步完成
-2. **深度推理**：每一步执行前，先分析当前已知信息和目标的差距，选择最有效的工具
-3. **信息收集优先**：在给出结论前，先充分收集必要信息（读文件、搜索、查询系统状态等）
-4. **结果验证**：完成关键操作后，通过读取或查询验证结果是否正确
-5. **错误恢复**：工具失败时分析根因，尝试替代方案而非简单重试
+${s.taskStrategy}
 
 ## 工具使用规则
 - 需要工具时直接调用，**严禁在回复文本中写出工具调用**（如"调用工具: web_search(...)"），必须通过 function call 真正执行
@@ -1365,13 +1399,24 @@ ${codingHint}
 - 涉及文件操作时，必须调用对应工具
 - 如有 delegate_subtask 工具可用，可将独立子问题委派给子 Agent 并行处理
 - **所有文件路径必须使用绝对路径**，不要使用 ~ 或相对路径
-- **sequential_thinking 仅用于梳理复杂逻辑，禁止连续调用超过 3 次**。思考后必须立即使用 read_file / list_directory / search_in_files 等工具获取实际信息
-${codingBlock}
+- **sequential_thinking 仅用于梳理复杂逻辑，禁止连续调用超过 3 次**
+
 ## 回答质量
 - 结论必须基于真实的工具调用结果
 - 多角度分析问题，给出全面的答案
-- 如果任务有多种可行方案，简要说明各方案优劣
-- 发现用户有明确偏好或习惯时，使用 save_user_memory 工具记录${this.config.userMemoryPrompt || ""}`;
+- 如果任务有多种可行方案，简要说明各方案优劣`;
+
+    const sections: PromptSection[] = [
+      { name: "identity_rules", content: identityAndRules, priority: 10 },
+      { name: "codingBlock", content: s.codingBlock, priority: 30, maxTokens: 800 },
+      { name: "skills", content: s.skillsBlock, priority: 40, maxTokens: 600 },
+      { name: "memory", content: s.memoryBlock ? `- 发现用户有明确偏好或习惯时，使用 save_user_memory 工具记录${s.memoryBlock}` : "", priority: 50, maxTokens: 400 },
+      { name: "codingHint", content: s.codingHintBlock, priority: 60, maxTokens: 500 },
+    ];
+
+    const budget = this.config.contextBudget ?? 0;
+    const result = applyContextBudget(sections, budget);
+    return result.sections.map((sec) => sec.content).join("\n\n");
   }
 
   /**

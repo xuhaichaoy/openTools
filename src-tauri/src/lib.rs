@@ -214,6 +214,9 @@ pub fn run() {
         .manage(commands::ai::ToolConfirmationState {
             pending: std::sync::Mutex::new(None),
         })
+        .manage(commands::ai::FrontendToolState {
+            pending: std::sync::Mutex::new(None),
+        })
         .manage(commands::ai::StreamCancellation::new())
         .manage(std::sync::Mutex::new(commands::plugin::PluginCache::new()))
         .manage(std::sync::Mutex::new(
@@ -292,6 +295,7 @@ pub fn run() {
             commands::ai::ai_get_own_keys,
             commands::ai::ai_set_own_keys,
             commands::ai::ai_confirm_tool,
+            commands::ai::ai_frontend_tool_result,
             commands::ai::ai_stop_stream,
             commands::ai::ai_save_chat_image,
             commands::ai::ai_embedding,

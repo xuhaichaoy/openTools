@@ -43,10 +43,14 @@ pub async fn openai_stream_loop(
         config.team_config_id
     );
 
-    let response = client
+    let mut req_builder = client
         .post(&url)
         .header("Authorization", format!("Bearer {}", config.api_key))
-        .header("Content-Type", "application/json")
+        .header("Content-Type", "application/json");
+    if url.contains("coding.dashscope") || url.contains("coding-intl.dashscope") {
+        req_builder = req_builder.header("User-Agent", "openclaw/1.0.0");
+    }
+    let response = req_builder
         .json(&request)
         .send()
         .await
@@ -171,10 +175,15 @@ pub async fn openai_stream_loop(
                                     }
                                 }
 
-                                match client
-                                    .post(format!("{}/chat/completions", config.base_url))
+                                let follow_url = format!("{}/chat/completions", config.base_url);
+                                let mut follow_builder = client
+                                    .post(&follow_url)
                                     .header("Authorization", format!("Bearer {}", config.api_key))
-                                    .header("Content-Type", "application/json")
+                                    .header("Content-Type", "application/json");
+                                if follow_url.contains("coding.dashscope") || follow_url.contains("coding-intl.dashscope") {
+                                    follow_builder = follow_builder.header("User-Agent", "openclaw/1.0.0");
+                                }
+                                match follow_builder
                                     .json(&follow_request)
                                     .send()
                                     .await

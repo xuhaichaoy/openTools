@@ -222,7 +222,7 @@ function SessionCard({
     routeToAICenter({
       mode: "agent",
       source: "cluster_continue_to_agent",
-      agentInitialQuery: prefilled,
+      agentHandoff: { query: prefilled },
       taskId: session.id,
       navigate: false,
     });
@@ -796,8 +796,8 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
             onChange={handleFileSelect}
           />
         </div>
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1.5 text-xs flex-wrap">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+          <div className="flex items-center gap-1.5 text-xs">
             <span className="text-[var(--color-text-tertiary)]">模式:</span>
             <button
               type="button"
@@ -821,13 +821,13 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
             >
               多角色协作
             </button>
-            {aiConfig.model && (
-              <span className="text-[var(--color-text-tertiary)]">
-                · {aiConfig.model}
-              </span>
-            )}
           </div>
-          <div className="flex items-center gap-1.5">
+          {aiConfig.model && (
+            <span className="text-xs text-[var(--color-text-tertiary)] truncate max-w-[200px]" title={aiConfig.model}>
+              · {aiConfig.model}
+            </span>
+          )}
+          <div className="flex items-center gap-1.5 flex-wrap">
             {autoReview && (
               <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600">
                 Review
@@ -854,29 +854,31 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
               </span>
             )}
           </div>
-          <div className="flex-1" />
-          {hasAnyRunning && (
+          <div className="flex-1 min-w-[16px]" />
+          <div className="flex items-center gap-1.5 shrink-0">
+            {hasAnyRunning && (
+              <button
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-red-500/10 text-red-600 rounded-lg hover:bg-red-500/20 transition-colors"
+                onClick={handleAbort}
+              >
+                <Square className="w-3 h-3" />
+                {currentSessionRunning ? "停止当前" : "停止最近"}
+              </button>
+            )}
             <button
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-red-500/10 text-red-600 rounded-lg hover:bg-red-500/20 transition-colors"
-              onClick={handleAbort}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-[var(--color-accent)] text-white rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50"
+              onClick={handleRun}
+              disabled={(!input.trim() && attachments.length === 0) || runningCount >= MAX_ACTIVE_CLUSTER_TASKS}
+              title={
+                runningCount >= MAX_ACTIVE_CLUSTER_TASKS
+                  ? `最多同时运行 ${MAX_ACTIVE_CLUSTER_TASKS} 个集群任务`
+                  : undefined
+              }
             >
-              <Square className="w-3 h-3" />
-              {currentSessionRunning ? "停止当前" : "停止最近"}
+              <Play className="w-3 h-3" />
+              执行
             </button>
-          )}
-          <button
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-[var(--color-accent)] text-white rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50"
-            onClick={handleRun}
-            disabled={(!input.trim() && attachments.length === 0) || runningCount >= MAX_ACTIVE_CLUSTER_TASKS}
-            title={
-              runningCount >= MAX_ACTIVE_CLUSTER_TASKS
-                ? `最多同时运行 ${MAX_ACTIVE_CLUSTER_TASKS} 个集群任务`
-                : undefined
-            }
-          >
-            <Play className="w-3 h-3" />
-            执行
-          </button>
+          </div>
         </div>
       </div>
 

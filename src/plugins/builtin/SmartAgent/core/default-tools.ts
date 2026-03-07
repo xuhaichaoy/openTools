@@ -1563,6 +1563,157 @@ export function createBuiltinAgentTools(
     },
   });
 
+  // ── manage_skills: 技能管理工具 ──
+  tools.push({
+    name: "manage_skills",
+    description: `管理 AI 技能（领域知识包）。可以列出、创建、启用/禁用、删除技能。
+技能会注入 system prompt，为 AI 提供特定领域的知识和行为约束。
+当用户要求你"学会"某个领域知识、"记住"某类工作流程、或安装/创建技能时使用此工具。`,
+    parameters: {
+      action: {
+        type: "string",
+        description: "操作类型：list | create | enable | disable | delete | get",
+      },
+      id: {
+        type: "string",
+        description: "技能 ID（enable/disable/delete/get 时必填）",
+        required: false,
+      },
+      name: {
+        type: "string",
+        description: "技能名称（create 时必填）",
+        required: false,
+      },
+      description: {
+        type: "string",
+        description: "技能简短描述（create 时必填）",
+        required: false,
+      },
+      system_prompt: {
+        type: "string",
+        description: "技能的系统提示词，Markdown 格式的领域知识和行为约束（create 时必填）",
+        required: false,
+      },
+      trigger_patterns: {
+        type: "string",
+        description: "触发模式，用逗号分隔的正则表达式列表（create 时可选，留空则需手动激活）",
+        required: false,
+      },
+      category: {
+        type: "string",
+        description: "分类标签，如 coding / writing / devops / data（create 时可选）",
+        required: false,
+      },
+    },
+    execute: async (params) => {
+      const { useSkillStore } = await import("@/store/skill-store");
+      const action = String(params.action || "").trim().toLowerCase();
+
+      let snap = useSkillStore.getState();
+      if (!snap.loaded) {
+        await snap.load();
+        snap = useSkillStore.getState();
+      }
+
+      switch (action) {
+        case "list": {
+          return {
+            skills: snap.skills.map((s) => ({
+              id: s.id,
+              name: s.name,
+              description: s.description,
+              category: s.category,
+              source: s.source,
+              enabled: s.enabled,
+              autoActivate: s.autoActivate,
+              triggerCount: s.triggerPatterns?.length ?? 0,
+            })),
+            total: snap.skills.length,
+            enabled: snap.skills.filter((s) => s.enabled).length,
+          };
+        }
+
+        case "get": {
+          const id = String(params.id || "").trim();
+          const skill = snap.skills.find((s) => s.id === id);
+          if (!skill) return { error: `技能 "${id}" 不存在` };
+          return {
+            id: skill.id,
+            name: skill.name,
+            description: skill.description,
+            category: skill.category,
+            source: skill.source,
+            enabled: skill.enabled,
+            autoActivate: skill.autoActivate,
+            triggerPatterns: skill.triggerPatterns,
+            systemPrompt: skill.systemPrompt?.slice(0, 500),
+            promptLength: skill.systemPrompt?.length ?? 0,
+          };
+        }
+
+        case "create": {
+          const name = String(params.name || "").trim();
+          const description = String(params.description || "").trim();
+          const systemPrompt = String(params.system_prompt || "").trim();
+          if (!name || !systemPrompt) {
+            return { error: "create 操作需要 name 和 system_prompt 参数" };
+          }
+          const patterns = params.trigger_patterns
+            ? String(params.trigger_patterns).split(",").map((s: string) => s.trim()).filter(Boolean)
+            : [];
+          const skill = await snap.add({
+            name,
+            description: description || name,
+            version: "1.0.0",
+            enabled: true,
+            autoActivate: patterns.length > 0,
+            triggerPatterns: patterns.length > 0 ? patterns : undefined,
+            systemPrompt,
+            category: params.category ? String(params.category).trim() : undefined,
+            source: "user",
+          });
+          return {
+            success: true,
+            message: `技能 "${name}" 已创建并启用`,
+            id: skill.id,
+          };
+        }
+
+        case "enable": {
+          const id = String(params.id || "").trim();
+          const skill = snap.skills.find((s) => s.id === id);
+          if (!skill) return { error: `技能 "${id}" 不存在` };
+          if (skill.enabled) return { message: `技能 "${skill.name}" 已经是启用状态` };
+          await snap.toggleEnabled(id);
+          return { success: true, message: `技能 "${skill.name}" 已启用` };
+        }
+
+        case "disable": {
+          const id = String(params.id || "").trim();
+          const skill = snap.skills.find((s) => s.id === id);
+          if (!skill) return { error: `技能 "${id}" 不存在` };
+          if (!skill.enabled) return { message: `技能 "${skill.name}" 已经是禁用状态` };
+          await snap.toggleEnabled(id);
+          return { success: true, message: `技能 "${skill.name}" 已禁用` };
+        }
+
+        case "delete": {
+          const id = String(params.id || "").trim();
+          const skill = snap.skills.find((s) => s.id === id);
+          if (!skill) return { error: `技能 "${id}" 不存在` };
+          if (skill.source === "builtin") return { error: "内置技能不能删除，只能禁用" };
+          const ok = await snap.remove(id);
+          return ok
+            ? { success: true, message: `技能 "${skill.name}" 已删除` }
+            : { error: "删除失败" };
+        }
+
+        default:
+          return { error: `未知操作 "${action}"。支持的操作：list, get, create, enable, disable, delete` };
+      }
+    },
+  });
+
   const isMac =
     typeof navigator !== "undefined" &&
     navigator.platform.toLowerCase().includes("mac");

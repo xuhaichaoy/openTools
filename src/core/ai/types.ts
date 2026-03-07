@@ -14,6 +14,8 @@ export interface ChatMessage {
   streaming?: boolean;
   toolCalls?: ToolCallInfo[];
   images?: string[];
+  /** Ask 模式检测到复杂工具调用后，建议用户升级到 Agent 模式 */
+  suggestAgentUpgrade?: boolean;
 }
 
 /**

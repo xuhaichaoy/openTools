@@ -10,6 +10,8 @@ import {
   normalizeCodingExecutionProfile,
   type CodingExecutionProfile,
 } from "@/core/agent/coding-profile";
+import { loadAndResolveSkills } from "@/store/skill-store";
+import { applySkillToolFilter } from "@/core/agent/skills/skill-resolver";
 import {
   getExecutionWaitingStageLabel,
   type ExecutionWaitingStage,
@@ -49,6 +51,7 @@ interface UseAgentExecutionResult {
       sessionId?: string;
       taskId?: string;
       systemHint?: string;
+      codingHint?: string;
       images?: string[];
       runProfile?: CodingExecutionProfile;
     },
@@ -100,8 +103,10 @@ export function useAgentExecution({
         sessionId?: string;
         taskId?: string;
         systemHint?: string;
+        codingHint?: string;
         images?: string[];
         runProfile?: CodingExecutionProfile;
+        sourceHandoff?: import("@/store/agent-store").AgentSession["sourceHandoff"];
       },
     ) => {
       if (!ai || !query.trim()) return;
@@ -120,7 +125,7 @@ export function useAgentExecution({
       const snapshot = useAgentStore.getState();
 
       if (!sessionId || !snapshot.sessions.some((s) => s.id === sessionId)) {
-        sessionId = createSession(query);
+        sessionId = createSession(query, opts?.sourceHandoff);
         const newSession = useAgentStore
           .getState()
           .sessions.find((s) => s.id === sessionId);
@@ -247,7 +252,10 @@ export function useAgentExecution({
 
         updateTask(sessionId!, taskId, {
           steps: [...collectedSteps],
-          ...(step.type === "answer" ? { answer: step.content } : {}),
+          // 避免 FC 中间轮次的流式文本覆盖最终答案，造成“先出现再重置”。
+          ...(step.type === "answer" && !step.streaming
+            ? { answer: step.content }
+            : {}),
         });
         if (scrollTimer) clearTimeout(scrollTimer);
         scrollTimer = setTimeout(() => {
@@ -268,9 +276,20 @@ export function useAgentExecution({
         true,
       );
 
-      const memoryStore = useAgentMemoryStore.getState();
-      if (!memoryStore.loaded) await memoryStore.load();
-      const userMemoryPrompt = memoryStore.getMemoriesForPrompt();
+      let memorySnap = useAgentMemoryStore.getState();
+      if (!memorySnap.loaded) {
+        await memorySnap.load();
+        memorySnap = useAgentMemoryStore.getState();
+      }
+      const userMemoryPrompt = memorySnap.getMemoriesForPrompt();
+
+      const skillContext = await loadAndResolveSkills(query);
+      const skillsPrompt = skillContext.mergedSystemPrompt || undefined;
+      const hasCodingWorkflowSkill = skillContext.activeSkillIds.includes("builtin-coding-workflow");
+      const toolsForRun = applySkillToolFilter(
+        availableTools,
+        skillContext.mergedToolFilter,
+      );
 
       const aiConfig = useAIStore.getState().config;
       const runProfile = normalizeCodingExecutionProfile(opts?.runProfile);
@@ -302,13 +321,16 @@ export function useAgentExecution({
 
       const agent = new ReActAgent(
         ai,
-        availableTools,
+        toolsForRun,
         {
           maxIterations,
           temperature: aiConfig.temperature ?? 0.7,
           verbose: true,
           fcCompatibilityKey,
           userMemoryPrompt: userMemoryPrompt || undefined,
+          skillsPrompt,
+          skipInternalCodingBlock: hasCodingWorkflowSkill,
+          codingHint: opts?.codingHint,
           ...(runProfile.largeProjectMode ? { contextLimit: 160_000 } : {}),
           dangerousToolPatterns: [
             "write_file",

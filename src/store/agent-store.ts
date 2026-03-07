@@ -37,6 +37,11 @@ export interface AgentSession {
   title: string;
   tasks: AgentTask[];
   createdAt: number;
+  /** 跨模式 handoff 来源信息（如从 Ask 切换到 Agent） */
+  sourceHandoff?: {
+    sourceMode: string;
+    sourceSessionId: string;
+  };
 }
 
 interface AgentState {
@@ -60,7 +65,7 @@ interface AgentState {
   upsertScheduledTask: (task: AgentScheduledTask) => void;
   applyScheduledTaskPatch: (patch: AgentTaskStatusPatch) => void;
   applyScheduledTaskSkipped: (event: AgentTaskSkippedEvent) => void;
-  createSession: (query: string) => string;
+  createSession: (query: string, sourceHandoff?: AgentSession["sourceHandoff"]) => string;
   getCurrentSession: () => AgentSession | null;
   setCurrentSession: (id: string) => void;
   /** 向会话追加一个新任务，返回新任务的 id */
@@ -334,7 +339,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }));
   },
 
-  createSession: (query: string) => {
+  createSession: (query: string, sourceHandoff?: AgentSession["sourceHandoff"]) => {
     const id = generateId();
     const session: AgentSession = {
       id,
@@ -352,6 +357,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           ]
         : [],
       createdAt: Date.now(),
+      ...(sourceHandoff ? { sourceHandoff } : {}),
     };
     set((state) => ({
       sessions: [session, ...state.sessions],

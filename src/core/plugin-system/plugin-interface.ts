@@ -37,6 +37,8 @@ export interface MToolsAI {
     temperature?: number;
     requestPolicy?: AIRequestPolicy;
     signal?: AbortSignal;
+    /** 跳过后端系统工具注入和默认 system prompt，发送干净的纯 LLM 请求 */
+    skipTools?: boolean;
   }): Promise<{ content: string; usage?: { tokens: number } }>;
 
   /** 流式对话 */

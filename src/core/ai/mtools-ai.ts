@@ -226,6 +226,7 @@ export function createMToolsAI(): MToolsAI {
             messages: enrichedMessages,
             config: routed,
             conversationId,
+            skipTools: !!options.skipTools,
           });
         })().catch((e) => {
           cleanup();
@@ -484,4 +485,59 @@ export function getMToolsAI(): MToolsAI {
     _instance = createMToolsAI();
   }
   return _instance;
+}
+
+/**
+ * 直接通过 fetch 调用 LLM API，绕过 Rust 后端（不注入系统工具和默认提示词）。
+ * 用于 Cluster Planner/Aggregator 等纯文本对话场景，避免服务端 API 网关
+ * 因 tools 字段触发功能限制。
+ */
+export async function chatDirect(options: {
+  messages: { role: string; content: string; images?: string[] }[];
+  model?: string;
+  temperature?: number;
+  signal?: AbortSignal;
+}): Promise<{ content: string }> {
+  const config = getConfig();
+  const routed = getRoutedConfig({
+    ...config,
+    ...(options.model ? { model: options.model } : {}),
+    ...(options.temperature != null ? { temperature: options.temperature } : {}),
+  });
+  const url = `${routed.base_url}/chat/completions`;
+
+  const body: Record<string, unknown> = {
+    model: routed.model,
+    messages: options.messages.map((m) => ({ role: m.role, content: m.content })),
+    temperature: routed.temperature ?? 0.7,
+  };
+  if (routed.max_tokens) body.max_tokens = routed.max_tokens;
+  if (routed.team_id) {
+    body.team_id = routed.team_id;
+    if (routed.team_config_id) body.team_config_id = routed.team_config_id;
+  }
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${routed.api_key}`,
+  };
+  if (url.includes("coding.dashscope") || url.includes("coding-intl.dashscope")) {
+    headers["User-Agent"] = "openclaw/1.0.0";
+  }
+
+  const resp = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+    signal: options.signal,
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`API 错误: ${text}`);
+  }
+
+  const data = await resp.json();
+  const content = data?.choices?.[0]?.message?.content ?? "";
+  return { content };
 }

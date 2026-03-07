@@ -34,6 +34,8 @@ export interface ClusterStep {
   reviewAfter?: boolean;
   /** Review-Fix 最大重试次数 */
   maxReviewRetries?: number;
+  /** 标记为关键步骤（默认 true）。关键步骤失败后其下游步骤将被跳过 */
+  critical?: boolean;
 }
 
 export interface ClusterPlan {
@@ -45,7 +47,7 @@ export interface ClusterPlan {
 
 // ── Cluster Execution ──
 
-export type AgentInstanceStatus = "idle" | "running" | "done" | "error" | "reviewing";
+export type AgentInstanceStatus = "idle" | "running" | "done" | "error" | "reviewing" | "skipped";
 
 export interface AgentInstance {
   id: string;
@@ -156,6 +158,7 @@ export type ClusterProgressEventType =
   | "step_started"
   | "step_progress"
   | "step_completed"
+  | "step_skipped"
   | "step_review"
   | "step_retry"
   | "aggregation_started"

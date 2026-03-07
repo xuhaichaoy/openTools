@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import type { AgentScheduledTask, AgentTaskStatus } from "@/core/ai/types";
 import type { AgentTool } from "../core/react-agent";
 import type {
@@ -6,6 +6,7 @@ import type {
   ScheduledSortMode,
   WorkbenchTab,
 } from "../core/ui-state";
+import { SkillsManager } from "@/components/ai/SkillsManager";
 
 function isTaskDue(nextRunAt?: number, status?: AgentTaskStatus) {
   return typeof nextRunAt === "number" && nextRunAt <= Date.now() && status === "pending";
@@ -93,6 +94,16 @@ export function AgentWorkbenchPanel({
               }`}
             >
               编排
+            </button>
+            <button
+              onClick={() => onSelectTab("skills")}
+              className={`px-2 py-0.5 text-[10px] rounded ${
+                workbenchTab === "skills"
+                  ? "bg-[var(--color-bg)] text-[var(--color-text)]"
+                  : "text-[var(--color-text-secondary)]"
+              }`}
+            >
+              技能
             </button>
           </div>
           <button
@@ -297,6 +308,12 @@ export function AgentWorkbenchPanel({
                   </div>
                 ))}
               </div>
+            </div>
+          )}
+
+          {workbenchTab === "skills" && (
+            <div className="p-3">
+              <SkillsManager compact />
             </div>
           )}
         </div>

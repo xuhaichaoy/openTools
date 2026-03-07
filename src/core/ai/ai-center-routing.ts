@@ -1,5 +1,5 @@
 import { useAIStore } from "@/store/ai-store";
-import { useAppStore, type AICenterMode } from "@/store/app-store";
+import { useAppStore, type AICenterMode, type AgentHandoff } from "@/store/app-store";
 import {
   recordAIRouteEvent,
   type AIRouteSource,
@@ -10,7 +10,9 @@ interface RouteToAICenterParams {
   source: AIRouteSource;
   query?: string;
   images?: string[];
+  /** @deprecated 用 agentHandoff 代替 */
   agentInitialQuery?: string;
+  agentHandoff?: AgentHandoff;
   taskId?: string;
   note?: string;
   navigate?: boolean;
@@ -30,6 +32,7 @@ export function routeToAICenter(params: RouteToAICenterParams): void {
     query,
     images,
     agentInitialQuery,
+    agentHandoff,
     taskId,
     note,
     navigate = true,
@@ -44,15 +47,19 @@ export function routeToAICenter(params: RouteToAICenterParams): void {
     void useAIStore.getState().sendMessage(query, images);
   }
 
-  if (mode === "agent" && agentInitialQuery?.trim()) {
-    appStore.setPendingAgentInitialQuery(agentInitialQuery);
+  if (mode === "agent") {
+    if (agentHandoff) {
+      appStore.setPendingAgentHandoff(agentHandoff);
+    } else if (agentInitialQuery?.trim()) {
+      appStore.setPendingAgentHandoff({ query: agentInitialQuery });
+    }
   }
 
   recordAIRouteEvent({
     mode,
     source,
     taskId,
-    queryPreview: preview(query ?? agentInitialQuery),
+    queryPreview: preview(query ?? agentHandoff?.query ?? agentInitialQuery),
     note,
   });
 

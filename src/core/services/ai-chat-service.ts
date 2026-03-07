@@ -229,8 +229,10 @@ export async function startStreamingChat(opts: {
   apiMessages: Array<{ role: string; content: string; images?: string[] }>;
   config: AIConfig;
   callbacks: StreamCallbacks;
+  extraTools?: any[];
+  onFrontendToolCall?: (name: string, args: string) => Promise<{ success: boolean; result: string }>;
 }): Promise<() => void> {
-  const { conversationId, assistantMessageId, apiMessages, config, callbacks } = opts;
+  const { conversationId, assistantMessageId, apiMessages, config, callbacks, extraTools, onFrontendToolCall } = opts;
   const { updateAssistant, setState, onPersist } = callbacks;
 
   // <think> 标签过滤器（DeepSeek 等模型的思考过程）
@@ -259,6 +261,7 @@ export async function startStreamingChat(opts: {
     unlistenToolConfirm,
     unlistenDone,
     unlistenError,
+    unlistenFrontendTool,
   ] = await Promise.all([
     listen<{ conversation_id: string; content: string }>(
       "ai-stream-chunk",
@@ -327,11 +330,15 @@ export async function startStreamingChat(opts: {
           }
           const remaining = (_chunkBuffer || "") + thinkFilter.flush();
           _chunkBuffer = "";
-          updateAssistant((m) => ({
-            ...m,
-            content: remaining ? m.content + remaining : m.content,
-            streaming: false,
-          }));
+          updateAssistant((m) => {
+            const shouldSuggestUpgrade = (m.toolCalls?.length ?? 0) >= 2;
+            return {
+              ...m,
+              content: remaining ? m.content + remaining : m.content,
+              streaming: false,
+              ...(shouldSuggestUpgrade ? { suggestAgentUpgrade: true } : {}),
+            };
+          });
           setState({ isStreaming: false });
           cleanup();
           onPersist();
@@ -352,6 +359,28 @@ export async function startStreamingChat(opts: {
         }
       },
     ),
+    listen<{ name: string; arguments: string }>(
+      "ai-frontend-tool-call",
+      async (event) => {
+        const { name, arguments: args } = event.payload;
+        try {
+          if (onFrontendToolCall) {
+            const { success, result } = await onFrontendToolCall(name, args);
+            await invoke("ai_frontend_tool_result", { success, result });
+          } else {
+            await invoke("ai_frontend_tool_result", {
+              success: false,
+              result: `工具 ${name} 无前端执行器`,
+            });
+          }
+        } catch (e) {
+          await invoke("ai_frontend_tool_result", {
+            success: false,
+            result: `前端工具执行异常: ${e}`,
+          });
+        }
+      },
+    ),
   ]);
 
   const cleanup = () => {
@@ -366,6 +395,7 @@ export async function startStreamingChat(opts: {
     unlistenToolConfirm();
     unlistenDone();
     unlistenError();
+    unlistenFrontendTool();
   };
 
   // 发起 AI 请求
@@ -376,6 +406,7 @@ export async function startStreamingChat(opts: {
       config,
       conversationId,
       token,
+      extraTools,
     });
   } catch (e) {
     handleError(e, { context: "AI 对话" });

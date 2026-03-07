@@ -169,15 +169,33 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
     hasMessages: () => messages.length > 0,
     continueInAgent: () => {
       if (messages.length === 0) return;
-      const recent = messages.slice(-6);
-      const summary = recent
-        .map((m) => `[${m.role === "user" ? "用户" : "助手"}]: ${m.content.slice(0, 300)}${m.content.length > 300 ? "…" : ""}`)
-        .join("\n");
-      const query = `以下是之前的对话上下文，请基于此继续执行任务：\n\n${summary}`;
+      const recent = messages.slice(-10);
+      const parts: string[] = [];
+      for (const m of recent) {
+        const role = m.role === "user" ? "用户" : "助手";
+        const text = m.content.length > 600
+          ? `${m.content.slice(0, 600)}…`
+          : m.content;
+        parts.push(`[${role}]: ${text}`);
+        if (m.toolCalls?.length) {
+          const toolNames = m.toolCalls.map((tc) => tc.function?.name || tc.name).filter(Boolean);
+          if (toolNames.length) parts.push(`  [使用工具]: ${toolNames.join(", ")}`);
+        }
+      }
+      const query = `以下是之前的对话上下文，请基于此继续执行任务：\n\n${parts.join("\n")}`;
+      const filePaths = attachments
+        .filter((a) => a.type === "text_file" || a.type === "document")
+        .map((a) => a.path)
+        .filter((p): p is string => !!p);
       routeToAICenter({
         mode: "agent",
         source: "ask_continue_to_agent",
-        agentInitialQuery: query,
+        agentHandoff: {
+          query,
+          attachmentPaths: filePaths.length > 0 ? filePaths : undefined,
+          sourceMode: "ask",
+          sourceSessionId: currentConversationId ?? undefined,
+        },
         navigate: false,
       });
     },

@@ -474,7 +474,50 @@ pub async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<Str
             let result = crate::commands::native_apps::win_open_settings(page).await?;
             Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
         }
-        _ => Err(format!("未知工具: {}", name)),
+        _ => {
+            // 尝试前端工具桥接（MCP/插件工具由前端执行）
+            request_frontend_tool_execution(app, name, args).await
+        }
+    }
+}
+
+/// 将未知工具调用转发到前端执行（MCP/插件工具桥接）
+async fn request_frontend_tool_execution(
+    app: &AppHandle,
+    name: &str,
+    args: &str,
+) -> Result<String, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+
+    {
+        let state = app.state::<super::super::stream::FrontendToolState>();
+        let mut pending = state
+            .pending
+            .lock()
+            .map_err(|e| format!("锁获取失败: {}", e))?;
+        *pending = Some(tx);
+    }
+
+    let _ = app.emit(
+        "ai-frontend-tool-call",
+        serde_json::json!({
+            "name": name,
+            "arguments": args,
+        }),
+    );
+
+    match tokio::time::timeout(std::time::Duration::from_secs(120), rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err(format!("前端工具 {} 执行通道关闭", name)),
+        Err(_) => {
+            let state = app.state::<super::super::stream::FrontendToolState>();
+            let mut pending = state
+                .pending
+                .lock()
+                .map_err(|e| format!("锁获取失败: {}", e))?;
+            *pending = None;
+            Err(format!("前端工具 {} 执行超时（120s）", name))
+        }
     }
 }
 

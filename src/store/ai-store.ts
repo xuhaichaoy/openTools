@@ -33,6 +33,8 @@ import {
   recallMemories,
   type AIMemoryCandidate,
 } from "@/core/ai/memory-store";
+import { loadAndResolveSkills } from "@/store/skill-store";
+import { useMcpStore, executeMcpTool } from "@/store/mcp-store";
 
 import type {
   ToolCallInfo,
@@ -584,12 +586,35 @@ export const useAIStore = create<AIState>((set, get) => ({
       return;
     }
 
+    // Skills 注入（与 Agent/Cluster 保持一致）
+    try {
+      const skillCtx = await loadAndResolveSkills(content);
+      if (skillCtx.mergedSystemPrompt) {
+        apiMessages.unshift({ role: "system", content: skillCtx.mergedSystemPrompt });
+      }
+    } catch { /* skills 加载失败不阻塞对话 */ }
+
+    // 收集 MCP 工具定义（转为 OpenAI function calling 格式）
+    const mcpTools = useMcpStore.getState().getAllMcpTools();
+    const extraTools = mcpTools.map((def) => ({
+      type: "function",
+      function: {
+        name: def.name,
+        description: def.description ?? def.name,
+        parameters: def.input_schema ?? { type: "object", properties: {} },
+      },
+    }));
+
     // 委托 Service 处理流式监听
     const cleanup = await startStreamingChat({
       conversationId,
       assistantMessageId: assistantMessage.id,
       apiMessages,
       config: state.config,
+      extraTools: extraTools.length > 0 ? extraTools : undefined,
+      onFrontendToolCall: extraTools.length > 0
+        ? async (name, args) => executeMcpTool(name, args)
+        : undefined,
       callbacks: {
         updateAssistant: (updater) => {
           set((state) => ({

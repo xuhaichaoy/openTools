@@ -10,6 +10,7 @@ export interface RouteOptions {
   config: AIConfig;
   conversationId: string;
   token?: string | null;
+  extraTools?: any[];
 }
 
 /**
@@ -55,12 +56,13 @@ export function getRoutedConfig(config: AIConfig): AIConfig {
  * - team: 通过 51ToolBox 服务器的团队代理（使用团队 Key）
  */
 export async function routeAIRequest(options: RouteOptions) {
-  const { messages, config, conversationId, token } = options;
+  const { messages, config, conversationId, token, extraTools } = options;
   const routed = applyRouting(config, token);
 
   return invoke("ai_chat_stream", {
     messages,
     config: routed,
     conversationId,
+    extraTools: extraTools?.length ? extraTools : null,
   });
 }

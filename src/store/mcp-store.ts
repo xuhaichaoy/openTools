@@ -308,3 +308,40 @@ export const useMcpStore = create<McpState>((set, get) => ({
     return tools;
   },
 }));
+
+/**
+ * 执行一个 MCP 工具调用（通过已注册的 MCP 服务器）。
+ * toolName 格式: mcp_{serverId}_{realToolName}
+ */
+export async function executeMcpTool(
+  toolName: string,
+  argsJson: string,
+): Promise<{ success: boolean; result: string }> {
+  const parts = toolName.match(/^mcp_([^_]+)_(.+)$/);
+  if (!parts) return { success: false, result: `无法解析工具名: ${toolName}` };
+
+  const serverId = parts[1];
+  const realToolName = parts[2];
+  const mcpState = useMcpStore.getState();
+  const server = mcpState.servers.find((s) => s.id === serverId);
+  if (!server) return { success: false, result: `MCP 服务器 ${serverId} 未找到` };
+
+  try {
+    const args = JSON.parse(argsJson || "{}");
+    const result = await sendRpc(
+      serverId,
+      "tools/call",
+      { name: realToolName, arguments: args },
+      server.transport,
+      server.url,
+      server.headers,
+    ) as { content?: Array<{ text?: string }> };
+
+    if (Array.isArray(result?.content)) {
+      return { success: true, result: result.content.map((c) => c.text ?? "").join("\n") };
+    }
+    return { success: true, result: JSON.stringify(result) };
+  } catch (e) {
+    return { success: false, result: `MCP 工具执行失败: ${e}` };
+  }
+}

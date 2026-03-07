@@ -5,7 +5,7 @@ pub mod tools;
 pub mod types;
 
 // Re-export all public types and command functions
-pub use stream::{StreamCancellation, ToolConfirmationState};
+pub use stream::{FrontendToolState, StreamCancellation, ToolConfirmationState};
 pub use types::{AIConfig, ChatMessage, OwnKeyModelConfig};
 
 use tauri::{AppHandle, Manager};
@@ -188,6 +188,25 @@ pub async fn ai_confirm_tool(app: AppHandle, approved: bool) -> Result<(), AppEr
     Ok(())
 }
 
+/// 前端调用此命令，回传前端工具执行结果（MCP/插件工具桥接）
+#[tauri::command]
+pub async fn ai_frontend_tool_result(
+    app: AppHandle,
+    success: bool,
+    result: String,
+) -> Result<(), AppError> {
+    let state = app.state::<FrontendToolState>();
+    let mut pending = state
+        .pending
+        .lock()
+        .map_err(|e| AppError::Custom(format!("锁获取失败: {}", e)))?;
+    if let Some(tx) = pending.take() {
+        let payload = if success { Ok(result) } else { Err(result) };
+        let _ = tx.send(payload);
+    }
+    Ok(())
+}
+
 /// 非流式 AI 对话（保持向后兼容）
 #[tauri::command]
 pub async fn ai_chat(messages: Vec<ChatMessage>, config: AIConfig) -> Result<String, AppError> {
@@ -318,16 +337,63 @@ pub async fn ai_chat_stream(
     messages: Vec<ChatMessage>,
     config: AIConfig,
     conversation_id: String,
+    extra_tools: Option<Vec<serde_json::Value>>,
+    skip_tools: Option<bool>,
 ) -> Result<(), AppError> {
     let client = reqwest::Client::new();
-    let enable_advanced = config.enable_advanced_tools;
-    let enable_native = config.enable_native_tools;
-    let tool_list = tools::get_tools(enable_advanced, enable_native);
-    let mut system_prompt = build_guarded_system_prompt(&messages, &config);
-    let mut non_system_messages = strip_system_messages(messages);
-
     let cancellation = app.state::<StreamCancellation>();
     cancellation.reset(&conversation_id);
+
+    let skip = skip_tools.unwrap_or(false);
+
+    // ── skipTools 模式：直接透传消息，不注入工具/系统提示/RAG ──
+    if skip {
+        let protocol = config.protocol.as_deref().unwrap_or("openai");
+        if protocol == "anthropic" {
+            let system_parts: String = messages
+                .iter()
+                .filter(|m| m.role == "system")
+                .filter_map(|m| m.content.as_deref())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let non_system: Vec<ChatMessage> = messages
+                .into_iter()
+                .filter(|m| m.role != "system")
+                .collect();
+            return stream::anthropic::anthropic_stream_loop(
+                &app,
+                &client,
+                &config,
+                &conversation_id,
+                &system_parts,
+                non_system,
+                &[],
+            )
+            .await
+            .map_err(AppError::Custom);
+        }
+
+        return stream::openai::openai_stream_loop(
+            &app,
+            &client,
+            &config,
+            &conversation_id,
+            messages,
+            &[],
+        )
+        .await
+        .map_err(AppError::Custom);
+    }
+
+    // ── 正常模式：注入系统工具 + guarded system prompt + RAG ──
+    let enable_advanced = config.enable_advanced_tools;
+    let enable_native = config.enable_native_tools;
+    let mut tool_list = tools::get_tools(enable_advanced, enable_native);
+    if let Some(ref ext) = extra_tools {
+        tool_list.extend(ext.iter().cloned());
+    }
+    let mut system_prompt = build_guarded_system_prompt(&messages, &config);
+    let mut non_system_messages = strip_system_messages(messages);
 
     // RAG 预检索（带超时保护，避免阻塞 LLM 请求）
     if let Some(user_query) = non_system_messages
