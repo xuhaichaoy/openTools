@@ -3,11 +3,18 @@ FROM rust:latest AS builder
 
 WORKDIR /app
 
+# 1) 只拷贝依赖清单，用空壳项目预编译所有依赖（此层仅在 Cargo.toml/lock 变化时重建）
 COPY Cargo.toml Cargo.lock ./
+RUN mkdir src \
+    && echo "fn main() {}" > src/main.rs \
+    && echo "" > src/lib.rs \
+    && cargo build --release \
+    && rm -rf src
+
+# 2) 拷贝真实源码，只增量编译项目自身代码
 COPY src ./src
 COPY migrations ./migrations
-
-RUN cargo build --release
+RUN touch src/main.rs src/lib.rs && cargo build --release
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────
 FROM debian:trixie-slim
