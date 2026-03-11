@@ -45,5 +45,9 @@ if (!doTauriBuild) {
 }
 
 console.log('Running tauri build...');
-const tauri = spawnSync('pnpm', ['tauri', 'build'], { cwd: root, stdio: 'inherit', shell: true });
+const tauri = spawnSync('pnpm', ['tauri', 'build', '--bundles', 'nsis'], {
+  cwd: root,
+  stdio: 'inherit',
+  shell: true,
+});
 process.exit(tauri.status ?? 1);

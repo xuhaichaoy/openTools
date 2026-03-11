@@ -178,7 +178,7 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
           : m.content;
         parts.push(`[${role}]: ${text}`);
         if (m.toolCalls?.length) {
-          const toolNames = m.toolCalls.map((tc) => tc.function?.name || tc.name).filter(Boolean);
+          const toolNames = m.toolCalls.map((tc) => tc.name).filter(Boolean);
           if (toolNames.length) parts.push(`  [使用工具]: ${toolNames.join(", ")}`);
         }
       }

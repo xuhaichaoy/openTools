@@ -15,8 +15,23 @@ const TEXT_EXT = new Set([
   "r", "m", "lua", "pl", "dart", "scala", "groovy", "zig", "nim", "ex", "exs", "erl",
 ]);
 const DOCUMENT_EXT = new Set([
-  "pdf", "doc", "docx", "rtf", "odt",
+  "pdf", "doc", "docx", "rtf", "odt", "pptx", "ppt",
 ]);
+const SPREADSHEET_EXT = new Set([
+  "xlsx", "xls", "xlsm", "ods",
+]);
+const MINDMAP_EXT = new Set([
+  "xmind", "mm",
+]);
+
+/** Unified accept string for all file input components */
+export const FILE_ACCEPT_ALL = [
+  "image/*",
+  ...Array.from(TEXT_EXT).map((e) => `.${e}`),
+  ...Array.from(DOCUMENT_EXT).map((e) => `.${e}`),
+  ...Array.from(SPREADSHEET_EXT).map((e) => `.${e}`),
+  ...Array.from(MINDMAP_EXT).map((e) => `.${e}`),
+].join(",");
 const MAX_TEXT_FILE_BYTES = 100 * 1024;
 const MAX_TOTAL_TEXT_BYTES = 500 * 1024;
 const MAX_FOLDER_DEPTH = 2;
@@ -413,6 +428,37 @@ export function useInputAttachments() {
     }
   }, [addTextFile]);
 
+  const addSpreadsheetFile = useCallback(async (path: string) => {
+    const name = path.replace(/^.*[/\\]/, "");
+    const extName = ext(name);
+    try {
+      const content = await invoke<string>("extract_spreadsheet_text", { filePath: path, maxRows: 500 });
+      if (content) {
+        const bytes = new TextEncoder().encode(content).length;
+        setAttachments((prev) => {
+          const currentTotal = prev
+            .filter((a) => a.type === "text_file" || a.type === "document")
+            .reduce((s, a) => s + (a.textContent?.length ?? 0), 0);
+          if (currentTotal + bytes > MAX_TOTAL_TEXT_BYTES) return prev;
+          return [
+            ...prev,
+            {
+              id: genId(),
+              type: "document",
+              name,
+              path,
+              textContent: content,
+              size: bytes,
+              originalExt: extName,
+            },
+          ];
+        });
+        return;
+      }
+    } catch { /* extraction failed */ }
+    await addTextFile(path);
+  }, [addTextFile]);
+
   const handlePaste = useCallback(
     (e: ClipboardEvent) => {
       const items = e.clipboardData?.items;
@@ -473,7 +519,15 @@ export function useInputAttachments() {
           },
           {
             name: "文档",
-            extensions: ["pdf", "doc", "docx", "rtf", "odt"],
+            extensions: ["pdf", "doc", "docx", "rtf", "odt", "pptx", "ppt"],
+          },
+          {
+            name: "表格",
+            extensions: ["xlsx", "xls", "xlsm", "ods"],
+          },
+          {
+            name: "思维导图",
+            extensions: ["xmind", "mm"],
           },
           { name: "所有文件", extensions: ["*"] },
         ],
@@ -484,7 +538,9 @@ export function useInputAttachments() {
         const extName = ext(filePath);
         if (IMAGE_EXT.has(extName)) {
           await addImageFromPath(filePath);
-        } else if (DOCUMENT_EXT.has(extName)) {
+        } else if (SPREADSHEET_EXT.has(extName)) {
+          await addSpreadsheetFile(filePath);
+        } else if (DOCUMENT_EXT.has(extName) || MINDMAP_EXT.has(extName)) {
           await addDocumentFile(filePath);
         } else {
           await addTextFile(filePath);
@@ -493,7 +549,7 @@ export function useInputAttachments() {
     } catch (err) {
       handleError(err, { context: "选择文件", silent: true });
     }
-  }, [addImageFromPath, addTextFile, addDocumentFile]);
+  }, [addImageFromPath, addTextFile, addDocumentFile, addSpreadsheetFile]);
 
   const handleFileSelect = useCallback(
     async (e: ChangeEvent<HTMLInputElement>) => {
@@ -513,7 +569,7 @@ export function useInputAttachments() {
             reader.readAsText(file, "utf-8");
           }).catch(() => "");
           if (content) addTextFileFromFile(file, content);
-        } else if (DOCUMENT_EXT.has(extName)) {
+        } else if (SPREADSHEET_EXT.has(extName) || DOCUMENT_EXT.has(extName) || MINDMAP_EXT.has(extName)) {
           const content = await new Promise<string>((resolve, reject) => {
             const reader = new FileReader();
             reader.onload = () => resolve(String(reader.result ?? ""));
@@ -585,7 +641,7 @@ export function useInputAttachments() {
         const extName = ext(file.name);
         if (IMAGE_EXT.has(extName)) {
           await addImageFromBlob(file);
-        } else if (TEXT_EXT.has(extName) || DOCUMENT_EXT.has(extName)) {
+        } else if (TEXT_EXT.has(extName) || DOCUMENT_EXT.has(extName) || SPREADSHEET_EXT.has(extName) || MINDMAP_EXT.has(extName)) {
           const content = await new Promise<string>((resolve, reject) => {
             const reader = new FileReader();
             reader.onload = () => resolve(String(reader.result ?? ""));
@@ -678,5 +734,6 @@ export function useInputAttachments() {
     addImageFromBlob,
     addImageFromPath,
     addTextFile,
+    addSpreadsheetFile,
   };
 }

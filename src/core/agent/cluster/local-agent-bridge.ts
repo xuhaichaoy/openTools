@@ -155,6 +155,7 @@ export class LocalAgentBridge implements AgentBridge {
         dangerousToolPatterns: ["write_file", "run_shell_command", "native_"],
         confirmDangerousAction: this.confirmDangerousAction,
         onToolExecuted: notifyToolCalled,
+        modelOverride: role?.modelOverride,
       },
       (step) => {
         collectedSteps.push(step);

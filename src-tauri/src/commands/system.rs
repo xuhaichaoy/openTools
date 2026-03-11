@@ -649,6 +649,70 @@ pub async fn write_text_file(
     })
 }
 
+/// 创建目录（受路径白名单保护，支持递归创建）
+#[tauri::command]
+pub async fn create_directory(app: tauri::AppHandle, path: String, recursive: Option<bool>) -> Result<String, String> {
+    validate_path_access(&app, &path)?;
+    let p = std::path::Path::new(&path);
+    let recursive = recursive.unwrap_or(true);
+    
+    if p.exists() {
+        if p.is_dir() {
+            return Ok(format!("目录已存在: {}", path));
+        } else {
+            return Err(format!("路径存在但不是目录: {}", path));
+        }
+    }
+    
+    if recursive {
+        std::fs::create_dir_all(p).map_err(|e| format!("创建目录失败: {}", e))?;
+    } else {
+        std::fs::create_dir(p).map_err(|e| format!("创建目录失败: {}", e))?;
+    }
+    
+    Ok(format!("已创建目录: {}", path))
+}
+
+/// 删除文件或空目录（受路径白名单保护）
+#[tauri::command]
+pub async fn delete_file(app: tauri::AppHandle, path: String) -> Result<String, String> {
+    validate_path_access(&app, &path)?;
+    let p = std::path::Path::new(&path);
+    
+    if !p.exists() {
+        return Err(format!("路径不存在: {}", path));
+    }
+    
+    let metadata = std::fs::metadata(p).map_err(|e| format!("获取元数据失败: {}", e))?;
+    
+    if metadata.is_dir() {
+        // 检查目录是否为空
+        if std::fs::read_dir(p).map_err(|e| format!("读取目录失败: {}", e))?.next().is_some() {
+            return Err(format!("目录非空，请先删除内容: {}", path));
+        }
+        std::fs::remove_dir(p).map_err(|e| format!("删除目录失败: {}", e))?;
+    } else {
+        std::fs::remove_file(p).map_err(|e| format!("删除文件失败: {}", e))?;
+    }
+    
+    Ok(format!("已删除: {}", path))
+}
+
+/// 移动/重命名文件或目录
+#[tauri::command]
+pub async fn move_file(app: tauri::AppHandle, source: String, destination: String) -> Result<String, String> {
+    validate_path_access(&app, &source)?;
+    validate_path_access(&app, &destination)?;
+
+    let src = std::path::Path::new(&source);
+    if !src.exists() {
+        return Err(format!("源路径不存在: {}", source));
+    }
+
+    std::fs::rename(src, &destination).map_err(|e| format!("移动失败: {}", e))?;
+    Ok(format!("已移动: {} → {}", source, destination))
+}
+
 /// 列出目录内容（受路径白名单保护）
 #[tauri::command]
 pub async fn list_directory(app: tauri::AppHandle, path: String) -> Result<String, String> {
@@ -1112,4 +1176,451 @@ fn strip_html_tags(html: &str) -> String {
         .replace("&apos;", "'")
         .replace("&#39;", "'")
         .replace("&nbsp;", " ")
+}
+
+#[tauri::command]
+pub async fn extract_spreadsheet_text(
+    file_path: String,
+    max_rows: Option<usize>,
+) -> Result<String, String> {
+    use calamine::{open_workbook_auto, Reader, Data};
+
+    let mut workbook = open_workbook_auto(&file_path).map_err(|e| e.to_string())?;
+    let sheet_names = workbook.sheet_names().to_vec();
+    let limit = max_rows.unwrap_or(500);
+    let mut output = String::new();
+
+    for sheet_name in &sheet_names {
+        if let Ok(range) = workbook.worksheet_range(sheet_name) {
+            output.push_str(&format!("## Sheet: {}\n", sheet_name));
+            for (i, row) in range.rows().enumerate() {
+                if i >= limit {
+                    output.push_str(&format!("... (截断，共 {} 行)\n", range.height()));
+                    break;
+                }
+                let cells: Vec<String> = row.iter().map(|c| match c {
+                    Data::Empty => String::new(),
+                    other => other.to_string(),
+                }).collect();
+                output.push_str(&cells.join("\t"));
+                output.push('\n');
+            }
+            output.push('\n');
+        }
+    }
+
+    Ok(output)
+}
+
+// ── Document Text Extraction (PDF, DOCX, PPTX, XMind, FreeMind) ──
+
+#[tauri::command]
+pub async fn extract_document_text(path: String) -> Result<String, String> {
+    let file_path = std::path::Path::new(&path);
+    if !file_path.exists() {
+        return Err(format!("文件不存在: {}", path));
+    }
+
+    let ext = file_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let text = match ext.as_str() {
+        "pdf" => extract_pdf_text(&path)?,
+        "docx" => extract_docx_text(&path)?,
+        "pptx" | "ppt" => extract_pptx_text(&path)?,
+        "xmind" => extract_xmind_text(&path)?,
+        "mm" => extract_freemind_text(&path)?,
+        _ => return Err(format!("不支持的文档格式: .{}", ext)),
+    };
+
+    const MAX_CHARS: usize = 200_000;
+    if text.len() > MAX_CHARS {
+        Ok(format!(
+            "{}...\n\n(文档内容已截断，共约 {} 字符)",
+            &text[..MAX_CHARS],
+            text.len()
+        ))
+    } else {
+        Ok(text)
+    }
+}
+
+fn extract_pdf_text(path: &str) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("读取 PDF 失败: {}", e))?;
+    pdf_extract::extract_text_from_mem(&bytes).map_err(|e| format!("解析 PDF 失败: {}", e))
+}
+
+fn extract_docx_text(path: &str) -> Result<String, String> {
+    use quick_xml::events::Event;
+    use quick_xml::reader::Reader as XmlReader;
+
+    let file = std::fs::File::open(path).map_err(|e| format!("打开 DOCX 失败: {}", e))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|e| format!("解压 DOCX 失败: {}", e))?;
+
+    let doc_xml = archive
+        .by_name("word/document.xml")
+        .map_err(|_| "DOCX 中未找到 word/document.xml".to_string())?;
+
+    let mut reader = XmlReader::from_reader(std::io::BufReader::new(doc_xml));
+    reader.config_mut().trim_text(true);
+
+    let mut result = String::new();
+    let mut buf = Vec::new();
+    let mut in_paragraph = false;
+    let mut paragraph_text = String::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                if e.local_name().as_ref() == b"p" {
+                    in_paragraph = true;
+                    paragraph_text.clear();
+                }
+            }
+            Ok(Event::Text(ref e)) => {
+                if in_paragraph {
+                    if let Ok(t) = e.unescape() {
+                        paragraph_text.push_str(&t);
+                    }
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                if e.local_name().as_ref() == b"p" && in_paragraph {
+                    in_paragraph = false;
+                    let trimmed = paragraph_text.trim();
+                    if !trimmed.is_empty() {
+                        result.push_str(trimmed);
+                        result.push('\n');
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(format!("解析 DOCX XML 失败: {}", e)),
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    Ok(result)
+}
+
+fn extract_pptx_text(path: &str) -> Result<String, String> {
+    use quick_xml::events::Event;
+    use quick_xml::reader::Reader as XmlReader;
+
+    let file = std::fs::File::open(path).map_err(|e| format!("打开 PPTX 失败: {}", e))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|e| format!("解压 PPTX 失败: {}", e))?;
+
+    let slide_names: Vec<String> = (0..archive.len())
+        .filter_map(|i| {
+            let name = archive.by_index(i).ok()?.name().to_string();
+            if name.starts_with("ppt/slides/slide") && name.ends_with(".xml") {
+                Some(name)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut sorted_slides = slide_names;
+    sorted_slides.sort_by(|a, b| {
+        let num_a = a
+            .trim_start_matches("ppt/slides/slide")
+            .trim_end_matches(".xml")
+            .parse::<u32>()
+            .unwrap_or(0);
+        let num_b = b
+            .trim_start_matches("ppt/slides/slide")
+            .trim_end_matches(".xml")
+            .parse::<u32>()
+            .unwrap_or(0);
+        num_a.cmp(&num_b)
+    });
+
+    let mut result = String::new();
+
+    for (idx, slide_name) in sorted_slides.iter().enumerate() {
+        let slide_file =
+            archive.by_name(slide_name).map_err(|e| format!("读取幻灯片失败: {}", e))?;
+        let mut reader = XmlReader::from_reader(std::io::BufReader::new(slide_file));
+        reader.config_mut().trim_text(true);
+
+        let mut buf = Vec::new();
+        let mut slide_texts: Vec<String> = Vec::new();
+        let mut current_text = String::new();
+        let mut in_text = false;
+
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(Event::Start(ref e)) => {
+                    if e.local_name().as_ref() == b"t" {
+                        in_text = true;
+                        current_text.clear();
+                    }
+                }
+                Ok(Event::Text(ref e)) => {
+                    if in_text {
+                        if let Ok(t) = e.unescape() {
+                            current_text.push_str(&t);
+                        }
+                    }
+                }
+                Ok(Event::End(ref e)) => {
+                    if e.local_name().as_ref() == b"t" && in_text {
+                        in_text = false;
+                        let trimmed = current_text.trim().to_string();
+                        if !trimmed.is_empty() {
+                            slide_texts.push(trimmed);
+                        }
+                    }
+                }
+                Ok(Event::Eof) => break,
+                Err(_) => break,
+                _ => {}
+            }
+            buf.clear();
+        }
+
+        if !slide_texts.is_empty() {
+            result.push_str(&format!("## Slide {}\n", idx + 1));
+            result.push_str(&slide_texts.join("\n"));
+            result.push_str("\n\n");
+        }
+    }
+
+    if result.is_empty() {
+        return Err("PPTX 中未提取到文本内容".to_string());
+    }
+    Ok(result)
+}
+
+fn extract_xmind_text(path: &str) -> Result<String, String> {
+    let file = std::fs::File::open(path).map_err(|e| format!("打开 XMind 失败: {}", e))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|e| format!("解压 XMind 失败: {}", e))?;
+
+    if let Ok(mut entry) = archive.by_name("content.json") {
+        let mut content = String::new();
+        std::io::Read::read_to_string(&mut entry, &mut content)
+            .map_err(|e| format!("读取 content.json 失败: {}", e))?;
+
+        let json: serde_json::Value =
+            serde_json::from_str(&content).map_err(|e| format!("解析 content.json 失败: {}", e))?;
+
+        let mut result = String::new();
+        if let Some(sheets) = json.as_array() {
+            for (i, sheet) in sheets.iter().enumerate() {
+                let title = sheet.get("title").and_then(|t| t.as_str()).unwrap_or("Sheet");
+                result.push_str(&format!("## {}\n", title));
+                if let Some(root) = sheet.get("rootTopic") {
+                    xmind_topic_to_text(root, 0, &mut result);
+                }
+                if i < sheets.len() - 1 {
+                    result.push('\n');
+                }
+            }
+        } else if let Some(root) = json.get("rootTopic") {
+            xmind_topic_to_text(root, 0, &mut result);
+        }
+        return Ok(result);
+    }
+
+    if let Ok(mut entry) = archive.by_name("content.xml") {
+        let mut content = String::new();
+        std::io::Read::read_to_string(&mut entry, &mut content)
+            .map_err(|e| format!("读取 content.xml 失败: {}", e))?;
+        return extract_xmind_xml(&content);
+    }
+
+    Err("XMind 文件中未找到 content.json 或 content.xml".to_string())
+}
+
+fn xmind_topic_to_text(topic: &serde_json::Value, depth: usize, out: &mut String) {
+    let indent = "  ".repeat(depth);
+    let marker = if depth == 0 { "" } else { "- " };
+    if let Some(title) = topic.get("title").and_then(|t| t.as_str()) {
+        out.push_str(&format!("{}{}{}\n", indent, marker, title));
+    }
+    if let Some(children) = topic
+        .get("children")
+        .and_then(|c| c.get("attached"))
+        .and_then(|a| a.as_array())
+    {
+        for child in children {
+            xmind_topic_to_text(child, depth + 1, out);
+        }
+    }
+    if let Some(topics) = topic
+        .get("children")
+        .and_then(|c| c.get("topics"))
+        .and_then(|t| t.as_array())
+    {
+        for child in topics {
+            xmind_topic_to_text(child, depth + 1, out);
+        }
+    }
+}
+
+fn extract_xmind_xml(content: &str) -> Result<String, String> {
+    use quick_xml::events::Event;
+    use quick_xml::reader::Reader as XmlReader;
+
+    let mut reader = XmlReader::from_str(content);
+    reader.config_mut().trim_text(true);
+
+    let mut result = String::new();
+    let mut buf = Vec::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                if e.local_name().as_ref() == b"topic" {
+                    for attr in e.attributes().flatten() {
+                        if attr.key.as_ref() == b"title" || attr.key.as_ref() == b"text" {
+                            if let Ok(val) = attr.unescape_value() {
+                                result.push_str(&val);
+                                result.push('\n');
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(format!("解析 XMind XML 失败: {}", e)),
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    Ok(result)
+}
+
+fn extract_freemind_text(path: &str) -> Result<String, String> {
+    use quick_xml::events::Event;
+    use quick_xml::reader::Reader as XmlReader;
+
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("读取 FreeMind 文件失败: {}", e))?;
+    let mut reader = XmlReader::from_str(&content);
+    reader.config_mut().trim_text(true);
+
+    let mut result = String::new();
+    let mut buf = Vec::new();
+    let mut depth: i32 = -1;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) => {
+                if e.local_name().as_ref() == b"node" {
+                    depth += 1;
+                    for attr in e.attributes().flatten() {
+                        if attr.key.as_ref() == b"TEXT" {
+                            if let Ok(val) = attr.unescape_value() {
+                                let indent = "  ".repeat(depth.max(0) as usize);
+                                let marker = if depth == 0 { "" } else { "- " };
+                                result.push_str(&format!("{}{}{}\n", indent, marker, val));
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                if e.local_name().as_ref() == b"node" {
+                    depth -= 1;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(format!("解析 FreeMind XML 失败: {}", e)),
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    Ok(result)
+}
+
+// ── Excel Export (write .xlsx from JSON data) ──
+
+#[derive(serde::Deserialize)]
+struct SheetData {
+    name: Option<String>,
+    headers: Vec<String>,
+    rows: Vec<Vec<String>>,
+}
+
+#[tauri::command]
+pub async fn export_spreadsheet(
+    output_path: String,
+    sheets_json: String,
+) -> Result<String, String> {
+    use rust_xlsxwriter::{Format, Workbook};
+
+    let sheets: Vec<SheetData> =
+        serde_json::from_str(&sheets_json).map_err(|e| format!("解析表格数据失败: {}", e))?;
+
+    if sheets.is_empty() {
+        return Err("至少需要一个工作表".to_string());
+    }
+
+    let mut workbook = Workbook::new();
+    let header_format = Format::new().set_bold();
+
+    for (i, sheet) in sheets.iter().enumerate() {
+        let default_name = format!("Sheet{}", i + 1);
+        let sheet_name = sheet.name.as_deref().unwrap_or(&default_name);
+
+        let worksheet = workbook.add_worksheet();
+        worksheet
+            .set_name(sheet_name)
+            .map_err(|e| format!("设置工作表名称失败: {}", e))?;
+
+        for (col, header) in sheet.headers.iter().enumerate() {
+            worksheet
+                .write_string_with_format(0, col as u16, header, &header_format)
+                .map_err(|e| format!("写入表头失败: {}", e))?;
+        }
+
+        for (row_idx, row) in sheet.rows.iter().enumerate() {
+            for (col_idx, cell) in row.iter().enumerate() {
+                if let Ok(num) = cell.parse::<f64>() {
+                    worksheet
+                        .write_number((row_idx + 1) as u32, col_idx as u16, num)
+                        .map_err(|e| format!("写入数字失败: {}", e))?;
+                } else {
+                    worksheet
+                        .write_string((row_idx + 1) as u32, col_idx as u16, cell)
+                        .map_err(|e| format!("写入文本失败: {}", e))?;
+                }
+            }
+        }
+
+        for (col, header) in sheet.headers.iter().enumerate() {
+            let mut max_len = header.len();
+            for row in &sheet.rows {
+                if let Some(cell) = row.get(col) {
+                    max_len = max_len.max(cell.len());
+                }
+            }
+            let width = (max_len as f64 * 1.2).min(60.0).max(8.0);
+            let _ = worksheet.set_column_width(col as u16, width);
+        }
+    }
+
+    if let Some(parent) = std::path::Path::new(&output_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    workbook
+        .save(&output_path)
+        .map_err(|e| format!("保存 Excel 失败: {}", e))?;
+
+    let abs_path = std::fs::canonicalize(&output_path)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&output_path));
+
+    Ok(abs_path.display().to_string())
 }

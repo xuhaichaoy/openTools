@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
-import { HelpCircle, Send, Check, ChevronLeft, ChevronRight, X, Bot, Network } from "lucide-react";
+import { HelpCircle, Send, Check, ChevronLeft, ChevronRight, X, Bot, Network, Users } from "lucide-react";
 import type {
   AskUserQuestion,
   AskUserAnswers,
@@ -179,6 +179,7 @@ function TextInput({
 const SOURCE_CONFIG: Record<AskUserSource, { icon: typeof Bot; label: string; color: string }> = {
   agent: { icon: Bot, label: "Agent", color: "text-blue-500" },
   cluster: { icon: Network, label: "Cluster", color: "text-cyan-500" },
+  actor_dialog: { icon: Users, label: "Dialog", color: "text-purple-500" },
 };
 
 export function AskUserDialog({ questions, onSubmit, onDismiss, source = "agent", taskDescription }: AskUserDialogProps) {

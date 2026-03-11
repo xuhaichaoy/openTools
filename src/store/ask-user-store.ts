@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import type { AskUserQuestion, AskUserAnswers } from "@/plugins/builtin/SmartAgent/core/default-tools";
 
-export type AskUserSource = "agent" | "cluster";
+export type AskUserSource = "agent" | "cluster" | "actor_dialog";
 
 export interface AskUserState {
   /** 当前弹窗数据，null 表示无弹窗 */

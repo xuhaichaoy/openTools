@@ -200,6 +200,51 @@ function createLocalDevTools(
       },
     },
     {
+      name: "export_spreadsheet",
+      description:
+        "将数据导出为 Excel (.xlsx) 文件，用户可以直接打开。适用于数据分析结果、报表生成、数据清洗后输出等场景。",
+      parameters: {
+        file_name: {
+          type: "string",
+          description:
+            "输出文件名（如 report.xlsx），会保存到用户的下载目录",
+        },
+        sheets: {
+          type: "string",
+          description:
+            'JSON 字符串，格式: [{"name":"Sheet1","headers":["列A","列B"],"rows":[["值1","值2"]]}]',
+        },
+      },
+      execute: async (params) => {
+        const fileName = String(params.file_name || "export.xlsx");
+        const sheetsJson = String(params.sheets || "[]");
+        // Validate JSON
+        try {
+          JSON.parse(sheetsJson);
+        } catch {
+          return { error: "sheets 参数不是有效的 JSON" };
+        }
+        // Resolve output path to Downloads directory
+        let outputDir: string;
+        try {
+          const { downloadDir } = await import("@tauri-apps/api/path");
+          outputDir = await downloadDir();
+        } catch {
+          outputDir = "/tmp";
+        }
+        const outputPath = `${outputDir}${fileName}`;
+        try {
+          const result = await invokeTauri<string>("export_spreadsheet", {
+            outputPath,
+            sheetsJson,
+          });
+          return `已导出 Excel 文件: ${result}`;
+        } catch (err) {
+          return { error: `导出失败: ${err}` };
+        }
+      },
+    },
+    {
       name: "str_replace_edit",
       description: `对文件进行精确编辑。支持三种命令：
 - str_replace: 精确替换文件中的一段文本（old_str → new_str）。old_str 必须在文件中唯一匹配。

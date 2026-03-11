@@ -48,7 +48,7 @@ import { useToolTrustStore } from "@/store/command-allowlist-store";
 import { useConfirmDialogStore } from "@/store/confirm-dialog-store";
 import { useClusterPlanApprovalStore } from "@/store/cluster-plan-approval-store";
 import type { AskUserQuestion, AskUserAnswers } from "../../core/default-tools";
-import { useInputAttachments } from "@/hooks/use-input-attachments";
+import { useInputAttachments, FILE_ACCEPT_ALL } from "@/hooks/use-input-attachments";
 import { useToast } from "@/components/ui/Toast";
 import { handleError } from "@/core/errors";
 import { routeToAICenter } from "@/core/ai/ai-center-routing";
@@ -791,7 +791,7 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
             ref={clusterFileInputRef}
             type="file"
             multiple
-            accept="image/*,.txt,.md,.json,.yaml,.yml,.toml,.xml,.csv,.log,.js,.ts,.jsx,.tsx,.py,.rs,.go,.java,.c,.cpp,.h,.hpp,.swift,.kt,.rb,.php,.sh,.sql,.css,.html,.htm,.vue,.svelte"
+            accept={FILE_ACCEPT_ALL}
             className="hidden"
             onChange={handleFileSelect}
           />

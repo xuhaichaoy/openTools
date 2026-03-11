@@ -181,7 +181,7 @@ describe("useAgentRunActions", () => {
   });
 
   it("passes OpenClaw profile when enabled", async () => {
-    const executeAgentTask = vi.fn(async (_query: string) => undefined);
+    const executeAgentTask = vi.fn(async (_query: string, _opts?: unknown) => undefined);
     let hookValue: ReturnType<typeof useAgentRunActions> | null = null;
 
     act(() => {
@@ -214,12 +214,20 @@ describe("useAgentRunActions", () => {
 
     expect(executeAgentTask).toHaveBeenCalledTimes(1);
     const call = executeAgentTask.mock.calls[0];
+    const options = (call?.[1] ?? {}) as {
+      runProfile?: {
+        codingMode: boolean;
+        largeProjectMode: boolean;
+        openClawMode: boolean;
+      };
+      systemHint?: string;
+    };
     expect(call?.[0]).toBe("修复这个模块并验证");
-    expect(call?.[1]?.runProfile).toEqual({
+    expect(options.runProfile).toEqual({
       codingMode: true,
       largeProjectMode: true,
       openClawMode: true,
     });
-    expect(String(call?.[1]?.systemHint || "")).toContain("OpenClaw");
+    expect(String(options.systemHint || "")).toContain("OpenClaw");
   });
 });

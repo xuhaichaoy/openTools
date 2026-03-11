@@ -375,6 +375,9 @@ export function createMToolsAI(): MToolsAI {
      */
     async streamWithTools(options) {
       const config = getConfig();
+      if (options.modelOverride) {
+        config.model = options.modelOverride;
+      }
       const conversationId = `agent-${generateId()}`;
       const routed = getRoutedConfig(config);
       let fullContent = "";

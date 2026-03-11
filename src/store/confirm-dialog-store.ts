@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-export type ConfirmDialogSource = "agent" | "cluster";
+export type ConfirmDialogSource = "agent" | "cluster" | "actor_dialog";
 
 interface ConfirmDialogRequest {
   id: string;

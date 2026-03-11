@@ -61,6 +61,8 @@ export interface MToolsAI {
     signal?: AbortSignal;
     onChunk: (chunk: string) => void;
     onDone?: (full: string) => void;
+    /** 运行时模型覆盖（用于多 Agent 场景下每个 Agent 使用不同模型） */
+    modelOverride?: string;
   }): Promise<
     | { type: "content"; content: string }
     | { type: "tool_calls"; toolCalls: AIToolCall[] }

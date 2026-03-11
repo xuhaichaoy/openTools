@@ -15,8 +15,8 @@ export type AppMode = 'search' | 'ai'
 
 const MAX_RECENT_TOOLS = 20
 
-export type AIInitialMode = 'ask' | 'agent' | 'cluster'
-export type AICenterMode = 'ask' | 'agent' | 'cluster'
+export type AIInitialMode = 'ask' | 'agent' | 'cluster' | 'dialog'
+export type AICenterMode = 'ask' | 'agent' | 'cluster' | 'dialog'
 
 export interface AgentHandoff {
   query: string

@@ -443,7 +443,7 @@ ${forceMode ? `强制使用模式: ${forceMode}` : "根据任务复杂度自动�
     });
 
     if (steps.length === 0) {
-      this.emitProgress("plan_retry", { reason: "empty_steps", rawJson: planJson.slice(0, 300) });
+      this.emitProgress("plan_retry", { reason: "empty_steps", rawJson: (planJson ?? "").slice(0, 300) });
       const fallbackSteps: ClusterStep[] = [{
         id: "step_1",
         role: "researcher",

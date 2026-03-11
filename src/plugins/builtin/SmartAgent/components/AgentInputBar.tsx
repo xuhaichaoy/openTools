@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import { Send, X, FileText, Folder, File } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
-import type { InputAttachment } from "@/hooks/use-input-attachments";
+import { FILE_ACCEPT_ALL, type InputAttachment } from "@/hooks/use-input-attachments";
 import { AttachDropdown } from "@/components/ui/AttachDropdown";
 
 interface AgentInputBarProps {
@@ -262,7 +262,7 @@ export function AgentInputBar({
           ref={fileInputRef}
           type="file"
           multiple
-          accept="image/*,.txt,.md,.json,.yaml,.yml,.toml,.xml,.csv,.log,.js,.ts,.jsx,.tsx,.py,.rs,.go,.java,.c,.cpp,.h,.hpp,.swift,.kt,.rb,.php,.sh,.sql,.css,.html,.htm,.vue,.svelte"
+          accept={FILE_ACCEPT_ALL}
           className="hidden"
           onChange={onFileSelect}
         />

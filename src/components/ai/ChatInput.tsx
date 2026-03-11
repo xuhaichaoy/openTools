@@ -12,7 +12,7 @@ import {
   File,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
-import type { InputAttachment } from "@/hooks/use-input-attachments";
+import { FILE_ACCEPT_ALL, type InputAttachment } from "@/hooks/use-input-attachments";
 import { AttachDropdown } from "@/components/ui/AttachDropdown";
 
 const PROMPT_TEMPLATES = [
@@ -349,7 +349,7 @@ export function ChatInput({
                   ref={fileInputEl as React.RefObject<HTMLInputElement>}
                   type="file"
                   multiple
-                  accept="image/*,.txt,.md,.json,.yaml,.yml,.toml,.xml,.csv,.log,.js,.ts,.jsx,.tsx,.py,.rs,.go,.java,.c,.cpp,.h,.hpp,.swift,.kt,.rb,.php,.sh,.sql,.css,.scss,.less,.html,.htm,.vue,.svelte,.pdf,.doc,.docx,.rtf,.odt,.r,.lua,.dart,.scala,.groovy,.zig,.dockerfile,.makefile,.ini,.cfg,.conf"
+                  accept={FILE_ACCEPT_ALL}
                   className="hidden"
                   onChange={onFileSelect}
                 />

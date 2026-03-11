@@ -104,6 +104,12 @@ export interface AgentConfig {
   codingHint?: string;
   /** system prompt 总 token 预算（0 = 不限，默认不限） */
   contextBudget?: number;
+  /** 运行时模型覆盖（用于多 Agent / Actor 场景下每个 Agent 使用不同模型） */
+  modelOverride?: string;
+  /** Actor 收件箱排空回调：每次 iteration 间隙调用，返回待处理消息（空数组 = 无新消息） */
+  inboxDrain?: () => { id: string; from: string; content: string; expectReply?: boolean; replyTo?: string }[];
+  /** 对话历史上下文：作为多轮 messages 注入（system 之后、当前 query 之前），用于 Actor 会话连续性 */
+  contextMessages?: Array<{ role: "user" | "assistant"; content: string }>;
 }
 
 const DEFAULT_CONFIG: AgentConfig = {
@@ -1150,7 +1156,12 @@ ${s.taskStrategy}
       images?: string[];
     }[] = [{ role: "system", content: this.buildSystemPrompt(userInput) }];
 
-    // 添加历史记录
+    if (this.config.contextMessages?.length) {
+      for (const cm of this.config.contextMessages) {
+        messages.push({ role: cm.role, content: cm.content });
+      }
+    }
+
     for (const step of this.history) {
       if (step.type === "thought" || step.type === "action") {
         messages.push({ role: "assistant", content: step.content });
@@ -1447,6 +1458,7 @@ ${s.taskStrategy}
       messages,
       tools: toolDefs,
       signal,
+      modelOverride: this.config.modelOverride,
       onChunk: (chunk) => {
         if (signal?.aborted) return;
         accumulated += chunk;
@@ -1513,6 +1525,12 @@ ${s.taskStrategy}
       { role: "system", content: this.buildFCSystemPrompt(userInput) },
     ];
 
+    if (this.config.contextMessages?.length) {
+      for (const cm of this.config.contextMessages) {
+        messages.push({ role: cm.role, content: cm.content });
+      }
+    }
+
     if (this.history.length > 0) {
       const historyParts: string[] = [];
       for (const step of this.history) {
@@ -1548,6 +1566,27 @@ ${s.taskStrategy}
 
     for (let i = 0; i < this.config.maxIterations; i++) {
       if (signal?.aborted) throw new Error("Aborted");
+
+      // Actor inbox 注入点：在每个 iteration 间隙检查是否有新消息
+      if (this.config.inboxDrain) {
+        const pending = this.config.inboxDrain();
+        if (pending.length > 0) {
+          const inboxBlock = pending.map((m) => {
+            const replyHint = m.expectReply
+              ? `（等待你的回复，请用 send_message 回复，reply_to 填 "${m.id}"）`
+              : "";
+            return `[消息来自 ${m.from}（消息ID: ${m.id}）${replyHint}]: ${m.content}`;
+          }).join("\n");
+          const hasAgentMsg = pending.some((m) => m.from !== "用户" && m.from !== "user");
+          const replyGuide = hasAgentMsg
+            ? "如果有其他 Agent 的消息需要回应，使用 send_message 回复。然后继续当前任务。"
+            : "请根据消息内容继续当前任务。";
+          messages.push({
+            role: "user",
+            content: `[收件箱 — 你在执行任务期间收到了新消息]\n${inboxBlock}\n\n${replyGuide}`,
+          });
+        }
+      }
 
       // 每轮刷新 system prompt（模式切换或 doom loop 禁用工具后需要更新）
       messages[0] = { role: "system", content: this.buildFCSystemPrompt(userInput) };

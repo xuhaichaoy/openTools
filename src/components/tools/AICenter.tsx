@@ -10,6 +10,7 @@ import {
   Plus,
   Wrench,
   Network,
+  Users,
   ArrowRightCircle,
   Sparkles,
   X,
@@ -38,6 +39,11 @@ const ClusterPanel = lazy(() =>
     (m) => ({ default: m.ClusterPanel }),
   ),
 );
+const ActorChatPanel = lazy(() =>
+  import("@/plugins/builtin/SmartAgent/components/actor/ActorChatPanel").then(
+    (m) => ({ default: m.ActorChatPanel }),
+  ),
+);
 
 export function AICenter({
   onBack,
@@ -63,11 +69,12 @@ export function AICenter({
     useAIStore.getState().loadConfig();
   }, []);
 
-  const [mounted, setMounted] = useState({ agent: mode === "agent", cluster: mode === "cluster" });
+  const [mounted, setMounted] = useState({ agent: mode === "agent", cluster: mode === "cluster", dialog: mode === "dialog" });
   useEffect(() => {
     setMounted((prev) => {
       if (mode === "agent" && !prev.agent) return { ...prev, agent: true };
       if (mode === "cluster" && !prev.cluster) return { ...prev, cluster: true };
+      if (mode === "dialog" && !prev.dialog) return { ...prev, dialog: true };
       return prev;
     });
   }, [mode]);
@@ -130,6 +137,7 @@ export function AICenter({
             </div>,
             "Cluster",
           )}
+          {modeBtn("dialog", <Users className="w-3 h-3" />, "Dialog")}
         </div>
 
         <div className="w-px h-4 bg-[var(--color-border)] mx-0.5" />
@@ -233,6 +241,13 @@ export function AICenter({
           </span>
         )}
 
+        {/* Dialog 模式操作按钮 */}
+        {mode === "dialog" && (
+          <span className="text-[11px] text-[var(--color-text-secondary)]">
+            多 Agent 自由对话
+          </span>
+        )}
+
         <div className="flex-1" />
 
         <button
@@ -260,6 +275,11 @@ export function AICenter({
           {mounted.cluster && (
             <div className={`absolute inset-0 ${mode === "cluster" ? "" : "invisible pointer-events-none"}`}>
               <ClusterPanel active={mode === "cluster"} />
+            </div>
+          )}
+          {mounted.dialog && (
+            <div className={`absolute inset-0 ${mode === "dialog" ? "" : "invisible pointer-events-none"}`}>
+              <ActorChatPanel active={mode === "dialog"} />
             </div>
           )}
         </Suspense>
