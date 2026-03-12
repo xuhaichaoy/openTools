@@ -84,6 +84,31 @@ export function createActorCommunicationTools(
         description: "是否期望收到完成消息通知（默认 true）。设为 false 可用于 fire-and-forget 场景。",
         required: false,
       },
+      override_model: {
+        type: "string",
+        description: "覆盖目标 Agent 的 LLM 模型（如 'gpt-4o'、'claude-3-sonnet' 等）。不提供则使用目标 Agent 的默认模型。",
+        required: false,
+      },
+      override_max_iterations: {
+        type: "number",
+        description: "覆盖目标 Agent 的最大迭代次数。适用于简单任务可设小值（如 5），复杂任务可设大值（如 30）。",
+        required: false,
+      },
+      override_tools_allow: {
+        type: "string",
+        description: "覆盖目标 Agent 允许使用的工具名称列表（逗号分隔）。如 'read_file,search' 则只允许这两个工具。",
+        required: false,
+      },
+      override_tools_deny: {
+        type: "string",
+        description: "覆盖目标 Agent 禁止使用的工具名称列表（逗号分隔）。如 'shell_execute' 则禁止执行 shell。",
+        required: false,
+      },
+      override_system_prompt_append: {
+        type: "string",
+        description: "追加到目标 Agent 系统提示的额外指令（不替换原有指令）。用于为子任务提供特定约束。",
+        required: false,
+      },
     },
     readonly: false,
     execute: async (params) => {
@@ -100,6 +125,24 @@ export function createActorCommunicationTools(
       const cleanup = params.cleanup === "delete" ? "delete" : "keep";
       const expectsCompletionMessage = params.expects_completion !== false;
 
+      // Subagent 独立配置
+      const overrides: import("./types").SpawnTaskOverrides = {};
+      if (params.override_model) overrides.model = String(params.override_model);
+      if (params.override_max_iterations) overrides.maxIterations = Number(params.override_max_iterations);
+      if (params.override_tools_allow || params.override_tools_deny) {
+        overrides.toolPolicy = {};
+        if (params.override_tools_allow) {
+          overrides.toolPolicy.allow = String(params.override_tools_allow).split(",").map((s) => s.trim()).filter(Boolean);
+        }
+        if (params.override_tools_deny) {
+          overrides.toolPolicy.deny = String(params.override_tools_deny).split(",").map((s) => s.trim()).filter(Boolean);
+        }
+      }
+      if (params.override_system_prompt_append) {
+        overrides.systemPromptAppend = String(params.override_system_prompt_append);
+      }
+      const hasOverrides = Object.keys(overrides).length > 0;
+
       const result = system.spawnTask(actorId, target, task, {
         label,
         context,
@@ -108,6 +151,7 @@ export function createActorCommunicationTools(
         mode,
         cleanup,
         expectsCompletionMessage,
+        overrides: hasOverrides ? overrides : undefined,
       });
 
       if ("error" in result) {

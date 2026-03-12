@@ -154,28 +154,10 @@ function normalizeFCCompatibilityKey(key?: string): string | null {
 
 // ── Context 管理 ──
 
+import { estimateTokens, estimateMessagesTokens } from "@/core/ai/token-utils";
+
 const DEFAULT_CONTEXT_LIMIT = 100_000;
 const CONTEXT_COMPACT_THRESHOLD = 0.75;
-
-function estimateTokens(text: string): number {
-  if (!text) return 0;
-  const cjkCount = (text.match(/[\u4e00-\u9fff\u3400-\u4dbf]/g) || []).length;
-  const nonCjkLength = text.length - cjkCount;
-  return Math.ceil(cjkCount * 1.5 + nonCjkLength / 3.5);
-}
-
-function estimateMessagesTokens(
-  messages: { role: string; content: string | null; [k: string]: unknown }[],
-): number {
-  let total = 0;
-  for (const m of messages) {
-    total += 4; // role + structural overhead
-    total += estimateTokens(m.content || "");
-    if (m.tool_calls) total += estimateTokens(JSON.stringify(m.tool_calls));
-    if (m.name) total += estimateTokens(String(m.name));
-  }
-  return total;
-}
 
 function summarizeDiscardedMiddle<
   T extends { role: string; content: string | null; tool_calls?: unknown; [k: string]: unknown },
@@ -244,14 +226,22 @@ function compactMessages<
       }
     }
 
-    // 保留最近3组工具调用（之前是2组）
+    // 保留最近3组工具调用
     const keepCount = Math.min(3, toolCallGroups.length);
     const recentGroups = toolCallGroups.slice(-keepCount);
-    const discardedGroups = toolCallGroups.slice(0, -keepCount || toolCallGroups.length);
+    const discardedGroups = toolCallGroups.slice(0, toolCallGroups.length - keepCount);
 
-    const discardedMessages = discardedGroups.flat().concat(
-      nonGroupMessages.filter((m) => !recentGroups.flat().includes(m)),
+    // 保留最后一条纯文本 assistant，其余 nonGroupMessages 视为可丢弃
+    const keptNonGroup = new Set<T>();
+    const assistantTexts = nonGroupMessages.filter(
+      (m) => m.role === "assistant" && !m.tool_calls,
     );
+    if (assistantTexts.length > 0) keptNonGroup.add(assistantTexts[assistantTexts.length - 1]);
+
+    const discardedMessages = [
+      ...discardedGroups.flat(),
+      ...nonGroupMessages.filter((m) => !keptNonGroup.has(m)),
+    ];
     if (discardedMessages.length > 0) {
       const summary = summarizeDiscardedMiddle(discardedMessages);
       result.push({ role: "user", content: summary } as unknown as T);
@@ -270,14 +260,9 @@ function compactMessages<
       }),
     );
 
-    // 保留最后一条纯文本 assistant 消息
-    const assistantMsgs = nonGroupMessages.filter(
-      (m) => m.role === "assistant" && !m.tool_calls,
-    );
-    const lastAssistant = assistantMsgs.length > 0 ? assistantMsgs[assistantMsgs.length - 1] : null;
-
-    if (lastAssistant) result.push(lastAssistant);
+    // 先恢复工具调用组（时间较早），再放纯文本 assistant（时间较晚）
     for (const group of compactedGroups) result.push(...group);
+    for (const m of keptNonGroup) result.push(m);
   }
 
   result.push(...tail);
@@ -494,8 +479,9 @@ export class ReActAgent {
   private currentSignal?: AbortSignal;
   private loopDetector = new LoopDetector();
   private approvedDangerousKeys = new Set<string>();
-  /** 缓存已成功执行的 tool+params → 输出，避免重复执行 */
+  /** 缓存已成功执行的 tool+params → 输出，避免重复执行（LRU, max 200 entries） */
   private successfulCallCache = new Map<string, string>();
+  private static readonly CALL_CACHE_MAX_SIZE = 200;
   private mode: AgentMode = "execute";
   private trajectory: TrajectoryEntry[] = [];
 
@@ -1051,6 +1037,11 @@ export class ReActAgent {
 
       if (!hasToolError) {
         this.successfulCallCache.set(cacheKey, outputStr);
+        // LRU eviction: drop oldest entries when exceeding max size
+        if (this.successfulCallCache.size > ReActAgent.CALL_CACHE_MAX_SIZE) {
+          const firstKey = this.successfulCallCache.keys().next().value;
+          if (firstKey !== undefined) this.successfulCallCache.delete(firstKey);
+        }
       }
 
       this.addStep({ type: "observation", content: outputStr, toolName, toolOutput: output, timestamp: Date.now() });

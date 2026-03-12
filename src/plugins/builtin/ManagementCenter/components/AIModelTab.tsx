@@ -1,4 +1,4 @@
-import React, { useState, useEffect, type CSSProperties } from "react";
+import React, { useState, useEffect, lazy, Suspense, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useAIStore } from "@/store/ai-store";
 import { useRAGStore } from "@/store/rag-store";
@@ -35,7 +35,10 @@ import {
   Eye,
   EyeOff,
   Save,
+  Radio,
 } from "lucide-react";
+
+const ChannelConfigPanel = lazy(() => import("@/plugins/builtin/SmartAgent/components/ChannelConfigPanel"));
 import {
   useToolTrustStore,
   TRUST_LEVEL_OPTIONS,
@@ -91,7 +94,7 @@ interface ContainerRuntimeAvailability {
 }
 
 type AIModelSource = "own_key" | "team" | "platform";
-type AIConfigPanel = "source" | "abilities" | "prompt";
+type AIConfigPanel = "source" | "abilities" | "prompt" | "channels";
 
 function toTime(value?: string | null): number {
   if (!value) return 0;
@@ -274,11 +277,12 @@ export function AIModelTab() {
         </span>
       </div>
 
-      <div className="grid grid-cols-3 gap-2">
+      <div className="grid grid-cols-4 gap-2">
         {[
           { id: "source" as const, label: "模型来源", icon: Key },
           { id: "abilities" as const, label: "能力开关", icon: ShieldAlert },
           { id: "prompt" as const, label: "提示词", icon: MessageSquare },
+          { id: "channels" as const, label: "IM 通道", icon: Radio },
         ].map((panel) => (
           <button
             key={panel.id}
@@ -795,6 +799,14 @@ export function AIModelTab() {
           <p className="text-[10px] text-[var(--color-text-secondary)]">
             留空则使用默认提示词；填写后会追加到默认提示词之后。建议将可长期复用的内容写入“长期记忆”而不是提示词。
           </p>
+        </div>
+      )}
+
+      {activePanel === "channels" && (
+        <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] overflow-hidden" style={{ minHeight: 300 }}>
+          <Suspense fallback={<div className="p-4 text-xs text-[var(--color-text-secondary)]">加载中...</div>}>
+            <ChannelConfigPanel />
+          </Suspense>
         </div>
       )}
     </div>

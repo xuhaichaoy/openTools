@@ -7,6 +7,8 @@ import {
   extractMemoryCandidates,
   appendMemoryCandidates,
   listConfirmedMemories,
+  llmExtractMemories,
+  mergeMemoryCandidatesIntoStore,
   type AIMemoryItem,
 } from "@/core/ai/memory-store";
 
@@ -110,8 +112,9 @@ function formatMemoryItem(m: AIMemoryItem) {
 }
 
 /**
- * 从对话内容中自动提取记忆候选（用于任务结束后的自动提取）。
- * 对标 OpenClaw 的 session-memory hook。
+ * Extract memories from conversation using LLM-based extraction (primary)
+ * with regex-based fallback. Merges results directly into the memory store
+ * using confidence-based dedup (inspired by deer-flow's memory updater).
  */
 export async function autoExtractMemories(
   conversationContent: string,
@@ -120,6 +123,16 @@ export async function autoExtractMemories(
   if (!conversationContent || conversationContent.length < 20) return 0;
 
   const truncated = conversationContent.slice(0, MAX_EXTRACT_CONTENT_LENGTH);
+
+  // Try LLM-based extraction first for richer results
+  const llmCandidates = await llmExtractMemories(truncated, { conversationId }).catch(() => []);
+
+  if (llmCandidates.length > 0) {
+    const result = await mergeMemoryCandidatesIntoStore(llmCandidates);
+    return result.added + result.updated;
+  }
+
+  // Fallback to regex-based heuristic
   const candidates = extractMemoryCandidates(truncated, { conversationId });
   if (candidates.length === 0) return 0;
 

@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef, useEffect, useMemo } from "react";
+import React, { useState, useCallback, useRef, useEffect, useMemo, lazy, Suspense } from "react";
 import {
   Users,
   Square,
@@ -15,6 +15,8 @@ import {
   FileDown,
   FolderOpen,
   RotateCcw,
+  ListChecks,
+  Network,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import ReactMarkdown from "react-markdown";
@@ -26,8 +28,91 @@ import { api } from "@/core/api/client";
 import { DIALOG_FULL_ROLE } from "@/core/agent/actor/agent-actor";
 import type { AgentCapability, AgentCapabilities, DialogMessage } from "@/core/agent/actor/types";
 import { DIALOG_PRESETS, loadCustomPresets, saveCustomPreset, deleteCustomPreset, exportCustomPresets, importCustomPresets, type DialogPreset } from "@/core/agent/actor/dialog-presets";
+import type { AgentStep } from "@/plugins/builtin/SmartAgent/core/react-agent";
 import { useInputAttachments, FILE_ACCEPT_ALL } from "@/hooks/use-input-attachments";
 import { AttachDropdown } from "@/components/ui/AttachDropdown";
+
+const TaskCenterPanel = lazy(() => import("../TaskCenterPanel"));
+const KnowledgeGraphView = lazy(() => import("../KnowledgeGraphView"));
+
+type DialogOverlay = "tasks" | "graph" | null;
+
+function basename(path: unknown): string {
+  const s = String(path ?? "");
+  return s.split("/").pop() || s;
+}
+
+function describeAgentActivity(steps: AgentStep[], roleName: string, hasStreamingContent: boolean): string {
+  if (hasStreamingContent) return "正在生成回复";
+
+  const latest = steps[steps.length - 1];
+  if (!latest) return `${roleName} 正在思考`;
+
+  if (latest.type === "action" && latest.toolName) {
+    const input = latest.toolInput ?? {};
+    switch (latest.toolName) {
+      case "read_file":
+      case "read_file_range":
+        return `读取 ${basename(input.path)}`;
+      case "list_directory":
+        return `浏览目录 ${basename(input.path)}`;
+      case "search_in_files":
+        return `搜索 "${String(input.query ?? "").slice(0, 30)}"`;
+      case "write_file":
+        return `写入 ${basename(input.path)}`;
+      case "str_replace_edit":
+        return `编辑 ${basename(input.path)}`;
+      case "json_edit":
+        return `编辑 ${basename(input.path)}`;
+      case "run_shell_command":
+      case "persistent_shell":
+        return `执行 ${String(input.command ?? "").slice(0, 40)}`;
+      case "web_search":
+        return `搜索 "${String(input.query ?? "").slice(0, 30)}"`;
+      case "web_fetch":
+        return `访问 ${String(input.url ?? "").replace(/^https?:\/\//, "").slice(0, 35)}`;
+      case "sequential_thinking":
+        return `推理分析中`;
+      case "ckg_search_function":
+      case "ckg_search_class":
+      case "ckg_search_class_method":
+        return `查找 ${String(input.name ?? "")}`;
+      case "run_lint":
+        return `检查代码`;
+      case "ask_user":
+        return `等待用户回答`;
+      case "task_done":
+        return `任务完成`;
+      default:
+        return `${latest.toolName}`;
+    }
+  }
+
+  if (latest.type === "observation") {
+    const prevAction = [...steps].reverse().find((s) => s.type === "action");
+    if (prevAction?.toolName) {
+      const name = prevAction.toolName;
+      if (name === "read_file" || name === "read_file_range")
+        return `已读取 ${basename(prevAction.toolInput?.path)}，分析中`;
+      if (name === "search_in_files")
+        return `搜索完成，分析结果`;
+      if (name === "run_shell_command" || name === "persistent_shell")
+        return `命令执行完成，分析输出`;
+      return `${name} 完成，继续处理`;
+    }
+    return `处理结果中`;
+  }
+
+  if (latest.type === "thought") {
+    const text = latest.content.replace(/\n/g, " ").trim();
+    return text.length > 60 ? text.slice(0, 60) + "…" : text;
+  }
+
+  if (latest.type === "answer") return "生成回复中";
+  if (latest.type === "error") return "遇到错误，处理中";
+
+  return `${roleName} 正在思考`;
+}
 
 const ACTOR_COLORS = [
   { bg: "bg-blue-500/10", text: "text-blue-600", border: "border-blue-500/20", dot: "bg-blue-500" },
@@ -81,7 +166,10 @@ function FileActionButtons({ content }: { content: string }) {
                     const data = await readFile(filePath);
                     await writeFile(dest, data);
                   }
-                } catch { /* user cancelled */ }
+                } catch (err) {
+                  if (err && typeof err === "object" && "message" in err && /cancel/i.test(String((err as Error).message))) return;
+                  console.warn("[ActorChatPanel] File save failed:", err);
+                }
               }}
               className="flex items-center gap-1 px-2 py-1 rounded-md bg-[var(--color-accent)]/10 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/20 transition-colors"
               title="另存为..."
@@ -126,7 +214,7 @@ function useAvailableModels(): ModelOption[] {
       .then((res) => {
         if (!cancelled) setTeamModels((res.models || []).map((m) => ({ id: m.config_id, name: m.display_name, model: m.model_name })));
       })
-      .catch(() => { if (!cancelled) setTeamModels([]); });
+      .catch((err) => { if (!cancelled) { console.warn("[ActorChatPanel] Failed to load team models:", err); setTeamModels([]); } });
     return () => { cancelled = true; };
   }, [source, config.team_id, teamsLoaded, teams]);
 
@@ -153,7 +241,10 @@ function MessageBubbleBase({
   isUser,
   isWaitingReply,
 }: MessageBubbleProps) {
+  const [showFullContext, setShowFullContext] = useState(false);
   const color = isUser ? null : getActorColor(actorIndex);
+  const hasBrief = isUser && !!message._briefContent && message._briefContent !== message.content;
+  const displayText = hasBrief && !showFullContext ? message._briefContent! : message.content;
   return (
     <div className={`flex gap-2 ${isUser ? "flex-row-reverse" : ""}`}>
       <div className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 ${
@@ -182,9 +273,18 @@ function MessageBubbleBase({
         }`}>
           <div className="prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-headings:mt-2 prose-headings:mb-1 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_code]:break-words">
             <ReactMarkdown remarkPlugins={MARKDOWN_REMARK_PLUGINS}>
-              {message.content}
+              {displayText}
             </ReactMarkdown>
           </div>
+          {hasBrief && (
+            <button
+              onClick={() => setShowFullContext((v) => !v)}
+              className="mt-1 text-[10px] text-[var(--color-text-tertiary)] hover:text-[var(--color-accent)] flex items-center gap-0.5 ml-auto transition-colors"
+            >
+              <ChevronDown className={`w-3 h-3 transition-transform ${showFullContext ? "rotate-180" : ""}`} />
+              {showFullContext ? "收起上下文" : "查看完整上下文"}
+            </button>
+          )}
           {!isUser && <FileActionButtons content={message.content} />}
         </div>
         {isWaitingReply && (
@@ -203,6 +303,7 @@ const MessageBubble = React.memo(
   (prev, next) =>
     prev.message.id === next.message.id &&
     prev.message.content === next.message.content &&
+    prev.message._briefContent === next.message._briefContent &&
     prev.message.timestamp === next.message.timestamp &&
     prev.actorIndex === next.actorIndex &&
     prev.actorName === next.actorName &&
@@ -570,12 +671,14 @@ function RoutingModeButton({
 
 export function ActorChatPanel({ active = true }: { active?: boolean }) {
   const [showConfig, setShowConfig] = useState(false);
+  const [overlay, setOverlay] = useState<DialogOverlay>(null);
   const [input, setInput] = useState("");
   const [showMention, setShowMention] = useState(false);
   const [mentionFilter, setMentionFilter] = useState("");
   const [customPresets, setCustomPresets] = useState<DialogPreset[]>([]);
   /** 路由模式：coordinator=只发给第一个，smart=智能路由，broadcast=发给所有 */
   const [routingMode, setRoutingMode] = useState<"coordinator" | "smart" | "broadcast">("coordinator");
+  const [showAllMessages, setShowAllMessages] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const inputWrapRef = useRef<HTMLDivElement>(null);
@@ -594,6 +697,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     attachments,
     imagePaths,
     fileContextBlock,
+    attachmentSummary,
     hasAttachments,
     handlePaste,
     handleDrop,
@@ -605,7 +709,8 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     clearAttachments,
   } = useInputAttachments();
 
-  const hasRunningActors = actors.some((a) => a.status === "running");
+  const runningActors = useMemo(() => actors.filter((a) => a.status === "running"), [actors]);
+  const hasRunningActors = runningActors.length > 0;
 
   // Auto-init: mount 时自动创建 ActorSystem
   // - 如果本地有持久化的 Dialog 会话，则只恢复，不额外创建默认 Agent
@@ -648,8 +753,15 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     }
   }, [showConfig]);
 
+  const lastDialogLengthRef = useRef(0);
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (dialogHistory.length > lastDialogLengthRef.current) {
+      // Only auto-scroll when new messages arrive, not on re-renders
+      requestAnimationFrame(() => {
+        chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      });
+    }
+    lastDialogLengthRef.current = dialogHistory.length;
   }, [dialogHistory.length]);
 
   useEffect(() => {
@@ -675,6 +787,13 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   }, [actors]);
 
   const pendingUserReplySet = useMemo(() => new Set(pendingUserReplies), [pendingUserReplies]);
+
+  /** Visible messages: limit DOM nodes for large conversations */
+  const MESSAGE_WINDOW_SIZE = 100;
+  const visibleMessages = useMemo(() => {
+    if (showAllMessages || dialogHistory.length <= MESSAGE_WINDOW_SIZE) return dialogHistory;
+    return dialogHistory.slice(-MESSAGE_WINDOW_SIZE);
+  }, [dialogHistory, showAllMessages]);
   const messageById = useMemo(() => {
     const map = new Map<string, DialogMessage>();
     dialogHistory.forEach((m) => map.set(m.id, m));
@@ -766,12 +885,17 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
 
     ensureSystem();
 
-    const userText = trimmed || (fileContextBlock.trim() ? "请分析以上文件内容。" : "");
-    const content = fileContextBlock.trim()
+    const hasContext = fileContextBlock.trim().length > 0;
+    const userText = trimmed || (hasContext ? "请分析以上文件内容。" : "");
+    const content = hasContext
       ? `${fileContextBlock}\n\n${userText}`
       : userText;
 
     if (!content) return;
+
+    const briefContent = hasContext
+      ? (attachmentSummary ? `${attachmentSummary}\n${userText}` : userText)
+      : undefined;
 
     // 如果有待回复的消息，优先回复（直接回复给最早的那条）
     if (pendingUserReplies.length > 0) {
@@ -785,15 +909,18 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     }
 
     const { targetId, cleanContent } = parseMention(trimmed);
-    const finalContent = fileContextBlock.trim()
+    const finalContent = hasContext
       ? `${fileContextBlock}\n\n${cleanContent || userText}`
       : (cleanContent || content);
+    const finalBrief = hasContext
+      ? (attachmentSummary ? `${attachmentSummary}\n${cleanContent || userText}` : (cleanContent || userText))
+      : undefined;
 
     if (targetId && finalContent.startsWith("!steer ")) {
       const directive = finalContent.slice(7).trim();
       if (directive) steer(targetId, directive);
     } else if (targetId) {
-      sendMessage("user", targetId, finalContent);
+      sendMessage("user", targetId, finalContent, { _briefContent: finalBrief });
     } else {
       if (routingMode === "smart" && finalContent) {
         const routes = routeTask(finalContent);
@@ -801,7 +928,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
           const selectedAgent = routes[0].agentId;
           const reason = routes[0].reason;
           console.log(`[Smart Routing] "${finalContent.slice(0, 30)}..." → ${selectedAgent} (${reason})`);
-          sendMessage("user", selectedAgent, finalContent);
+          sendMessage("user", selectedAgent, finalContent, { _briefContent: finalBrief });
           setInput("");
           setShowMention(false);
           clearAttachments();
@@ -810,9 +937,9 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
         }
       }
       if (routingMode === "broadcast") {
-        broadcastMessage("user", finalContent);
+        broadcastMessage("user", finalContent, { _briefContent: finalBrief });
       } else {
-        broadcastAndResolve("user", finalContent);
+        broadcastAndResolve("user", finalContent, { _briefContent: finalBrief });
       }
     }
 
@@ -820,7 +947,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     setShowMention(false);
     clearAttachments();
     inputRef.current?.focus();
-  }, [input, hasAttachments, fileContextBlock, ensureSystem, parseMention, sendMessage, broadcastMessage, broadcastAndResolve, steer, pendingUserReplies, replyToMessage, routingMode, routeTask, clearAttachments]);
+  }, [input, hasAttachments, fileContextBlock, attachmentSummary, ensureSystem, parseMention, sendMessage, broadcastMessage, broadcastAndResolve, steer, pendingUserReplies, replyToMessage, routingMode, routeTask, clearAttachments]);
 
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value;
@@ -870,8 +997,25 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     return names.join("、");
   }, [pendingUserReplies, messageById, actorById]);
 
+  // 图谱数据
+  const graphData = useMemo(() => {
+    if (overlay !== "graph") return null;
+    try {
+      const { KnowledgeGraph } = require("@/core/knowledge/knowledge-graph");
+      const actorNodes = actors.map((a) => ({
+        id: a.id, name: a.roleName, status: a.status, capabilities: a.capabilities?.tags,
+      }));
+      const spawnEvents = useActorSystemStore.getState().spawnedTaskEvents || [];
+      const tasks = spawnEvents.map((e: any) => ({
+        spawner: e.spawnerActorId, target: e.targetActorId, label: e.label || "", status: e.status,
+      }));
+      const dialog = dialogHistory.map((m) => ({ from: m.from, to: m.to }));
+      return KnowledgeGraph.fromActorSystem(actorNodes, tasks, dialog);
+    } catch { return { nodes: [], edges: [] }; }
+  }, [overlay, actors, dialogHistory]);
+
   return (
-    <div className="flex flex-col h-full">
+    <div className="relative flex flex-col h-full">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-2.5 border-b border-[var(--color-border)]">
         <div className="flex items-center gap-2">
@@ -893,7 +1037,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
             </span>
           )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5">
           <button
             onClick={() => setShowConfig(!showConfig)}
             className={`p-1 rounded transition-colors ${
@@ -903,6 +1047,27 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
           >
             <Settings2 className="w-3.5 h-3.5" />
           </button>
+          <button
+            onClick={() => setOverlay(overlay === "tasks" ? null : "tasks")}
+            className={`p-1 rounded transition-colors ${
+              overlay === "tasks" ? "bg-blue-500/10 text-blue-500" : "text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)]"
+            }`}
+            title="任务中心"
+          >
+            <ListChecks className="w-3.5 h-3.5" />
+          </button>
+          <button
+            onClick={() => setOverlay(overlay === "graph" ? null : "graph")}
+            className={`p-1 rounded transition-colors ${
+              overlay === "graph" ? "bg-purple-500/10 text-purple-500" : "text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)]"
+            }`}
+            title="知识图谱"
+          >
+            <Network className="w-3.5 h-3.5" />
+          </button>
+          {hasRunningActors && (
+            <span className="mx-0.5 h-3 w-px bg-[var(--color-border)]" />
+          )}
           {hasRunningActors && (
             <button onClick={handleStop} className="text-xs text-red-500 hover:text-red-600 flex items-center gap-1">
               <Square className="w-3 h-3" /> 停止
@@ -1001,7 +1166,17 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
           </div>
         )}
 
-        {dialogHistory.map((msg) => {
+        {/* Message windowing: show all when < 100, otherwise show load-more + recent */}
+        {dialogHistory.length > 100 && !showAllMessages && (
+          <button
+            onClick={() => setShowAllMessages(true)}
+            className="w-full text-center text-[10px] text-[var(--color-text-tertiary)] hover:text-[var(--color-accent)] py-2 transition-colors"
+          >
+            ↑ 加载更早的 {dialogHistory.length - 100} 条消息
+          </button>
+        )}
+
+        {visibleMessages.map((msg) => {
           const isUser = msg.from === "user";
           const actorIdx = actorIdToIndex.get(msg.from) ?? 0;
           const actor = actorById.get(msg.from);
@@ -1026,9 +1201,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
         })}
 
         {/* Thinking indicators - 流式输出 */}
-        {actors
-          .filter((a) => a.status === "running")
-          .map((a, i) => {
+        {runningActors.map((a, i) => {
             const color = getActorColor(actorIdToIndex.get(a.id) ?? i);
             const steps = a.currentTask?.steps ?? [];
 
@@ -1069,11 +1242,11 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                 {/* 思考状态指示器 */}
                 <div className={`flex items-center gap-2 ${color.text}`}>
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  <span className="text-[11px]">
-                    {streamingContent ? "正在继续生成" : `${a.roleName} 正在思考`}
-                    {latestStep?.type === "action" && latestStep.toolName && (
-                      <span className="opacity-60">（{latestStep.toolName}）</span>
-                    )}
+                  <span className="text-[11px] truncate max-w-[80%]">
+                    <span className="font-medium">{a.roleName}</span>
+                    <span className="opacity-70 ml-1">
+                      {describeAgentActivity(steps, a.roleName, !!streamingContent)}
+                    </span>
                   </span>
                 </div>
               </div>
@@ -1170,6 +1343,35 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
           </button>
         </div>
       </div>
+
+      {/* Overlay Panel — 浮层弹窗，不压缩聊天区 */}
+      {overlay && (
+        <>
+          <div className="absolute inset-0 bg-black/20 z-30" onClick={() => setOverlay(null)} />
+          <div className="absolute inset-x-4 top-14 bottom-4 z-40 bg-[var(--color-bg)] border border-[var(--color-border)] rounded-xl shadow-2xl flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-2.5 border-b border-[var(--color-border)]">
+              <span className="text-sm font-medium">
+                {overlay === "tasks" && "任务中心"}
+                {overlay === "graph" && "知识图谱"}
+              </span>
+              <button
+                onClick={() => setOverlay(null)}
+                className="p-1 rounded hover:bg-[var(--color-bg-secondary)] text-[var(--color-text-tertiary)]"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-hidden">
+              <Suspense fallback={<div className="p-4 text-xs text-[var(--color-text-secondary)]">加载中...</div>}>
+                {overlay === "tasks" && <TaskCenterPanel />}
+                {overlay === "graph" && graphData && (
+                  <KnowledgeGraphView data={graphData} className="h-full" />
+                )}
+              </Suspense>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }

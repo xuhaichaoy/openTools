@@ -1,7 +1,8 @@
 import { JsonCollection, SyncableCollection, type SyncMeta } from "@/core/database/index";
 import { invoke } from "@tauri-apps/api/core";
+import { estimateTokens } from "./token-utils";
 
-export type AIMemoryKind = "preference" | "fact" | "goal" | "constraint" | "project_context" | "conversation_summary";
+export type AIMemoryKind = "preference" | "fact" | "goal" | "constraint" | "project_context" | "conversation_summary" | "knowledge" | "behavior";
 export type AIMemoryScope = "global" | "conversation";
 export type AIMemorySource = "user" | "assistant" | "system" | "agent";
 
@@ -47,6 +48,9 @@ const MAX_CANDIDATE_TEXT_LENGTH = 500;
 const MAX_MEMORY_TEXT_LENGTH = 260;
 const MAX_CANDIDATES = 60;
 const MAX_MEMORIES_IN_PROMPT = 6;
+const MAX_INJECTION_TOKENS = 2000;
+const FACT_CONFIDENCE_THRESHOLD = 0.7;
+const MAX_FACTS = 100;
 
 const SENSITIVE_PATTERNS: RegExp[] = [
   /\b(sk|rk|pk)-[a-z0-9]{10,}\b/i,
@@ -74,6 +78,8 @@ const CAPTURE_HINTS: RegExp[] = [
 const CONSTRAINT_HINTS = /(不要|不得|必须|禁止|务必|仅限)/;
 const GOAL_HINTS = /(目标|里程碑|计划|推进|交付|上线)/;
 const PREFERENCE_HINTS = /(默认|风格|格式|语气|模板|偏好|习惯|输出)/;
+const KNOWLEDGE_HINTS = /(擅长|精通|熟悉|了解|会用|经验|专家|专长|掌握)/;
+const BEHAVIOR_HINTS = /(习惯|通常|一般|总是|喜欢先|工作流|流程|方式)/;
 
 export const aiMemoryDb = new SyncableCollection<AIMemoryItem>("ai_memory");
 export const aiMemoryCandidateDb = new JsonCollection<AIMemoryCandidate>(
@@ -120,6 +126,8 @@ function tokenize(input: string): string[] {
 function inferKind(text: string): AIMemoryKind {
   if (CONSTRAINT_HINTS.test(text)) return "constraint";
   if (GOAL_HINTS.test(text)) return "goal";
+  if (KNOWLEDGE_HINTS.test(text)) return "knowledge";
+  if (BEHAVIOR_HINTS.test(text)) return "behavior";
   if (PREFERENCE_HINTS.test(text)) return "preference";
   return "fact";
 }
@@ -392,30 +400,39 @@ export async function recallMemories(
   return ranked;
 }
 
-export function buildMemoryPromptBlock(memories: AIMemoryItem[]): string {
+const KIND_LABELS: Record<AIMemoryKind, string> = {
+  constraint: "约束",
+  goal: "目标",
+  preference: "偏好",
+  knowledge: "知识",
+  behavior: "行为",
+  project_context: "项目",
+  conversation_summary: "摘要",
+  fact: "事实",
+};
+
+export function buildMemoryPromptBlock(
+  memories: AIMemoryItem[],
+  maxTokens: number = MAX_INJECTION_TOKENS,
+): string {
   if (!memories.length) return "";
 
-  const selected = memories.slice(0, MAX_MEMORIES_IN_PROMPT);
-  const lines = selected.map((memory, index) => {
-    const label =
-      memory.kind === "constraint"
-        ? "约束"
-        : memory.kind === "goal"
-          ? "目标"
-          : memory.kind === "preference"
-            ? "偏好"
-            : memory.kind === "project_context"
-              ? "项目"
-              : memory.kind === "conversation_summary"
-                ? "摘要"
-                : "事实";
-    return `${index + 1}. [${label}] ${trimMemoryContent(memory.content, 180)}`;
-  });
+  const header = "以下是用户确认过的长期记忆，请在回答中优先遵循（如与当前明确指令冲突，以当前指令为准）：";
+  let tokenBudget = maxTokens - estimateTokens(header);
+  const lines: string[] = [];
 
-  return [
-    "以下是用户确认过的长期记忆，请在回答中优先遵循（如与当前明确指令冲突，以当前指令为准）：",
-    ...lines,
-  ].join("\n");
+  for (let i = 0; i < Math.min(memories.length, MAX_MEMORIES_IN_PROMPT); i++) {
+    const memory = memories[i];
+    const label = KIND_LABELS[memory.kind] ?? "事实";
+    const line = `${i + 1}. [${label}] ${trimMemoryContent(memory.content, 180)}`;
+    const lineCost = estimateTokens(line);
+    if (lineCost > tokenBudget) break;
+    lines.push(line);
+    tokenBudget -= lineCost;
+  }
+
+  if (!lines.length) return "";
+  return [header, ...lines].join("\n");
 }
 
 // ── Unified Agent Memory Support ──
@@ -424,6 +441,11 @@ const AGENT_KIND_MAP: Record<string, AIMemoryKind> = {
   preference: "preference",
   fact: "fact",
   pattern: "preference",
+  knowledge: "knowledge",
+  context: "project_context",
+  behavior: "behavior",
+  goal: "goal",
+  constraint: "constraint",
 };
 
 export async function addMemoryFromAgent(
@@ -477,7 +499,37 @@ export async function addMemoryFromAgent(
   });
 }
 
-// ── Semantic Recall (embedding-based) ──
+// ── Semantic Recall (vector-store based, inspired by cocoindex-code sqlite-vec) ──
+
+let _memoryVectorStoreReady = false;
+
+/**
+ * Ensure memory vector store is hydrated from the persistent memory DB.
+ * Called lazily on first semantic recall. Incremental — only indexes new/updated items.
+ */
+async function ensureMemoryVectorIndex(): Promise<void> {
+  if (_memoryVectorStoreReady) return;
+  const { getMemoryVectorStore } = await import("./vector-store");
+  const store = getMemoryVectorStore();
+  const all = await aiMemoryDb.getAll();
+  const active = all.filter((m) => !m.deleted);
+  if (active.length > 0) {
+    await store.upsert(
+      active.map((m) => ({
+        id: m.id,
+        content: m.content,
+        partition: m.kind,
+        metadata: { tags: m.tags, importance: m.importance, source: m.source },
+      })),
+    );
+  }
+  _memoryVectorStoreReady = true;
+}
+
+/** Reset the vector index ready flag (call after bulk memory mutations). */
+export function invalidateMemoryVectorIndex(): void {
+  _memoryVectorStoreReady = false;
+}
 
 export async function semanticRecall(
   query: string,
@@ -485,7 +537,7 @@ export async function semanticRecall(
 ): Promise<AIMemoryItem[]> {
   const topK = options?.topK ?? DEFAULT_RECALL_TOP_K;
 
-  // Try RAG embedding search first; fall back to keyword-based recall
+  // 1. Try native Rust vector store (sqlite-vec) via Tauri invoke
   try {
     const results = await invoke<Array<{ content: string; score: number }>>("rag_search", {
       query,
@@ -503,9 +555,36 @@ export async function semanticRecall(
       if (matched.length > 0) return matched;
     }
   } catch {
-    // RAG not available for memory collection, fall back
+    // Native RAG not available, try in-memory vector store
   }
 
+  // 2. Try in-memory vector store (VectorStore with simple embeddings)
+  try {
+    await ensureMemoryVectorIndex();
+    const { getMemoryVectorStore } = await import("./vector-store");
+    const store = getMemoryVectorStore();
+    if (store.size > 0) {
+      const results = await store.search(query, {
+        topK,
+        partition: options?.conversationId || undefined,
+        minScore: 0.1,
+      });
+      if (results.length > 0) {
+        const all = await aiMemoryDb.getAll();
+        const idMap = new Map(all.filter((m) => !m.deleted).map((m) => [m.id, m]));
+        const matched: AIMemoryItem[] = [];
+        for (const r of results) {
+          const found = idMap.get(r.id);
+          if (found) matched.push(found);
+        }
+        if (matched.length > 0) return matched;
+      }
+    }
+  } catch {
+    // Vector store not available
+  }
+
+  // 3. Fallback to keyword-based recall
   return recallMemories(query, options);
 }
 
@@ -569,4 +648,177 @@ export async function getMemoryStats(): Promise<{
     bySource[m.source] = (bySource[m.source] || 0) + 1;
   }
   return { total: active.length, byKind, bySource };
+}
+
+// ── LLM-based Memory Extraction (inspired by deer-flow) ──
+
+interface LLMExtractedFact {
+  content: string;
+  category: string;
+  confidence: number;
+}
+
+const MEMORY_EXTRACTION_PROMPT = `You are a memory extraction system. Analyze this conversation and extract important facts about the user.
+
+Conversation:
+{conversation}
+
+Extract facts in this JSON format:
+{
+  "facts": [
+    { "content": "...", "category": "preference|knowledge|context|behavior|goal|constraint", "confidence": 0.0-1.0 }
+  ]
+}
+
+Categories:
+- preference: 用户偏好（工具、风格、方法的偏好/厌恶）
+- knowledge: 专业知识（擅长的技术、领域专长）
+- context: 背景信息（职位、项目、技术栈）
+- behavior: 行为模式（工作习惯、沟通风格、解决问题方式）
+- goal: 目标（学习目标、项目目标）
+- constraint: 约束（硬性限制、规则）
+
+Confidence levels:
+- 0.9-1.0: 用户明确表述的事实（"我在做X"、"我的角色是Y"）
+- 0.7-0.8: 从行为/讨论中强推断
+- 0.5-0.6: 推测的模式（仅限明确的模式，谨慎使用）
+
+Rules:
+- Only extract clear, specific facts
+- Skip vague or temporary information
+- Preserve technical terms and proper nouns
+- Do NOT extract file paths, session IDs, or ephemeral data
+- Return ONLY valid JSON, no explanation`;
+
+/**
+ * LLM-based memory extraction from conversation content.
+ * Falls back to regex-based heuristic when LLM is unavailable.
+ */
+export async function llmExtractMemories(
+  conversationContent: string,
+  opts?: { conversationId?: string },
+): Promise<AIMemoryCandidate[]> {
+  if (!conversationContent || conversationContent.length < 30) return [];
+  const truncated = conversationContent.slice(0, 3000);
+
+  try {
+    const { getMToolsAI } = await import("@/core/ai/mtools-ai");
+    const ai = getMToolsAI();
+    const prompt = MEMORY_EXTRACTION_PROMPT.replace("{conversation}", truncated);
+
+    const result = await ai.chat([
+      { role: "system", content: "You extract structured memory facts from conversations. Respond with valid JSON only." },
+      { role: "user", content: prompt },
+    ], { temperature: 0.1 });
+
+    const text = typeof result === "string" ? result : String(result);
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return fallbackExtract(truncated, opts);
+
+    const parsed = JSON.parse(jsonMatch[0]) as { facts?: LLMExtractedFact[] };
+    if (!parsed.facts?.length) return [];
+
+    const candidates: AIMemoryCandidate[] = [];
+    for (const fact of parsed.facts) {
+      if (fact.confidence < FACT_CONFIDENCE_THRESHOLD) continue;
+
+      const sanitized = sanitizeCandidateStrict(fact.content);
+      if (!sanitized.ok) continue;
+
+      candidates.push({
+        id: createId("memc"),
+        content: sanitized.sanitized,
+        reason: `LLM extracted [${fact.category}] confidence=${fact.confidence}`,
+        confidence: clamp(fact.confidence, 0, 1),
+        created_at: Date.now(),
+        conversation_id: opts?.conversationId,
+      });
+    }
+    return candidates;
+  } catch {
+    return fallbackExtract(truncated, opts);
+  }
+}
+
+function fallbackExtract(
+  text: string,
+  opts?: { conversationId?: string },
+): AIMemoryCandidate[] {
+  return extractMemoryCandidates(text, opts);
+}
+
+/**
+ * Merge new candidates into existing memory, handling deduplication by content
+ * similarity and confidence-based replacement (higher confidence wins).
+ * Enforces MAX_FACTS limit by dropping lowest-confidence items.
+ */
+export async function mergeMemoryCandidatesIntoStore(
+  candidates: AIMemoryCandidate[],
+): Promise<{ added: number; updated: number; skipped: number }> {
+  if (!candidates.length) return { added: 0, updated: 0, skipped: 0 };
+
+  const existing = await aiMemoryDb.getAll();
+  const activeMemories = existing.filter((m) => !m.deleted);
+  let added = 0;
+  let updated = 0;
+  let skipped = 0;
+
+  for (const candidate of candidates) {
+    const sanitized = sanitizeCandidateStrict(candidate.content);
+    if (!sanitized.ok) { skipped++; continue; }
+
+    const normalized = normalizeForCompare(sanitized.sanitized);
+    const match = activeMemories.find(
+      (m) => normalizeForCompare(m.content) === normalized,
+    );
+
+    if (match) {
+      if (candidate.confidence > (match.confidence ?? 0.5)) {
+        const kind = inferKind(sanitized.sanitized);
+        await aiMemoryDb.update(match.id, {
+          content: trimMemoryContent(sanitized.sanitized),
+          kind,
+          confidence: candidate.confidence,
+          tags: [...new Set([...(match.tags || []), ...inferTags(sanitized.sanitized)])],
+          importance: Math.max(match.importance ?? 0.5, inferImportance(kind, sanitized.sanitized)),
+          updated_at: Date.now(),
+        });
+        updated++;
+      } else {
+        skipped++;
+      }
+    } else {
+      const kind = inferKind(sanitized.sanitized);
+      await aiMemoryDb.create({
+        id: createId("mem"),
+        content: trimMemoryContent(sanitized.sanitized),
+        kind,
+        tags: inferTags(sanitized.sanitized),
+        scope: candidate.conversation_id ? "conversation" : "global",
+        conversation_id: candidate.conversation_id,
+        importance: inferImportance(kind, sanitized.sanitized),
+        confidence: candidate.confidence,
+        source: "system",
+        created_at: Date.now(),
+        updated_at: Date.now(),
+        last_used_at: null,
+        use_count: 0,
+        deleted: false,
+      });
+      added++;
+    }
+  }
+
+  // Enforce max facts limit
+  const allAfter = await aiMemoryDb.getAll();
+  const activeAfter = allAfter.filter((m) => !m.deleted);
+  if (activeAfter.length > MAX_FACTS) {
+    const sorted = activeAfter.sort((a, b) => (b.confidence ?? 0.5) - (a.confidence ?? 0.5));
+    const toDelete = sorted.slice(MAX_FACTS);
+    for (const m of toDelete) {
+      await aiMemoryDb.update(m.id, { deleted: true, updated_at: Date.now() });
+    }
+  }
+
+  return { added, updated, skipped };
 }

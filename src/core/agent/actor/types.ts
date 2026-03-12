@@ -29,6 +29,8 @@ export interface InboxMessage {
 export interface DialogMessage extends InboxMessage {
   /** 接收方 actor id（undefined = 广播） */
   to?: string;
+  /** UI 显示用的简短内容（附件摘要），完整上下文仍在 content 中发送给 Agent */
+  _briefContent?: string;
 }
 
 // ── Agent Configuration ──
@@ -49,7 +51,12 @@ export type AgentCapability =
   | "devops"            // DevOps/部署
   | "data_analysis"      // 数据分析
   | "creative"           // 创意头脑风暴
-  | "synthesis";         // 综合分析/整合
+  | "synthesis"          // 综合分析/整合
+  // 操作类能力（与 DIALOG_FULL_ROLE 对齐）
+  | "file_write"         // 文件写入
+  | "shell_execute"      // Shell 命令执行
+  | "information_retrieval" // 信息检索
+  | "web_search";        // Web 搜索
 
 /** Agent 能力描述 */
 export interface AgentCapabilities {
@@ -66,6 +73,17 @@ export interface ToolPolicy {
   allow?: string[];
   /** 禁止的工具名称（glob 模式） */
   deny?: string[];
+}
+
+/** HumanApproval 策略级别 */
+export type ApprovalLevel = "strict" | "normal" | "permissive" | "off";
+
+/** 中间件覆盖配置 */
+export interface MiddlewareOverrides {
+  /** 禁用的中间件名称列表 */
+  disable?: string[];
+  /** HumanApproval 策略级别（覆盖默认） */
+  approvalLevel?: ApprovalLevel;
 }
 
 export interface ActorConfig {
@@ -90,6 +108,34 @@ export interface ActorConfig {
   thinkingLevel?: ThinkingLevel;
   /** 协作能力（用于智能路由和展示） */
   capabilities?: AgentCapabilities;
+  /**
+   * 中间件链覆盖配置。
+   * 支持禁用特定中间件或调整 HumanApproval 策略。
+   * 例如 Agent Shell 模式设置 approvalLevel: "off" 跳过所有审批。
+   */
+  middlewareOverrides?: MiddlewareOverrides;
+}
+
+// ── Subagent Spawn Configuration ──
+
+/** spawn_task 时可动态覆盖的 Subagent 配置 */
+export interface SpawnTaskOverrides {
+  /** 覆盖 subagent 使用的 LLM 模型 */
+  model?: string;
+  /** 覆盖最大迭代次数 */
+  maxIterations?: number;
+  /** 覆盖工具策略（白名单/黑名单） */
+  toolPolicy?: ToolPolicy;
+  /** 覆盖 context token 预算 */
+  contextTokens?: number;
+  /** 覆盖思维深度 */
+  thinkingLevel?: ThinkingLevel;
+  /** 追加系统提示（不替换原有 role systemPrompt，而是附加指令） */
+  systemPromptAppend?: string;
+  /** 覆盖中间件配置 */
+  middlewareOverrides?: MiddlewareOverrides;
+  /** 覆盖温度 */
+  temperature?: number;
 }
 
 // ── Actor Events ──
@@ -101,13 +147,40 @@ export type ActorEventType =
   | "task_started"
   | "task_completed"
   | "task_error"
-  | "step";
+  | "step"
+  // Spawned task lifecycle events (inspired by deer-flow SSE stream_writer)
+  | "spawned_task_started"
+  | "spawned_task_running"
+  | "spawned_task_completed"
+  | "spawned_task_failed"
+  | "spawned_task_timeout";
 
 export interface ActorEvent {
   type: ActorEventType;
   actorId: string;
   timestamp: number;
   detail?: unknown;
+}
+
+/**
+ * Structured detail for spawned task lifecycle events.
+ * Mirrors deer-flow's task_started / task_running / task_completed / task_failed SSE events.
+ */
+export interface SpawnedTaskEventDetail {
+  runId: string;
+  spawnerActorId: string;
+  targetActorId: string;
+  targetName: string;
+  spawnerName: string;
+  label?: string;
+  task: string;
+  status: SpawnedTaskStatus;
+  /** Elapsed time in ms since spawn */
+  elapsed?: number;
+  /** Result content (only for completed) */
+  result?: string;
+  /** Error message (only for failed/timeout) */
+  error?: string;
 }
 
 // ── Actor Task ──

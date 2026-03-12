@@ -206,7 +206,12 @@ export function resolveSkills(
       : "";
 
   const filters = activeSkills
-    .map((s) => s.toolFilter)
+    .map((s) => {
+      if (s.allowedTools?.length) {
+        return { include: s.allowedTools } as SkillToolFilter;
+      }
+      return s.toolFilter;
+    })
     .filter(Boolean) as SkillToolFilter[];
 
   return {

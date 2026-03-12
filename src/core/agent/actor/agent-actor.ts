@@ -1,26 +1,20 @@
 import { getMToolsAI } from "@/core/ai/mtools-ai";
-import { useAIStore } from "@/store/ai-store";
-import { useAgentMemoryStore } from "@/store/agent-memory-store";
-import { loadAndResolveSkills } from "@/store/skill-store";
-import { applySkillToolFilter } from "@/core/agent/skills/skill-resolver";
-import { buildAgentFCCompatibilityKey } from "@/core/agent/fc-compatibility";
-import { registry } from "@/core/plugin-system/registry";
 import {
   ReActAgent,
-  pluginActionToTool,
   type AgentTool,
   type AgentStep,
 } from "@/plugins/builtin/SmartAgent/core/react-agent";
 import {
-  createBuiltinAgentTools,
   type AskUserQuestion,
   type AskUserAnswers,
 } from "@/plugins/builtin/SmartAgent/core/default-tools";
 import type { AgentRole } from "@/core/agent/cluster/types";
 import type { ActorSystem } from "./actor-system";
-import { createActorCommunicationTools } from "./actor-tools";
-import { createActorMemoryTools, autoExtractMemories } from "./actor-memory";
+import { autoExtractMemories } from "./actor-memory";
 import { appendToolCallSync as appendToolCall, appendToolResultSync as appendToolResult } from "./actor-transcript";
+import type { ActorRunContext } from "./actor-middleware";
+import { runMiddlewareChain } from "./actor-middleware";
+import { createDefaultMiddlewares } from "./middlewares";
 import type {
   AgentCapabilities,
   ActorConfig,
@@ -36,30 +30,18 @@ import type {
 const generateId = () =>
   Math.random().toString(36).substring(2, 10) + Date.now().toString(36);
 
-const actorLog = (name: string, ...args: unknown[]) => console.log(`[AgentActor:${name}]`, ...args);
+import { estimateTokens } from "@/core/ai/token-utils";
+import { createLogger } from "@/core/logger";
 
-/** Rough token estimate (~4 chars per token for mixed CJK/English) */
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 3);
-}
+const _agentActorLogger = createLogger("AgentActor");
+const actorLog = (name: string, ...args: unknown[]) => {
+  const message = args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" ");
+  _agentActorLogger.info(`[${name}] ${message}`);
+};
 
 type ActorEventHandler = (event: ActorEvent) => void;
 export type AskUserCallback = (questions: AskUserQuestion[]) => Promise<AskUserAnswers>;
 type ConfirmDangerousAction = (toolName: string, params: Record<string, unknown>) => Promise<boolean>;
-
-// ── Tool builders (shared with local-agent-bridge) ──
-
-function getPluginTools(): AgentTool[] {
-  const ai = getMToolsAI();
-  return registry.getAllActions().map(({ pluginId, pluginName, action }) =>
-    pluginActionToTool(pluginId, pluginName, action, ai),
-  );
-}
-
-function getBuiltinTools(askUser?: AskUserCallback) {
-  const confirmHostFallback = async () => true;
-  return createBuiltinAgentTools(confirmHostFallback, askUser);
-}
 
 /** Dialog 模式下每个 Agent 使用的全能角色（不做工具过滤） */
 export const DIALOG_FULL_ROLE: AgentRole = {
@@ -105,6 +87,7 @@ export class AgentActor {
 
   private _status: ActorStatus = "idle";
   private inbox: InboxMessage[] = [];
+  private _draining = false;
   private tasks: ActorTask[] = [];
   private abortController: AbortController | null = null;
   private eventHandlers: ActorEventHandler[] = [];
@@ -119,9 +102,13 @@ export class AgentActor {
   private _workspace?: string;
   private _contextTokens?: number;
   private _thinkingLevel?: ThinkingLevel;
+  private _middlewareOverrides?: import("./types").MiddlewareOverrides;
 
   /** 会话记忆：跨任务保留对话上下文（对标 OpenClaw 持久会话） */
   private sessionHistory: Array<{ role: "user" | "assistant"; content: string; timestamp: number }> = [];
+
+  /** inboxDrain 捕获的真实用户消息（用于替代 "[inbox]" 占位符写入 sessionHistory） */
+  private _capturedInboxUserQuery?: string;
 
   constructor(config: ActorConfig, opts?: {
     askUser?: AskUserCallback;
@@ -140,6 +127,7 @@ export class AgentActor {
     this._workspace = config.workspace;
     this._contextTokens = config.contextTokens;
     this._thinkingLevel = config.thinkingLevel;
+    this._middlewareOverrides = config.middlewareOverrides;
     this.confirmDangerousAction = opts?.confirmDangerousAction;
     this.actorSystem = opts?.actorSystem;
 
@@ -226,6 +214,44 @@ export class AgentActor {
     return this._workspace;
   }
 
+  /** spawn 时的额外系统提示（通过 SpawnTaskOverrides 注入） */
+  private _spawnSystemPromptAppend?: string;
+  /** spawn 时覆盖的温度 */
+  private _spawnTemperature?: number;
+
+  /**
+   * 在 spawn_task 时动态覆盖运行参数（Subagent 独立配置）。
+   * 覆盖是临时性的，仅影响当前 spawn 任务的执行。
+   */
+  applySpawnOverride(key: string, value: unknown): void {
+    switch (key) {
+      case "model":
+        (this as { modelOverride?: string }).modelOverride = String(value);
+        break;
+      case "maxIterations":
+        this.maxIterations = Number(value);
+        break;
+      case "toolPolicy":
+        this.toolPolicy = value as ToolPolicy;
+        break;
+      case "contextTokens":
+        this._contextTokens = Number(value);
+        break;
+      case "thinkingLevel":
+        this._thinkingLevel = value as ThinkingLevel;
+        break;
+      case "systemPromptAppend":
+        this._spawnSystemPromptAppend = String(value);
+        break;
+      case "middlewareOverrides":
+        this._middlewareOverrides = value as import("./types").MiddlewareOverrides;
+        break;
+      case "temperature":
+        this._spawnTemperature = Number(value);
+        break;
+    }
+  }
+
   /** 注入额外的 AgentTool（如 spawn_task / send_message / agents 等通信工具） */
   setExtraTools(tools: AgentTool[]): void {
     this.extraTools = tools;
@@ -247,7 +273,8 @@ export class AgentActor {
   /**
    * 空闲时收到消息，自动启动一个轻量任务来处理 inbox。
    * 使用 queueMicrotask 延迟，让同一 tick 内的多条消息合并处理。
-   * 注意：不在此处清空 inbox，让 inboxDrain 钩子在 ReAct 循环首次迭代时获取消息（保留 ID 等元数据）。
+   * 预先 drain inbox 并将真实用户内容作为 query，避免 "[inbox]" 占位符误导 Agent。
+   * 执行期间新到达的消息仍通过 inboxDrain 钩子正常注入。
    */
   private _wakeUpScheduled = false;
   private wakeUpForInbox(): void {
@@ -259,17 +286,41 @@ export class AgentActor {
         actorLog(this.role.name, `wakeUpForInbox: skipped (status=${this._status}, inbox=${this.inbox.length})`);
         return;
       }
-      actorLog(this.role.name, `wakeUpForInbox: starting task, inboxSize=${this.inbox.length}`);
-      // Minimal trigger — full messages (with id, priority, replyTo, etc.)
-      // will be delivered via the inboxDrain hook on the first ReAct iteration
-      void this.assignTask("[inbox] 处理收件箱中的新消息");
+
+      const messages = this.drainInbox();
+      actorLog(this.role.name, `wakeUpForInbox: drained ${messages.length} messages`);
+
+      const userMsgs = messages.filter((m) => m.from === "user");
+      let query: string;
+      if (userMsgs.length === 1 && messages.length === 1) {
+        query = userMsgs[0].content;
+      } else if (userMsgs.length > 0 && messages.length === userMsgs.length) {
+        query = userMsgs.map((m) => m.content).join("\n\n");
+      } else {
+        query = messages.map((m) => {
+          const sender = m.from === "user" ? "用户"
+            : (this.actorSystem?.get(m.from)?.role.name ?? m.from);
+          return `[${sender}]: ${m.content}`;
+        }).join("\n\n");
+      }
+
+      void this.assignTask(query);
     });
   }
 
-  /** 手动读取并清空 inbox */
+  /** 手动读取并清空 inbox（带重入保护，防止并发 drain 丢消息） */
   drainInbox(): InboxMessage[] {
-    const messages = this.inbox.splice(0);
-    return messages;
+    if (this._draining) {
+      actorLog(this.role.name, `drainInbox: re-entrant call blocked`);
+      return [];
+    }
+    this._draining = true;
+    try {
+      const messages = this.inbox.splice(0);
+      return messages;
+    } finally {
+      this._draining = false;
+    }
   }
 
   /**
@@ -303,11 +354,14 @@ export class AgentActor {
       }
 
       actorLog(this.role.name, `📝 assignTask: executing with sessionHistory=${this.sessionHistory.length} entries, inbox=${this.inbox.length}`);
+      this._capturedInboxUserQuery = undefined;
       let result = await this.runWithInbox(query, images, (step) => {
         task.steps.push(step);
         this.emit("step", { taskId: task.id, step });
       });
-      this.appendSessionHistory("user", query);
+      const historyQuery = this._capturedInboxUserQuery || query;
+      this._capturedInboxUserQuery = undefined;
+      this.appendSessionHistory("user", historyQuery);
       this.appendSessionHistory("assistant", result ?? "");
 
       // 等待循环：如果有未完成的 spawned tasks，保持运行等待结果回送
@@ -347,7 +401,9 @@ export class AgentActor {
 
       // 自动提取记忆（对标 OpenClaw session-memory hook）
       const memContent = `${query}\n${result ?? ""}`;
-      autoExtractMemories(memContent, task.id).catch(() => {});
+      autoExtractMemories(memContent, task.id).catch((err) => {
+        actorLog(this.role.name, `autoExtractMemories failed (non-blocking):`, err instanceof Error ? err.message : err);
+      });
       if (this.actorSystem && opts?.publishResult !== false) {
         const output = String(result ?? "").trim() || "（任务已完成，但未生成可展示的文本结果）";
         this.actorSystem.publishResult(this.id, output, { suppressLowSignal: false });
@@ -489,8 +545,8 @@ export class AgentActor {
   }
 
   /**
-   * 核心执行方法：构建 ReActAgent，注入 inboxDrain 钩子。
-   * Agent 在每个 iteration 间隙会检查 inbox 中是否有新消息。
+   * Build the ActorRunContext from current actor state, run the middleware chain,
+   * then create and execute the ReActAgent.
    */
   private async runWithInbox(
     query: string,
@@ -498,91 +554,66 @@ export class AgentActor {
     onStep?: (step: AgentStep) => void,
   ): Promise<string> {
     actorLog(this.role.name, `runWithInbox: model=${this.modelOverride ?? "default"}, maxIter=${this.maxIterations}, inboxSize=${this.inbox.length}`);
-    const ai = getMToolsAI();
-    const builtinResult = getBuiltinTools(this.askUser);
-    builtinResult.resetPerRunState();
-    const { notifyToolCalled } = builtinResult;
-    const commTools = this.actorSystem
-      ? createActorCommunicationTools(this.id, this.actorSystem)
-      : [];
-    const memoryTools = createActorMemoryTools(this.id);
-    const allTools = [...getPluginTools(), ...builtinResult.tools, ...this.extraTools, ...commTools, ...memoryTools];
 
-    const fcCompatibilityKey = buildAgentFCCompatibilityKey(
-      useAIStore.getState().config,
-    );
+    const ctx: ActorRunContext = {
+      query,
+      images,
+      onStep,
+      actorId: this.id,
+      role: this.role,
+      modelOverride: this.modelOverride,
+      maxIterations: this.maxIterations,
+      systemPromptOverride: this.systemPromptOverride,
+      workspace: this._workspace,
+      contextTokens: this._contextTokens,
+      toolPolicy: this.toolPolicy,
+      actorSystem: this.actorSystem,
+      askUser: this.askUser,
+      confirmDangerousAction: this.confirmDangerousAction,
+      extraTools: this.extraTools,
+      middlewareOverrides: this._middlewareOverrides,
+      tools: [],
+      rolePrompt: "",
+      hasCodingWorkflowSkill: false,
+      fcCompatibilityKey: "",
+      contextMessages: this.buildContextMessages(),
+    };
 
-    let memorySnap = useAgentMemoryStore.getState();
-    if (!memorySnap.loaded) {
-      try { await memorySnap.load(); memorySnap = useAgentMemoryStore.getState(); } catch { /* ignore */ }
-    }
-    const userMemory = memorySnap.getMemoriesForPrompt();
-    const userMemoryPrompt = userMemory ? `\n\n## 用户偏好\n${userMemory}` : undefined;
-
-    const skillCtx = await loadAndResolveSkills(query, this.role.id);
-    const skillsPrompt = skillCtx.mergedSystemPrompt || undefined;
-    const hasCodingWorkflowSkill = skillCtx.activeSkillIds.includes("builtin-coding-workflow");
-    let toolsAfterSkills = applySkillToolFilter(allTools, skillCtx.mergedToolFilter);
-    toolsAfterSkills = this.applyToolPolicy(toolsAfterSkills);
+    await runMiddlewareChain(createDefaultMiddlewares(), ctx);
 
     this.abortController = new AbortController();
     const signal = this.abortController.signal;
-
-    let rolePrompt = this.systemPromptOverride ?? this.role.systemPrompt ?? "";
-    if (this._workspace) {
-      rolePrompt += `\n\n## 工作目录\n你的工作目录为: ${this._workspace}\n执行 shell 命令和文件操作时，请在此目录下进行。`;
-    }
-    // 多 Agent 时提示协作（派活 + 讨论）
-    if (this.actorSystem && this.actorSystem.size >= 2) {
-      const otherAgents = this.actorSystem.getAll().filter((a) => a.id !== this.id);
-      const agentNames = otherAgents.map((a) => a.role.name).join("、");
-      const coordinator = this.actorSystem.getFirstActor();
-      const isCoordinator = coordinator?.id === this.id;
-      rolePrompt += `\n\n## 多 Agent 协作（重要！）
-当前会话中有 ${this.actorSystem.size} 个 Agent：${agentNames}
-
-你有两种方式与其他 Agent 协作：
-
-1. **派发子任务**：用 \`spawn_task\` 派发给其他 Agent 执行（如 @${agentNames}），结果会自动回送
-2. **发起讨论**：用 \`send_message\` 向其他 Agent 发送消息、分享发现、提出问题、请求建议
-
-**典型场景**：
-- 需要别人帮你完成部分工作时 → 用 \`spawn_task\` 派发任务
-- 想和别人讨论一个问题时 → 用 \`send_message\` 发起对话
-- 遇到难题时 → 可以先 \`send_message\` 询问其他 Agent 的看法，再决定是否派发任务
-
-**不要独自完成所有工作！主动与其他 Agent 讨论和协作，你能更快更好地完成复杂任务。**`;
-      if (!isCoordinator) {
-        rolePrompt += `\n\n## 当前角色：执行者（非协调者）
-- 你当前不是协调者，默认不要向用户发“收到/待命/请分配任务”这类回执消息。
-- 除非被明确要求，不要安排其他 Agent，不要重复分工，不要宣称“我来协调”。
-- 你的职责是执行被分配的任务，并输出可直接使用的结果。`;
-      }
-    }
+    const ai = getMToolsAI();
 
     const agent = new ReActAgent(
       ai,
-      toolsAfterSkills,
+      ctx.tools,
       {
         maxIterations: this.maxIterations,
         verbose: true,
-        fcCompatibilityKey,
+        fcCompatibilityKey: ctx.fcCompatibilityKey,
         temperature: this.role.temperature,
         initialMode: "execute",
-        userMemoryPrompt,
-        skillsPrompt,
-        skipInternalCodingBlock: hasCodingWorkflowSkill,
-        roleOverride: rolePrompt || undefined,
+        userMemoryPrompt: ctx.userMemoryPrompt,
+        skillsPrompt: ctx.skillsPrompt,
+        skipInternalCodingBlock: ctx.hasCodingWorkflowSkill,
+        roleOverride: ctx.rolePrompt || undefined,
         dangerousToolPatterns: ["write_file", "run_shell_command", "native_"],
         confirmDangerousAction: this.confirmDangerousAction,
-        onToolExecuted: notifyToolCalled,
+        onToolExecuted: ctx.notifyToolCalled,
         modelOverride: this.modelOverride,
         contextBudget: this._contextTokens,
-        contextMessages: this.buildContextMessages(),
+        contextMessages: ctx.contextMessages,
         inboxDrain: () => {
           const drained = this.drainInbox();
           if (drained.length > 0) {
             actorLog(this.role.name, `inboxDrain: ${drained.length} messages drained`);
+            if (!this._capturedInboxUserQuery) {
+              const userMsgs = drained.filter((m) => m.from === "user");
+              if (userMsgs.length > 0) {
+                this._capturedInboxUserQuery = userMsgs.map((m) => m.content).join("\n\n");
+              }
+            }
           }
           return drained.map((m) => ({
             ...m,
@@ -609,34 +640,4 @@ export class AgentActor {
       this.abortController = null;
     }
   }
-
-  /**
-   * 根据 toolPolicy 过滤工具列表。
-   * 通信工具（spawn_task, send_message, agents 等）始终保留。
-   */
-  private applyToolPolicy(tools: AgentTool[]): AgentTool[] {
-    if (!this.toolPolicy) return tools;
-    const { allow, deny } = this.toolPolicy;
-    const commToolNames = new Set([
-      "spawn_task", "send_message", "agents",
-      "memory_search", "memory_save",
-      "session_history", "session_list",
-    ]);
-
-    return tools.filter((t) => {
-      if (commToolNames.has(t.name)) return true;
-      if (deny?.length && matchesGlob(t.name, deny)) return false;
-      if (allow?.length && !matchesGlob(t.name, allow)) return false;
-      return true;
-    });
-  }
-}
-
-function matchesGlob(name: string, patterns: string[]): boolean {
-  return patterns.some((p) => {
-    if (p === "*") return true;
-    if (p.endsWith("*")) return name.startsWith(p.slice(0, -1));
-    if (p.startsWith("*")) return name.endsWith(p.slice(1));
-    return name === p;
-  });
 }

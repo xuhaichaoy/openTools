@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import {
   addMemoryFromAgent,
+  deleteMemory,
   recallMemories,
   buildMemoryPromptBlock,
   migrateAgentMemory,
@@ -27,6 +28,9 @@ interface AgentMemoryState {
     category?: UserMemory["category"],
   ) => void;
   removeMemory: (key: string) => void;
+  /** Async version — must be awaited for fresh results */
+  getMemoriesForPromptAsync: () => Promise<string>;
+  /** Sync version — returns cached prompt (may be stale on first call) */
   getMemoriesForPrompt: () => string;
 }
 
@@ -40,10 +44,17 @@ export const useAgentMemoryStore = create<AgentMemoryState>((set, get) => ({
 
   load: async () => {
     if (get().loaded) return;
-    // Migrate any remaining localStorage memories to unified store
     if (!get().migrated) {
       await migrateAgentMemory();
       set({ migrated: true });
+    }
+    // Pre-warm prompt cache
+    try {
+      const memories = await recallMemories("", { topK: 20 });
+      cachedPrompt = buildMemoryPromptBlock(memories);
+      promptDirty = false;
+    } catch (err) {
+      console.warn("[AgentMemoryStore] Failed to pre-warm memory prompt:", err);
     }
     set({ loaded: true });
   },
@@ -54,22 +65,41 @@ export const useAgentMemoryStore = create<AgentMemoryState>((set, get) => ({
 
   addMemory: (key, value, category = "preference") => {
     promptDirty = true;
-    addMemoryFromAgent(key, value, category).catch(() => {});
+    addMemoryFromAgent(key, value, category).catch((err) => {
+      console.warn("[AgentMemoryStore] addMemory failed:", err);
+    });
   },
 
-  removeMemory: (_key: string) => {
+  removeMemory: (key: string) => {
     promptDirty = true;
+    deleteMemory(key).catch((err) => {
+      console.warn("[AgentMemoryStore] removeMemory failed:", err);
+    });
+  },
+
+  getMemoriesForPromptAsync: async () => {
+    if (!promptDirty && cachedPrompt) return cachedPrompt;
+    try {
+      const memories = await recallMemories("", { topK: 20 });
+      cachedPrompt = buildMemoryPromptBlock(memories);
+      promptDirty = false;
+    } catch (err) {
+      console.warn("[AgentMemoryStore] getMemoriesForPromptAsync failed:", err);
+    }
+    return cachedPrompt;
   },
 
   getMemoriesForPrompt: () => {
     if (!promptDirty && cachedPrompt) return cachedPrompt;
-    // Synchronous fallback: return cached or empty, trigger async refresh
+    // Trigger async refresh in background, return current cache
     recallMemories("", { topK: 20 })
       .then((memories) => {
         cachedPrompt = buildMemoryPromptBlock(memories);
         promptDirty = false;
       })
-      .catch(() => {});
+      .catch((err) => {
+        console.warn("[AgentMemoryStore] background refresh failed:", err);
+      });
     return cachedPrompt;
   },
 }));

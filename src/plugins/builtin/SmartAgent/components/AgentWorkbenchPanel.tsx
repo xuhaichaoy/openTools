@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, lazy, Suspense } from "react";
 import type { AgentScheduledTask, AgentTaskStatus } from "@/core/ai/types";
 import type { AgentTool } from "../core/react-agent";
 import type {
@@ -8,8 +8,68 @@ import type {
 } from "../core/ui-state";
 import { SkillsManager } from "@/components/ai/SkillsManager";
 
+const TaskCenterPanel = lazy(() => import("./TaskCenterPanel"));
+const KnowledgeGraphView = lazy(() => import("./KnowledgeGraphView"));
+
 function isTaskDue(nextRunAt?: number, status?: AgentTaskStatus) {
   return typeof nextRunAt === "number" && nextRunAt <= Date.now() && status === "pending";
+}
+
+/** 图谱 Tab 内容：展示 ActorSystem 拓扑或知识图谱 */
+function GraphTabContent() {
+  const [mode, setMode] = React.useState<"actor" | "knowledge">("actor");
+
+  // 获取 ActorSystem 拓扑数据
+  const actorSystemStore = React.useMemo(() => {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { useActorSystemStore } = require("@/store/actor-system-store");
+      return useActorSystemStore.getState();
+    } catch { return null; }
+  }, []);
+
+  const actorData = React.useMemo(() => {
+    const { KnowledgeGraph } = require("@/core/knowledge/knowledge-graph");
+    if (mode === "actor" && actorSystemStore) {
+      const actors = (actorSystemStore.actors || []).map((a: any) => ({
+        id: a.id, name: a.roleName, status: a.status, capabilities: a.capabilities?.tags,
+      }));
+      const tasks = (actorSystemStore.spawnedTaskEvents || []).map((e: any) => ({
+        spawner: e.spawnerActorId, target: e.targetActorId, label: e.label || "", status: e.status,
+      }));
+      const dialog = (actorSystemStore.dialogHistory || []).map((m: any) => ({ from: m.from, to: m.to }));
+      return KnowledgeGraph.fromActorSystem(actors, tasks, dialog);
+    }
+    // 知识图谱模式
+    const { globalKnowledgeGraph } = require("@/core/knowledge/knowledge-graph");
+    return globalKnowledgeGraph.toVisualizationData();
+  }, [mode, actorSystemStore]);
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="flex items-center gap-1 px-3 py-2 border-b border-[var(--color-border)]">
+        <button
+          onClick={() => setMode("actor")}
+          className={`text-[10px] px-2 py-0.5 rounded ${mode === "actor" ? "bg-blue-500/15 text-blue-500" : "text-[var(--color-text-secondary)]"}`}
+        >
+          Agent 拓扑
+        </button>
+        <button
+          onClick={() => setMode("knowledge")}
+          className={`text-[10px] px-2 py-0.5 rounded ${mode === "knowledge" ? "bg-blue-500/15 text-blue-500" : "text-[var(--color-text-secondary)]"}`}
+        >
+          知识图谱
+        </button>
+      </div>
+      {actorData.nodes.length === 0 ? (
+        <div className="flex-1 flex items-center justify-center text-xs text-[var(--color-text-secondary)]">
+          {mode === "actor" ? "暂无 Agent 运行数据，请先启动对话" : "暂无知识图谱数据"}
+        </div>
+      ) : (
+        <KnowledgeGraphView data={actorData} className="flex-1" />
+      )}
+    </div>
+  );
 }
 
 interface AgentWorkbenchPanelProps {
@@ -104,6 +164,26 @@ export function AgentWorkbenchPanel({
               }`}
             >
               技能
+            </button>
+            <button
+              onClick={() => onSelectTab("tasks")}
+              className={`px-2 py-0.5 text-[10px] rounded ${
+                workbenchTab === "tasks"
+                  ? "bg-[var(--color-bg)] text-[var(--color-text)]"
+                  : "text-[var(--color-text-secondary)]"
+              }`}
+            >
+              任务
+            </button>
+            <button
+              onClick={() => onSelectTab("graph")}
+              className={`px-2 py-0.5 text-[10px] rounded ${
+                workbenchTab === "graph"
+                  ? "bg-[var(--color-bg)] text-[var(--color-text)]"
+                  : "text-[var(--color-text-secondary)]"
+              }`}
+            >
+              图谱
             </button>
           </div>
           <button
@@ -315,6 +395,18 @@ export function AgentWorkbenchPanel({
             <div className="p-3">
               <SkillsManager compact />
             </div>
+          )}
+
+          {workbenchTab === "tasks" && (
+            <Suspense fallback={<div className="p-3 text-xs text-[var(--color-text-secondary)]">加载中...</div>}>
+              <TaskCenterPanel />
+            </Suspense>
+          )}
+
+          {workbenchTab === "graph" && (
+            <Suspense fallback={<div className="p-3 text-xs text-[var(--color-text-secondary)]">加载中...</div>}>
+              <GraphTabContent />
+            </Suspense>
           )}
         </div>
       </aside>

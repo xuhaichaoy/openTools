@@ -15,6 +15,8 @@ import {
   removeSkill as removeSkillPersist,
   getManualActiveSkillIds,
   setManualActiveSkillIds,
+  importSkillFromMd as importSkillFromMdPersist,
+  exportSkillToMd,
 } from "@/core/agent/skills/skill-persistence";
 
 interface SkillStoreState {
@@ -32,6 +34,9 @@ interface SkillStoreState {
   toggleEnabled: (id: string) => Promise<void>;
   toggleManualActive: (id: string) => void;
   clearManualActive: () => void;
+
+  importFromMd: (content: string) => Promise<AgentSkill | null>;
+  exportToMd: (id: string) => string | null;
 }
 
 export const useSkillStore = create<SkillStoreState>((set, get) => ({
@@ -128,6 +133,18 @@ export const useSkillStore = create<SkillStoreState>((set, get) => ({
     set({ manualActiveIds: new Set() });
     void setManualActiveSkillIds([]);
   },
+
+  importFromMd: async (content) => {
+    const skill = await importSkillFromMdPersist(content);
+    if (skill) await get().reload();
+    return skill;
+  },
+
+  exportToMd: (id) => {
+    const skill = get().skills.find((s) => s.id === id);
+    if (!skill) return null;
+    return exportSkillToMd(skill);
+  },
 }));
 
 /**
@@ -160,7 +177,8 @@ export async function loadAndResolveSkills(
     const enabled = snap.skills.filter((s) => s.enabled);
     if (enabled.length === 0) return EMPTY_SKILL_CONTEXT;
     return resolveSkills(enabled, query, [...snap.manualActiveIds], roleHint);
-  } catch {
+  } catch (err) {
+    console.warn("[SkillStore] resolveSkillContext failed:", err);
     return EMPTY_SKILL_CONTEXT;
   }
 }

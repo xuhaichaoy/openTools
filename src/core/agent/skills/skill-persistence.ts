@@ -9,6 +9,7 @@
 import { getTauriStore } from "@/core/storage";
 import { handleError, ErrorLevel } from "@/core/errors";
 import { BUILTIN_SKILLS } from "./builtin-skills";
+import { parseSkillMd, serializeSkillMd } from "./skill-md-parser";
 import type { AgentSkill, AgentSkillInput } from "./types";
 
 const STORE_FILENAME = "agent-skills.json";
@@ -205,4 +206,42 @@ export function clearSkillCache(): void {
   userSkillsCache = null;
   builtinOverridesCache = null;
   manualActiveIdsCache = null;
+}
+
+// ── SKILL.md Import / Export ──
+
+/**
+ * Import a skill from SKILL.md content string.
+ * Returns the created skill, or null if parsing failed.
+ */
+export async function importSkillFromMd(content: string): Promise<AgentSkill | null> {
+  const parsed = parseSkillMd(content);
+  if (!parsed) return null;
+
+  const user = await loadUserSkills();
+  const existing = user.find(
+    (s) => s.source === "skillmd" && s.name === parsed.name,
+  );
+  if (existing) {
+    Object.assign(existing, {
+      ...parsed,
+      id: existing.id,
+      createdAt: existing.createdAt,
+      updatedAt: Date.now(),
+    });
+    await saveUserSkills(user);
+    return existing;
+  }
+
+  parsed.id = generateId();
+  user.push(parsed);
+  await saveUserSkills(user);
+  return parsed;
+}
+
+/**
+ * Export a skill to SKILL.md format string.
+ */
+export function exportSkillToMd(skill: AgentSkill): string {
+  return serializeSkillMd(skill);
 }

@@ -9,12 +9,17 @@ import type {
   ActorTask,
   DialogMessage,
   SpawnedTaskRecord,
+  SpawnedTaskEventDetail,
 } from "@/core/agent/actor/types";
 import type { AgentStep } from "@/plugins/builtin/SmartAgent/core/react-agent";
+import { createLogger } from "@/core/logger";
+
+const log = createLogger("ActorStore");
 
 // ── LocalStorage 持久化 ──
 
 const STORAGE_KEY = "dialog_session";
+const SCHEMA_VERSION = 2;
 
 interface PersistedSpawnedTask {
   runId: string;
@@ -30,12 +35,14 @@ interface PersistedSpawnedTask {
 }
 
 interface PersistedSession {
+  version?: number;
   dialogHistory: DialogMessage[];
   actorConfigs: Array<{ 
     id: string; 
     roleName: string; 
     model?: string; 
     systemPrompt?: string;
+    capabilities?: AgentCapabilities;
     sessionHistory?: Array<{ role: "user" | "assistant"; content: string; timestamp: number }>;
   }>;
   spawnedTasks?: PersistedSpawnedTask[];
@@ -69,12 +76,14 @@ function saveSession(
     }
 
     const data: PersistedSession = {
+      version: SCHEMA_VERSION,
       dialogHistory: dialogHistory.slice(-200),
       actorConfigs: actors.map((a) => ({
         id: a.id,
         roleName: a.role.name,
         model: a.modelOverride,
         systemPrompt: a.getSystemPromptOverride(),
+        capabilities: a.capabilities,
         sessionHistory: a.getSessionHistory(),
       })),
       spawnedTasks: persistedTasks,
@@ -82,16 +91,45 @@ function saveSession(
       savedAt: Date.now(),
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-  } catch { /* quota exceeded or unavailable */ }
+  } catch (err) {
+    log.warn("saveSession failed (quota exceeded or unavailable)", err);
+  }
 }
+
+/** Max session age: discard sessions older than 7 days */
+const MAX_SESSION_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 function loadSession(): PersistedSession | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
     const data = JSON.parse(raw) as PersistedSession;
+
+    // Schema version check: discard incompatible data
+    if (data.version !== undefined && data.version !== SCHEMA_VERSION) {
+      log.info(`Discarding session with outdated schema v${data.version} (current: v${SCHEMA_VERSION})`);
+      localStorage.removeItem(STORAGE_KEY);
+      return null;
+    }
+
+    // Staleness check
+    if (data.savedAt && Date.now() - data.savedAt > MAX_SESSION_AGE_MS) {
+      log.info("Discarding stale session", { savedAt: data.savedAt, ageMs: Date.now() - data.savedAt });
+      localStorage.removeItem(STORAGE_KEY);
+      return null;
+    }
+
+    // Basic structural validation
+    if (!Array.isArray(data.dialogHistory) || !Array.isArray(data.actorConfigs)) {
+      log.warn("loadSession: invalid structure, clearing");
+      localStorage.removeItem(STORAGE_KEY);
+      return null;
+    }
+
     return data;
-  } catch {
+  } catch (err) {
+    log.warn("loadSession parse failed, clearing corrupted data", err);
+    localStorage.removeItem(STORAGE_KEY);
     return null;
   }
 }
@@ -128,6 +166,8 @@ interface ActorSystemState {
   actors: ActorSnapshot[];
   /** 对话历史 */
   dialogHistory: DialogMessage[];
+  /** 子任务生命周期事件流（UI 用于展示中间过程） */
+  spawnedTaskEvents: SpawnedTaskEventDetail[];
   /** 当前 ActorSystem 实例引用（不序列化） */
   _system: ActorSystem | null;
 
@@ -137,9 +177,9 @@ interface ActorSystemState {
   spawnActor: (config: ActorConfig) => AgentActor;
   killActor: (actorId: string) => void;
   destroyAll: () => void;
-  sendMessage: (from: string, to: string, content: string, opts?: { expectReply?: boolean; replyTo?: string }) => void;
-  broadcastMessage: (from: string, content: string) => void;
-  broadcastAndResolve: (from: string, content: string) => void;
+  sendMessage: (from: string, to: string, content: string, opts?: { expectReply?: boolean; replyTo?: string; _briefContent?: string }) => void;
+  broadcastMessage: (from: string, content: string, opts?: { _briefContent?: string }) => void;
+  broadcastAndResolve: (from: string, content: string, opts?: { _briefContent?: string }) => void;
   /** 智能路由：根据内容自动选择合适的 Agent */
   routeTask: (content: string, preferredCapabilities?: string[]) => { agentId: string; reason: string }[];
   assignTask: (actorId: string, query: string, images?: string[]) => void;
@@ -194,6 +234,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
   active: false,
   actors: [],
   dialogHistory: [],
+  spawnedTaskEvents: [],
   pendingUserReplies: [],
   _system: null,
 
@@ -219,6 +260,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
           },
           modelOverride: config.model,
           systemPromptOverride: config.systemPrompt,
+          capabilities: config.capabilities,
         });
         if (config.sessionHistory?.length) {
           system.restoreActorSessionHistory(config.id, config.sessionHistory);
@@ -226,9 +268,23 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
       }
     }
 
+    // Capture spawned task lifecycle events for the UI
+    const SPAWNED_TASK_EVENT_TYPES = new Set([
+      "spawned_task_started", "spawned_task_running",
+      "spawned_task_completed", "spawned_task_failed", "spawned_task_timeout",
+    ]);
+    const MAX_TASK_EVENTS = 100;
+
     // RAF-based debounce: coalesce rapid events into a single sync per frame
     let syncRAF = 0;
-    system.onEvent(() => {
+    system.onEvent((event) => {
+      if (SPAWNED_TASK_EVENT_TYPES.has(event.type) && event.detail) {
+        const detail = event.detail as SpawnedTaskEventDetail;
+        set((state) => {
+          const events = [...state.spawnedTaskEvents, detail];
+          return { spawnedTaskEvents: events.slice(-MAX_TASK_EVENTS) };
+        });
+      }
       if (!syncRAF) {
         syncRAF = requestAnimationFrame(() => {
           syncRAF = 0;
@@ -274,20 +330,20 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
     get().sync();
   },
 
-  broadcastMessage: (from, content) => {
+  broadcastMessage: (from, content, opts) => {
     const system = get()._system;
     if (!system) return;
-    system.broadcast(from, content);
+    system.broadcast(from, content, opts);
     get().sync();
   },
 
-  broadcastAndResolve: (from, content) => {
+  broadcastAndResolve: (from, content, opts) => {
     const system = get()._system;
     if (!system) {
-      console.warn("[ActorStore] broadcastAndResolve: no system!");
+      log.warn("broadcastAndResolve: no system!");
       return;
     }
-    system.broadcastAndResolve(from, content);
+    system.broadcastAndResolve(from, content, opts);
     get().sync();
   },
 
@@ -329,6 +385,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
     if (!system) return;
     system.resetSession(summary);
     clearPersistedSession();
+    set({ spawnedTaskEvents: [] });
     get().sync();
   },
 

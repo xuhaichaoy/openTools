@@ -7,6 +7,7 @@ import type {
   InboxMessage,
   PendingReply,
   SpawnedTaskRecord,
+  SpawnedTaskEventDetail,
 } from "./types";
 import {
   appendDialogMessageSync as appendDialogMessage,
@@ -411,6 +412,7 @@ export class ActorSystem {
     expectReply?: boolean;
     replyTo?: string;
     priority?: "normal" | "urgent";
+    _briefContent?: string;
   }): DialogMessage {
     const target = this.actors.get(to);
     if (!target) throw new Error(`Actor ${to} not found`);
@@ -428,6 +430,7 @@ export class ActorSystem {
       priority: opts?.priority ?? "normal",
       expectReply: opts?.expectReply,
       replyTo: opts?.replyTo,
+      _briefContent: opts?._briefContent,
     };
 
     target.receive(msg);
@@ -459,7 +462,7 @@ export class ActorSystem {
    * - 来自 Agent：投递给除自己外的所有 Agent
    * 消息始终记录到 dialogHistory，UI 上全员可见。
    */
-  broadcast(from: string, content: string): DialogMessage {
+  broadcast(from: string, content: string, opts?: { _briefContent?: string }): DialogMessage {
     const fromName = from === "user" ? "用户" : (this.actors.get(from)?.role.name ?? from);
     log(`broadcast: ${fromName} → all, content="${content.slice(0, 80)}"`);
 
@@ -470,6 +473,7 @@ export class ActorSystem {
       content,
       timestamp: Date.now(),
       priority: "normal",
+      _briefContent: opts?._briefContent,
     };
     this.dialogHistory.push(msg);
     appendDialogMessage(this.sessionId, msg);
@@ -490,7 +494,7 @@ export class ActorSystem {
    * - 否则，仅投递给第一个 Agent（协调者），其他 Agent 等待 spawn_task 激活
    * - 消息始终记录到 dialogHistory，UI 上所有人可见
    */
-  broadcastAndResolve(from: string, content: string): DialogMessage {
+  broadcastAndResolve(from: string, content: string, opts?: { _briefContent?: string }): DialogMessage {
     const fromName = from === "user" ? "用户" : (this.actors.get(from)?.role.name ?? from);
     log(`broadcastAndResolve: ${fromName} → all, content="${content.slice(0, 80)}", pendingReplies=${this.pendingReplies.size}`);
 
@@ -501,6 +505,7 @@ export class ActorSystem {
       content,
       timestamp: Date.now(),
       priority: "normal",
+      _briefContent: opts?._briefContent,
     };
     this.dialogHistory.push(msg);
     appendDialogMessage(this.sessionId, msg);
@@ -626,12 +631,28 @@ export class ActorSystem {
       cleanup?: "delete" | "keep";
       /** 是否期望完成消息通知 */
       expectsCompletionMessage?: boolean;
+      /** Subagent 独立配置：动态覆盖目标 Agent 的运行参数 */
+      overrides?: import("./types").SpawnTaskOverrides;
     },
   ): SpawnedTaskRecord | { error: string } {
     const spawner = this.actors.get(spawnerActorId);
     const target = this.actors.get(targetActorId);
     if (!spawner) return { error: `Spawner ${spawnerActorId} not found` };
     if (!target) return { error: `Target ${targetActorId} not found` };
+
+    // Subagent 独立配置：在 spawn 时动态覆盖 target 的运行参数
+    if (opts?.overrides) {
+      const ov = opts.overrides;
+      if (ov.model) target.applySpawnOverride("model", ov.model);
+      if (ov.maxIterations) target.applySpawnOverride("maxIterations", ov.maxIterations);
+      if (ov.toolPolicy) target.applySpawnOverride("toolPolicy", ov.toolPolicy);
+      if (ov.contextTokens) target.applySpawnOverride("contextTokens", ov.contextTokens);
+      if (ov.thinkingLevel) target.applySpawnOverride("thinkingLevel", ov.thinkingLevel);
+      if (ov.systemPromptAppend) target.applySpawnOverride("systemPromptAppend", ov.systemPromptAppend);
+      if (ov.middlewareOverrides) target.applySpawnOverride("middlewareOverrides", ov.middlewareOverrides);
+      if (ov.temperature != null) target.applySpawnOverride("temperature", ov.temperature);
+      log(`spawnTask: applied overrides to ${target.role.name}`, JSON.stringify(ov).slice(0, 200));
+    }
 
     // session 模式下允许 target 处于 running 状态（保持会话）
     const mode = opts?.mode ?? "run";
@@ -691,6 +712,17 @@ export class ActorSystem {
       }
 
       this.emitEvent({ type: "task_error", actorId: targetActorId, timestamp: Date.now(), detail: { runId, reason: "timeout" } });
+      this.emitEvent({
+        type: "spawned_task_timeout",
+        actorId: targetActorId,
+        timestamp: Date.now(),
+        detail: {
+          ...taskEventBase,
+          status: "aborted" as const,
+          elapsed: duration,
+          error: record.error,
+        } satisfies SpawnedTaskEventDetail,
+      });
 
       // 超时时清理（如果需要，且目标非持久 Agent）
       if (cleanup === "delete" && !target.persistent) {
@@ -702,7 +734,37 @@ export class ActorSystem {
 
     this.spawnedTasks.set(runId, record);
     appendSpawnEvent(this.sessionId, spawnerActorId, targetActorId, task, runId);
+
+    // 同步到 TaskCenter（如果可用）
+    try {
+      const { getTaskQueue } = require("@/core/task-center/task-queue");
+      const q = getTaskQueue();
+      q.create({
+        id: `spawn-${runId}`,
+        title: label,
+        description: task.slice(0, 200),
+        type: "agent_spawn",
+        priority: "normal",
+        params: { runId, spawnerActorId, targetActorId },
+        createdBy: spawnerName,
+        assignee: targetName,
+        timeoutSeconds: timeoutMs / 1000,
+        tags: [mode, targetName],
+      });
+    } catch { /* TaskCenter not available */ }
     log(`🚀 spawnTask START: ${spawnerName} → ${targetName}, task="${task.slice(0, 60)}", runId=${runId}, mode=${mode}, timeout=${timeoutMs / 1000}s, depth=${depth + 1}, targetStatus=${target.status}`);
+
+    // Emit structured spawned_task_started event (deer-flow SSE pattern)
+    const taskEventBase: Omit<SpawnedTaskEventDetail, "status" | "elapsed"> = {
+      runId, spawnerActorId, targetActorId,
+      targetName, spawnerName, label, task,
+    };
+    this.emitEvent({
+      type: "spawned_task_started",
+      actorId: targetActorId,
+      timestamp: Date.now(),
+      detail: { ...taskEventBase, status: "running" as const, elapsed: 0 },
+    });
 
     // 触发 onSpawnTask 钩子
     void this.runHooks<SpawnTaskHookContext>("onSpawnTask", {
@@ -729,6 +791,7 @@ export class ActorSystem {
         record.result = taskResult.result;
         log(`✅ spawnTask COMPLETED: ${targetName} → announce to ${spawnerName}, runId=${runId}, duration=${Date.now() - record.spawnedAt}ms`);
         appendAnnounceEvent(this.sessionId, runId, "completed", taskResult.result);
+        try { const { getTaskQueue } = require("@/core/task-center/task-queue"); getTaskQueue().complete(`spawn-${runId}`, taskResult.result?.slice(0, 500)); } catch { /* noop */ }
 
         if (expectsCompletionMessage) {
           this.announceWithRetry(targetActorId, spawnerActorId, `[Task completed: ${label}]\n\n${taskResult.result}`, runId);
@@ -739,6 +802,7 @@ export class ActorSystem {
         record.error = taskResult.error ?? "unknown error";
         log(`❌ spawnTask FAILED: ${targetName}, status=${taskResult.status}, error=${record.error}, runId=${runId}, duration=${Date.now() - record.spawnedAt}ms`);
         appendAnnounceEvent(this.sessionId, runId, record.status, undefined, record.error);
+        try { const { getTaskQueue } = require("@/core/task-center/task-queue"); getTaskQueue().fail(`spawn-${runId}`, record.error || "unknown"); } catch { /* noop */ }
 
         if (expectsCompletionMessage) {
           this.announceWithRetry(targetActorId, spawnerActorId, `[Task failed: ${label}]\n\nError: ${record.error}`, runId);
@@ -746,6 +810,34 @@ export class ActorSystem {
       }
 
       this.emitEvent({ type: "task_completed", actorId: targetActorId, timestamp: Date.now(), detail: { runId } });
+
+      // Emit structured spawned_task lifecycle event
+      const elapsed = Date.now() - record.spawnedAt;
+      if (record.status === "completed") {
+        this.emitEvent({
+          type: "spawned_task_completed",
+          actorId: targetActorId,
+          timestamp: Date.now(),
+          detail: {
+            ...taskEventBase,
+            status: "completed" as const,
+            elapsed,
+            result: record.result?.slice(0, 500),
+          } satisfies SpawnedTaskEventDetail,
+        });
+      } else {
+        this.emitEvent({
+          type: "spawned_task_failed",
+          actorId: targetActorId,
+          timestamp: Date.now(),
+          detail: {
+            ...taskEventBase,
+            status: record.status,
+            elapsed,
+            error: record.error,
+          } satisfies SpawnedTaskEventDetail,
+        });
+      }
 
       // 触发 onSpawnTaskEnd 钩子
       void this.runHooks<SpawnTaskEndHookContext>("onSpawnTaskEnd", {

@@ -7,7 +7,7 @@
  * - Skill 可按上下文自动激活，无需用户手动切换
  */
 
-export type SkillSource = "builtin" | "user" | "marketplace";
+export type SkillSource = "builtin" | "user" | "marketplace" | "skillmd";
 
 export interface SkillToolFilter {
   include?: string[];
@@ -47,6 +47,13 @@ export interface AgentSkill {
    */
   toolFilter?: SkillToolFilter;
 
+  /**
+   * Allowed tools whitelist (deer-flow SKILL.md `allowed-tools` pattern).
+   * When set, only these tools are available when the skill is active.
+   * More declarative than toolFilter — maps to toolFilter.include internally.
+   */
+  allowedTools?: string[];
+
   /** 分类标签（如 "coding", "writing", "devops"） */
   category?: string;
   tags?: string[];
@@ -56,6 +63,27 @@ export interface AgentSkill {
   updatedAt: number;
 
   source: SkillSource;
+
+  /** Dependencies (deer-flow SKILL.md `dependency` field) */
+  dependency?: Record<string, string>;
+}
+
+/**
+ * SKILL.md frontmatter schema (deer-flow compatible).
+ * Parsed from YAML between `---` delimiters.
+ */
+export interface SkillMdFrontmatter {
+  name: string;
+  description: string;
+  version?: string;
+  author?: string;
+  category?: string;
+  tags?: string[];
+  icon?: string;
+  "allowed-tools"?: string[];
+  "trigger-patterns"?: string[];
+  "auto-activate"?: boolean;
+  dependency?: Record<string, string>;
 }
 
 /** 创建新 Skill 时的输入（省略自动生成的字段） */

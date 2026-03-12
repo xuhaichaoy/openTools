@@ -416,7 +416,9 @@ export const useAIStore = create<AIState>((set, get) => ({
   stopStreaming: () => {
     const { currentConversationId } = get();
     if (!currentConversationId) return;
-    invoke("ai_stop_stream", { conversationId: currentConversationId }).catch(() => {});
+    invoke("ai_stop_stream", { conversationId: currentConversationId }).catch((err) => {
+      console.warn("[AIStore] ai_stop_stream failed:", err);
+    });
     if (_streamCleanup) {
       _streamCleanup();
       _streamCleanup = null;
