@@ -10,5 +10,5 @@ export type {
   TaskStats,
 } from "./types";
 
-export { TaskQueue, getTaskQueue } from "./task-queue";
+export { TaskQueue, getTaskQueue, createActorSystemExecutor } from "./task-queue";
 export type { TaskExecutor } from "./task-queue";

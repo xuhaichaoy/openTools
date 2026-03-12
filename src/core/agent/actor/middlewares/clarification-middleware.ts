@@ -46,26 +46,23 @@ export class ClarificationMiddleware implements ActorMiddleware {
           "此工具会中断当前执行流程，等待用户回答后你将收到用户的回复。",
           "仅在真正需要澄清时使用，不要用于普通对话。",
         ].join("\n"),
-        parameters: [
-          {
-            name: "question",
+        parameters: {
+          question: {
             type: "string",
             description: "向用户提出的具体问题",
             required: true,
           },
-          {
-            name: "options",
+          options: {
             type: "string",
             description: "可选的选项列表，JSON 数组格式，如 [\"选项A\", \"选项B\"]。不提供则为开放式问题。",
             required: false,
           },
-          {
-            name: "context",
+          context: {
             type: "string",
             description: "为什么需要这个信息的简短说明",
             required: false,
           },
-        ],
+        },
         execute: async (params: Record<string, unknown>) => {
           const question = String(params.question || "").trim();
           if (!question) {
@@ -92,41 +89,41 @@ export class ClarificationMiddleware implements ActorMiddleware {
 
           log.info(`Clarification requested by ${actorId}: "${question}"`);
 
-          // 通过 askUser 回调等待用户回答
-          if (askUser) {
-            try {
-              const reply = await askUser(displayMessage, 300_000); // 5 min timeout
-              log.info(`Clarification answered: "${reply.slice(0, 80)}"`);
-
-              // 如果用户输入了序号，映射到选项
-              if (options?.length) {
-                const num = parseInt(reply.trim(), 10);
-                if (num > 0 && num <= options.length) {
-                  return {
-                    answer: options[num - 1],
-                    raw_input: reply,
-                    was_option_selection: true,
-                  };
-                }
+          const parseOptionSelection = (reply: string) => {
+            if (options?.length) {
+              const num = parseInt(reply.trim(), 10);
+              if (num > 0 && num <= options.length) {
+                return { answer: options[num - 1], raw_input: reply, was_option_selection: true };
               }
+            }
+            return { answer: reply, was_option_selection: false };
+          };
 
-              return { answer: reply, was_option_selection: false };
+          // 优先通过 actorSystem 的聊天机制（Dialog 模式）
+          if (actorSystem) {
+            try {
+              const reply = await actorSystem.askUserInChat(actorId, displayMessage, 300_000);
+              log.info(`Clarification answered: "${reply.slice(0, 80)}"`);
+              return parseOptionSelection(reply);
             } catch {
               return { error: "用户未在规定时间内回答，请根据已有信息继续执行。" };
             }
           }
 
-          // 如果没有 askUser，通过 actorSystem 的聊天机制
-          if (actorSystem) {
+          // 回退到 askUser 回调（非 Dialog 模式）
+          if (askUser) {
             try {
-              const reply = await actorSystem.askUserInChat(actorId, displayMessage, 300_000);
-              if (options?.length) {
-                const num = parseInt(reply.trim(), 10);
-                if (num > 0 && num <= options.length) {
-                  return { answer: options[num - 1], raw_input: reply, was_option_selection: true };
-                }
-              }
-              return { answer: reply, was_option_selection: false };
+              const qId = `clarify-${Date.now()}`;
+              const answers = await askUser([{
+                id: qId,
+                question: displayMessage,
+                type: options?.length ? "single" : "text",
+                options,
+              }]);
+              const raw = answers[qId] ?? "";
+              const reply = Array.isArray(raw) ? raw[0] ?? "" : raw;
+              log.info(`Clarification answered: "${reply.slice(0, 80)}"`);
+              return parseOptionSelection(reply);
             } catch {
               return { error: "用户未在规定时间内回答，请根据已有信息继续执行。" };
             }

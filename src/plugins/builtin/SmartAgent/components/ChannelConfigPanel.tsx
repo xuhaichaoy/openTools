@@ -38,9 +38,7 @@ const STATUS_MAP: Record<ChannelStatus, { icon: React.ReactNode; label: string; 
 
 const CHANNEL_TYPE_LABELS: Record<ChannelType, string> = {
   dingtalk: "钉钉",
-  wecom: "企业微信",
   feishu: "飞书",
-  slack: "Slack",
 };
 
 interface SavedChannel {
@@ -77,11 +75,6 @@ const ChannelConfigPanel: React.FC = () => {
   const [formAppSecret, setFormAppSecret] = useState("");
   const [showSecret, setShowSecret] = useState(false);
 
-  useEffect(() => {
-    setChannels(loadSavedChannels());
-    refreshStatuses();
-  }, []);
-
   const refreshStatuses = useCallback(() => {
     const mgr = getChannelManager();
     const all = mgr.getStatuses();
@@ -89,6 +82,13 @@ const ChannelConfigPanel: React.FC = () => {
     for (const s of all) map[s.id] = s.status;
     setStatuses(map);
   }, []);
+
+  useEffect(() => {
+    setChannels(loadSavedChannels());
+    refreshStatuses();
+    const timer = setInterval(refreshStatuses, 5000);
+    return () => clearInterval(timer);
+  }, [refreshStatuses]);
 
   const handleAdd = useCallback(async () => {
     if (!formName.trim() || !formWebhookUrl.trim()) return;
@@ -102,7 +102,11 @@ const ChannelConfigPanel: React.FC = () => {
       platformConfig: {
         webhookUrl: formWebhookUrl.trim(),
         ...(formSecret ? { secret: formSecret.trim() } : {}),
-        ...(formAppKey ? { appKey: formAppKey.trim(), appSecret: formAppSecret.trim() } : {}),
+        ...(formAppKey
+          ? formType === "feishu"
+            ? { appId: formAppKey.trim(), appSecret: formAppSecret.trim() }
+            : { appKey: formAppKey.trim(), appSecret: formAppSecret.trim() }
+          : {}),
       },
     };
 
@@ -226,19 +230,19 @@ const ChannelConfigPanel: React.FC = () => {
               </button>
             </div>
           </div>
-          {formType === "dingtalk" && (
+          {(formType === "dingtalk" || formType === "feishu") && (
             <div className="flex gap-2">
               <input
                 value={formAppKey}
                 onChange={(e) => setFormAppKey(e.target.value)}
-                placeholder="AppKey（可选，用于 API 模式）"
+                placeholder={formType === "feishu" ? "App ID（可选）" : "AppKey（可选，用于 API 模式）"}
                 className="flex-1 text-xs px-2 py-1.5 rounded border border-[var(--color-border)] bg-[var(--color-bg)] font-mono"
               />
               <input
                 value={formAppSecret}
                 onChange={(e) => setFormAppSecret(e.target.value)}
                 type="password"
-                placeholder="AppSecret"
+                placeholder={formType === "feishu" ? "App Secret" : "AppSecret"}
                 className="flex-1 text-xs px-2 py-1.5 rounded border border-[var(--color-border)] bg-[var(--color-bg)] font-mono"
               />
             </div>

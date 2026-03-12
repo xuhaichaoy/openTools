@@ -330,6 +330,43 @@ let _instance: TaskQueue | null = null;
 export function getTaskQueue(): TaskQueue {
   if (!_instance) {
     _instance = new TaskQueue();
+    _instance.startScheduler();
   }
   return _instance;
+}
+
+/**
+ * 创建一个 ActorSystem 桥接的 TaskExecutor。
+ * ActorSystem 在 spawn 任务时已经直接调用 create/complete/fail，
+ * 但对于手动创建的通用任务，也可以通过 executor 委派执行。
+ */
+export function createActorSystemExecutor(
+  actorSystem: {
+    assignTask: (actorId: string, query: string) => Promise<{ status: string; result?: string; error?: string }>;
+    getAll: () => Array<{ id: string; status: string }>;
+  },
+): TaskExecutor {
+  return {
+    async execute(task: TaskRecord): Promise<void> {
+      const queue = getTaskQueue();
+      const actors = actorSystem.getAll() as Array<{ id: string; status: string }>;
+      const idle = actors.find((a) => a.status === "idle") ?? actors[0];
+      if (!idle) {
+        queue.fail(task.id, "没有可用的 Agent");
+        return;
+      }
+
+      try {
+        const result = await actorSystem.assignTask(idle.id, task.description || task.title);
+        if (result.status === "completed") {
+          queue.complete(task.id, result.result);
+        } else if (result.status === "error" || result.status === "aborted") {
+          queue.fail(task.id, result.error ?? "任务执行失败");
+        }
+        // "pending" / "running" — task still in progress, don't mark as done yet
+      } catch (err) {
+        queue.fail(task.id, err instanceof Error ? err.message : String(err));
+      }
+    },
+  };
 }

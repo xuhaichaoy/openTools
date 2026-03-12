@@ -7,6 +7,7 @@ import {
 import { createBuiltinAgentTools } from "@/plugins/builtin/SmartAgent/core/default-tools";
 import { createActorCommunicationTools } from "../actor-tools";
 import { createActorMemoryTools } from "../actor-memory";
+import { createCodeSearchTools } from "@/core/code-index/code-search-tools";
 import type { ActorMiddleware, ActorRunContext } from "../actor-middleware";
 
 function getPluginTools(): AgentTool[] {
@@ -36,12 +37,21 @@ export class ToolResolverMiddleware implements ActorMiddleware {
       : [];
     const memoryTools = createActorMemoryTools(ctx.actorId);
 
+    let codeSearchTools: AgentTool[] = [];
+    if (ctx.workspace) {
+      try {
+        const projectId = ctx.workspace.replace(/[^a-zA-Z0-9]/g, "_").slice(-40);
+        codeSearchTools = createCodeSearchTools(projectId, ctx.workspace);
+      } catch { /* code index not available */ }
+    }
+
     ctx.tools = [
       ...getPluginTools(),
       ...builtinResult.tools,
       ...ctx.extraTools,
       ...commTools,
       ...memoryTools,
+      ...codeSearchTools,
     ];
 
     ctx.notifyToolCalled = builtinResult.notifyToolCalled;

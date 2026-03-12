@@ -42,6 +42,10 @@ export interface ActorRunContext {
   // ── Callbacks (set by middlewares) ──
   notifyToolCalled?: (...args: unknown[]) => void;
   inboxDrain?: () => InboxMessage[];
+
+  // ── Retry (set by ModelRetryMiddleware) ──
+  retryConfig?: { maxRetries: number; initialDelayMs: number; maxDelayMs: number; backoffMultiplier: number; fallbackModels: string[]; toolTimeoutMs: number };
+  withRetry?: <T>(fn: () => Promise<T>, config: ActorRunContext["retryConfig"] & Record<string, unknown>, label?: string) => Promise<T>;
 }
 
 /**

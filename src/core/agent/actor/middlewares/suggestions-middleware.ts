@@ -19,20 +19,18 @@ export class SuggestionsMiddleware implements ActorMiddleware {
       {
         name: "generate_suggestions",
         description: "基于当前对话生成 3-5 个后续问题/操作建议，帮助用户继续探索。在回复较长的分析或完成任务后调用此工具。",
-        parameters: [
-          {
-            name: "context_summary",
+        parameters: {
+          context_summary: {
             type: "string",
             description: "当前对话的简要总结",
             required: true,
           },
-          {
-            name: "suggestions",
+          suggestions: {
             type: "string",
             description: "JSON 数组字符串，每项包含 { text: string, type: 'question' | 'action' | 'deepdive' }",
             required: true,
           },
-        ],
+        },
         execute: async (params: Record<string, unknown>) => {
           try {
             const suggestions = JSON.parse(String(params.suggestions || "[]"));

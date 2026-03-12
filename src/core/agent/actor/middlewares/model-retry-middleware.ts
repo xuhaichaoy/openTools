@@ -123,9 +123,8 @@ export class ModelRetryMiddleware implements ActorMiddleware {
   }
 
   async apply(ctx: ActorRunContext): Promise<void> {
-    // Expose retry config on context for ReActAgent to wrap LLM calls
-    (ctx as any)._retryConfig = this.config;
-    (ctx as any)._withRetry = withRetry;
+    ctx.retryConfig = this.config;
+    ctx.withRetry = withRetry as ActorRunContext["withRetry"];
 
     // Add tool execution timeout protection (no retry — just timeout)
     const toolTimeoutMs = this.config.toolTimeoutMs;

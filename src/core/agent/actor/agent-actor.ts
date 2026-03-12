@@ -634,6 +634,11 @@ export class AgentActor {
     );
 
     try {
+      if (ctx.withRetry && ctx.retryConfig) {
+        const retryConf = ctx.retryConfig as Required<typeof ctx.retryConfig>;
+        const answer = await ctx.withRetry(() => agent.run(query, signal, images), retryConf, `LLM call for ${this.role.name}`);
+        return answer;
+      }
       const answer = await agent.run(query, signal, images);
       return answer;
     } finally {

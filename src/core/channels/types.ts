@@ -65,7 +65,7 @@ export interface ChannelConfig {
   platformConfig: Record<string, unknown>;
 }
 
-export type ChannelType = "dingtalk" | "wecom" | "feishu" | "slack";
+export type ChannelType = "dingtalk" | "feishu";
 
 /** 消息处理器 */
 export type MessageHandler = (msg: ChannelIncomingMessage) => Promise<string | void>;

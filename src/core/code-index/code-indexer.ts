@@ -478,7 +478,7 @@ export class CodeIndexer {
   }
 
   /** Remove a file from the index */
-  removeFile(filePath: string): void {
+  async removeFile(filePath: string): Promise<void> {
     this.fileIndex.delete(filePath);
     const removedIds = this.allChunks
       .filter((c) => c.filePath === filePath)
@@ -486,7 +486,7 @@ export class CodeIndexer {
     this.allChunks = this.allChunks.filter((c) => c.filePath !== filePath);
     if (removedIds.length > 0) {
       const store = getCodeIndexStore(this.projectId);
-      void store.remove(removedIds);
+      await store.remove(removedIds);
     }
   }
 

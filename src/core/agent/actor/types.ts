@@ -153,7 +153,8 @@ export type ActorEventType =
   | "spawned_task_running"
   | "spawned_task_completed"
   | "spawned_task_failed"
-  | "spawned_task_timeout";
+  | "spawned_task_timeout"
+  | "session_title_updated";
 
 export interface ActorEvent {
   type: ActorEventType;

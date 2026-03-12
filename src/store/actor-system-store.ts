@@ -13,6 +13,8 @@ import type {
 } from "@/core/agent/actor/types";
 import type { AgentStep } from "@/plugins/builtin/SmartAgent/core/react-agent";
 import { createLogger } from "@/core/logger";
+import { getChannelManager } from "@/core/channels/channel-manager";
+import { getTaskQueue, createActorSystemExecutor } from "@/core/task-center";
 
 const log = createLogger("ActorStore");
 
@@ -277,7 +279,9 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
 
     // RAF-based debounce: coalesce rapid events into a single sync per frame
     let syncRAF = 0;
-    system.onEvent((event) => {
+    system.onEvent((ev) => {
+      if (!("type" in ev)) return;
+      const event = ev as { type: string; detail?: unknown };
       if (SPAWNED_TASK_EVENT_TYPES.has(event.type) && event.detail) {
         const detail = event.detail as SpawnedTaskEventDetail;
         set((state) => {
@@ -292,6 +296,20 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
         });
       }
     });
+
+    // 连接 IM 通道管理器，实现 IM ↔ Agent 双向通信
+    const channelMgr = getChannelManager();
+    channelMgr.connectToActorSystem({
+      broadcastAndResolve: (from, content, opts) => system.broadcastAndResolve(from, content, opts),
+      getAll: () => system.getAll().map((a) => ({ id: a.id })),
+      onEvent: (handler) => system.onEvent((ev) => handler(ev as unknown as Record<string, unknown>)),
+    });
+    channelMgr.listenForCallbacks().catch((err) =>
+      log.warn("Failed to start IM callback listener (expected outside Tauri)", err),
+    );
+
+    // 连接任务队列执行器，使通用任务可委派给 Agent
+    getTaskQueue().setExecutor(createActorSystemExecutor(system));
 
     set({ _system: system, active: true });
     return system;

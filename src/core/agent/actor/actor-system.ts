@@ -19,6 +19,7 @@ import {
   clearSessionCache,
 } from "./actor-transcript";
 import { ActorCron } from "./actor-cron";
+import { clearSessionApprovals, clearAllTodos, resetTitleGeneration, clearTelemetry } from "./middlewares";
 
 const generateId = (): string => {
   // 使用更安全的随机 ID 生成
@@ -1227,6 +1228,12 @@ export class ActorSystem {
     // 清空 transcript 内存缓存
     clearSessionCache();
 
+    // 清理中间件状态
+    clearSessionApprovals();
+    clearAllTodos();
+    resetTitleGeneration(oldSessionId);
+    clearTelemetry();
+
     log(`resetSession: archived ${oldSessionId}, new session ${this.sessionId}`);
     this.syncTranscriptActors();
     this.emitEvent({
@@ -1364,7 +1371,7 @@ export class ActorSystem {
     };
   }
 
-  private emitEvent(event: ActorEvent | DialogMessage): void {
+  emitEvent(event: ActorEvent | DialogMessage): void {
     for (const handler of this.eventHandlers) {
       try { handler(event); } catch { /* non-critical */ }
     }

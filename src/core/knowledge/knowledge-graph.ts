@@ -13,6 +13,13 @@
  * 5. 与 RAG 结合的混合检索
  */
 
+import { getTauriStore } from "@/core/storage";
+import { createLogger } from "@/core/logger";
+
+const log = createLogger("KnowledgeGraph");
+const KG_STORE_FILE = "knowledge-graph.json";
+const KG_STORE_KEY = "graph";
+
 export interface GraphEntity {
   id: string;
   name: string;
@@ -106,6 +113,14 @@ function generateId(): string {
 export class KnowledgeGraph {
   private entities = new Map<string, GraphEntity>();
   private relations: GraphRelation[] = [];
+  private _persistTimer: ReturnType<typeof setTimeout> | null = null;
+  private _loaded = false;
+
+  constructor() {
+    this._loadFromStorage().catch((err) =>
+      log.warn("Failed to load persisted knowledge graph (expected outside Tauri)", err),
+    );
+  }
 
   // ── Entity Management ──
 
@@ -116,6 +131,7 @@ export class KnowledgeGraph {
     );
     if (existing) {
       existing.properties = { ...existing.properties, ...properties };
+      this._debouncedPersist();
       return existing;
     }
 
@@ -128,6 +144,7 @@ export class KnowledgeGraph {
       createdAt: Date.now(),
     };
     this.entities.set(entity.id, entity);
+    this._debouncedPersist();
     return entity;
   }
 
@@ -166,6 +183,7 @@ export class KnowledgeGraph {
       createdAt: Date.now(),
     };
     this.relations.push(relation);
+    this._debouncedPersist();
     return relation;
   }
 
@@ -361,6 +379,50 @@ export class KnowledgeGraph {
   clear(): void {
     this.entities.clear();
     this.relations.length = 0;
+    this._debouncedPersist();
+  }
+
+  // ── Persistence ──
+
+  private _debouncedPersist(): void {
+    if (this._persistTimer) clearTimeout(this._persistTimer);
+    this._persistTimer = setTimeout(() => this._persist(), 1000);
+  }
+
+  private async _persist(): Promise<void> {
+    try {
+      const data = {
+        entities: [...this.entities.values()],
+        relations: this.relations,
+      };
+      const store = await getTauriStore(KG_STORE_FILE);
+      await store.set(KG_STORE_KEY, data);
+      await store.save();
+    } catch { /* Tauri Store not available */ }
+  }
+
+  private async _loadFromStorage(): Promise<void> {
+    if (this._loaded) return;
+    this._loaded = true;
+
+    try {
+      const store = await getTauriStore(KG_STORE_FILE);
+      const data = await store.get<{ entities: GraphEntity[]; relations: GraphRelation[] }>(KG_STORE_KEY);
+      if (!data) return;
+
+      if (Array.isArray(data.entities)) {
+        for (const entity of data.entities) {
+          if (entity.id) this.entities.set(entity.id, entity);
+        }
+      }
+      if (Array.isArray(data.relations)) {
+        this.relations.push(...data.relations);
+      }
+
+      if (this.entities.size > 0) {
+        log.info(`Loaded knowledge graph: ${this.entities.size} entities, ${this.relations.length} relations`);
+      }
+    } catch { /* not in Tauri environment */ }
   }
 }
 

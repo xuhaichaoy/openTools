@@ -13,9 +13,14 @@
  * 5. 知识库中间件集成：与 KnowledgeBaseMiddleware 配合注入 Agent
  */
 
-import { getKnowledgeVectorStore, type VectorSearchResult } from "@/core/ai/vector-store";
+import { getKnowledgeVectorStore } from "@/core/ai/vector-store";
 import { documentProcessor, type ParsedDocument, type DocumentFormat } from "./document-processor";
 import { registerKnowledgeBase, type KnowledgeBaseRef } from "@/core/agent/actor/middlewares/knowledge-base-middleware";
+import { globalKnowledgeGraph } from "./knowledge-graph";
+import { getTauriStore } from "@/core/storage";
+import { createLogger } from "@/core/logger";
+
+const log = createLogger("KnowledgeBase");
 
 export interface KnowledgeBaseConfig {
   id: string;
@@ -243,6 +248,19 @@ export class KnowledgeBase {
       metadata: parsed.metadata,
     };
     this.documents.set(docId, doc);
+    knowledgeBaseManager.notifyChanged();
+
+    // 自动写入知识图谱
+    const docEntity = globalKnowledgeGraph.addEntity(parsed.title, "document", {
+      filePath: parsed.filePath,
+      format: parsed.format,
+      chunkCount: textChunks.length,
+    }, docId);
+    const kbEntity = globalKnowledgeGraph.addEntity(this.config.name, "project", {
+      kbId: this.config.id,
+    });
+    globalKnowledgeGraph.addRelation(kbEntity.id, docEntity.id, "contains", "包含文档");
+
     return doc;
   }
 
@@ -278,6 +296,7 @@ export class KnowledgeBase {
     const chunkIds = Array.from({ length: doc.chunkCount }, (_, i) => `${documentId}:${i}`);
     await store.remove(chunkIds);
     this.documents.delete(documentId);
+    knowledgeBaseManager.notifyChanged();
     return true;
   }
 
@@ -300,6 +319,13 @@ export class KnowledgeBase {
     return [...this.documents.values()];
   }
 
+  /** Load persisted documents (no re-indexing, just restore metadata) */
+  loadDocuments(docs: KnowledgeDocument[]): void {
+    for (const doc of docs) {
+      if (doc.id) this.documents.set(doc.id, doc);
+    }
+  }
+
   /** Register this KB with the agent middleware system */
   registerForAgent(): void {
     registerKnowledgeBase({
@@ -312,8 +338,24 @@ export class KnowledgeBase {
 
 // ── KnowledgeBase Manager (Factory Pattern, inspired by Yuxi-Know) ──
 
+const KB_STORE_FILE = "knowledge-bases.json";
+const KB_STORE_KEY = "bases";
+
+interface PersistedKBData {
+  config: KnowledgeBaseConfig;
+  documents: KnowledgeDocument[];
+}
+
 class KnowledgeBaseManager {
   private bases = new Map<string, KnowledgeBase>();
+  private _persistTimer: ReturnType<typeof setTimeout> | null = null;
+  private _loaded = false;
+
+  constructor() {
+    this._loadFromStorage().catch((err) =>
+      log.warn("Failed to load persisted knowledge bases (expected outside Tauri)", err),
+    );
+  }
 
   create(config: KnowledgeBaseConfig): KnowledgeBase {
     if (this.bases.has(config.id)) {
@@ -321,6 +363,7 @@ class KnowledgeBaseManager {
     }
     const kb = new KnowledgeBase(config);
     this.bases.set(config.id, kb);
+    this._debouncedPersist();
     return kb;
   }
 
@@ -333,13 +376,87 @@ class KnowledgeBaseManager {
   }
 
   delete(id: string): boolean {
-    return this.bases.delete(id);
+    const result = this.bases.delete(id);
+    if (result) this._debouncedPersist();
+    return result;
   }
 
   /** Register all KBs for agent middleware */
   registerAllForAgent(): void {
     for (const kb of this.bases.values()) {
       kb.registerForAgent();
+    }
+  }
+
+  /** Persist after document changes */
+  notifyChanged(): void {
+    this._debouncedPersist();
+  }
+
+  private _debouncedPersist(): void {
+    if (this._persistTimer) clearTimeout(this._persistTimer);
+    this._persistTimer = setTimeout(() => this._persist(), 500);
+  }
+
+  private async _persist(): Promise<void> {
+    try {
+      const data: PersistedKBData[] = [...this.bases.values()].map((kb) => ({
+        config: kb.config,
+        documents: kb.getDocuments(),
+      }));
+      const store = await getTauriStore(KB_STORE_FILE);
+      await store.set(KB_STORE_KEY, data);
+      await store.save();
+    } catch {
+      // Tauri Store 不可用时回退到 localStorage
+      try {
+        const data: PersistedKBData[] = [...this.bases.values()].map((kb) => ({
+          config: kb.config,
+          documents: kb.getDocuments(),
+        }));
+        localStorage.setItem("mtools_knowledge_bases", JSON.stringify(data));
+      } catch { /* both unavailable */ }
+    }
+  }
+
+  private async _loadFromStorage(): Promise<void> {
+    if (this._loaded) return;
+    this._loaded = true;
+
+    let data: PersistedKBData[] | null | undefined = null;
+
+    // 优先从 Tauri Store 加载
+    try {
+      const store = await getTauriStore(KB_STORE_FILE);
+      data = await store.get<PersistedKBData[]>(KB_STORE_KEY);
+    } catch { /* not in Tauri environment */ }
+
+    // 回退到 localStorage（兼容旧数据迁移）
+    if (!data) {
+      try {
+        const raw = localStorage.getItem("mtools_knowledge_bases");
+        if (raw) {
+          data = JSON.parse(raw) as PersistedKBData[];
+          // 迁移成功后清理旧数据
+          localStorage.removeItem("mtools_knowledge_bases");
+          log.info("Migrated knowledge base data from localStorage to Tauri Store");
+        }
+      } catch { /* corrupted data */ }
+    }
+
+    if (!Array.isArray(data)) return;
+
+    for (const item of data) {
+      if (!item.config?.id) continue;
+      const kb = new KnowledgeBase(item.config);
+      kb.loadDocuments(item.documents ?? []);
+      this.bases.set(item.config.id, kb);
+    }
+
+    // 迁移后持久化到 Tauri Store
+    if (this.bases.size > 0) {
+      this._debouncedPersist();
+      log.info(`Loaded ${this.bases.size} knowledge base(s) from storage`);
     }
   }
 }

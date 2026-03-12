@@ -83,7 +83,7 @@ export class TitleMiddleware implements ActorMiddleware {
 
     // 也通过 ActorSystem 事件通知
     ctx.actorSystem?.emitEvent?.({
-      type: "session_title_updated" as any,
+      type: "session_title_updated",
       actorId: ctx.actorId,
       timestamp: Date.now(),
       detail: { sessionId, title },

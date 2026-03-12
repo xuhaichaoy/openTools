@@ -566,7 +566,6 @@ export async function semanticRecall(
     if (store.size > 0) {
       const results = await store.search(query, {
         topK,
-        partition: options?.conversationId || undefined,
         minScore: 0.1,
       });
       if (results.length > 0) {

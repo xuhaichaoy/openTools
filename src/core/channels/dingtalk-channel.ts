@@ -112,13 +112,53 @@ export class DingTalkChannel implements IMChannel {
   async send(msg: ChannelOutgoingMessage): Promise<void> {
     if (!this._config) throw new Error("DingTalk channel not connected");
 
-    const webhookUrl = this._config.webhookUrl;
+    // 优先 API 模式：有 accessToken 且有明确的群会话 ID（非 "default"）
+    if (this._accessToken && msg.conversationId && msg.conversationId !== "default") {
+      await this._sendByApi(msg);
+      return;
+    }
+
+    await this._sendByWebhook(msg);
+  }
+
+  private async _sendByApi(msg: ChannelOutgoingMessage): Promise<void> {
+    await this._refreshAccessToken();
+    if (!this._accessToken) throw new Error("No access token available for API mode");
+
+    const body: Record<string, unknown> = {
+      openConversationId: msg.conversationId,
+      robotCode: this._config!.appKey,
+      msgKey: msg.messageType === "markdown" ? "sampleMarkdown" : "sampleText",
+      msgParam: msg.messageType === "markdown" && msg.markdown
+        ? JSON.stringify({ title: msg.markdown.title, text: msg.markdown.text })
+        : JSON.stringify({ content: msg.text || "" }),
+    };
+
+    const response = await fetch("https://api.dingtalk.com/v1.0/robot/groupMessages/send", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-acs-dingtalk-access-token": this._accessToken,
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      log.warn(`DingTalk API send failed (${response.status}), falling back to webhook`, text);
+      await this._sendByWebhook(msg);
+      return;
+    }
+
+    log.info("Message sent via DingTalk API", { conversationId: msg.conversationId });
+  }
+
+  private async _sendByWebhook(msg: ChannelOutgoingMessage): Promise<void> {
+    const webhookUrl = this._config?.webhookUrl;
     if (!webhookUrl) throw new Error("No webhook URL configured");
 
     let url = webhookUrl;
-
-    // 如果配置了签名密钥，附加签名参数
-    if (this._config.secret) {
+    if (this._config?.secret) {
       const timestamp = String(Date.now());
       const sign = await computeSign(timestamp, this._config.secret);
       const separator = url.includes("?") ? "&" : "?";
@@ -126,7 +166,6 @@ export class DingTalkChannel implements IMChannel {
     }
 
     const body = this._buildMessageBody(msg);
-
     const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -135,7 +174,7 @@ export class DingTalkChannel implements IMChannel {
 
     if (!response.ok) {
       const text = await response.text();
-      log.error("DingTalk send failed", { status: response.status, body: text });
+      log.error("DingTalk webhook send failed", { status: response.status, body: text });
       throw new Error(`DingTalk send failed: ${response.status} ${text}`);
     }
 
@@ -145,7 +184,7 @@ export class DingTalkChannel implements IMChannel {
       throw new Error(`DingTalk API error: ${result.errmsg} (${result.errcode})`);
     }
 
-    log.info("Message sent to DingTalk", { conversationId: msg.conversationId, type: msg.messageType });
+    log.info("Message sent via DingTalk webhook", { conversationId: msg.conversationId });
   }
 
   onMessage(handler: MessageHandler): () => void {
@@ -181,19 +220,13 @@ export class DingTalkChannel implements IMChannel {
     if (!this._config?.appKey || !this._config?.appSecret) return;
     if (Date.now() < this._tokenExpiresAt - 60_000) return;
 
-    const response = await fetch("https://oapi.dingtalk.com/gettoken", {
-      method: "GET",
-      headers: { "Content-Type": "application/json" },
-    });
-
-    // 注意：真实实现需要带 appkey/appsecret 查询参数
     const params = new URLSearchParams({
       appkey: this._config.appKey,
       appsecret: this._config.appSecret,
     });
 
-    const tokenResp = await fetch(`https://oapi.dingtalk.com/gettoken?${params}`);
-    const data = await tokenResp.json() as { access_token: string; expires_in: number; errcode: number };
+    const response = await fetch(`https://oapi.dingtalk.com/gettoken?${params}`);
+    const data = await response.json() as { access_token: string; expires_in: number; errcode: number };
 
     if (data.errcode === 0 && data.access_token) {
       this._accessToken = data.access_token;
