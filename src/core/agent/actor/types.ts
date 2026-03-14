@@ -149,6 +149,10 @@ export interface SessionUploadRecord {
   originalExt?: string;
   preview?: string;
   excerpt?: string;
+  parsed?: boolean;
+  truncated?: boolean;
+  canReadFromPath?: boolean;
+  multimodalEligible?: boolean;
 }
 
 // ── Agent Configuration ──

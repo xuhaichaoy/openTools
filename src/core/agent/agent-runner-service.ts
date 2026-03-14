@@ -379,7 +379,7 @@ export class AgentRunnerService {
 
     const skillCtx = await loadAndResolveSkills(task.query);
     const skillsPrompt = skillCtx.mergedSystemPrompt || undefined;
-    const hasCodingWorkflowSkill = skillCtx.activeSkillIds.includes("builtin-coding-workflow");
+    const hasCodingWorkflowSkill = skillCtx.visibleSkillIds.includes("builtin-coding-workflow");
     const toolsForRun = applySkillToolFilter(availableTools, skillCtx.mergedToolFilter);
 
     const collectedSteps: AgentStep[] = [];

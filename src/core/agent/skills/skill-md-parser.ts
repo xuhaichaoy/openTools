@@ -33,6 +33,7 @@ export function parseSkillMd(
 
   const now = Date.now();
   const id = opts?.id ?? `skillmd-${slugify(fm.name)}`;
+  const legacyDeps = normalizeLegacyDependencies(fm.dependency);
 
   const skill: AgentSkill = {
     id,
@@ -52,12 +53,82 @@ export function parseSkillMd(
       ? { include: fm["allowed-tools"] }
       : undefined,
     dependency: fm.dependency,
+    skillDependencies: mergeUniqueStrings(fm["skill-dependencies"], legacyDeps.skillDependencies),
+    toolDependencies: mergeUniqueStrings(fm["tool-dependencies"], legacyDeps.toolDependencies),
+    mcpDependencies: mergeUniqueStrings(fm["mcp-dependencies"], legacyDeps.mcpDependencies),
     createdAt: now,
     updatedAt: now,
     source: "skillmd",
   };
 
   return skill;
+}
+
+function splitDependencyValue(value: string | undefined): string[] {
+  if (!value) return [];
+  return value
+    .split(/[,\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function mergeUniqueStrings(...groups: Array<string[] | undefined>): string[] | undefined {
+  const merged = [...new Set(groups.flatMap((group) => group ?? []).map((item) => item.trim()).filter(Boolean))];
+  return merged.length > 0 ? merged : undefined;
+}
+
+function normalizeLegacyDependencies(dependency?: Record<string, string>): {
+  skillDependencies: string[];
+  toolDependencies: string[];
+  mcpDependencies: string[];
+} {
+  const skillDependencies: string[] = [];
+  const toolDependencies: string[] = [];
+  const mcpDependencies: string[] = [];
+
+  if (!dependency) {
+    return { skillDependencies, toolDependencies, mcpDependencies };
+  }
+
+  const pushByKind = (kind: string, values: string[]) => {
+    if (kind === "skill" || kind === "skills") {
+      skillDependencies.push(...values);
+    } else if (kind === "tool" || kind === "tools") {
+      toolDependencies.push(...values);
+    } else if (kind === "mcp" || kind === "mcps") {
+      mcpDependencies.push(...values);
+    }
+  };
+
+  for (const [key, rawValue] of Object.entries(dependency)) {
+    const normalizedKey = key.trim().toLowerCase();
+    const normalizedValue = rawValue.trim();
+
+    if (["skill", "skills", "tool", "tools", "mcp", "mcps"].includes(normalizedKey)) {
+      pushByKind(normalizedKey, splitDependencyValue(normalizedValue));
+      continue;
+    }
+
+    const prefixedKey = normalizedKey.match(/^(skill|skills|tool|tools|mcp|mcps)[:/](.+)$/);
+    if (prefixedKey) {
+      pushByKind(prefixedKey[1], splitDependencyValue(prefixedKey[2]));
+      if (normalizedValue && normalizedValue !== "true") {
+        pushByKind(prefixedKey[1], splitDependencyValue(normalizedValue));
+      }
+      continue;
+    }
+
+    const prefixedValue = normalizedValue.match(/^(skill|skills|tool|tools|mcp|mcps)[:/](.+)$/i);
+    if (prefixedValue) {
+      pushByKind(prefixedValue[1].toLowerCase(), splitDependencyValue(prefixedValue[2]));
+    }
+  }
+
+  return {
+    skillDependencies: [...new Set(skillDependencies)],
+    toolDependencies: [...new Set(toolDependencies)],
+    mcpDependencies: [...new Set(mcpDependencies)],
+  };
 }
 
 function splitFrontmatterAndBody(
@@ -197,6 +268,15 @@ export function serializeSkillMd(skill: AgentSkill): string {
     lines.push(`trigger-patterns: [${skill.triggerPatterns.map((p) => `"${p}"`).join(", ")}]`);
   }
   if (skill.autoActivate === false) lines.push("auto-activate: false");
+  if (skill.skillDependencies?.length) {
+    lines.push(`skill-dependencies: [${skill.skillDependencies.join(", ")}]`);
+  }
+  if (skill.toolDependencies?.length) {
+    lines.push(`tool-dependencies: [${skill.toolDependencies.join(", ")}]`);
+  }
+  if (skill.mcpDependencies?.length) {
+    lines.push(`mcp-dependencies: [${skill.mcpDependencies.join(", ")}]`);
+  }
   if (skill.dependency) {
     lines.push("dependency:");
     for (const [k, v] of Object.entries(skill.dependency)) {

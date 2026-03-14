@@ -3,6 +3,13 @@ pub mod openai;
 
 use std::collections::HashSet;
 
+pub fn extract_sse_data_line(line: &str) -> Option<(&str, bool)> {
+    if let Some(data) = line.strip_prefix("data: ") {
+        return Some((data, false));
+    }
+    line.strip_prefix("data:").map(|data| (data, true))
+}
+
 // ── 工具确认状态（用于危险工具执行前的用户确认） ──
 
 pub struct ToolConfirmationState {
@@ -78,7 +85,7 @@ impl StreamCancellation {
 
 #[cfg(test)]
 mod tests {
-    use super::StreamCancellation;
+    use super::{extract_sse_data_line, StreamCancellation};
 
     #[test]
     fn cancel_specific_conversation_only_marks_target() {
@@ -115,5 +122,19 @@ mod tests {
 
         assert!(!state.is_cancelled("conv-a"));
         assert!(state.is_cancelled("conv-b"));
+    }
+
+    #[test]
+    fn extract_sse_data_line_accepts_standard_prefix() {
+        let (data, compat) = extract_sse_data_line("data: {\"ok\":true}").unwrap();
+        assert_eq!(data, "{\"ok\":true}");
+        assert!(!compat);
+    }
+
+    #[test]
+    fn extract_sse_data_line_accepts_compact_prefix() {
+        let (data, compat) = extract_sse_data_line("data:{\"ok\":true}").unwrap();
+        assert_eq!(data, "{\"ok\":true}");
+        assert!(compat);
     }
 }

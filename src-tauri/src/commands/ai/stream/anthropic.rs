@@ -1,6 +1,6 @@
 use tauri::{AppHandle, Emitter, Manager};
 
-use super::StreamCancellation;
+use super::{extract_sse_data_line, StreamCancellation};
 use crate::commands::ai::request::build_anthropic_request;
 use crate::commands::ai::tools::executor::execute_tool;
 use crate::commands::ai::types::{AIConfig, ChatMessage, FunctionCall, ToolCall};
@@ -128,6 +128,9 @@ pub async fn anthropic_stream_loop(
         let mut current_tool_name = String::new();
         let mut current_tool_input = String::new();
         let mut has_tool_use = false;
+        let mut parsed_event_count: usize = 0;
+        let mut compat_data_prefix_count: usize = 0;
+        let mut json_parse_fail_count: usize = 0;
 
         while let Some(chunk) = stream.next().await {
             if cancellation.is_cancelled(conversation_id) {
@@ -147,10 +150,19 @@ pub async fn anthropic_stream_loop(
                         let line = buffer[..pos].trim().to_string();
                         buffer = buffer[pos + 1..].to_string();
 
-                        if !line.starts_with("data: ") {
+                        let Some((data, used_compact_prefix)) = extract_sse_data_line(&line) else {
                             continue;
+                        };
+                        if used_compact_prefix {
+                            compat_data_prefix_count += 1;
+                            if compat_data_prefix_count == 1 {
+                                log::warn!(
+                                    "[anthropic_stream] normalized compact SSE prefix conv={} sample={}",
+                                    conversation_id,
+                                    line.chars().take(160).collect::<String>()
+                                );
+                            }
                         }
-                        let data = &line[6..];
                         let _ = app.emit(
                             "ai-stream-raw",
                             serde_json::json!({
@@ -161,9 +173,21 @@ pub async fn anthropic_stream_loop(
 
                         let parsed: serde_json::Value = match serde_json::from_str(data) {
                             Ok(v) => v,
-                            Err(_) => continue,
+                            Err(e) => {
+                                json_parse_fail_count += 1;
+                                if json_parse_fail_count <= 3 {
+                                    log::warn!(
+                                        "[anthropic_stream] failed to parse SSE data conv={} err={} sample={}",
+                                        conversation_id,
+                                        e,
+                                        data.chars().take(200).collect::<String>()
+                                    );
+                                }
+                                continue;
+                            }
                         };
 
+                        parsed_event_count += 1;
                         let event_type = parsed["type"].as_str().unwrap_or("");
 
                         match event_type {
@@ -251,6 +275,13 @@ pub async fn anthropic_stream_loop(
         }
 
         if pending_tool_calls.is_empty() {
+            log::info!(
+                "[anthropic_stream] done conv={} parsed_events={} compat_prefix={} json_parse_failures={}",
+                conversation_id,
+                parsed_event_count,
+                compat_data_prefix_count,
+                json_parse_fail_count
+            );
             let _ = app.emit(
                 "ai-stream-done",
                 serde_json::json!({ "conversation_id": conversation_id }),
@@ -323,6 +354,10 @@ pub async fn anthropic_stream_loop(
     let _ = app.emit(
         "ai-stream-done",
         serde_json::json!({ "conversation_id": conversation_id }),
+    );
+    log::info!(
+        "[anthropic_stream] max rounds reached conv={} final_emit_done=true",
+        conversation_id
     );
     cancellation.clear(conversation_id);
     Ok(())

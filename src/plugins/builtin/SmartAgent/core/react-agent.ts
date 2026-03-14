@@ -153,6 +153,20 @@ function normalizeFCCompatibilityKey(key?: string): string | null {
   return normalized || null;
 }
 
+function isFCCompatibilityErrorMessage(message: string): boolean {
+  const normalized = message.trim();
+  if (!normalized) return false;
+  if (normalized.startsWith("FC_INCOMPATIBLE")) return true;
+
+  return /(?:function calling|tool(?:_calls?| calling| use| choice)?).{0,48}(?:not supported|unsupported|unavailable|disabled|invalid|forbidden)|does not support.{0,48}(?:tools|tool use|function calling)|unknown parameter.{0,48}(?:tools|tool_choice)|extra inputs? are not permitted.{0,48}(?:tools|tool_choice)|tool_choice.{0,32}(?:not supported|unsupported|invalid)/i
+    .test(normalized);
+}
+
+function isTransportOrTimeoutErrorMessage(message: string): boolean {
+  return /(timeout|timed out|超时|卡住|请求失败|网络|network|econn|socket hang up|connection reset|流读取错误|503|504|502|rate limit|overloaded|temporarily unavailable)/i
+    .test(message);
+}
+
 function escapeRawControlCharsInJsonStrings(input: string): string {
   let result = "";
   let inString = false;
@@ -2130,7 +2144,7 @@ ${s.taskStrategy}
   /**
    * 执行 Agent 推理循环
    * 优先使用结构化 Function Calling（消除格式解析失败），
-   * 如果 streamWithTools 不可用或首次调用失败则降级为文本 ReAct。
+   * 只有在明确确认 FC 不兼容时才降级为文本 ReAct。
    */
   async run(userInput: string, signal?: AbortSignal, images?: string[]): Promise<string> {
     if (this.running) throw new Error("Agent is already running");
@@ -2159,10 +2173,11 @@ ${s.taskStrategy}
         if ((e as Error).message === "Aborted") throw e;
 
         const errMsg = (e as Error).message || "";
-        const isFCIncompatible = errMsg.startsWith("FC_INCOMPATIBLE");
-        const isTransportOrTimeoutError = /(timeout|timed out|超时|卡住|请求失败|网络|network|econn|api 错误|流读取错误)/i
-          .test(errMsg);
-        const shouldDowngrade = isFCIncompatible || (!isTransportOrTimeoutError && this.fcAvailable === null);
+        const isFCIncompatible = isFCCompatibilityErrorMessage(errMsg);
+        const isTransportOrTimeoutError = isTransportOrTimeoutErrorMessage(
+          errMsg,
+        );
+        const shouldDowngrade = isFCIncompatible;
 
         if (isFCIncompatible) {
           this.fcAvailable = false;
@@ -2179,9 +2194,6 @@ ${s.taskStrategy}
             level: ErrorLevel.Warning,
             silent: true,
           });
-          if (!isFCIncompatible) {
-            this.fcAvailable = false;
-          }
           this.addStep({
             type: "observation",
             content: "Function Calling 模式不可用，已自动切换至文本 ReAct 模式。",
@@ -2194,6 +2206,13 @@ ${s.taskStrategy}
           } finally {
             this.config.maxIterations = prevMaxIterations;
           }
+        }
+        if (!isTransportOrTimeoutError) {
+          handleError(e, {
+            context: "ReAct Agent Function Calling 执行失败（保留结构化模式）",
+            level: ErrorLevel.Warning,
+            silent: true,
+          });
         }
         throw e;
       }

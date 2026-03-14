@@ -40,7 +40,7 @@ export interface ActorRunContext {
   contextMessages: Array<{ role: "user" | "assistant"; content: string }>;
 
   // ── Callbacks (set by middlewares) ──
-  notifyToolCalled?: (...args: unknown[]) => void;
+  notifyToolCalled?: (toolName: string) => void;
   inboxDrain?: () => InboxMessage[];
 
   // ── Retry (set by ModelRetryMiddleware) ──

@@ -154,8 +154,11 @@ export const useSkillStore = create<SkillStoreState>((set, get) => ({
  */
 const EMPTY_SKILL_CONTEXT: ResolvedSkillContext = {
   activeSkillIds: [],
+  visibleSkillIds: [],
   mergedSystemPrompt: "",
   mergedToolFilter: {},
+  dependencyToolNames: [],
+  dependencyMcpNames: [],
 };
 
 /**

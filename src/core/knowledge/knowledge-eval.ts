@@ -155,12 +155,19 @@ Rules:
 - Return ONLY valid JSON array`;
 
       try {
-        const result = await ai.chat([
-          { role: "system", content: "You generate QA pairs for RAG evaluation. Return only JSON." },
-          { role: "user", content: prompt },
-        ], { temperature: 0.3 });
+        const result = await ai.chat({
+          messages: [
+            {
+              role: "system",
+              content: "You generate QA pairs for RAG evaluation. Return only JSON.",
+            },
+            { role: "user", content: prompt },
+          ],
+          temperature: 0.3,
+          skipTools: true,
+        });
 
-        const text = String(result);
+        const text = result.content;
         const jsonMatch = text.match(/\[[\s\S]*\]/);
         if (jsonMatch) {
           const pairs = JSON.parse(jsonMatch[0]) as Array<{ query: string; answer: string }>;

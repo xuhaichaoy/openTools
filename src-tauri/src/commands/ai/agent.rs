@@ -4,7 +4,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 
 use super::request::{build_anthropic_request, build_api_request};
-use super::stream::StreamCancellation;
+use super::stream::{extract_sse_data_line, StreamCancellation};
 use super::types::{AIConfig, ChatMessage, FunctionCall, ToolCall};
 use crate::error::AppError;
 
@@ -346,10 +346,9 @@ async fn agent_stream_openai(
                         }),
                     );
 
-                    if !line.starts_with("data: ") {
+                    let Some((data, _)) = extract_sse_data_line(&line) else {
                         continue;
-                    }
-                    let data = &line[6..];
+                    };
                     if data == "[DONE]" {
                         if !pending_tool_calls.is_empty() {
                             for (idx, args) in &tc_args_buffer {
@@ -649,6 +648,9 @@ async fn agent_stream_anthropic(
     let mut line_count: usize = 0;
     let mut byte_count: usize = 0;
     let mut text_chunk_count: usize = 0;
+    let mut parsed_event_count: usize = 0;
+    let mut compat_data_prefix_count: usize = 0;
+    let mut json_parse_fail_count: usize = 0;
 
     loop {
         if cancellation.is_cancelled(conversation_id) {
@@ -728,16 +730,37 @@ async fn agent_stream_anthropic(
                         }),
                     );
 
-                    if !line.starts_with("data: ") {
+                    let Some((data, used_compact_prefix)) = extract_sse_data_line(&line) else {
                         continue;
+                    };
+                    if used_compact_prefix {
+                        compat_data_prefix_count += 1;
+                        if compat_data_prefix_count == 1 {
+                            log::warn!(
+                                "[ai_agent_stream/anthropic] normalized compact SSE prefix conv={} sample={}",
+                                conversation_id,
+                                line.chars().take(160).collect::<String>()
+                            );
+                        }
                     }
-                    let data = &line[6..];
 
                     let parsed: serde_json::Value = match serde_json::from_str(data) {
                         Ok(v) => v,
-                        Err(_) => continue,
+                        Err(e) => {
+                            json_parse_fail_count += 1;
+                            if json_parse_fail_count <= 3 {
+                                log::warn!(
+                                    "[ai_agent_stream/anthropic] failed to parse SSE data conv={} err={} sample={}",
+                                    conversation_id,
+                                    e,
+                                    data.chars().take(200).collect::<String>()
+                                );
+                            }
+                            continue;
+                        }
                     };
 
+                    parsed_event_count += 1;
                     let event_type = parsed["type"].as_str().unwrap_or("");
 
                     match event_type {
@@ -882,14 +905,17 @@ async fn agent_stream_anthropic(
     }
 
     log::info!(
-        "[ai_agent_stream/anthropic] done conv={} elapsed={}ms chunks={} lines={} bytes={} text_chunks={} tool_calls={}",
+        "[ai_agent_stream/anthropic] done conv={} elapsed={}ms chunks={} lines={} bytes={} text_chunks={} tool_calls={} parsed_events={} compat_prefix={} json_parse_failures={}",
         conversation_id,
         started_at.elapsed().as_millis(),
         chunk_count,
         line_count,
         byte_count,
         text_chunk_count,
-        pending_tool_calls.len()
+        pending_tool_calls.len(),
+        parsed_event_count,
+        compat_data_prefix_count,
+        json_parse_fail_count
     );
     emit_stream_done(app, conversation_id);
     cancellation.clear(conversation_id);

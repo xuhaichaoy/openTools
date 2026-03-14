@@ -14,6 +14,10 @@ export function mergeCloudAIConfig(
     typeof cloudConfig.team_config_id === "string"
       ? cloudConfig.team_config_id
       : undefined;
+  const cloudProtocol =
+    cloudConfig.protocol === "openai" || cloudConfig.protocol === "anthropic"
+      ? cloudConfig.protocol
+      : undefined;
   const cloudActiveOwnKeyId =
     typeof cloudConfig.active_own_key_id === "string"
       ? cloudConfig.active_own_key_id
@@ -46,6 +50,7 @@ export function mergeCloudAIConfig(
       cloudSource === "team"
         ? cloudTeamConfigId ?? localConfig.team_config_id
         : undefined,
+    protocol: cloudProtocol ?? localConfig.protocol,
     active_own_key_id: cloudActiveOwnKeyId ?? localConfig.active_own_key_id,
     _syncVersion: version,
   };

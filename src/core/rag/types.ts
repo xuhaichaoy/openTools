@@ -6,7 +6,20 @@
 export type DocFormat = 'txt' | 'md' | 'pdf' | 'json' | 'csv' | 'html'
 
 /** 文档状态 */
-export type DocStatus = 'pending' | 'processing' | 'indexed' | 'indexed_full' | 'indexed_keyword' | 'error'
+export type DocStatus =
+  | 'pending'
+  | 'uploaded'
+  | 'parsing'
+  | 'parsed'
+  | 'indexing'
+  | 'processing'
+  | 'indexed'
+  | 'indexed_full'
+  | 'indexed_keyword'
+  | 'duplicate'
+  | 'error'
+  | 'error_parsing'
+  | 'error_indexing'
 
 /** 文档来源类型 */
 export type DocSourceType = 'local' | 'personal' | 'team'
@@ -24,6 +37,7 @@ export interface KnowledgeDoc {
   createdAt: number       // 导入时间戳
   updatedAt: number
   errorMsg?: string       // 处理失败时的错误信息
+  contentHash?: string
   tags?: string[]         // 用户自定义标签
   sourceType: DocSourceType  // 文档来源
   sourceId?: string          // 来源 ID（团队文档时为 team_id）

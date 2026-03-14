@@ -99,6 +99,36 @@ const OPENCLAW_MODEL_CAPABILITY_RULES: &[ModelCapabilityRule] = &[
     },
 ];
 
+const TEXT_ONLY_HINTS: &[&str] = &[
+    "embedding",
+    "rerank",
+    "re-rank",
+    "transcribe",
+    "transcription",
+    "whisper",
+    "tts",
+    "speech",
+    "asr",
+    "coder",
+];
+
+const OPENAI_VISION_HINTS: &[&str] = &[
+    "gpt-4o",
+    "gpt-4.1",
+    "claude",
+    "gemini",
+    "kimi",
+    "qwen-vl",
+    "qwen2-vl",
+    "qwen2.5-vl",
+    "qwen3.5-plus",
+    "glm-4v",
+    "glm-4.1v",
+    "minimax-vl",
+];
+
+const ANTHROPIC_VISION_HINTS: &[&str] = &["claude", "minimax-vl"];
+
 fn normalize_model_name(model: &str) -> String {
     let mut normalized = String::with_capacity(model.len());
     let mut previous_was_dash = false;
@@ -133,23 +163,18 @@ fn matches_rule(rule: &ModelCapabilityRule, model: &str, protocol: AIProtocol) -
     model.contains(rule.pattern)
 }
 
+fn matches_any_pattern(model: &str, patterns: &[&str]) -> bool {
+    patterns.iter().any(|pattern| model.contains(pattern))
+}
+
 fn fallback_supports_image_input(model: &str, protocol: AIProtocol) -> bool {
+    if matches_any_pattern(model, TEXT_ONLY_HINTS) {
+        return false;
+    }
+
     match protocol {
-        AIProtocol::Anthropic => model.contains("claude") || model.contains("minimax-vl"),
-        AIProtocol::OpenAI => {
-            model.contains("gpt-4")
-                || model.contains("gpt-4o")
-                || model.contains("gpt-4.1")
-                || model.contains("claude")
-                || model.contains("gemini")
-                || model.contains("kimi")
-                || model.contains("qwen-vl")
-                || model.contains("qwen2-vl")
-                || model.contains("qwen2.5-vl")
-                || model.contains("glm-4v")
-                || model.contains("glm-4.1v")
-                || model.contains("minimax-vl")
-        }
+        AIProtocol::Anthropic => matches_any_pattern(model, ANTHROPIC_VISION_HINTS),
+        AIProtocol::OpenAI => matches_any_pattern(model, OPENAI_VISION_HINTS),
     }
 }
 
@@ -222,6 +247,35 @@ mod tests {
     fn falls_back_for_generic_multimodal_models() {
         assert_eq!(
             resolve_model_capabilities("gpt-4o", AIProtocol::OpenAI),
+            ModelCapabilities {
+                supports_image_input: true,
+                source: CapabilitySource::Fallback,
+            }
+        );
+    }
+
+    #[test]
+    fn text_only_hints_override_broad_multimodal_family_matches() {
+        assert_eq!(
+            resolve_model_capabilities("gpt-4o-mini-transcribe", AIProtocol::OpenAI),
+            ModelCapabilities {
+                supports_image_input: false,
+                source: CapabilitySource::Fallback,
+            }
+        );
+        assert_eq!(
+            resolve_model_capabilities("text-embedding-3-large", AIProtocol::OpenAI),
+            ModelCapabilities {
+                supports_image_input: false,
+                source: CapabilitySource::Fallback,
+            }
+        );
+    }
+
+    #[test]
+    fn keeps_anthropic_family_fallback_for_claude_models() {
+        assert_eq!(
+            resolve_model_capabilities("Claude 3.7 Sonnet", AIProtocol::Anthropic),
             ModelCapabilities {
                 supports_image_input: true,
                 source: CapabilitySource::Fallback,

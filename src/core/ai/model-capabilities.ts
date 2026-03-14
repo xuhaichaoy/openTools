@@ -27,6 +27,39 @@ const OPENCLAW_MODEL_CAPABILITY_RULES: ReadonlyArray<ModelCapabilityRule> = [
   { pattern: "kimi-k2.5", protocols: ["openai"], supportsImageInput: true, source: "openclaw" },
 ];
 
+const TEXT_ONLY_HINTS = [
+  "embedding",
+  "rerank",
+  "re-rank",
+  "transcribe",
+  "transcription",
+  "whisper",
+  "tts",
+  "speech",
+  "asr",
+  "coder",
+];
+
+const OPENAI_VISION_HINTS = [
+  "gpt-4o",
+  "gpt-4.1",
+  "claude",
+  "gemini",
+  "kimi",
+  "qwen-vl",
+  "qwen2-vl",
+  "qwen2.5-vl",
+  "qwen3.5-plus",
+  "glm-4v",
+  "glm-4.1v",
+  "minimax-vl",
+];
+
+const ANTHROPIC_VISION_HINTS = [
+  "claude",
+  "minimax-vl",
+];
+
 function normalizeModel(model: string): string {
   return model
     .trim()
@@ -51,23 +84,16 @@ function matchesRule(
   return model.includes(rule.pattern);
 }
 
-function fallbackSupportsImageInput(model: string, protocol: AIProtocol): boolean {
-  if (protocol === "anthropic") {
-    return model.includes("claude") || model.includes("minimax-vl");
-  }
+function matchesAnyPattern(model: string, patterns: readonly string[]): boolean {
+  return patterns.some((pattern) => model.includes(pattern));
+}
 
-  return model.includes("gpt-4")
-    || model.includes("gpt-4o")
-    || model.includes("gpt-4.1")
-    || model.includes("claude")
-    || model.includes("gemini")
-    || model.includes("kimi")
-    || model.includes("qwen-vl")
-    || model.includes("qwen2-vl")
-    || model.includes("qwen2.5-vl")
-    || model.includes("glm-4v")
-    || model.includes("glm-4.1v")
-    || model.includes("minimax-vl");
+function fallbackSupportsImageInput(model: string, protocol: AIProtocol): boolean {
+  if (matchesAnyPattern(model, TEXT_ONLY_HINTS)) return false;
+
+  return protocol === "anthropic"
+    ? matchesAnyPattern(model, ANTHROPIC_VISION_HINTS)
+    : matchesAnyPattern(model, OPENAI_VISION_HINTS);
 }
 
 export function resolveModelCapabilities(

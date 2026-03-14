@@ -1,11 +1,23 @@
 import { memo, useCallback, useRef, useState, useEffect, useMemo } from "react";
-import { User, Bot, Copy, Check, RefreshCw, Pencil, X, ArrowRight } from "lucide-react";
+import {
+  User,
+  Bot,
+  Copy,
+  Check,
+  RefreshCw,
+  Pencil,
+  X,
+  ArrowRight,
+  ChevronUp,
+  ChevronDown,
+} from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { useAIStore } from "@/store/ai-store";
 import { stripReasoningTagsFromText } from "@/core/ai/reasoning-tag-stream";
+import { buildAskAgentHandoff } from "@/core/ai/ask-agent-handoff";
 import { ToolCallDisplay } from "./ToolCallDisplay";
 import { routeToAICenter } from "@/core/ai/ai-center-routing";
 import type { ChatMessage } from "@/core/ai/types";
@@ -495,19 +507,18 @@ export const MessageBubble = memo(function MessageBubble({
                 <button
                   onClick={() => {
                     const aiState = useAIStore.getState();
-                    const lastMsgs = aiState.conversations
-                      .flatMap((c) => c.messages).slice(-6);
-                    const summary = lastMsgs
-                      .map((m) => `[${m.role === "user" ? "用户" : "助手"}]: ${m.content.slice(0, 400)}`)
-                      .join("\n");
+                    const currentConversation = aiState.conversations.find(
+                      (conversation) => conversation.id === aiState.currentConversationId,
+                    ) || null;
+                    const handoff = buildAskAgentHandoff(currentConversation, {
+                      maxMessages: 6,
+                      maxCharsPerMessage: 400,
+                    });
+                    if (!handoff) return;
                     routeToAICenter({
                       mode: "agent",
                       source: "ask_continue_to_agent",
-                      agentHandoff: {
-                        query: `以下是之前的对话上下文，请基于此继续执行任务：\n\n${summary}`,
-                        sourceMode: "ask",
-                        sourceSessionId: aiState.currentConversationId ?? undefined,
-                      },
+                      agentHandoff: handoff,
                       navigate: false,
                     });
                   }}

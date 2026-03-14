@@ -130,7 +130,7 @@ export class LocalAgentBridge implements AgentBridge {
 
     const skillCtx = await loadAndResolveSkills(task, role?.id);
     const skillsPrompt = skillCtx.mergedSystemPrompt || undefined;
-    const hasCodingWorkflowSkill = skillCtx.activeSkillIds.includes("builtin-coding-workflow");
+    const hasCodingWorkflowSkill = skillCtx.visibleSkillIds.includes("builtin-coding-workflow");
     const toolsAfterSkills = applySkillToolFilter(tools, skillCtx.mergedToolFilter);
 
     const collectedSteps: AgentStep[] = [];

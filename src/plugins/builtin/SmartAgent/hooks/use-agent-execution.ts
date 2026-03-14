@@ -285,7 +285,7 @@ export function useAgentExecution({
 
       const skillContext = await loadAndResolveSkills(query);
       const skillsPrompt = skillContext.mergedSystemPrompt || undefined;
-      const hasCodingWorkflowSkill = skillContext.activeSkillIds.includes("builtin-coding-workflow");
+      const hasCodingWorkflowSkill = skillContext.visibleSkillIds.includes("builtin-coding-workflow");
       const toolsForRun = applySkillToolFilter(
         availableTools,
         skillContext.mergedToolFilter,

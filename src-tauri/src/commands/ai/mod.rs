@@ -30,7 +30,8 @@ fn should_force_rag_for_query(query: &str) -> bool {
 
     // 产品知识问答兜底：即便用户未开启自动检索，也先做一次预检索，避免模型遗漏工具调用。
     let name_lower = crate::branding::APP_NAME.to_lowercase();
-    let has_product_name = q.contains(&name_lower) || q.contains("51toolbox") || q.contains("mtools");
+    let has_product_name =
+        q.contains(&name_lower) || q.contains("51toolbox") || q.contains("mtools");
     if !has_product_name {
         return false;
     }
@@ -420,27 +421,17 @@ pub async fn ai_chat_stream(
             let rag_app = app.clone();
             let rag_query = user_query.clone();
             let rag_future = async move {
-                match super::rag::rag_search(
-                    rag_app.clone(),
-                    rag_query.clone(),
-                    Some(3),
-                    None,
-                )
-                .await
+                match super::rag::rag_search(rag_app.clone(), rag_query.clone(), Some(3), None)
+                    .await
                 {
                     Ok(r) => Ok(r),
-                    Err(_) => {
-                        super::rag::rag_keyword_search(rag_app, rag_query, Some(3)).await
-                    }
+                    Err(_) => super::rag::rag_keyword_search(rag_app, rag_query, Some(3)).await,
                 }
             };
 
             const RAG_TIMEOUT_SECS: u64 = 3;
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(RAG_TIMEOUT_SECS),
-                rag_future,
-            )
-            .await
+            match tokio::time::timeout(std::time::Duration::from_secs(RAG_TIMEOUT_SECS), rag_future)
+                .await
             {
                 Ok(Ok(results)) if !results.is_empty() => {
                     let mut rag_context = String::from(
@@ -470,7 +461,10 @@ pub async fn ai_chat_stream(
                     log::warn!("RAG 预检索失败: {}", e);
                 }
                 Err(_) => {
-                    log::warn!("RAG 预检索超时（{}s），跳过以避免阻塞 LLM 请求", RAG_TIMEOUT_SECS);
+                    log::warn!(
+                        "RAG 预检索超时（{}s），跳过以避免阻塞 LLM 请求",
+                        RAG_TIMEOUT_SECS
+                    );
                 }
             }
         }

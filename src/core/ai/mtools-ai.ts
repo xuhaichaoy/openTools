@@ -707,6 +707,7 @@ export function createMToolsAI(): MToolsAI {
       let fullContent = "";
       const reasoningStream = new AssistantReasoningStreamNormalizer();
       let resolvedToolCalls: AIToolCall[] | null = null;
+      let hadModelResponse = false;
 
       return new Promise((resolve, reject) => {
         const startedAt = Date.now();
@@ -815,11 +816,13 @@ export function createMToolsAI(): MToolsAI {
                     event.payload.content,
                   );
                   if (parsed.visible) {
+                    hadModelResponse = true;
                     fullContent += parsed.visible;
                     traceStreamEvent(conversationId, "chunk", parsed.visible);
                     options.onChunk(parsed.visible);
                   }
                   if (parsed.thinking) {
+                    hadModelResponse = true;
                     traceStreamEvent(
                       conversationId,
                       "thinking_inline",
@@ -871,11 +874,13 @@ export function createMToolsAI(): MToolsAI {
                 }
                 const remaining = reasoningStream.flush();
                 if (remaining.visible) {
+                  hadModelResponse = true;
                   fullContent += remaining.visible;
                   traceStreamEvent(conversationId, "chunk", remaining.visible);
                   options.onChunk(remaining.visible);
                 }
                 if (remaining.thinking) {
+                  hadModelResponse = true;
                   traceStreamEvent(
                     conversationId,
                     "thinking_inline",
@@ -887,6 +892,20 @@ export function createMToolsAI(): MToolsAI {
                   safeResolve({ type: "tool_calls", toolCalls: resolvedToolCalls });
                 } else {
                   if (!fullContent.trim()) {
+                    if (hadModelResponse) {
+                      aiLog.warn(
+                        "[streamWithTools] model responded without visible content/tool calls",
+                        {
+                          conversationId,
+                          elapsedMs: Date.now() - startedAt,
+                          chunkCount,
+                          chunkChars,
+                        },
+                      );
+                      options.onDone?.("");
+                      safeResolve({ type: "content", content: "" });
+                      return;
+                    }
                     const emptyErr = new Error("FC_INCOMPATIBLE: ai_agent_stream 返回空响应（无 chunk 且无 tool_calls）");
                     aiLog.error("[streamWithTools] empty stream result", {
                       conversationId,
@@ -923,6 +942,7 @@ export function createMToolsAI(): MToolsAI {
                 }
                 const remaining = reasoningStream.flush();
                 if (remaining.thinking) {
+                  hadModelResponse = true;
                   traceStreamEvent(
                     conversationId,
                     "thinking_inline",
@@ -943,6 +963,7 @@ export function createMToolsAI(): MToolsAI {
                   );
                   traceStreamEvent(conversationId, "thinking", parsed.thinking);
                   if (parsed.thinking) {
+                    hadModelResponse = true;
                     options.onThinking?.(parsed.thinking);
                   }
                 }

@@ -64,9 +64,23 @@ export function AICenter({
     }
   }, [setMode]);
 
-  // 每次进入 AI 中心时从磁盘恢复模型选择，避免离开再回来后显示被重置
+  // 每次进入 AI 中心时按顺序恢复配置与自有模型，避免 active_own_key_id 被早到的 ownKeys 回退覆盖。
   useEffect(() => {
-    useAIStore.getState().loadConfig();
+    let cancelled = false;
+
+    useAIStore
+      .getState()
+      .loadConfig()
+      .then(() => {
+        if (!cancelled) {
+          return useAIStore.getState().loadOwnKeys();
+        }
+        return undefined;
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const [mounted, setMounted] = useState({ agent: mode === "agent", cluster: mode === "cluster", dialog: mode === "dialog" });

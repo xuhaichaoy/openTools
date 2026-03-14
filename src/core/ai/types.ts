@@ -16,6 +16,10 @@ export interface ChatMessage {
   thinkingStreaming?: boolean;
   toolCalls?: ToolCallInfo[];
   images?: string[];
+  /** 用户消息附带的非图片上下文块，供重发/重生成复用 */
+  contextPrefix?: string;
+  /** Ask -> Agent 等跨模式流转时可重建的原始附件路径 */
+  attachmentPaths?: string[];
   /** Ask 模式检测到复杂工具调用后，建议用户升级到 Agent 模式 */
   suggestAgentUpgrade?: boolean;
 }

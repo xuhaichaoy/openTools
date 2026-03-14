@@ -705,12 +705,19 @@ export async function llmExtractMemories(
     const ai = getMToolsAI();
     const prompt = MEMORY_EXTRACTION_PROMPT.replace("{conversation}", truncated);
 
-    const result = await ai.chat([
-      { role: "system", content: "You extract structured memory facts from conversations. Respond with valid JSON only." },
-      { role: "user", content: prompt },
-    ], { temperature: 0.1 });
+    const result = await ai.chat({
+      messages: [
+        {
+          role: "system",
+          content: "You extract structured memory facts from conversations. Respond with valid JSON only.",
+        },
+        { role: "user", content: prompt },
+      ],
+      temperature: 0.1,
+      skipTools: true,
+    });
 
-    const text = typeof result === "string" ? result : String(result);
+    const text = result.content;
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return fallbackExtract(truncated, opts);
 

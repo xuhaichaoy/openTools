@@ -188,4 +188,56 @@ describe("ReActAgent FC compatibility cache", () => {
     expect(capturedContent).toContain('<button class="cta">Run</button>');
     expect(fcCalls).toBe(2);
   });
+
+  it("should not downgrade or cache on generic FC execution errors", async () => {
+    let fcCalls = 0;
+    const ai = createMockAI(async () => {
+      fcCalls += 1;
+      throw new Error("unexpected schema mismatch");
+    });
+
+    const key = "fc-generic-error";
+
+    const first = new ReActAgent(ai, noopTools, {
+      maxIterations: 2,
+      fcCompatibilityKey: key,
+    });
+
+    await expect(first.run("first")).rejects.toThrow("unexpected schema mismatch");
+    expect(fcCalls).toBe(1);
+
+    const second = new ReActAgent(ai, noopTools, {
+      maxIterations: 2,
+      fcCompatibilityKey: key,
+    });
+
+    await expect(second.run("second")).rejects.toThrow("unexpected schema mismatch");
+    expect(fcCalls).toBe(2);
+  });
+
+  it("should downgrade and cache when provider explicitly reports tool incompatibility", async () => {
+    let fcCalls = 0;
+    const ai = createMockAI(async () => {
+      fcCalls += 1;
+      throw new Error("tools are not supported for this model");
+    });
+
+    const key = "fc-provider-incompatible";
+
+    const first = new ReActAgent(ai, noopTools, {
+      maxIterations: 2,
+      fcCompatibilityKey: key,
+    });
+    const firstAnswer = await first.run("first");
+    expect(firstAnswer).toContain("文本模式回答");
+    expect(fcCalls).toBe(1);
+
+    const second = new ReActAgent(ai, noopTools, {
+      maxIterations: 2,
+      fcCompatibilityKey: key,
+    });
+    const secondAnswer = await second.run("second");
+    expect(secondAnswer).toContain("文本模式回答");
+    expect(fcCalls).toBe(1);
+  });
 });

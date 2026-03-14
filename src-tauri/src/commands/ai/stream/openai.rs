@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 
-use super::StreamCancellation;
+use super::{extract_sse_data_line, StreamCancellation};
 use crate::commands::ai::request::build_api_request;
 use crate::commands::ai::tools::executor::execute_tool;
 use crate::commands::ai::types::{AIConfig, ChatMessage, FunctionCall, ToolCall};
@@ -199,10 +199,9 @@ pub async fn openai_stream_loop(
                     let line = buffer[..pos].trim().to_string();
                     buffer = buffer[pos + 1..].to_string();
 
-                    if !line.starts_with("data: ") {
+                    let Some((data, _)) = extract_sse_data_line(&line) else {
                         continue;
-                    }
-                    let data = &line[6..];
+                    };
                     if data == "[DONE]" {
                         if !pending_tool_calls.is_empty() {
                             for (idx, args) in &tc_args_buffer {

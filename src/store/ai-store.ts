@@ -83,7 +83,12 @@ interface AIState {
 
   createConversation: () => string;
   getCurrentConversation: () => Conversation | null;
-  sendMessage: (content: string, images?: string[], contextPrefix?: string) => Promise<void>;
+  sendMessage: (
+    content: string,
+    images?: string[],
+    contextPrefix?: string,
+    attachmentPaths?: string[],
+  ) => Promise<void>;
   setCurrentConversation: (id: string) => void;
   deleteConversation: (id: string) => void;
   renameConversation: (id: string, title: string) => void;
@@ -451,10 +456,10 @@ export const useAIStore = create<AIState>((set, get) => ({
     );
     if (!conversation) return;
 
-    const { keptMessages, lastUserContent } = prepareRegenerateMessages(
+    const { keptMessages, lastUserMessage } = prepareRegenerateMessages(
       conversation.messages,
     );
-    if (!lastUserContent) return;
+    if (!lastUserMessage?.content) return;
 
     set((s) => ({
       conversations: s.conversations.map((c) =>
@@ -462,7 +467,12 @@ export const useAIStore = create<AIState>((set, get) => ({
       ),
     }));
 
-    await get().sendMessage(lastUserContent);
+    await get().sendMessage(
+      lastUserMessage.content,
+      lastUserMessage.images,
+      lastUserMessage.contextPrefix,
+      lastUserMessage.attachmentPaths,
+    );
   },
 
   editAndResend: async (messageId: string, newContent: string) => {
@@ -475,8 +485,9 @@ export const useAIStore = create<AIState>((set, get) => ({
     );
     if (!conversation) return;
 
-    const keptMessages = prepareEditMessages(conversation.messages, messageId);
-    if (!keptMessages) return;
+    const prepared = prepareEditMessages(conversation.messages, messageId);
+    if (!prepared?.targetMessage || prepared.targetMessage.role !== "user") return;
+    const { keptMessages, targetMessage } = prepared;
 
     set((s) => ({
       conversations: s.conversations.map((c) =>
@@ -484,10 +495,20 @@ export const useAIStore = create<AIState>((set, get) => ({
       ),
     }));
 
-    await get().sendMessage(newContent);
+    await get().sendMessage(
+      newContent,
+      targetMessage.images,
+      targetMessage.contextPrefix,
+      targetMessage.attachmentPaths,
+    );
   },
 
-  sendMessage: async (content: string, images?: string[], contextPrefix?: string) => {
+  sendMessage: async (
+    content: string,
+    images?: string[],
+    contextPrefix?: string,
+    attachmentPaths?: string[],
+  ) => {
     const state = get();
     let conversationId = state.currentConversationId;
 
@@ -501,6 +522,8 @@ export const useAIStore = create<AIState>((set, get) => ({
       content,
       timestamp: Date.now(),
       ...(images && images.length > 0 ? { images } : {}),
+      ...(contextPrefix ? { contextPrefix } : {}),
+      ...(attachmentPaths && attachmentPaths.length > 0 ? { attachmentPaths } : {}),
     };
 
     const assistantMessage: ChatMessage = {
@@ -549,8 +572,8 @@ export const useAIStore = create<AIState>((set, get) => ({
       .filter((m) => !m.streaming)
       .map((m) => {
         const isCurrentUser = m.id === userMessage.id;
-        const msgContent = isCurrentUser && contextPrefix
-          ? `${contextPrefix}\n\n---\n\n${m.content}`
+        const msgContent = isCurrentUser && m.contextPrefix
+          ? `${m.contextPrefix}\n\n---\n\n${m.content}`
           : m.content;
         return {
           role: m.role,

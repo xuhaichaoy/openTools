@@ -9,6 +9,7 @@ import { useRAGStore } from "@/store/rag-store";
 import { useAuthStore } from "@/store/auth-store";
 import { useTeamStore } from "@/store/team-store";
 import { useKbStore, type KbScope, type KbCloudDoc } from "@/store/kb-store";
+import type { KnowledgeDoc } from "@/core/rag/types";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { useDragWindow } from "@/hooks/useDragWindow";
@@ -213,11 +214,11 @@ function TreeItem({
 function IndexedDocsPanel() {
   const {
     docs, stats, isLoading, isIndexing,
-    loadDocs, importDoc, removeDoc, reindexDoc, loadStats,
+    loadDocs, importDoc, parseDoc, indexDoc, retryDoc, removeDoc, reindexDoc, loadStats,
   } = useRAGStore();
   const { teams } = useTeamStore();
 
-  const handleImport = async () => {
+  const handleImport = async (autoIndex: boolean) => {
     try {
       const selected = await open({
         multiple: true,
@@ -228,7 +229,7 @@ function IndexedDocsPanel() {
       if (selected) {
         const paths = Array.isArray(selected) ? selected : [selected];
         for (const filePath of paths) {
-          if (filePath) await importDoc(filePath);
+          if (filePath) await importDoc(filePath, undefined, { autoIndex });
         }
       }
     } catch (e) {
@@ -245,20 +246,67 @@ function IndexedDocsPanel() {
   const getStatusIcon = (status: string) => {
     switch (status) {
       case "indexed_full": return <CheckCircle className="w-3.5 h-3.5 text-green-400" />;
-      case "indexed":
       case "indexed_keyword": return <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />;
-      case "processing": return <Loader2 className="w-3.5 h-3.5 text-yellow-400 animate-spin" />;
-      case "error": return <AlertCircle className="w-3.5 h-3.5 text-red-400" />;
+      case "indexed": return <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />;
+      case "parsing":
+      case "indexing":
+      case "processing":
+        return <Loader2 className="w-3.5 h-3.5 text-yellow-400 animate-spin" />;
+      case "parsed":
+        return <Eye className="w-3.5 h-3.5 text-sky-400" />;
+      case "duplicate":
+        return <AlertCircle className="w-3.5 h-3.5 text-orange-400" />;
+      case "error":
+      case "error_parsing":
+      case "error_indexing":
+        return <AlertCircle className="w-3.5 h-3.5 text-red-400" />;
       default: return <FileText className="w-3.5 h-3.5 text-gray-400" />;
     }
   };
 
   const getIndexStatusLabel = (status: string) => {
     if (status === "indexed_full") return { text: "全量索引", color: "#22C55E" };
-    if (status === "indexed" || status === "indexed_keyword") return { text: "关键词", color: EMERALD };
+    if (status === "indexed" || status === "indexed_keyword") return { text: "关键词索引", color: EMERALD };
+    if (status === "uploaded") return { text: "已上传", color: "#9CA3AF" };
+    if (status === "parsing") return { text: "解析中", color: "#EAB308" };
+    if (status === "parsed") return { text: "待入库", color: "#38BDF8" };
+    if (status === "indexing") return { text: "入库中", color: "#F59E0B" };
     if (status === "processing") return { text: "处理中", color: "#EAB308" };
-    if (status === "error") return { text: "失败", color: "#EF4444" };
+    if (status === "duplicate") return { text: "重复内容", color: "#FB923C" };
+    if (status === "error" || status === "error_parsing") return { text: "解析失败", color: "#EF4444" };
+    if (status === "error_indexing") return { text: "入库失败", color: "#EF4444" };
     return { text: status, color: "#9CA3AF" };
+  };
+
+  const handlePrimaryAction = async (doc: KnowledgeDoc) => {
+    if (doc.status === "uploaded" || doc.status === "error_parsing") {
+      await parseDoc(doc.id);
+      return;
+    }
+    if (doc.status === "parsed" || doc.status === "error_indexing") {
+      await indexDoc(doc.id);
+      return;
+    }
+    await reindexDoc(doc.id);
+  };
+
+  const getPrimaryActionMeta = (doc: KnowledgeDoc) => {
+    if (doc.status === "uploaded") {
+      return { title: "开始解析", icon: <Eye className="w-3.5 h-3.5" /> };
+    }
+    if (doc.status === "parsed") {
+      return { title: "执行入库", icon: <Database className="w-3.5 h-3.5" /> };
+    }
+    if (doc.status === "error_parsing") {
+      return { title: "重试解析", icon: <RefreshCw className="w-3.5 h-3.5" /> };
+    }
+    if (doc.status === "error_indexing") {
+      return { title: "重试入库", icon: <RefreshCw className="w-3.5 h-3.5" /> };
+    }
+    if (doc.status === "duplicate") {
+      return { title: "重复内容无需再次入库", icon: <AlertCircle className="w-3.5 h-3.5" />, disabled: true };
+    }
+    return { title: "重建索引", icon: <RefreshCw className="w-3.5 h-3.5" /> };
   };
 
   const getSourceLabel = (doc: { sourceType?: string; sourceId?: string }) => {
@@ -274,15 +322,25 @@ function IndexedDocsPanel() {
   return (
     <>
       <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--color-border)]">
-        <div className="text-xs font-medium text-[var(--color-text)]">已索引文档</div>
-        <button
-          onClick={handleImport}
-          disabled={isIndexing}
-          className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-emerald-500 text-white rounded-lg hover:bg-emerald-600 disabled:opacity-40 transition-colors"
-        >
-          {isIndexing ? <Loader2 className="w-3 h-3 animate-spin" /> : <Upload className="w-3 h-3" />}
-          导入本地文件
-        </button>
+        <div className="text-xs font-medium text-[var(--color-text)]">知识库文档</div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => handleImport(false)}
+            disabled={isIndexing}
+            className="flex items-center gap-1.5 text-xs px-3 py-1.5 border border-[var(--color-border)] text-[var(--color-text-secondary)] rounded-lg hover:text-[var(--color-text)] hover:border-sky-400/40 disabled:opacity-40 transition-colors"
+          >
+            {isIndexing ? <Loader2 className="w-3 h-3 animate-spin" /> : <Eye className="w-3 h-3" />}
+            仅上传解析
+          </button>
+          <button
+            onClick={() => handleImport(true)}
+            disabled={isIndexing}
+            className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-emerald-500 text-white rounded-lg hover:bg-emerald-600 disabled:opacity-40 transition-colors"
+          >
+            {isIndexing ? <Loader2 className="w-3 h-3 animate-spin" /> : <Upload className="w-3 h-3" />}
+            导入并入库
+          </button>
+        </div>
       </div>
 
       {stats && (
@@ -303,11 +361,12 @@ function IndexedDocsPanel() {
             </div>
           )}
           {!isLoading && docs.length === 0 && (
-            <EmptyState icon={BookOpen} text="暂无已索引文档" hint={'点击「导入本地文件」或从文档空间「索引到知识库」'} />
+            <EmptyState icon={BookOpen} text="暂无知识库文档" hint={'点击「导入并入库」或从文档空间「索引到知识库」'} />
           )}
           {docs.map((doc) => {
             const source = getSourceLabel(doc);
             const indexStatus = getIndexStatusLabel(doc.status);
+            const primaryAction = getPrimaryActionMeta(doc);
             return (
               <div
                 key={doc.id}
@@ -342,8 +401,8 @@ function IndexedDocsPanel() {
                   </div>
                 </div>
                 <div className="flex items-center gap-1 ml-2">
-                  <IconButton onClick={() => reindexDoc(doc.id)} disabled={isIndexing} title="重建索引">
-                    <RefreshCw className="w-3.5 h-3.5" />
+                  <IconButton onClick={() => handlePrimaryAction(doc)} disabled={isIndexing || primaryAction.disabled} title={primaryAction.title}>
+                    {primaryAction.icon}
                   </IconButton>
                   <IconButton onClick={() => removeDoc(doc.id)} title="从知识库移除" hoverColor="red-500">
                     <Trash2 className="w-3.5 h-3.5" />

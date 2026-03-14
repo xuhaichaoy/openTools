@@ -88,12 +88,7 @@ export async function persistConversations(conversations: Conversation[]): Promi
       })),
     }));
   const json = JSON.stringify(trimmed);
-
-  // 采样哈希避免完全遍历：取长度+头64+尾64+中间64字符
-  const sampleLen = 64;
-  const mid = Math.max(0, Math.floor(json.length / 2) - sampleLen / 2);
-  const sample = `${json.length}:${json.slice(0, sampleLen)}:${json.slice(mid, mid + sampleLen)}:${json.slice(-sampleLen)}`;
-  const hash = fnv1a(sample);
+  const hash = fnv1a(json);
   if (hash === _lastPersistedHash) return;
 
   for (let attempt = 0; attempt <= PERSIST_MAX_RETRIES; attempt++) {
@@ -129,7 +124,7 @@ export async function loadConversationHistory(): Promise<Conversation[]> {
  */
 export function prepareRegenerateMessages(
   messages: ChatMessage[],
-): { keptMessages: ChatMessage[]; lastUserContent: string | null } {
+): { keptMessages: ChatMessage[]; lastUserMessage: ChatMessage | null } {
   const copy = [...messages];
   while (copy.length > 0 && copy[copy.length - 1].role === "assistant") {
     copy.pop();
@@ -140,7 +135,7 @@ export function prepareRegenerateMessages(
       : null;
   return {
     keptMessages: copy,
-    lastUserContent: lastUserMsg?.content ?? null,
+    lastUserMessage: lastUserMsg ?? null,
   };
 }
 
@@ -150,10 +145,13 @@ export function prepareRegenerateMessages(
 export function prepareEditMessages(
   messages: ChatMessage[],
   messageId: string,
-): ChatMessage[] | null {
+): { keptMessages: ChatMessage[]; targetMessage: ChatMessage | null } | null {
   const msgIndex = messages.findIndex((m) => m.id === messageId);
   if (msgIndex === -1) return null;
-  return messages.slice(0, msgIndex);
+  return {
+    keptMessages: messages.slice(0, msgIndex),
+    targetMessage: messages[msgIndex] ?? null,
+  };
 }
 
 // ── reasoning 标签过滤器 ──
@@ -190,6 +188,17 @@ export async function startStreamingChat(opts: {
   let _thinkingBuffer = "";
   let _thinkingRafId: number | null = null;
 
+  function clearPendingFrames() {
+    if (_chunkRafId !== null) {
+      cancelAnimationFrame(_chunkRafId);
+      _chunkRafId = null;
+    }
+    if (_thinkingRafId !== null) {
+      cancelAnimationFrame(_thinkingRafId);
+      _thinkingRafId = null;
+    }
+  }
+
   function flushChunkBuffer() {
     _chunkRafId = null;
     if (!_chunkBuffer) return;
@@ -211,6 +220,35 @@ export async function startStreamingChat(opts: {
       thinkingContent: (m.thinkingContent || "") + flushed,
       thinkingStreaming: true,
     }));
+  }
+
+  function finalizeStreamFailure(errorText: string) {
+    clearPendingFrames();
+    const remaining = reasoningStream.flush();
+    const visibleContent = (_chunkBuffer || "") + remaining.visible;
+    const thinkingContent = _thinkingBuffer + remaining.thinking;
+    _chunkBuffer = "";
+    _thinkingBuffer = "";
+
+    updateAssistant((m) => {
+      const nextContent = visibleContent ? m.content + visibleContent : m.content;
+      const normalizedError = errorText.trim() || "请求失败";
+      const contentWithError = nextContent.trim()
+        ? `${nextContent}\n\n⚠️ 生成中断：${normalizedError}`
+        : `❌ ${normalizedError}`;
+      return {
+        ...m,
+        content: contentWithError,
+        streaming: false,
+        thinkingContent: thinkingContent
+          ? (m.thinkingContent || "") + thinkingContent
+          : m.thinkingContent,
+        thinkingStreaming: false,
+      };
+    });
+    setState({ isStreaming: false, pendingToolConfirm: null });
+    cleanup();
+    onPersist();
   }
 
   // 并行注册所有事件监听器（减少 IPC 串行等待）
@@ -344,24 +382,7 @@ export async function startStreamingChat(opts: {
       "ai-stream-error",
       (event) => {
         if (event.payload.conversation_id === conversationId) {
-          const remaining = reasoningStream.flush();
-          if (_thinkingRafId !== null) {
-            cancelAnimationFrame(_thinkingRafId);
-            _thinkingRafId = null;
-          }
-          const thinkingRemaining = _thinkingBuffer + remaining.thinking;
-          _thinkingBuffer = "";
-          updateAssistant((m) => ({
-            ...m,
-            content: `❌ ${event.payload.error}`,
-            streaming: false,
-            thinkingContent: thinkingRemaining
-              ? (m.thinkingContent || "") + thinkingRemaining
-              : m.thinkingContent,
-            thinkingStreaming: false,
-          }));
-          setState({ isStreaming: false });
-          cleanup();
+          finalizeStreamFailure(event.payload.error);
         }
       },
     ),
@@ -390,14 +411,7 @@ export async function startStreamingChat(opts: {
   ]);
 
   const cleanup = () => {
-    if (_chunkRafId !== null) {
-      cancelAnimationFrame(_chunkRafId);
-      _chunkRafId = null;
-    }
-    if (_thinkingRafId !== null) {
-      cancelAnimationFrame(_thinkingRafId);
-      _thinkingRafId = null;
-    }
+    clearPendingFrames();
     if (_chunkBuffer) flushChunkBuffer();
     if (_thinkingBuffer) flushThinkingBuffer();
     unlisten();
@@ -422,8 +436,8 @@ export async function startStreamingChat(opts: {
     });
   } catch (e) {
     handleError(e, { context: "AI 对话" });
-    setState({ isStreaming: false });
-    cleanup();
+    const message = e instanceof Error ? e.message : String(e);
+    finalizeStreamFailure(message || "发起对话失败");
   }
 
   return cleanup;

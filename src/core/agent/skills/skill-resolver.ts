@@ -13,6 +13,12 @@ interface NamedTool {
   name: string;
 }
 
+interface SkillDependencyBundle {
+  skillIds: string[];
+  toolNames: string[];
+  mcpNames: string[];
+}
+
 // ── 正则缓存 ──
 
 const regexCache = new Map<string, RegExp | null>();
@@ -43,6 +49,91 @@ function getCachedRegex(pattern: string): RegExp | null {
 /** 清除正则缓存（测试或 Skill 变更后调用） */
 export function clearRegexCache(): void {
   regexCache.clear();
+}
+
+function normalizeStringList(values?: string[]): string[] {
+  return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
+}
+
+function splitLegacyDependencyValues(value?: string): string[] {
+  if (!value) return [];
+  return value
+    .split(/[,\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function getSkillDependencies(skill: AgentSkill): SkillDependencyBundle {
+  const bundle: SkillDependencyBundle = {
+    skillIds: normalizeStringList(skill.skillDependencies),
+    toolNames: normalizeStringList(skill.toolDependencies),
+    mcpNames: normalizeStringList(skill.mcpDependencies),
+  };
+
+  for (const [key, rawValue] of Object.entries(skill.dependency ?? {})) {
+    const normalizedKey = key.trim().toLowerCase();
+    const normalizedValue = rawValue.trim();
+    if (!normalizedValue) continue;
+
+    if (normalizedKey === "skill" || normalizedKey === "skills") {
+      bundle.skillIds.push(...splitLegacyDependencyValues(normalizedValue));
+      continue;
+    }
+    if (normalizedKey === "tool" || normalizedKey === "tools") {
+      bundle.toolNames.push(...splitLegacyDependencyValues(normalizedValue));
+      continue;
+    }
+    if (normalizedKey === "mcp" || normalizedKey === "mcps") {
+      bundle.mcpNames.push(...splitLegacyDependencyValues(normalizedValue));
+      continue;
+    }
+
+    const prefixedValue = normalizedValue.match(/^(skill|skills|tool|tools|mcp|mcps)[:/](.+)$/i);
+    if (!prefixedValue) continue;
+    const kind = prefixedValue[1].toLowerCase();
+    const values = splitLegacyDependencyValues(prefixedValue[2]);
+    if (kind === "skill" || kind === "skills") {
+      bundle.skillIds.push(...values);
+    } else if (kind === "tool" || kind === "tools") {
+      bundle.toolNames.push(...values);
+    } else if (kind === "mcp" || kind === "mcps") {
+      bundle.mcpNames.push(...values);
+    }
+  }
+
+  bundle.skillIds = normalizeStringList(bundle.skillIds);
+  bundle.toolNames = normalizeStringList(bundle.toolNames);
+  bundle.mcpNames = normalizeStringList(bundle.mcpNames);
+  return bundle;
+}
+
+function expandSkillClosure(activeRootIds: string[], enabledSkills: AgentSkill[]): AgentSkill[] {
+  if (activeRootIds.length === 0) return [];
+
+  const skillMap = new Map(enabledSkills.map((skill) => [skill.id, skill]));
+  const visible: AgentSkill[] = [];
+  const seen = new Set<string>();
+  const visiting = new Set<string>();
+
+  const visit = (skillId: string) => {
+    if (seen.has(skillId) || visiting.has(skillId)) return;
+    const skill = skillMap.get(skillId);
+    if (!skill) return;
+
+    visiting.add(skillId);
+    seen.add(skillId);
+    visible.push(skill);
+    for (const depId of getSkillDependencies(skill).skillIds) {
+      visit(depId);
+    }
+    visiting.delete(skillId);
+  };
+
+  for (const rootId of activeRootIds) {
+    visit(rootId);
+  }
+
+  return visible;
 }
 
 function testPattern(pattern: string, text: string): boolean {
@@ -187,25 +278,43 @@ export function resolveSkills(
     .map((e) => e.skill);
 
   const activeSkills = [...manualSkills, ...autoSkills];
+  const visibleSkills = expandSkillClosure(
+    activeSkills.map((skill) => skill.id),
+    enabledSkills.filter((skill) => skill.enabled),
+  );
 
   if (activeSkills.length === 0) {
     return {
       activeSkillIds: [],
+      visibleSkillIds: [],
       mergedSystemPrompt: "",
       mergedToolFilter: {},
+      dependencyToolNames: [],
+      dependencyMcpNames: [],
     };
   }
 
-  const prompts = activeSkills
+  const prompts = visibleSkills
     .map((s) => s.systemPrompt?.trim())
     .filter(Boolean) as string[];
 
+  const visibleSkillNames = visibleSkills.map((skill) => skill.name);
+  const activeSkillNames = activeSkills.map((skill) => skill.name);
   const mergedSystemPrompt =
     prompts.length > 0
-      ? `# 已激活的领域技能\n\n${prompts.join("\n\n---\n\n")}`
+      ? [
+        "# 已激活的领域技能",
+        "",
+        `已激活: ${activeSkillNames.join("、")}`,
+        visibleSkillNames.length > activeSkillNames.length
+          ? `可见依赖: ${visibleSkillNames.filter((name) => !activeSkillNames.includes(name)).join("、")}`
+          : "",
+        "",
+        prompts.join("\n\n---\n\n"),
+      ].filter(Boolean).join("\n")
       : "";
 
-  const filters = activeSkills
+  const filters = visibleSkills
     .map((s) => {
       if (s.allowedTools?.length) {
         return { include: s.allowedTools } as SkillToolFilter;
@@ -214,9 +323,19 @@ export function resolveSkills(
     })
     .filter(Boolean) as SkillToolFilter[];
 
+  const dependencyToolNames = normalizeStringList(
+    visibleSkills.flatMap((skill) => getSkillDependencies(skill).toolNames),
+  );
+  const dependencyMcpNames = normalizeStringList(
+    visibleSkills.flatMap((skill) => getSkillDependencies(skill).mcpNames),
+  );
+
   return {
     activeSkillIds: activeSkills.map((s) => s.id),
+    visibleSkillIds: visibleSkills.map((s) => s.id),
     mergedSystemPrompt,
     mergedToolFilter: mergeToolFilters(filters),
+    dependencyToolNames,
+    dependencyMcpNames,
   };
 }

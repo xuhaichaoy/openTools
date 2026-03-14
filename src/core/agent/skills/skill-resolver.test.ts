@@ -36,6 +36,7 @@ describe("resolveSkills", () => {
     ];
     const result = resolveSkills(skills, "create a react component");
     expect(result.activeSkillIds).toEqual(["s1"]);
+    expect(result.visibleSkillIds).toEqual(["s1"]);
     expect(result.mergedSystemPrompt).toContain("Use React best practices");
   });
 
@@ -149,5 +150,42 @@ describe("resolveSkills", () => {
     ];
     const result = resolveSkills(skills, "react component");
     expect(result.activeSkillIds).toEqual(["s1"]);
+  });
+
+  it("expands visible skills through dependency closure", () => {
+    const skills = [
+      makeSkill({ id: "root", triggerPatterns: ["react"], systemPrompt: "Root", skillDependencies: ["dep-skill"] }),
+      makeSkill({ id: "dep-skill", autoActivate: false, systemPrompt: "Dependency prompt" }),
+    ];
+    const result = resolveSkills(skills, "build react ui");
+    expect(result.activeSkillIds).toEqual(["root"]);
+    expect(result.visibleSkillIds).toEqual(["root", "dep-skill"]);
+    expect(result.mergedSystemPrompt).toContain("Dependency prompt");
+  });
+
+  it("collects tool and mcp dependencies from visible skills", () => {
+    const skills = [
+      makeSkill({
+        id: "root",
+        triggerPatterns: ["deploy"],
+        toolDependencies: ["read_file"],
+        mcpDependencies: ["filesystem"],
+      }),
+      makeSkill({
+        id: "dep",
+        autoActivate: false,
+        skillDependencies: [],
+        toolDependencies: ["search_in_files"],
+      }),
+      makeSkill({
+        id: "root-2",
+        triggerPatterns: ["deploy"],
+        skillDependencies: ["dep"],
+      }),
+    ];
+    const result = resolveSkills(skills, "deploy service");
+    expect(result.visibleSkillIds).toEqual(["root", "root-2", "dep"]);
+    expect(result.dependencyToolNames.sort()).toEqual(["read_file", "search_in_files"]);
+    expect(result.dependencyMcpNames).toEqual(["filesystem"]);
   });
 });

@@ -26,6 +26,8 @@ pub struct KnowledgeDoc {
     pub source_type: String,
     #[serde(default)]
     pub source_id: Option<String>,
+    #[serde(default)]
+    pub content_hash: Option<String>,
 }
 
 fn default_source_local() -> String {
@@ -120,6 +122,12 @@ fn get_chunks_dir(app: &AppHandle) -> PathBuf {
     dir
 }
 
+fn get_parsed_dir(app: &AppHandle) -> PathBuf {
+    let dir = get_rag_dir(app).join("parsed");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 fn get_vectors_dir(app: &AppHandle) -> PathBuf {
     let dir = get_rag_dir(app).join("vectors");
     let _ = std::fs::create_dir_all(&dir);
@@ -141,6 +149,71 @@ fn save_docs_index(app: &AppHandle, docs: &[KnowledgeDoc]) {
     if let Ok(json) = serde_json::to_string_pretty(docs) {
         let _ = std::fs::write(&path, json);
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn calc_content_hash(content: &str) -> String {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    let mut hash = FNV_OFFSET;
+    for byte in content.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{hash:016x}")
+}
+
+fn get_parsed_content_path(app: &AppHandle, doc_id: &str) -> PathBuf {
+    get_parsed_dir(app).join(format!("{}.txt", doc_id))
+}
+
+fn load_parsed_content(app: &AppHandle, doc_id: &str) -> Option<String> {
+    let path = get_parsed_content_path(app, doc_id);
+    std::fs::read_to_string(path).ok()
+}
+
+fn save_parsed_content(app: &AppHandle, doc_id: &str, content: &str) -> Result<(), String> {
+    let path = get_parsed_content_path(app, doc_id);
+    std::fs::write(path, content).map_err(|e| format!("保存解析结果失败: {}", e))
+}
+
+fn delete_doc_artifacts(app: &AppHandle, doc_id: &str) {
+    let chunks_path = get_chunks_dir(app).join(format!("{}.json", doc_id));
+    let vectors_path = get_vectors_dir(app).join(format!("{}.bin", doc_id));
+    let parsed_path = get_parsed_content_path(app, doc_id);
+    let _ = std::fs::remove_file(chunks_path);
+    let _ = std::fs::remove_file(vectors_path);
+    let _ = std::fs::remove_file(parsed_path);
+}
+
+fn save_doc_record(app: &AppHandle, doc: &KnowledgeDoc) {
+    let mut docs = load_docs_index(app);
+    if let Some(existing) = docs.iter_mut().find(|item| item.id == doc.id) {
+        *existing = doc.clone();
+    } else {
+        docs.push(doc.clone());
+    }
+    save_docs_index(app, &docs);
+}
+
+fn emit_doc_status(app: &AppHandle, doc_id: &str, status: &str, error: Option<&str>) {
+    use tauri::Emitter;
+
+    let _ = app.emit(
+        "rag-index-progress",
+        serde_json::json!({
+            "docId": doc_id,
+            "status": status,
+            "error": error,
+        }),
+    );
 }
 
 /// 简单的 token 估算（按字符数 / 4）
@@ -653,113 +726,196 @@ pub async fn rag_list_docs(app: AppHandle) -> Result<Vec<KnowledgeDoc>, String> 
     Ok(load_docs_index(&app))
 }
 
-/// 内部通用导入逻辑：分块 → 关键词索引（必做）→ Embedding（可选）
-async fn import_doc_internal(
+async fn parse_doc_internal(
     app: &AppHandle,
-    doc: &mut KnowledgeDoc,
-    content: &str,
-) -> Result<(), String> {
+    doc_id: &str,
+    inline_content: Option<&str>,
+) -> Result<KnowledgeDoc, String> {
+    let mut doc = load_docs_index(app)
+        .into_iter()
+        .find(|item| item.id == doc_id)
+        .ok_or_else(|| "文档不存在".to_string())?;
+
+    if matches!(
+        doc.status.as_str(),
+        "indexed" | "indexed_keyword" | "indexed_full" | "error_indexing"
+    ) {
+        let mut kw_index = load_keyword_index(app);
+        remove_doc_from_index(&mut kw_index, doc_id);
+        update_index_stats(&mut kw_index, &load_docs_index(app));
+        save_keyword_index(app, &kw_index);
+        let chunks_path = get_chunks_dir(app).join(format!("{}.json", doc_id));
+        let vectors_path = get_vectors_dir(app).join(format!("{}.bin", doc_id));
+        let _ = std::fs::remove_file(chunks_path);
+        let _ = std::fs::remove_file(vectors_path);
+        doc.chunk_count = 0;
+        doc.token_count = 0;
+    }
+
+    doc.status = "parsing".to_string();
+    doc.error_msg = None;
+    doc.updated_at = now_ms();
+    save_doc_record(app, &doc);
+    emit_doc_status(app, doc_id, "parsing", None);
+
+    let parse_result = (|| -> Result<KnowledgeDoc, String> {
+        let mut parsed_doc = doc.clone();
+        let content = match inline_content {
+            Some(value) => value.to_string(),
+            None if parsed_doc.path.starts_with("cloud://") => load_parsed_content(app, doc_id)
+                .ok_or_else(|| "云端文档缺少可重建的解析内容，请重新从文档空间索引".to_string())?,
+            None => {
+                std::fs::read_to_string(&parsed_doc.path)
+                    .map_err(|e| format!("读取源文件失败: {}", e))?
+            }
+        };
+
+        save_parsed_content(app, doc_id, &content)?;
+        parsed_doc.content_hash = Some(calc_content_hash(&content));
+
+        if let Some(existing) = load_docs_index(app).into_iter().find(|item| {
+            item.id != parsed_doc.id
+                && item.content_hash.is_some()
+                && item.content_hash == parsed_doc.content_hash
+                && item.status != "duplicate"
+        }) {
+            parsed_doc.status = "duplicate".to_string();
+            parsed_doc.error_msg = Some(format!("与已有文档“{}”内容重复，已跳过入库", existing.name));
+            parsed_doc.chunk_count = 0;
+            parsed_doc.token_count = 0;
+            parsed_doc.updated_at = now_ms();
+            save_doc_record(app, &parsed_doc);
+            emit_doc_status(app, doc_id, "duplicate", parsed_doc.error_msg.as_deref());
+            return Ok(parsed_doc);
+        }
+
+        parsed_doc.status = "parsed".to_string();
+        parsed_doc.error_msg = None;
+        parsed_doc.updated_at = now_ms();
+        save_doc_record(app, &parsed_doc);
+        emit_doc_status(app, doc_id, "parsed", None);
+        Ok(parsed_doc)
+    })();
+
+    match parse_result {
+        Ok(parsed) => Ok(parsed),
+        Err(error) => {
+            doc.status = "error_parsing".to_string();
+            doc.error_msg = Some(error.clone());
+            doc.updated_at = now_ms();
+            save_doc_record(app, &doc);
+            emit_doc_status(app, doc_id, "error_parsing", doc.error_msg.as_deref());
+            Err(error)
+        }
+    }
+}
+
+/// 内部入库逻辑：分块 → 关键词索引（必做）→ Embedding（可选）
+async fn index_doc_internal(app: &AppHandle, doc_id: &str) -> Result<KnowledgeDoc, String> {
+    let mut doc = load_docs_index(app)
+        .into_iter()
+        .find(|item| item.id == doc_id)
+        .ok_or_else(|| "文档不存在".to_string())?;
+
+    if doc.status == "duplicate" {
+        return Err("当前文档内容与已有文档重复，请移除重复文档或重新导入其他内容".to_string());
+    }
+
+    let content =
+        load_parsed_content(app, doc_id).ok_or_else(|| "文档尚未解析，请先执行解析".to_string())?;
     let config = load_rag_config(app);
     let doc_id = doc.id.clone();
+    doc.status = "indexing".to_string();
+    doc.error_msg = None;
+    doc.updated_at = now_ms();
+    save_doc_record(app, &doc);
+    emit_doc_status(app, &doc_id, "indexing", None);
 
-    use tauri::Emitter;
-    let _ = app.emit(
-        "rag-index-progress",
-        serde_json::json!({
-            "docId": &doc_id,
-            "status": "processing",
-        }),
-    );
+    let index_result = async {
+        let mut indexed_doc = doc.clone();
+        delete_doc_artifacts(app, &doc_id);
+        save_parsed_content(app, &doc_id, &content)?;
 
-    // 1) 分块
-    let text_chunks = chunk_text(content, config.chunk_size, config.chunk_overlap);
-    let chunks: Vec<DocChunk> = text_chunks
-        .iter()
-        .enumerate()
-        .map(|(i, text)| DocChunk {
-            id: format!("{}_{}", doc_id, i),
-            doc_id: doc_id.clone(),
-            content: text.clone(),
-            index: i,
-            token_count: estimate_tokens(text),
-            metadata: ChunkMetadata {
-                source: doc.name.clone(),
-                page: None,
-                heading: None,
-            },
-        })
-        .collect();
+        // 1) 分块
+        let text_chunks = chunk_text(&content, config.chunk_size, config.chunk_overlap);
+        let chunks: Vec<DocChunk> = text_chunks
+            .iter()
+            .enumerate()
+            .map(|(i, text)| DocChunk {
+                id: format!("{}_{}", doc_id, i),
+                doc_id: doc_id.clone(),
+                content: text.clone(),
+                index: i,
+                token_count: estimate_tokens(text),
+                metadata: ChunkMetadata {
+                    source: indexed_doc.name.clone(),
+                    page: None,
+                    heading: None,
+                },
+            })
+            .collect();
 
-    let total_tokens: usize = chunks.iter().map(|c| c.token_count).sum();
-    save_chunks_for_doc(app, &doc_id, &chunks);
+        let total_tokens: usize = chunks.iter().map(|c| c.token_count).sum();
+        save_chunks_for_doc(app, &doc_id, &chunks);
 
-    // 2) 关键词索引（始终成功，无外部依赖）
-    let mut kw_index = load_keyword_index(app);
-    build_index_for_doc(&mut kw_index, &doc_id, &chunks);
-    let all_docs = load_docs_index(app);
-    update_index_stats(&mut kw_index, &all_docs);
-    save_keyword_index(app, &kw_index);
+        // 2) 关键词索引（始终成功，无外部依赖）
+        let mut kw_index = load_keyword_index(app);
+        build_index_for_doc(&mut kw_index, &doc_id, &chunks);
+        let all_docs = load_docs_index(app);
+        update_index_stats(&mut kw_index, &all_docs);
+        save_keyword_index(app, &kw_index);
 
-    doc.chunk_count = chunks.len();
-    doc.token_count = total_tokens;
-    doc.status = "indexed".to_string();
-    doc.updated_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
+        indexed_doc.chunk_count = chunks.len();
+        indexed_doc.token_count = total_tokens;
+        indexed_doc.status = "indexed_keyword".to_string();
+        indexed_doc.updated_at = now_ms();
+        save_doc_record(app, &indexed_doc);
+        emit_doc_status(app, &doc_id, "indexed_keyword", None);
 
-    // 更新 docs_index
-    let mut docs = load_docs_index(app);
-    if let Some(d) = docs.iter_mut().find(|d| d.id == doc_id) {
-        *d = doc.clone();
-    }
-    save_docs_index(app, &docs);
+        // 3) 向量索引（可选增强，失败不阻断）
+        let batch_size = 20;
+        let mut all_embeddings: Vec<Vec<f32>> = Vec::new();
+        let mut embed_ok = true;
 
-    let _ = app.emit(
-        "rag-index-progress",
-        serde_json::json!({
-            "docId": &doc_id,
-            "status": "indexed",
-        }),
-    );
+        for batch_start in (0..text_chunks.len()).step_by(batch_size) {
+            let batch_end = (batch_start + batch_size).min(text_chunks.len());
+            let batch: Vec<String> = text_chunks[batch_start..batch_end].to_vec();
 
-    // 3) 向量索引（可选增强，失败不阻断）
-    let batch_size = 20;
-    let mut all_embeddings: Vec<Vec<f32>> = Vec::new();
-    let mut embed_ok = true;
-
-    for batch_start in (0..text_chunks.len()).step_by(batch_size) {
-        let batch_end = (batch_start + batch_size).min(text_chunks.len());
-        let batch: Vec<String> = text_chunks[batch_start..batch_end].to_vec();
-
-        match get_embeddings(app, &batch).await {
-            Ok(embeddings) => {
-                all_embeddings.extend(embeddings);
-            }
-            Err(e) => {
-                log::info!("Embedding 可选增强跳过: {}", e);
-                embed_ok = false;
-                break;
+            match get_embeddings(app, &batch).await {
+                Ok(embeddings) => {
+                    all_embeddings.extend(embeddings);
+                }
+                Err(e) => {
+                    log::info!("Embedding 可选增强跳过: {}", e);
+                    embed_ok = false;
+                    break;
+                }
             }
         }
-    }
 
-    if embed_ok && all_embeddings.len() == chunks.len() {
-        save_vectors_for_doc(app, &doc_id, &all_embeddings);
-        doc.status = "indexed_full".to_string();
-        doc.updated_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-
-        let mut docs = load_docs_index(app);
-        if let Some(d) = docs.iter_mut().find(|d| d.id == doc_id) {
-            *d = doc.clone();
+        if embed_ok && all_embeddings.len() == chunks.len() {
+            save_vectors_for_doc(app, &doc_id, &all_embeddings);
+            indexed_doc.status = "indexed_full".to_string();
+            indexed_doc.updated_at = now_ms();
+            save_doc_record(app, &indexed_doc);
+            emit_doc_status(app, &doc_id, "indexed_full", None);
         }
-        save_docs_index(app, &docs);
-    }
 
-    Ok(())
+        Ok::<KnowledgeDoc, String>(indexed_doc)
+    }
+    .await;
+
+    match index_result {
+        Ok(indexed) => Ok(indexed),
+        Err(error) => {
+            doc.status = "error_indexing".to_string();
+            doc.error_msg = Some(error.clone());
+            doc.updated_at = now_ms();
+            save_doc_record(app, &doc);
+            emit_doc_status(app, &doc_id, "error_indexing", doc.error_msg.as_deref());
+            Err(error)
+        }
+    }
 }
 
 /// 导入文档到知识库
@@ -768,13 +924,12 @@ pub async fn rag_import_doc(
     app: AppHandle,
     file_path: String,
     tags: Vec<String>,
+    auto_index: Option<bool>,
 ) -> Result<KnowledgeDoc, String> {
     let path = PathBuf::from(&file_path);
     if !path.exists() {
         return Err(format!("文件不存在: {}", file_path));
     }
-
-    let content = std::fs::read_to_string(&path).map_err(|e| format!("读取文件失败: {}", e))?;
 
     let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     let name = path
@@ -783,20 +938,17 @@ pub async fn rag_import_doc(
         .to_string_lossy()
         .to_string();
     let format = detect_format(&file_path);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
+    let now = now_ms();
 
     let doc_id = format!("doc_{}", now);
 
-    let mut doc = KnowledgeDoc {
+    let doc = KnowledgeDoc {
         id: doc_id.clone(),
         name,
         path: file_path,
         format,
         size,
-        status: "processing".to_string(),
+        status: "uploaded".to_string(),
         chunk_count: 0,
         token_count: 0,
         created_at: now,
@@ -805,14 +957,17 @@ pub async fn rag_import_doc(
         tags,
         source_type: "local".to_string(),
         source_id: None,
+        content_hash: None,
     };
 
-    let mut docs = load_docs_index(&app);
-    docs.push(doc.clone());
-    save_docs_index(&app, &docs);
+    save_doc_record(&app, &doc);
+    emit_doc_status(&app, &doc_id, "uploaded", None);
 
-    import_doc_internal(&app, &mut doc, &content).await?;
-    Ok(doc)
+    let parsed = parse_doc_internal(&app, &doc_id, None).await?;
+    if auto_index.unwrap_or(true) && parsed.status == "parsed" {
+        return index_doc_internal(&app, &doc_id).await;
+    }
+    Ok(parsed)
 }
 
 /// 从内容字符串直接导入到知识库（用于云端文档下载后导入）
@@ -825,23 +980,21 @@ pub async fn rag_import_from_content(
     tags: Vec<String>,
     source_type: Option<String>,
     source_id: Option<String>,
+    auto_index: Option<bool>,
 ) -> Result<KnowledgeDoc, String> {
     let size = content.len() as u64;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
+    let now = now_ms();
 
     let doc_id = format!("doc_{}", now);
     let src_type = source_type.unwrap_or_else(|| "local".to_string());
 
-    let mut doc = KnowledgeDoc {
+    let doc = KnowledgeDoc {
         id: doc_id.clone(),
         name: name.clone(),
         path: format!("cloud://{}", name),
         format,
         size,
-        status: "processing".to_string(),
+        status: "uploaded".to_string(),
         chunk_count: 0,
         token_count: 0,
         created_at: now,
@@ -850,14 +1003,56 @@ pub async fn rag_import_from_content(
         tags,
         source_type: src_type,
         source_id,
+        content_hash: None,
     };
 
-    let mut docs = load_docs_index(&app);
-    docs.push(doc.clone());
-    save_docs_index(&app, &docs);
+    save_doc_record(&app, &doc);
+    emit_doc_status(&app, &doc_id, "uploaded", None);
 
-    import_doc_internal(&app, &mut doc, &content).await?;
-    Ok(doc)
+    let parsed = parse_doc_internal(&app, &doc_id, Some(&content)).await?;
+    if auto_index.unwrap_or(true) && parsed.status == "parsed" {
+        return index_doc_internal(&app, &doc_id).await;
+    }
+    Ok(parsed)
+}
+
+/// 单独解析文档（上传 -> 解析）
+#[tauri::command]
+pub async fn rag_parse_doc(app: AppHandle, doc_id: String) -> Result<KnowledgeDoc, String> {
+    parse_doc_internal(&app, &doc_id, None).await
+}
+
+/// 将已解析文档入库（解析 -> 索引）
+#[tauri::command]
+pub async fn rag_index_doc(app: AppHandle, doc_id: String) -> Result<KnowledgeDoc, String> {
+    index_doc_internal(&app, &doc_id).await
+}
+
+/// 根据当前状态自动重试下一步
+#[tauri::command]
+pub async fn rag_retry_doc(app: AppHandle, doc_id: String) -> Result<KnowledgeDoc, String> {
+    let doc = load_docs_index(&app)
+        .into_iter()
+        .find(|item| item.id == doc_id)
+        .ok_or_else(|| "文档不存在".to_string())?;
+
+    match doc.status.as_str() {
+        "uploaded" | "parsing" | "error_parsing" => {
+            let parsed = parse_doc_internal(&app, &doc.id, None).await?;
+            if parsed.status == "parsed" {
+                index_doc_internal(&app, &doc.id).await
+            } else {
+                Ok(parsed)
+            }
+        }
+        "parsed" | "indexing" | "error_indexing" => index_doc_internal(&app, &doc.id).await,
+        "indexed_keyword" | "indexed_full" => {
+            parse_doc_internal(&app, &doc.id, None).await?;
+            index_doc_internal(&app, &doc.id).await
+        }
+        "duplicate" => Err("重复文档不会再次入库，请删除后重新导入其他内容".to_string()),
+        _ => index_doc_internal(&app, &doc.id).await,
+    }
 }
 
 /// 删除知识库文档
@@ -873,10 +1068,7 @@ pub async fn rag_remove_doc(app: AppHandle, doc_id: String) -> Result<(), String
     update_index_stats(&mut kw_index, &docs);
     save_keyword_index(&app, &kw_index);
 
-    let chunks_path = get_chunks_dir(&app).join(format!("{}.json", doc_id));
-    let vectors_path = get_vectors_dir(&app).join(format!("{}.bin", doc_id));
-    let _ = std::fs::remove_file(chunks_path);
-    let _ = std::fs::remove_file(vectors_path);
+    delete_doc_artifacts(&app, &doc_id);
 
     Ok(())
 }
@@ -884,16 +1076,8 @@ pub async fn rag_remove_doc(app: AppHandle, doc_id: String) -> Result<(), String
 /// 重建文档索引
 #[tauri::command]
 pub async fn rag_reindex_doc(app: AppHandle, doc_id: String) -> Result<(), String> {
-    let docs = load_docs_index(&app);
-    let doc = docs.iter().find(|d| d.id == doc_id).ok_or("文档不存在")?;
-    let file_path = doc.path.clone();
-    let tags = doc.tags.clone();
-
-    // 先删除旧数据
-    rag_remove_doc(app.clone(), doc_id).await?;
-
-    // 重新导入
-    rag_import_doc(app, file_path, tags).await?;
+    parse_doc_internal(&app, &doc_id, None).await?;
+    index_doc_internal(&app, &doc_id).await?;
     Ok(())
 }
 

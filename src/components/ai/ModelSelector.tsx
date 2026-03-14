@@ -13,11 +13,21 @@ interface TeamModelInfo {
   priority: number;
 }
 
+interface TeamModelsState {
+  teamId: string | null;
+  models: TeamModelInfo[];
+  status: "idle" | "loading" | "ready" | "error";
+}
+
 export function ModelSelector() {
-  const { config, saveConfig, ownKeys, loadOwnKeys, selectOwnKeyModel } =
+  const { config, saveConfig, ownKeys, selectOwnKeyModel } =
     useAIStore();
   const [open, setOpen] = useState(false);
-  const [teamModels, setTeamModels] = useState<TeamModelInfo[]>([]);
+  const [teamModelsState, setTeamModelsState] = useState<TeamModelsState>({
+    teamId: null,
+    models: [],
+    status: "idle",
+  });
   const [openUp, setOpenUp] = useState(true);
   const ref = useRef<HTMLDivElement>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
@@ -33,13 +43,6 @@ export function ModelSelector() {
   );
 
   const { teams, loaded: teamsLoaded, loadTeams } = useTeamStore();
-
-  // 加载 ownKeys（首次）
-  useEffect(() => {
-    if (config.source === "own_key" && ownKeys.length === 0) {
-      void loadOwnKeys();
-    }
-  }, [config.source, ownKeys.length, loadOwnKeys]);
 
   // 自有 Key：仅当「已有选中但不在当前列表」时回退到第一个（避免 config 未加载完就被覆盖）
   useEffect(() => {
@@ -69,20 +72,35 @@ export function ModelSelector() {
   useEffect(() => {
     if (config.source === "team" && config.team_id) {
       if (!teamsLoaded || !teams.some((t) => t.id === config.team_id)) return;
+      const teamId = config.team_id;
       let cancelled = false;
+      setTeamModelsState({
+        teamId,
+        models: [],
+        status: "loading",
+      });
       api
         .get<{ models: TeamModelInfo[] }>(
-          `/teams/${config.team_id}/ai-models`,
+          `/teams/${teamId}/ai-models`,
         )
         .then((res) => {
           if (!cancelled) {
-            primeTeamModelCache(config.team_id!, res.models || []);
-            setTeamModels(res.models || []);
+            const models = res.models || [];
+            primeTeamModelCache(teamId, models);
+            setTeamModelsState({
+              teamId,
+              models,
+              status: "ready",
+            });
           }
         })
         .catch(() => {
           if (!cancelled) {
-            setTeamModels([]);
+            setTeamModelsState({
+              teamId,
+              models: [],
+              status: "error",
+            });
           }
         });
       return () => {
@@ -90,7 +108,13 @@ export function ModelSelector() {
       };
     } else {
       queueMicrotask(() => {
-        setTeamModels((prev) => (prev.length === 0 ? prev : []));
+        setTeamModelsState((prev) =>
+          prev.teamId === null &&
+          prev.models.length === 0 &&
+          prev.status === "idle"
+            ? prev
+            : { teamId: null, models: [], status: "idle" },
+        );
       });
     }
   }, [config.source, config.team_id, teamsLoaded, teams]);
@@ -98,13 +122,11 @@ export function ModelSelector() {
   // 团队模式下自动修正无效 team_config_id，并优先选中最高优先级模型
   useEffect(() => {
     if (config.source !== "team" || !config.team_id) return;
+    if (teamModelsState.teamId !== config.team_id) return;
+    if (teamModelsState.status !== "ready") return;
 
-    if (teamModels.length === 0) {
-      if (config.team_config_id) {
-        applyConfigPatch({ team_config_id: undefined });
-      }
-      return;
-    }
+    const teamModels = teamModelsState.models;
+    if (teamModels.length === 0) return;
 
     const selected = config.team_config_id
       ? teamModels.find((m) => m.config_id === config.team_config_id)
@@ -132,7 +154,7 @@ export function ModelSelector() {
     config.team_id,
     config.model,
     config.protocol,
-    teamModels,
+    teamModelsState,
     applyConfigPatch,
   ]);
 
@@ -171,6 +193,9 @@ export function ModelSelector() {
       if (key) return key.name || key.model;
     }
     if (source === "team") {
+      const teamModels = teamModelsState.teamId === config.team_id
+        ? teamModelsState.models
+        : [];
       const tm = config.team_config_id
         ? teamModels.find((m) => m.config_id === config.team_config_id)
         : teamModels.find((m) => m.model_name === currentModel);
@@ -267,8 +292,8 @@ export function ModelSelector() {
             {/* 团队共享模式 */}
             {source === "team" && (
               <>
-                {teamModels.length > 0 ? (
-                  teamModels.map((m) => {
+                {teamModelsState.models.length > 0 ? (
+                  teamModelsState.models.map((m) => {
                     const isActive = config.team_config_id === m.config_id;
                     return (
                       <button
@@ -296,6 +321,10 @@ export function ModelSelector() {
                       </button>
                     );
                   })
+                ) : teamModelsState.status === "loading" ? (
+                  <div className="px-3 py-3 text-[10px] text-[var(--color-text-secondary)] text-center">
+                    正在加载团队模型...
+                  </div>
                 ) : (
                   <div className="px-3 py-3 text-[10px] text-[var(--color-text-secondary)] text-center">
                     该团队暂无可用模型。

@@ -21,6 +21,7 @@ import {
   Network,
   Brain,
   ShieldCheck,
+  type LucideIcon,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import ReactMarkdown from "react-markdown";
@@ -222,7 +223,7 @@ function ThinkingBlock({
       <div className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 ${color.bg}`}>
         <Brain className="w-3.5 h-3.5" />
       </div>
-      <div className="max-w-[80%] min-w-[200px]">
+      <div className="max-w-[88%] min-w-[200px] lg:max-w-[78%]">
         <div className="text-[10px] mb-0.5">{roleName}</div>
         <div className={`rounded-xl ${color.bg} overflow-hidden`}>
           <button
@@ -638,6 +639,10 @@ function buildSessionUploadRecords(attachments: InputAttachment[]): SessionUploa
     originalExt: attachment.originalExt,
     preview: attachment.preview,
     excerpt: attachment.textContent?.slice(0, 1200),
+    parsed: attachment.type !== "image" ? Boolean(attachment.textContent) : undefined,
+    truncated: Boolean(attachment.textContent && attachment.textContent.length > 1200),
+    canReadFromPath: Boolean(attachment.path),
+    multimodalEligible: attachment.type === "image",
   }));
 }
 
@@ -1050,8 +1055,8 @@ function ApprovalRequestDrawer({
   return (
     <>
       <div className="absolute inset-0 bg-black/25 z-40" onClick={onClose} />
-      <div className="absolute inset-3 z-50 rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-2xl overflow-hidden flex flex-col md:inset-y-3 md:right-3 md:left-auto md:w-[min(78vw,880px)]">
-        <div className="px-5 py-4 border-b border-[var(--color-border)] bg-[var(--color-bg)]/95 backdrop-blur-sm">
+      <div className="absolute inset-3 z-50 rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-2xl overflow-hidden flex flex-col md:inset-y-3 md:right-3 md:left-auto md:w-[min(68vw,760px)]">
+        <div className="px-4 py-3 border-b border-[var(--color-border)] bg-[var(--color-bg)]/95 backdrop-blur-sm">
           <div className="flex items-start gap-3">
             <div className="w-10 h-10 rounded-2xl bg-amber-500/12 text-amber-600 flex items-center justify-center shrink-0">
               <AlertTriangle className="w-4.5 h-4.5" />
@@ -1105,7 +1110,7 @@ function ApprovalRequestDrawer({
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-5 py-4 bg-[var(--color-bg-secondary)]/35">
+        <div className="flex-1 overflow-y-auto px-4 py-3 bg-[var(--color-bg-secondary)]/35">
           {activeTab === "overview" && (
             <div className="space-y-4">
               {approval.targetPath && (
@@ -1133,7 +1138,7 @@ function ApprovalRequestDrawer({
                   </div>
                 ))}
               </div>
-              <div className="rounded-2xl border border-amber-500/20 bg-amber-500/8 p-4">
+              <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 p-4">
                 <div className="text-[12px] font-medium text-amber-800">
                   审批说明
                 </div>
@@ -1179,7 +1184,7 @@ function ApprovalRequestDrawer({
           )}
         </div>
 
-        <div className="px-5 py-4 border-t border-[var(--color-border)] bg-[var(--color-bg)]/96 backdrop-blur-sm">
+        <div className="px-4 py-3 border-t border-[var(--color-border)] bg-[var(--color-bg)]/96 backdrop-blur-sm">
           {canRespond ? (
             <div className="flex flex-wrap items-center gap-2">
               {approvalActions.map((option) => (
@@ -1246,7 +1251,7 @@ function MessageBubbleBase({
       }`}>
         {isUser ? <User className="w-3.5 h-3.5" /> : <Bot className="w-3.5 h-3.5" />}
       </div>
-      <div className={`max-w-[80%] min-w-0 ${isUser ? "flex flex-col items-end text-right" : ""}`}>
+      <div className={`max-w-[88%] min-w-0 lg:max-w-[78%] ${isUser ? "flex flex-col items-end text-right" : ""}`}>
         <div className={`text-[10px] mb-0.5 ${isUser ? "text-[var(--color-accent)]" : color!.text}`}>
           {actorName}
           {targetName && (
@@ -1373,14 +1378,14 @@ function CapabilityBadges({ tags }: { tags?: AgentCapability[] }) {
 
 function ActorStatusBar({ actors }: { actors: ActorSnapshot[] }) {
   return (
-    <div className="flex items-center gap-2 flex-wrap">
+    <div className="flex items-center gap-1.5 flex-wrap">
       {actors.map((actor, i) => {
         const color = getActorColor(i);
         const isThinking = actor.status === "running";
         return (
           <div
             key={actor.id}
-            className={`flex items-center gap-1.5 px-2 py-1 rounded-full text-[10px] ${color.bg} ${color.text}`}
+            className={`flex items-center gap-1.5 rounded-full border px-2 py-1 text-[10px] ${color.bg} ${color.text} ${color.border}`}
           >
             <div className={`w-1.5 h-1.5 rounded-full ${color.dot} ${isThinking ? "animate-pulse" : ""}`} />
             <span className="font-medium">{actor.roleName}</span>
@@ -1456,7 +1461,7 @@ function LiveActorRow({
   const color = getActorColor(index);
   const isRunning = actor.status === "running";
   return (
-    <div className={`p-2 rounded-lg border ${color.border} ${color.bg}`}>
+    <div className={`p-1.5 rounded-xl border ${color.border} ${color.bg}`}>
       <div className="flex items-center gap-2">
         <div className={`w-2 h-2 rounded-full ${color.dot} ${isRunning ? "animate-pulse" : ""} shrink-0`} />
         <span className="text-[11px] font-medium min-w-[60px]">{actor.roleName}</span>
@@ -1474,7 +1479,7 @@ function LiveActorRow({
           <X className="w-3 h-3" />
         </button>
       </div>
-      <div className="mt-2 flex flex-wrap gap-1">
+      <div className="mt-1.5 flex flex-wrap gap-1">
         <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg)]/80 text-[var(--color-text-secondary)]">
           {summarizeToolPolicy(actor.toolPolicy)}
         </span>
@@ -1614,18 +1619,18 @@ function AddAgentForm({
   };
 
   return (
-    <div className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] p-2.5 space-y-2">
-      <div className="flex items-center gap-2 flex-wrap">
+    <div className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-2 space-y-1.5">
+      <div className="flex items-center gap-1.5 flex-wrap">
         <input
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="名称 (可选)"
-          className="text-[11px] px-1.5 py-1 rounded border border-[var(--color-border)] bg-[var(--color-bg)] w-[100px]"
+          className="text-[10px] px-1.5 py-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] w-[96px]"
         />
         <select
           value={model}
           onChange={(e) => setModel(e.target.value)}
-          className="text-[11px] px-1.5 py-1 rounded border border-[var(--color-border)] bg-[var(--color-bg)] min-w-[120px] max-w-[180px]"
+          className="text-[10px] px-1.5 py-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] min-w-[108px] max-w-[160px]"
         >
           <option value="">(默认模型)</option>
           {models.map((m) => (
@@ -1636,7 +1641,7 @@ function AddAgentForm({
           <button
             type="button"
             onClick={() => setShowCapMenu(!showCapMenu)}
-            className="text-[11px] px-1.5 py-1 rounded border border-[var(--color-border)] bg-[var(--color-bg)] flex items-center gap-1 hover:bg-[var(--color-bg-hover)]"
+            className="text-[10px] px-1.5 py-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] flex items-center gap-1 hover:bg-[var(--color-bg-hover)]"
           >
             <span className="text-[var(--color-text-tertiary)]">能力:</span>
             {selectedCaps.length > 0 ? (
@@ -1667,29 +1672,29 @@ function AddAgentForm({
         <button
           type="button"
           onClick={() => setShowAdvanced((value) => !value)}
-          className="text-[11px] px-1.5 py-1 rounded border border-dashed border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-accent)] hover:border-[var(--color-accent)]/40"
+          className="text-[10px] px-1.5 py-1 rounded-lg border border-dashed border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-accent)] hover:border-[var(--color-accent)]/40"
         >
           {showAdvanced ? "收起高级" : "高级配置"}
         </button>
         <button
           onClick={handleAdd}
-          className="ml-auto flex items-center gap-1 px-2 py-1 text-[11px] rounded-md bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity"
+          className="ml-auto flex items-center gap-1 px-2 py-1 text-[10px] rounded-lg bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity"
         >
           <Plus className="w-3 h-3" /> 添加
         </button>
       </div>
       {showAdvanced && (
-        <div className="grid gap-2 md:grid-cols-2">
+        <div className="grid gap-1.5 md:grid-cols-2">
           <input
             value={workspace}
             onChange={(e) => setWorkspace(e.target.value)}
             placeholder="工作目录，如 /project/root"
-            className="text-[11px] px-2 py-1.5 rounded border border-[var(--color-border)] bg-[var(--color-bg)]"
+            className="text-[10px] px-2 py-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)]"
           />
           <select
             value={approvalLevel}
             onChange={(e) => setApprovalLevel(e.target.value as ApprovalLevel)}
-            className="text-[11px] px-2 py-1.5 rounded border border-[var(--color-border)] bg-[var(--color-bg)]"
+            className="text-[10px] px-2 py-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)]"
           >
             {APPROVAL_LEVELS.map((level) => (
               <option key={level} value={level}>
@@ -1701,24 +1706,24 @@ function AddAgentForm({
             value={toolAllow}
             onChange={(e) => setToolAllow(e.target.value)}
             placeholder="允许工具，逗号分隔"
-            className="text-[11px] px-2 py-1.5 rounded border border-[var(--color-border)] bg-[var(--color-bg)]"
+            className="text-[10px] px-2 py-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)]"
           />
           <input
             value={toolDeny}
             onChange={(e) => setToolDeny(e.target.value)}
             placeholder="禁止工具，逗号分隔"
-            className="text-[11px] px-2 py-1.5 rounded border border-[var(--color-border)] bg-[var(--color-bg)]"
+            className="text-[10px] px-2 py-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)]"
           />
           <input
             value={disabledMiddlewares}
             onChange={(e) => setDisabledMiddlewares(e.target.value)}
             placeholder="关闭中间件，逗号分隔"
-            className="text-[11px] px-2 py-1.5 rounded border border-[var(--color-border)] bg-[var(--color-bg)]"
+            className="text-[10px] px-2 py-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)]"
           />
           <select
             value={thinkingLevel}
             onChange={(e) => setThinkingLevel(e.target.value as ThinkingLevel)}
-            className="text-[11px] px-2 py-1.5 rounded border border-[var(--color-border)] bg-[var(--color-bg)]"
+            className="text-[10px] px-2 py-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)]"
           >
             {THINKING_LEVELS.map((level) => (
               <option key={level} value={level}>
@@ -1765,14 +1770,14 @@ function RoutingModeButton({
       <button
         type="button"
         onClick={() => setOpen(!open)}
-        className="flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] transition-colors"
+        className="flex items-center gap-1 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1 text-[10px] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/30 hover:text-[var(--color-text)] transition-colors"
       >
         <span>{current.icon}</span>
         <span>{current.label}</span>
         <ChevronDown className={`w-3 h-3 transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
       {open && (
-        <div className="absolute bottom-full mb-1 left-0 w-52 bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg shadow-xl overflow-hidden z-50">
+        <div className="absolute bottom-full mb-2 left-0 w-52 bg-[var(--color-bg)] border border-[var(--color-border)] rounded-2xl shadow-xl overflow-hidden z-50">
           <div className="py-1">
             {ROUTING_MODES.map((mode) => (
               <button
@@ -1944,40 +1949,160 @@ function DialogWorkspaceDock({
     };
   }, [panel, artifacts]);
 
+  const activeTodoCount = useMemo(
+    () =>
+      Object.values(actorTodos).reduce(
+        (sum, todos) =>
+          sum + todos.filter((todo) => todo.status === "pending" || todo.status === "in_progress").length,
+        0,
+      ),
+    [actorTodos],
+  );
+
+  const totalTodoCount = useMemo(
+    () => Object.values(actorTodos).reduce((sum, todos) => sum + todos.length, 0),
+    [actorTodos],
+  );
+
+  const openSessionCount = useMemo(
+    () => sortedTasks.filter((task) => task.mode === "session" && task.sessionOpen).length,
+    [sortedTasks],
+  );
+
+  const workspaceTabs: Array<{
+    id: Exclude<WorkspacePanel, null>;
+    label: string;
+    icon: LucideIcon;
+    count: number;
+    description: string;
+  }> = [
+    {
+      id: "todos",
+      label: "Todo",
+      icon: ListChecks,
+      count: activeTodoCount || totalTodoCount,
+      description: activeTodoCount > 0 ? `${activeTodoCount} 个活跃待办` : "查看全部 Agent 待办",
+    },
+    {
+      id: "artifacts",
+      label: "Artifacts",
+      icon: FileDown,
+      count: artifacts.length,
+      description: artifacts.length > 0 ? "浏览本轮生成的文件产物" : "当前还没有生成文件产物",
+    },
+    {
+      id: "uploads",
+      label: "Uploads",
+      icon: FolderOpen,
+      count: sessionUploads.length,
+      description: sessionUploads.length > 0 ? "查看会话上传与上下文附件" : "当前会话没有登记上传项",
+    },
+    {
+      id: "subtasks",
+      label: "Subtasks",
+      icon: Network,
+      count: sortedTasks.length,
+      description: openSessionCount > 0 ? `${openSessionCount} 个子会话仍可继续交互` : "查看已派发子任务与子会话",
+    },
+    {
+      id: "plan",
+      label: "Plan",
+      icon: ShieldCheck,
+      count: draftPlan?.steps.length ?? 0,
+      description: requirePlanApproval ? "发送前会先审批执行计划" : "当前发送将直接进入执行",
+    },
+  ];
+
+  const activePanelMeta = panel
+    ? workspaceTabs.find((tab) => tab.id === panel) ?? null
+    : null;
+  const ActivePanelIcon = activePanelMeta?.icon ?? ListChecks;
+
   return (
-    <div className="border-b border-[var(--color-border)] bg-[var(--color-bg-secondary)]">
-      <div className="flex items-center gap-1 px-4 pt-3">
-        {[
-          { id: "todos" as const, label: "Todo", icon: <ListChecks className="w-3.5 h-3.5" /> },
-          { id: "artifacts" as const, label: "Artifacts", icon: <FileDown className="w-3.5 h-3.5" /> },
-          { id: "uploads" as const, label: "Uploads", icon: <FolderOpen className="w-3.5 h-3.5" /> },
-          { id: "subtasks" as const, label: "Subtasks", icon: <Network className="w-3.5 h-3.5" /> },
-          { id: "plan" as const, label: "Plan", icon: <ShieldCheck className="w-3.5 h-3.5" /> },
-        ].map((tab) => (
+    <>
+      <div className="flex flex-wrap items-center gap-2">
+        {workspaceTabs.map((tab) => {
+          const active = panel === tab.id;
+          const Icon = tab.icon;
+          return (
+            <button
+              key={tab.id}
+              onClick={() => onPanelChange(active ? null : tab.id)}
+              className={`group inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] transition-all ${
+                active
+                  ? "border-[var(--color-accent)]/35 bg-[var(--color-accent)]/10 text-[var(--color-text)] shadow-sm"
+                  : "border-[var(--color-border)] bg-[var(--color-bg)]/75 text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/25 hover:text-[var(--color-text)]"
+              }`}
+              title={tab.description}
+            >
+              <span
+                className={`flex h-5 w-5 items-center justify-center rounded-full ${
+                  active ? "bg-[var(--color-accent)]/12 text-[var(--color-accent)]" : "bg-[var(--color-bg-secondary)] text-[var(--color-text-tertiary)] group-hover:text-[var(--color-text-secondary)]"
+                }`}
+              >
+                <Icon className="w-3 h-3" />
+              </span>
+              <span>{tab.label}</span>
+              {tab.count > 0 && (
+                <span
+                  className={`rounded-full px-1.5 py-0.5 text-[9px] ${
+                    active
+                      ? "bg-[var(--color-bg)] text-[var(--color-text-secondary)]"
+                      : "bg-[var(--color-bg-secondary)] text-[var(--color-text-tertiary)]"
+                  }`}
+                >
+                  {tab.count}
+                </span>
+              )}
+            </button>
+          );
+        })}
+        {panel && (
           <button
-            key={tab.id}
-            onClick={() => onPanelChange(panel === tab.id ? null : tab.id)}
-            className={`flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] rounded-t-lg border border-b-0 transition-colors ${
-              panel === tab.id
-                ? "bg-[var(--color-bg)] text-[var(--color-text)] border-[var(--color-border)]"
-                : "text-[var(--color-text-tertiary)] border-transparent hover:text-[var(--color-text-secondary)]"
-            }`}
+            onClick={() => onPanelChange(null)}
+            className="inline-flex items-center gap-1 rounded-full border border-transparent px-2 py-1 text-[10px] text-[var(--color-text-tertiary)] hover:border-[var(--color-border)] hover:bg-[var(--color-bg)]"
           >
-            {tab.icon}
-            {tab.label}
+            <X className="w-3.5 h-3.5" />
+            收起
           </button>
-        ))}
+        )}
       </div>
 
-      {panel && (
-        <div className="mx-4 mb-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] max-h-[320px] overflow-auto">
+      {panel && activePanelMeta && (
+        <>
+          <div className="absolute inset-0 z-20 bg-black/20" onClick={() => onPanelChange(null)} />
+          <div className="absolute inset-3 z-30 flex flex-col overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-2xl md:inset-y-3 md:right-3 md:left-auto md:w-[min(420px,calc(100%-1rem))]">
+            <div className="flex items-start justify-between gap-3 border-b border-[var(--color-border)] bg-[var(--color-bg)]/95 px-3.5 py-2.5 backdrop-blur-sm">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="flex h-7 w-7 items-center justify-center rounded-2xl bg-[var(--color-accent)]/12 text-[var(--color-accent)]">
+                    <ActivePanelIcon className="w-3.5 h-3.5" />
+                  </span>
+                  <span className="text-[13px] font-medium text-[var(--color-text)]">{activePanelMeta.label}</span>
+                  <span className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
+                    {activePanelMeta.count}
+                  </span>
+                </div>
+                <div className="mt-1 text-[10px] leading-relaxed text-[var(--color-text-secondary)]">
+                  {activePanelMeta.description}
+                </div>
+              </div>
+              <button
+                onClick={() => onPanelChange(null)}
+                className="rounded-xl p-1.5 text-[var(--color-text-tertiary)] hover:bg-[var(--color-bg-secondary)] hover:text-[var(--color-text)] transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-auto bg-[var(--color-bg-secondary)]/35">
         {panel === "todos" && (
-          <div className="p-4 space-y-3">
+          <div className="p-3 space-y-2.5">
             {actors.map((actor) => {
               const todos = actorTodos[actor.id] ?? [];
               const activeTodos = todos.filter((todo) => todo.status === "pending" || todo.status === "in_progress");
               return (
-                <div key={actor.id} className="rounded-xl border border-[var(--color-border)]/80 p-3">
+                <div key={actor.id} className="rounded-xl border border-[var(--color-border)]/80 p-2.5">
                   <div className="flex items-center justify-between gap-2">
                     <div className="text-[12px] font-medium text-[var(--color-text)]">{actor.roleName}</div>
                     <div className="text-[10px] text-[var(--color-text-tertiary)]">
@@ -1987,12 +2112,12 @@ function DialogWorkspaceDock({
                   {todos.length === 0 ? (
                     <div className="mt-2 text-[11px] text-[var(--color-text-tertiary)]">当前没有待办。</div>
                   ) : (
-                    <div className="mt-2 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                    <div className="mt-2 grid gap-1.5 md:grid-cols-2 xl:grid-cols-3">
                       {todos
                         .slice()
                         .sort((a, b) => b.updatedAt - a.updatedAt)
                         .map((todo) => (
-                          <div key={todo.id} className="rounded-lg border border-[var(--color-border)]/70 bg-[var(--color-bg-secondary)]/70 px-2.5 py-2">
+                          <div key={todo.id} className="rounded-lg border border-[var(--color-border)]/70 bg-[var(--color-bg-secondary)]/70 px-2.5 py-1.5">
                             <div className="flex items-center gap-2">
                               <span className="text-[11px] font-medium text-[var(--color-text)]">{todo.title}</span>
                               <span className="ml-auto text-[10px] text-[var(--color-text-tertiary)]">{todo.priority}</span>
@@ -2015,12 +2140,12 @@ function DialogWorkspaceDock({
         )}
 
         {panel === "artifacts" && (
-          <div className="p-4 space-y-3">
+          <div className="p-3 space-y-2.5">
             {artifacts.length === 0 ? (
               <div className="text-[12px] text-[var(--color-text-tertiary)]">当前还没有检测到文件产物。</div>
             ) : (
               artifacts.map((artifact) => (
-                <div key={artifact.id} className="rounded-xl border border-[var(--color-border)]/80 p-3">
+                <div key={artifact.id} className="rounded-xl border border-[var(--color-border)]/80 p-2.5">
                   {(() => {
                     const sourceMeta = getArtifactSourceMeta(artifact.source);
                     const availability = artifactAvailabilityByPath[artifact.path] ?? "unknown";
@@ -2083,12 +2208,12 @@ function DialogWorkspaceDock({
         )}
 
         {panel === "uploads" && (
-          <div className="p-4 space-y-3">
+          <div className="p-3 space-y-2.5">
             {sessionUploads.length === 0 ? (
               <div className="text-[12px] text-[var(--color-text-tertiary)]">当前会话里还没有登记过上传文件。</div>
             ) : (
               sessionUploads.map((upload) => (
-                <div key={upload.id} className="rounded-xl border border-[var(--color-border)]/80 p-3">
+                <div key={upload.id} className="rounded-xl border border-[var(--color-border)]/80 p-2.5">
                   <div className="flex flex-wrap items-center gap-2">
                     <div className="text-[12px] font-medium text-[var(--color-text)]">{upload.name}</div>
                     <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]">
@@ -2120,7 +2245,7 @@ function DialogWorkspaceDock({
         )}
 
         {panel === "subtasks" && (
-          <div className="p-4">
+          <div className="p-3">
             {sortedTasks.length === 0 ? (
               <div className="text-[12px] text-[var(--color-text-tertiary)]">还没有 spawn_task 记录。</div>
             ) : (
@@ -2161,7 +2286,7 @@ function DialogWorkspaceDock({
                   })}
                 </div>
                 {selectedTask && (
-                  <div className="rounded-xl border border-[var(--color-border)] p-3 space-y-3">
+                  <div className="rounded-xl border border-[var(--color-border)] p-2.5 space-y-2.5">
                     <div className="flex flex-wrap items-center gap-2">
                       <div className="text-[13px] font-medium text-[var(--color-text)]">
                         {selectedTask.label || selectedTask.task.slice(0, 32)}
@@ -2268,7 +2393,7 @@ function DialogWorkspaceDock({
         )}
 
         {panel === "plan" && (
-          <div className="p-4 space-y-3">
+          <div className="p-3 space-y-2.5">
             <div className="flex flex-wrap items-center gap-3">
               <label className="flex items-center gap-2 text-[12px] text-[var(--color-text)]">
                 <input
@@ -2316,9 +2441,11 @@ function DialogWorkspaceDock({
             )}
           </div>
         )}
-        </div>
+            </div>
+          </div>
+        </>
       )}
-    </div>
+    </>
   );
 }
 
@@ -2327,7 +2454,7 @@ function DialogWorkspaceDock({
 export function ActorChatPanel({ active = true }: { active?: boolean }) {
   const [showConfig, setShowConfig] = useState(false);
   const [overlay, setOverlay] = useState<DialogOverlay>(null);
-  const [workspacePanel, setWorkspacePanel] = useState<WorkspacePanel>("todos");
+  const [workspacePanel, setWorkspacePanel] = useState<WorkspacePanel>(null);
   const [input, setInput] = useState("");
   const [showMention, setShowMention] = useState(false);
   const [mentionFilter, setMentionFilter] = useState("");
@@ -2761,6 +2888,8 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
           });
           if (approvalResult.status !== "approved") {
             setLastPlanReview({ status: "rejected", timestamp: Date.now(), plan: planBundle.clusterPlan });
+            setShowConfig(false);
+            setOverlay(null);
             setWorkspacePanel("plan");
             setInputNotice("执行计划已取消，调整后可重新发送。");
             inputRef.current?.focus();
@@ -2896,6 +3025,76 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     return `${actorName} 的${kindLabel}`;
   }, [selectedPendingMessageId, pendingInteractionByMessageId, actorById]);
 
+  const routingModeMeta = useMemo(
+    () => ROUTING_MODES.find((mode) => mode.value === routingMode) ?? ROUTING_MODES[0],
+    [routingMode],
+  );
+
+  const activeTodoCount = useMemo(
+    () =>
+      Object.values(actorTodos).reduce(
+        (sum, todos) =>
+          sum + todos.filter((todo) => todo.status === "pending" || todo.status === "in_progress").length,
+        0,
+      ),
+    [actorTodos],
+  );
+
+  const openSessionCount = useMemo(
+    () => spawnedTasks.filter((task) => task.mode === "session" && task.sessionOpen).length,
+    [spawnedTasks],
+  );
+
+  const coordinatorName = coordinatorActorId
+    ? actorById.get(coordinatorActorId)?.roleName ?? null
+    : null;
+
+  useEffect(() => {
+    const element = inputRef.current;
+    if (!element) return;
+    element.style.height = "0px";
+    const nextHeight = Math.min(Math.max(element.scrollHeight, 64), 180);
+    element.style.height = `${nextHeight}px`;
+  }, [input]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || openApprovalMessageId) return;
+      if (showConfig) {
+        setShowConfig(false);
+        return;
+      }
+      if (overlay) {
+        setOverlay(null);
+        return;
+      }
+      if (workspacePanel) {
+        setWorkspacePanel(null);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [openApprovalMessageId, overlay, showConfig, workspacePanel]);
+
+  const handleToggleConfig = useCallback(() => {
+    setOverlay(null);
+    setWorkspacePanel(null);
+    setShowConfig((value) => !value);
+  }, []);
+
+  const handleToggleOverlay = useCallback((nextOverlay: DialogOverlay) => {
+    setShowConfig(false);
+    setWorkspacePanel(null);
+    setOverlay((current) => (current === nextOverlay ? null : nextOverlay));
+  }, []);
+
+  const handleWorkspacePanelChange = useCallback((nextPanel: WorkspacePanel) => {
+    setShowConfig(false);
+    setOverlay(null);
+    setWorkspacePanel(nextPanel);
+  }, []);
+
   const draftDispatchBundle = useMemo(() => {
     const trimmed = input.trim();
     const hasContext = fileContextBlock.trim().length > 0;
@@ -2947,218 +3146,220 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   }, [overlay, actors, dialogHistory]);
 
   return (
-    <div className="relative flex flex-col h-full">
-      {/* Header */}
-      <div className="flex items-center justify-between px-4 py-2.5 border-b border-[var(--color-border)]">
-        <div className="flex items-center gap-2">
-          <Users className="w-4 h-4 text-[var(--color-accent)]" />
-          <span className="text-sm font-medium">Agent Dialog</span>
+    <div className="relative flex h-full flex-col overflow-hidden bg-[var(--color-bg)]">
+      <div className="shrink-0 border-b border-[var(--color-border)] bg-[var(--color-bg)]">
+        <div className="mx-auto flex w-full max-w-6xl flex-col gap-2 px-3 py-2.5">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <div className="flex min-w-0 items-center gap-1.5">
+              <Users className="h-4 w-4 text-[var(--color-accent)]" />
+              <span className="text-[13px] font-semibold text-[var(--color-text)]">Agent Dialog</span>
+            </div>
+            <span className={`rounded-full px-2 py-0.5 text-[10px] ${
+              actors.length > 0
+                ? "bg-emerald-500/10 text-emerald-600"
+                : "bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]"
+            }`}>
+              {actors.length > 0 ? `${actors.length} 个 Agent` : "等待配置"}
+            </span>
+            {coordinatorName && (
+              <span className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
+                协调者 {coordinatorName}
+              </span>
+            )}
+            <span className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
+              {routingModeMeta.icon} {routingModeMeta.label}
+            </span>
+            {requirePlanApproval && (
+              <span className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
+                发送前审批
+              </span>
+            )}
+            {pendingUserInteractions.length > 0 && (
+              <span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-700">
+                {pendingUserInteractions.length} 条待回复
+              </span>
+            )}
+            {hasRunningActors && (
+              <span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-700">
+                {runningActors.length} 个运行中
+              </span>
+            )}
+            <div className="ml-auto flex flex-wrap items-center gap-1.5">
+              <button
+                onClick={handleToggleConfig}
+                className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] transition-colors ${
+                  showConfig
+                    ? "border-[var(--color-accent)]/35 bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
+                    : "border-[var(--color-border)] bg-[var(--color-bg)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/25 hover:text-[var(--color-text)]"
+                }`}
+                title="Agent 设置"
+              >
+                <Settings2 className="w-3 h-3" />
+                Agent 设置
+              </button>
+              <button
+                onClick={() => handleToggleOverlay("tasks")}
+                className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] transition-colors ${
+                  overlay === "tasks"
+                    ? "border-blue-500/30 bg-blue-500/10 text-blue-600"
+                    : "border-[var(--color-border)] bg-[var(--color-bg)] text-[var(--color-text-secondary)] hover:border-blue-500/25 hover:text-blue-600"
+                }`}
+                title="任务中心"
+              >
+                <ListChecks className="w-3 h-3" />
+                任务中心
+              </button>
+              <button
+                onClick={() => handleToggleOverlay("graph")}
+                className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] transition-colors ${
+                  overlay === "graph"
+                    ? "border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-600"
+                    : "border-[var(--color-border)] bg-[var(--color-bg)] text-[var(--color-text-secondary)] hover:border-fuchsia-500/25 hover:text-fuchsia-600"
+                }`}
+                title="知识图谱"
+              >
+                <Network className="w-3 h-3" />
+                图谱
+              </button>
+              {hasRunningActors && (
+                <button
+                  onClick={handleStop}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-red-500/20 bg-red-500/5 px-2.5 py-1 text-[10px] text-red-600 hover:border-red-500/35 hover:bg-red-500/10 transition-colors"
+                >
+                  <Square className="w-3 h-3" />
+                  停止
+                </button>
+              )}
+              <button
+                onClick={handleNewTopic}
+                className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1 text-[10px] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/25 hover:text-[var(--color-accent)] transition-colors"
+                title="清空对话和 Agent 记忆，保留当前 Agent 阵容"
+              >
+                <RotateCcw className="w-3 h-3" />
+                新话题
+              </button>
+              <button
+                onClick={handleFullReset}
+                className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1 text-[10px] text-[var(--color-text-secondary)] hover:border-red-500/25 hover:text-red-600 transition-colors"
+                title="销毁所有 Agent，回到初始状态"
+              >
+                <Trash2 className="w-3 h-3" />
+                重置
+              </button>
+            </div>
+          </div>
+
           {actors.length > 0 && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-500">
-              {actors.length} 个 Agent
-            </span>
+            <div className="flex flex-wrap items-center gap-2">
+              <ActorStatusBar actors={actors} />
+              <div className="min-w-0 flex-1" />
+              <DialogWorkspaceDock
+                panel={workspacePanel}
+                onPanelChange={handleWorkspacePanelChange}
+                actors={actors}
+                actorTodos={actorTodos}
+                dialogHistory={dialogHistory}
+                artifacts={artifacts}
+                sessionUploads={sessionUploads}
+                spawnedTasks={spawnedTasks}
+                selectedRunId={selectedSpawnRunId}
+                onSelectRunId={setSelectedSpawnRunId}
+                focusedSessionRunId={focusedSpawnedSessionRunId}
+                onFocusSession={focusSpawnedSession}
+                onCloseSession={closeSpawnedSession}
+                draftPlan={draftDispatchPlan}
+                requirePlanApproval={requirePlanApproval}
+                onTogglePlanApproval={setRequirePlanApproval}
+                lastPlanReview={lastPlanReview}
+              />
+            </div>
           )}
-          {actors.length === 1 && (
-            <span className="text-[10px] text-[var(--color-text-tertiary)]" title="与 OpenClaw 一致：多 Agent 可同时执行子任务">
-              点击 ⚙ 添加 Agent 可并行执行子任务
-            </span>
-          )}
-          {actors.length >= 2 && (
-            <span className="text-[10px] text-[var(--color-text-tertiary)]" title="用户消息只发给当前协调者；协调者用 spawn_task 派活后，其他 Agent 才会参与">
-              消息发给协调者，其他由协调者 spawn_task 激活
-            </span>
-          )}
-        </div>
-        <div className="flex items-center gap-1.5">
-          <button
-            onClick={() => setShowConfig(!showConfig)}
-            className={`p-1 rounded transition-colors ${
-              showConfig ? "bg-[var(--color-accent)]/10 text-[var(--color-accent)]" : "text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)]"
-            }`}
-            title="Agent 设置"
-          >
-            <Settings2 className="w-3.5 h-3.5" />
-          </button>
-          <button
-            onClick={() => setOverlay(overlay === "tasks" ? null : "tasks")}
-            className={`p-1 rounded transition-colors ${
-              overlay === "tasks" ? "bg-blue-500/10 text-blue-500" : "text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)]"
-            }`}
-            title="任务中心"
-          >
-            <ListChecks className="w-3.5 h-3.5" />
-          </button>
-          <button
-            onClick={() => setOverlay(overlay === "graph" ? null : "graph")}
-            className={`p-1 rounded transition-colors ${
-              overlay === "graph" ? "bg-purple-500/10 text-purple-500" : "text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)]"
-            }`}
-            title="知识图谱"
-          >
-            <Network className="w-3.5 h-3.5" />
-          </button>
-          {hasRunningActors && (
-            <span className="mx-0.5 h-3 w-px bg-[var(--color-border)]" />
-          )}
-          {hasRunningActors && (
-            <button onClick={handleStop} className="text-xs text-red-500 hover:text-red-600 flex items-center gap-1">
-              <Square className="w-3 h-3" /> 停止
-            </button>
-          )}
-          <button onClick={handleNewTopic} className="text-xs text-[var(--color-text-tertiary)] hover:text-[var(--color-accent)] flex items-center gap-1"
-            title="清空对话和 Agent 记忆，保留当前 Agent 阵容">
-            <RotateCcw className="w-3 h-3" /> 新话题
-          </button>
-          <button onClick={handleFullReset} className="text-xs text-[var(--color-text-tertiary)] hover:text-red-500 flex items-center gap-1"
-            title="销毁所有 Agent，回到初始状态">
-            <Trash2 className="w-3 h-3" /> 重置
-          </button>
         </div>
       </div>
 
-      {/* Settings Panel (collapsible) */}
-      {showConfig && (
-        <div className="px-4 py-3 border-b border-[var(--color-border)] space-y-3 bg-[var(--color-bg-secondary)]">
-          {/* Presets */}
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-[10px] text-[var(--color-text-tertiary)]">预设:</span>
-            {DIALOG_PRESETS.map((preset) => (
-              <button
-                key={preset.id}
-                className="text-[10px] px-2 py-1 rounded-md border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/40 hover:text-[var(--color-accent)] transition-colors"
-                onClick={() => handleApplyPreset(preset.id)}
-                title={preset.description}
-              >
-                {preset.name}
-              </button>
-            ))}
-            {customPresets.length > 0 && (
-              <>
-                <span className="text-[10px] text-[var(--color-text-tertiary)]">|</span>
-                {customPresets.map((preset) => (
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+        <div className="mx-auto flex w-full max-w-5xl flex-col gap-4">
+          {dialogHistory.length === 0 && (
+            <div className="rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-secondary)]/25 px-4 py-6 text-center">
+              <div className="flex flex-col items-center gap-2">
+                <Bot className="w-5 h-5 text-[var(--color-text-tertiary)] opacity-60" />
+                <div className="text-[13px] font-medium text-[var(--color-text)]">
+                  {actors.length > 0 ? "从下方输入框开始一条新对话" : "先添加 Agent，再开始对话"}
+                </div>
+                <div className="text-[11px] text-[var(--color-text-secondary)]">
+                  {actors.length > 0
+                    ? "任务中心、工作台和图谱都在顶部工具条里按需打开。"
+                    : "建议先保留一个协调者，再按分析、编写或审查角色继续补充。"}
+                </div>
+                <div className="mt-1 flex flex-wrap justify-center gap-2">
                   <button
-                    key={preset.id}
-                    className="text-[10px] px-2 py-1 rounded-md border border-purple-500/30 text-purple-600 hover:border-purple-500/60 hover:text-purple-500 transition-colors"
-                    onClick={() => handleApplyPreset(preset.id)}
-                    title={preset.description}
+                    onClick={() => {
+                      setOverlay(null);
+                      setWorkspacePanel(null);
+                      setShowConfig(true);
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[11px] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/25 hover:text-[var(--color-accent)] transition-colors"
                   >
-                    {preset.name}
+                    <Settings2 className="w-3 h-3" />
+                    管理 Agent
                   </button>
-                ))}
-              </>
-            )}
-            <button
-              onClick={handleSaveCurrentAsPreset}
-              className="text-[10px] px-2 py-1 rounded-md border border-dashed border-[var(--color-border)] text-[var(--color-text-tertiary)] hover:border-green-500/40 hover:text-green-500 transition-colors"
-              title="保存当前 Agent 配置为新预设"
-            >
-              + 保存当前
-            </button>
-          </div>
-          {/* Live Agents */}
-          <div className="text-[10px] font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider">
-            当前 Agent ({actors.length})
-          </div>
-          <div className="space-y-2">
-            {actors.map((actor, i) => (
-              <LiveActorRow
-                key={actor.id}
-                actor={actor}
-                index={i}
-                onRemove={() => handleRemoveAgent(actor.id)}
-              />
-            ))}
-            {actors.length === 0 && (
-              <div className="text-[11px] text-[var(--color-text-tertiary)] py-1">暂无 Agent</div>
-            )}
-          </div>
-          {/* Add Agent */}
-          <AddAgentForm
-            models={models}
-            existingNames={actors.map((a) => a.roleName)}
-            onAdd={handleAddAgent}
-          />
-        </div>
-      )}
-
-      {/* Status bar */}
-      {!showConfig && actors.length > 0 && (
-        <div className="px-4 py-2 border-b border-[var(--color-border)]">
-          <ActorStatusBar actors={actors} />
-        </div>
-      )}
-
-      {!showConfig && actors.length > 0 && (
-        <DialogWorkspaceDock
-          panel={workspacePanel}
-          onPanelChange={setWorkspacePanel}
-          actors={actors}
-          actorTodos={actorTodos}
-          dialogHistory={dialogHistory}
-          artifacts={artifacts}
-          sessionUploads={sessionUploads}
-          spawnedTasks={spawnedTasks}
-          selectedRunId={selectedSpawnRunId}
-          onSelectRunId={setSelectedSpawnRunId}
-          focusedSessionRunId={focusedSpawnedSessionRunId}
-          onFocusSession={focusSpawnedSession}
-          onCloseSession={closeSpawnedSession}
-          draftPlan={draftDispatchPlan}
-          requirePlanApproval={requirePlanApproval}
-          onTogglePlanApproval={setRequirePlanApproval}
-          lastPlanReview={lastPlanReview}
-        />
-      )}
-
-      {/* Chat Stream */}
-      <div className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-3 space-y-3">
-        {dialogHistory.length === 0 && (
-          <div className="text-center text-[var(--color-text-secondary)] py-12">
-            <Bot className="w-10 h-10 mx-auto mb-3 opacity-15" />
-            <p className="text-xs opacity-60">直接输入消息开始对话，点击 ⚙ 可添加更多 Agent</p>
-          </div>
-        )}
-
-        {/* Message windowing: show all when < 100, otherwise show load-more + recent */}
-        {dialogHistory.length > 100 && !showAllMessages && (
-          <button
-            onClick={() => setShowAllMessages(true)}
-            className="w-full text-center text-[10px] text-[var(--color-text-tertiary)] hover:text-[var(--color-accent)] py-2 transition-colors"
-          >
-            ↑ 加载更早的 {dialogHistory.length - 100} 条消息
-          </button>
-        )}
-
-        {visibleMessages.map((msg) => {
-          const isUser = msg.from === "user";
-          const actorIdx = actorIdToIndex.get(msg.from) ?? 0;
-          const actor = actorById.get(msg.from);
-          const actorName = isUser ? "你" : (actor?.roleName ?? msg.from);
-          const targetName = msg.to
-            ? (msg.to === "user" ? "你" : (actorById.get(msg.to)?.roleName ?? msg.to))
-            : undefined;
-          const isWaiting = !isUser && msg.expectReply && pendingUserReplySet.has(msg.id);
-          const pendingInteraction = pendingInteractionByMessageId.get(msg.id);
-
-          return (
-            <div key={msg.id} className="max-w-full">
-              <MessageBubble
-                message={msg}
-                actorIndex={actorIdx}
-                actorName={actorName}
-                targetName={targetName}
-                isUser={isUser}
-                isWaitingReply={isWaiting}
-                pendingInteraction={pendingInteraction}
-                onReplyToInteraction={replyToMessage}
-                onOpenApprovalDrawer={handleOpenApprovalDrawer}
-              />
+                  <button
+                    onClick={() => handleToggleOverlay("tasks")}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[11px] text-[var(--color-text-secondary)] hover:border-blue-500/25 hover:text-blue-600 transition-colors"
+                  >
+                    <ListChecks className="w-3 h-3" />
+                    任务中心
+                  </button>
+                  <button
+                    onClick={() => setRoutingMode("smart")}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[11px] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/25 hover:text-[var(--color-accent)] transition-colors"
+                  >
+                    <span>⚡</span>
+                    切到智能路由
+                  </button>
+                </div>
+              </div>
             </div>
-          );
-        })}
+          )}
 
-        {/* Thinking indicators - 流式输出 */}
-        {runningActors.map((a, i) => {
+          {dialogHistory.length > 100 && !showAllMessages && (
+            <button
+              onClick={() => setShowAllMessages(true)}
+              className="self-center rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-4 py-2 text-[11px] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/25 hover:text-[var(--color-accent)] transition-colors"
+            >
+              加载更早的 {dialogHistory.length - 100} 条消息
+            </button>
+          )}
+
+          {visibleMessages.map((msg) => {
+            const isUser = msg.from === "user";
+            const actorIdx = actorIdToIndex.get(msg.from) ?? 0;
+            const actor = actorById.get(msg.from);
+            const actorName = isUser ? "你" : (actor?.roleName ?? msg.from);
+            const targetName = msg.to
+              ? (msg.to === "user" ? "你" : (actorById.get(msg.to)?.roleName ?? msg.to))
+              : undefined;
+            const isWaiting = !isUser && msg.expectReply && pendingUserReplySet.has(msg.id);
+            const pendingInteraction = pendingInteractionByMessageId.get(msg.id);
+
+            return (
+              <div key={msg.id} className="max-w-full">
+                <MessageBubble
+                  message={msg}
+                  actorIndex={actorIdx}
+                  actorName={actorName}
+                  targetName={targetName}
+                  isUser={isUser}
+                  isWaitingReply={isWaiting}
+                  pendingInteraction={pendingInteraction}
+                  onReplyToInteraction={replyToMessage}
+                  onOpenApprovalDrawer={handleOpenApprovalDrawer}
+                />
+              </div>
+            );
+          })}
+
+          {runningActors.map((a, i) => {
             const color = getActorColor(actorIdToIndex.get(a.id) ?? i);
             const steps = a.currentTask?.steps ?? [];
             const hasPendingApproval = pendingUserInteractions.some(
@@ -3177,7 +3378,6 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
 
             return (
               <div key={`thinking-${a.id}`} className="space-y-2">
-                {/* 思考过程折叠面板 */}
                 {latestThinkingStep && (
                   <ThinkingBlock
                     roleName={a.roleName}
@@ -3187,8 +3387,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                     color={color}
                   />
                 )}
-                
-                {/* 工具流式输出代码块 */}
+
                 {latestToolStreamingStep && (
                   <ToolStreamingBlock
                     roleName={a.roleName}
@@ -3199,13 +3398,12 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                   />
                 )}
 
-                {/* 流式生成的内容气泡 */}
                 {streamingContent && (
                   <div className={`flex gap-2 ${color.text}`}>
                     <div className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 ${color.bg}`}>
                       <Bot className="w-3.5 h-3.5" />
                     </div>
-                    <div className="max-w-[80%]">
+                    <div className="max-w-[88%] lg:max-w-[78%]">
                       <div className="text-[10px] mb-0.5">
                         {a.roleName}
                         <span className="text-[var(--color-text-tertiary)] ml-1">
@@ -3224,10 +3422,9 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                   </div>
                 )}
 
-                {/* 思考状态指示器 */}
                 <div className={`flex items-center gap-2 ${color.text}`}>
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  <span className="text-[11px] truncate max-w-[80%]">
+                  <span className="text-[11px] truncate max-w-[88%] lg:max-w-[78%]">
                     <span className="font-medium">{a.roleName}</span>
                     <span className="opacity-70 ml-1">
                       {describeAgentActivity(steps, a.roleName, !!streamingContent)}
@@ -3238,176 +3435,333 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
             );
           })}
 
-        <div ref={chatEndRef} />
-      </div>
-
-      {/* Input Bar — always visible */}
-      <div className="px-4 py-3 border-t border-[var(--color-border)]" onDrop={handleDrop} onDragOver={handleDragOver}>
-        {focusedSessionTask && (
-          <div className="mb-2 flex flex-wrap items-center gap-2 text-[10px] text-blue-700 bg-blue-500/10 rounded-lg px-2.5 py-1.5">
-            <Network className="w-3 h-3" />
-            <span>
-              当前正在聚焦子会话：
-              {focusedSessionTask.label || (actorById.get(focusedSessionTask.targetActorId)?.roleName ?? focusedSessionTask.targetActorId)}
-            </span>
-            <button
-              onClick={() => focusSpawnedSession(null)}
-              className="ml-auto px-2 py-0.5 rounded-full border border-blue-500/20 hover:border-blue-500/40 transition-colors"
-            >
-              退出聚焦
-            </button>
-          </div>
-        )}
-        {pendingUserInteractions.length > 0 && pendingAgentNames && (
-          <div className="mb-2 space-y-1.5">
-            <div className="flex items-center gap-2 text-[10px] text-amber-600 bg-amber-500/10 rounded-lg px-2.5 py-1.5">
-              <Reply className="w-3 h-3" />
-              <span>
-                {pendingAgentNames} 正在等待你的回复
-                {pendingUserInteractions.length > 1 ? "，请先选择要回复的问题" : "，发送消息将回复当前问题"}
-              </span>
-            </div>
-            <div className="flex flex-wrap gap-1.5">
-              {pendingUserInteractions.map((interaction) => {
-                const actorName = actorById.get(interaction.fromActorId)?.roleName ?? interaction.fromActorId;
-                const isSelected = selectedPendingMessageId === interaction.messageId;
-                const kindLabel = interaction.type === "approval"
-                  ? "审批"
-                  : interaction.type === "clarification"
-                    ? "澄清"
-                    : "提问";
-                return (
-                  <button
-                    key={interaction.messageId}
-                    onClick={() => {
-                      setSelectedPendingMessageId(interaction.messageId);
-                      setInputNotice(null);
-                      inputRef.current?.focus();
-                    }}
-                    className={`text-[10px] px-2 py-1 rounded-full border transition-colors ${
-                      isSelected
-                        ? "border-amber-500/50 bg-amber-500/15 text-amber-700"
-                        : "border-[var(--color-border)] bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)] hover:border-amber-500/40 hover:text-amber-600"
-                    }`}
-                    title={interaction.question}
-                  >
-                    {actorName} · {kindLabel}
-                  </button>
-                );
-              })}
-              {selectedPendingMessageId !== NEW_MESSAGE_TARGET && (
-                <button
-                  onClick={() => setSelectedPendingMessageId(NEW_MESSAGE_TARGET)}
-                  className="text-[10px] px-2 py-1 rounded-full border border-dashed border-[var(--color-border)] text-[var(--color-text-tertiary)] hover:text-[var(--color-accent)] hover:border-[var(--color-accent)]/40 transition-colors"
-                >
-                  作为新消息发送
-                </button>
-              )}
-            </div>
-            {inputNotice && (
-              <div className="text-[10px] text-amber-600 px-1">{inputNotice}</div>
-            )}
-          </div>
-        )}
-        {/* Attachment preview */}
-        {attachments.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 mb-2">
-            {attachments.map((att) => (
-              <div
-                key={att.id}
-                className="flex items-center gap-1 px-2 py-1 rounded-lg bg-[var(--color-bg-secondary)] border border-[var(--color-border)] text-[11px]"
-              >
-                {att.type === "image" && att.preview ? (
-                  <img src={att.preview} alt="" className="w-5 h-5 rounded object-cover" />
-                ) : (
-                  <span className="opacity-60">{att.type === "folder" ? "📂" : "📄"}</span>
-                )}
-                <span className="max-w-[100px] truncate">{att.name}</span>
-                <button
-                  onClick={() => removeAttachment(att.id)}
-                  className="ml-0.5 p-0.5 rounded hover:bg-red-500/10 text-[var(--color-text-tertiary)] hover:text-red-500"
-                >
-                  <X className="w-2.5 h-2.5" />
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          accept={FILE_ACCEPT_ALL}
-          className="hidden"
-          onChange={onFileSelect}
-        />
-        <div className="flex items-end gap-2" ref={inputWrapRef}>
-          <div className="flex-1 relative bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-xl focus-within:ring-1 focus-within:ring-[var(--color-accent)] focus-within:border-[var(--color-accent)] transition-shadow">
-            {showMention && (
-              <MentionPopup
-                actors={actors}
-                filter={mentionFilter}
-                onSelect={handleMentionSelect}
-                onClose={() => setShowMention(false)}
-              />
-            )}
-            <textarea
-              ref={inputRef}
-              className="w-full text-sm bg-transparent px-3 pt-2 pb-1 resize-none focus:outline-none min-h-[36px] max-h-[140px]"
-              rows={1}
-              placeholder={selectedPendingMessageId === NEW_MESSAGE_TARGET
-                ? "作为新消息发送，不会绑定到待回复问题..."
-                : selectedPendingInteractionLabel
-                ? `回复${selectedPendingInteractionLabel}...`
-                : focusedSessionTask
-                  ? `继续和 ${actorById.get(focusedSessionTask.targetActorId)?.roleName ?? focusedSessionTask.targetActorId} 的子会话...`
-                : pendingUserInteractions.length > 0
-                  ? `有 ${pendingUserInteractions.length} 条待回复交互，先选择要回复的问题...`
-                : "输入消息... 输入 @ 可指定发送给某个 Agent"}
-              value={input}
-              onChange={handleInputChange}
-              onKeyDown={handleKeyDown}
-              onPaste={handlePaste}
-              onBlur={() => setTimeout(() => setShowMention(false), 150)}
-            />
-            <div className="flex items-center px-2 pb-1.5">
-              <AttachDropdown
-                onFileClick={() => {
-                  if ("__TAURI_INTERNALS__" in window) {
-                    void handleFileSelectNative();
-                  } else {
-                    fileInputRef.current?.click();
-                  }
-                }}
-                onFolderClick={handleFolderSelect}
-                accent="accent"
-              />
-              <RoutingModeButton value={routingMode} onChange={setRoutingMode} />
-            </div>
-          </div>
-          <button
-            onClick={handleSend}
-            disabled={!input.trim() && !hasAttachments}
-            className="h-9 w-9 rounded-xl bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity disabled:opacity-40 shrink-0 flex items-center justify-center mb-0.5"
-          >
-            <Send className="w-4 h-4" />
-          </button>
+          <div ref={chatEndRef} />
         </div>
       </div>
 
-      {/* Overlay Panel — 浮层弹窗，不压缩聊天区 */}
+      <div
+        className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-bg)]/92 backdrop-blur-sm"
+        onDrop={handleDrop}
+        onDragOver={handleDragOver}
+      >
+        <div className="mx-auto w-full max-w-5xl px-3 py-2.5">
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept={FILE_ACCEPT_ALL}
+            className="hidden"
+            onChange={onFileSelect}
+          />
+
+          <div className="overflow-visible rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-[0_12px_32px_-24px_rgba(15,23,42,0.35)]">
+            {(focusedSessionTask || pendingUserInteractions.length > 0 || attachments.length > 0 || inputNotice) && (
+              <div className="space-y-2 border-b border-[var(--color-border)] bg-[linear-gradient(135deg,rgba(15,23,42,0.02),transparent_45%)] px-3 py-3">
+                {focusedSessionTask && (
+                  <div className="flex flex-wrap items-center gap-2 rounded-xl border border-blue-500/15 bg-blue-500/10 px-3 py-1.5 text-[10px] text-blue-700">
+                    <Network className="w-3 h-3" />
+                    <span>
+                      当前正在聚焦子会话：
+                      {focusedSessionTask.label || (actorById.get(focusedSessionTask.targetActorId)?.roleName ?? focusedSessionTask.targetActorId)}
+                    </span>
+                    <button
+                      onClick={() => focusSpawnedSession(null)}
+                      className="ml-auto rounded-full border border-blue-500/20 px-2.5 py-1 text-[10px] hover:border-blue-500/40 transition-colors"
+                    >
+                      退出聚焦
+                    </button>
+                  </div>
+                )}
+
+                {pendingUserInteractions.length > 0 && pendingAgentNames && (
+                  <div className="space-y-2">
+                    <div className="flex flex-wrap items-center gap-2 rounded-xl border border-amber-500/15 bg-amber-500/10 px-3 py-1.5 text-[10px] text-amber-700">
+                      <Reply className="w-3 h-3" />
+                      <span>
+                        {pendingAgentNames} 正在等待你的回复
+                        {pendingUserInteractions.length > 1 ? "，请先选择要回复的问题" : "，发送消息将回复当前问题"}
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {pendingUserInteractions.map((interaction) => {
+                        const actorName = actorById.get(interaction.fromActorId)?.roleName ?? interaction.fromActorId;
+                        const isSelected = selectedPendingMessageId === interaction.messageId;
+                        const kindLabel = interaction.type === "approval"
+                          ? "审批"
+                          : interaction.type === "clarification"
+                            ? "澄清"
+                            : "提问";
+                        return (
+                          <button
+                            key={interaction.messageId}
+                            onClick={() => {
+                              setSelectedPendingMessageId(interaction.messageId);
+                              setInputNotice(null);
+                              inputRef.current?.focus();
+                            }}
+                            className={`rounded-full border px-2.5 py-1 text-[10px] transition-colors ${
+                              isSelected
+                                ? "border-amber-500/50 bg-amber-500/15 text-amber-700"
+                                : "border-[var(--color-border)] bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)] hover:border-amber-500/40 hover:text-amber-600"
+                            }`}
+                            title={interaction.question}
+                          >
+                            {actorName} · {kindLabel}
+                          </button>
+                        );
+                      })}
+                      {selectedPendingMessageId !== NEW_MESSAGE_TARGET && (
+                        <button
+                          onClick={() => setSelectedPendingMessageId(NEW_MESSAGE_TARGET)}
+                          className="rounded-full border border-dashed border-[var(--color-border)] px-2.5 py-1 text-[10px] text-[var(--color-text-tertiary)] hover:border-[var(--color-accent)]/40 hover:text-[var(--color-accent)] transition-colors"
+                        >
+                          作为新消息发送
+                        </button>
+                      )}
+                    </div>
+                    {inputNotice && (
+                      <div className="px-1 text-[10px] text-amber-700">{inputNotice}</div>
+                    )}
+                  </div>
+                )}
+
+                {attachments.length > 0 && (
+                  <div className="flex max-h-[96px] flex-wrap gap-1.5 overflow-y-auto pr-1">
+                    {attachments.map((att) => (
+                      <div
+                        key={att.id}
+                        className="flex items-center gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1 text-[10px]"
+                        title={att.name}
+                      >
+                        {att.type === "image" && att.preview ? (
+                          <img src={att.preview} alt="" className="h-6 w-6 rounded-lg object-cover" />
+                        ) : att.type === "folder" ? (
+                          <FolderOpen className="w-3.5 h-3.5 text-[var(--color-text-tertiary)]" />
+                        ) : (
+                          <FileDown className="w-3.5 h-3.5 text-[var(--color-text-tertiary)]" />
+                        )}
+                        <span className="max-w-[140px] truncate text-[var(--color-text-secondary)]">{att.name}</span>
+                        <button
+                          onClick={() => removeAttachment(att.id)}
+                          className="rounded-full p-1 text-[var(--color-text-tertiary)] hover:bg-red-500/10 hover:text-red-500 transition-colors"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {inputNotice && pendingUserInteractions.length === 0 && (
+                  <div className="rounded-xl border border-amber-500/15 bg-amber-500/10 px-3 py-1.5 text-[10px] text-amber-700">
+                    {inputNotice}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="relative" ref={inputWrapRef}>
+              {showMention && (
+                <MentionPopup
+                  actors={actors}
+                  filter={mentionFilter}
+                  onSelect={handleMentionSelect}
+                  onClose={() => setShowMention(false)}
+                />
+              )}
+              <textarea
+                ref={inputRef}
+                className="w-full resize-none bg-transparent px-3 pt-3 pb-2 text-[14px] leading-6 focus:outline-none min-h-[64px] max-h-[180px]"
+                rows={1}
+                placeholder={selectedPendingMessageId === NEW_MESSAGE_TARGET
+                  ? "作为新消息发送，不会绑定到待回复问题..."
+                  : selectedPendingInteractionLabel
+                    ? `回复${selectedPendingInteractionLabel}...`
+                    : focusedSessionTask
+                      ? `继续和 ${actorById.get(focusedSessionTask.targetActorId)?.roleName ?? focusedSessionTask.targetActorId} 的子会话...`
+                      : pendingUserInteractions.length > 0
+                        ? `有 ${pendingUserInteractions.length} 条待回复交互，先选择要回复的问题...`
+                        : "输入消息，Shift+Enter 换行，输入 @ 可指定发送给某个 Agent"}
+                value={input}
+                onChange={handleInputChange}
+                onKeyDown={handleKeyDown}
+                onPaste={handlePaste}
+                onBlur={() => setTimeout(() => setShowMention(false), 150)}
+              />
+            </div>
+
+            <div className="flex flex-col gap-2 border-t border-[var(--color-border)] px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex flex-wrap items-center gap-2">
+                <AttachDropdown
+                  onFileClick={() => {
+                    if ("__TAURI_INTERNALS__" in window) {
+                      void handleFileSelectNative();
+                    } else {
+                      fileInputRef.current?.click();
+                    }
+                  }}
+                  onFolderClick={handleFolderSelect}
+                  accent="accent"
+                />
+                <RoutingModeButton value={routingMode} onChange={setRoutingMode} />
+                {selectedPendingInteractionLabel ? (
+                  <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-2.5 py-1 text-[10px] text-amber-700">
+                    当前回复 {selectedPendingInteractionLabel}
+                  </span>
+                ) : focusedSessionTask ? (
+                  <span className="rounded-full border border-blue-500/20 bg-blue-500/10 px-2.5 py-1 text-[10px] text-blue-700">
+                    已聚焦子会话
+                  </span>
+                ) : coordinatorName ? (
+                  <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2.5 py-1 text-[10px] text-[var(--color-text-secondary)]">
+                    默认发给 {coordinatorName}
+                  </span>
+                ) : null}
+              </div>
+
+              <div className="flex items-center justify-between gap-3 sm:justify-end">
+                <span className="hidden text-[10px] text-[var(--color-text-tertiary)] sm:inline">
+                  Enter 发送 · Shift+Enter 换行
+                </span>
+                <button
+                  onClick={handleSend}
+                  disabled={!input.trim() && !hasAttachments}
+                  className="inline-flex h-9 items-center gap-2 rounded-xl bg-[var(--color-accent)] px-3.5 text-[11px] font-medium text-white hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  发送
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {showConfig && (
+        <>
+          <div className="absolute inset-0 z-30 bg-black/20" onClick={() => setShowConfig(false)} />
+          <div className="absolute inset-3 z-[35] flex flex-col overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-2xl md:inset-y-3 md:right-3 md:left-auto md:w-[min(460px,calc(100%-1rem))]">
+            <div className="flex items-start justify-between gap-3 border-b border-[var(--color-border)] bg-[var(--color-bg)]/95 px-4 py-3 backdrop-blur-sm">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-[13px] font-medium text-[var(--color-text)]">Agent 设置</span>
+                  <span className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
+                    {actors.length} 个 Agent
+                  </span>
+                </div>
+                <div className="mt-1 text-[10px] leading-relaxed text-[var(--color-text-secondary)]">
+                  预设、当前阵容和新增 Agent 都在这里。
+                </div>
+              </div>
+              <button
+                onClick={() => setShowConfig(false)}
+                className="rounded-xl p-1.5 text-[var(--color-text-tertiary)] hover:bg-[var(--color-bg-secondary)] hover:text-[var(--color-text)] transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-auto bg-[var(--color-bg-secondary)]/35 px-3 py-3 space-y-3">
+              <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] p-3 space-y-2.5">
+                <div className="text-[10px] font-medium uppercase tracking-[0.16em] text-[var(--color-text-tertiary)]">
+                  预设
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {DIALOG_PRESETS.map((preset) => (
+                    <button
+                      key={preset.id}
+                      className="rounded-full border border-[var(--color-border)] px-2 py-1 text-[10px] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/40 hover:text-[var(--color-accent)] transition-colors"
+                      onClick={() => handleApplyPreset(preset.id)}
+                      title={preset.description}
+                    >
+                      {preset.name}
+                    </button>
+                  ))}
+                  {customPresets.map((preset) => (
+                    <button
+                      key={preset.id}
+                      className="rounded-full border border-fuchsia-500/25 px-2 py-1 text-[10px] text-fuchsia-600 hover:border-fuchsia-500/45 hover:text-fuchsia-500 transition-colors"
+                      onClick={() => handleApplyPreset(preset.id)}
+                      title={preset.description}
+                    >
+                      {preset.name}
+                    </button>
+                  ))}
+                  <button
+                    onClick={handleSaveCurrentAsPreset}
+                    className="rounded-full border border-dashed border-[var(--color-border)] px-2 py-1 text-[10px] text-[var(--color-text-tertiary)] hover:border-green-500/35 hover:text-green-600 transition-colors"
+                    title="保存当前 Agent 配置为新预设"
+                  >
+                    + 保存当前
+                  </button>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] p-3 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-[10px] font-medium uppercase tracking-[0.16em] text-[var(--color-text-tertiary)]">
+                    当前 Agent
+                  </div>
+                  <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                    {actors.length} 个在线配置
+                  </span>
+                </div>
+                <div className="space-y-2">
+                  {actors.map((actor, i) => (
+                    <LiveActorRow
+                      key={actor.id}
+                      actor={actor}
+                      index={i}
+                      onRemove={() => handleRemoveAgent(actor.id)}
+                    />
+                  ))}
+                  {actors.length === 0 && (
+                    <div className="rounded-xl border border-dashed border-[var(--color-border)] px-3 py-3 text-[11px] text-[var(--color-text-tertiary)]">
+                      暂无 Agent，先创建一个协调者即可开始。
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div>
+                <div className="mb-1.5 text-[10px] font-medium uppercase tracking-[0.16em] text-[var(--color-text-tertiary)]">
+                  添加 Agent
+                </div>
+                <AddAgentForm
+                  models={models}
+                  existingNames={actors.map((a) => a.roleName)}
+                  onAdd={handleAddAgent}
+                />
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
       {overlay && (
         <>
-          <div className="absolute inset-0 bg-black/20 z-30" onClick={() => setOverlay(null)} />
-          <div className="absolute inset-x-4 top-14 bottom-4 z-40 bg-[var(--color-bg)] border border-[var(--color-border)] rounded-xl shadow-2xl flex flex-col overflow-hidden">
-            <div className="flex items-center justify-between px-4 py-2.5 border-b border-[var(--color-border)]">
-              <span className="text-sm font-medium">
-                {overlay === "tasks" && "任务中心"}
-                {overlay === "graph" && "知识图谱"}
-              </span>
+          <div className="absolute inset-0 z-30 bg-black/20" onClick={() => setOverlay(null)} />
+          <div
+            className={`absolute inset-3 z-[35] flex flex-col overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-2xl md:inset-y-3 md:right-3 md:left-auto ${
+              overlay === "graph"
+                ? "md:w-[min(720px,calc(100%-1rem))]"
+                : "md:w-[min(520px,calc(100%-1rem))]"
+            }`}
+          >
+            <div className="flex items-center justify-between gap-3 border-b border-[var(--color-border)] bg-[var(--color-bg)]/95 px-4 py-3 backdrop-blur-sm">
+              <div>
+                <div className="text-[13px] font-medium text-[var(--color-text)]">
+                  {overlay === "tasks" ? "任务中心" : "知识图谱"}
+                </div>
+                <div className="mt-1 text-[10px] text-[var(--color-text-secondary)]">
+                  {overlay === "tasks"
+                    ? "查看全局任务执行情况，不打断当前对话流。"
+                    : "从角色关系、消息流和子任务派发角度观察系统结构。"}
+                </div>
+              </div>
               <button
                 onClick={() => setOverlay(null)}
-                className="p-1 rounded hover:bg-[var(--color-bg-secondary)] text-[var(--color-text-tertiary)]"
+                className="rounded-xl p-1.5 text-[var(--color-text-tertiary)] hover:bg-[var(--color-bg-secondary)] hover:text-[var(--color-text)] transition-colors"
               >
                 <X className="w-4 h-4" />
               </button>

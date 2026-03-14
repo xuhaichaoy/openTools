@@ -25,6 +25,7 @@ import { useAIStore } from "@/store/ai-store";
 import { useToast } from "@/components/ui/Toast";
 import { handleError } from "@/core/errors";
 import { modelSupportsImageInput } from "@/core/ai/model-capabilities";
+import { buildAskAgentHandoff } from "@/core/ai/ask-agent-handoff";
 import { useInputAttachments } from "@/hooks/use-input-attachments";
 import { ModelSelector } from "./ModelSelector";
 import { MessageBubble } from "./MessageBubble";
@@ -62,7 +63,7 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
     handleDragOver,
     removeAttachment,
     clearAttachments,
-    addTextFile,
+    addAttachmentFromPath,
   } = useInputAttachments();
   const [showHistory, setShowHistory] = useState(false);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
@@ -169,34 +170,12 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
     },
     hasMessages: () => messages.length > 0,
     continueInAgent: () => {
-      if (messages.length === 0) return;
-      const recent = messages.slice(-10);
-      const parts: string[] = [];
-      for (const m of recent) {
-        const role = m.role === "user" ? "用户" : "助手";
-        const text = m.content.length > 600
-          ? `${m.content.slice(0, 600)}…`
-          : m.content;
-        parts.push(`[${role}]: ${text}`);
-        if (m.toolCalls?.length) {
-          const toolNames = m.toolCalls.map((tc) => tc.name).filter(Boolean);
-          if (toolNames.length) parts.push(`  [使用工具]: ${toolNames.join(", ")}`);
-        }
-      }
-      const query = `以下是之前的对话上下文，请基于此继续执行任务：\n\n${parts.join("\n")}`;
-      const filePaths = attachments
-        .filter((a) => a.type === "text_file" || a.type === "document")
-        .map((a) => a.path)
-        .filter((p): p is string => !!p);
+      const handoff = buildAskAgentHandoff(conversation);
+      if (!handoff) return;
       routeToAICenter({
         mode: "agent",
         source: "ask_continue_to_agent",
-        agentHandoff: {
-          query,
-          attachmentPaths: filePaths.length > 0 ? filePaths : undefined,
-          sourceMode: "ask",
-          sourceSessionId: currentConversationId ?? undefined,
-        },
+        agentHandoff: handoff,
         navigate: false,
       });
     },
@@ -385,12 +364,21 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
     const userText = trimmed || defaultPrompt;
     const content = attachmentSummary ? `${attachmentSummary}\n${userText}` : userText;
     const contextPrefix = fileContextBlock.trim() || undefined;
+    const attachmentPathsToSend = attachments
+      .filter((attachment) => attachment.type !== "image")
+      .map((attachment) => attachment.path)
+      .filter((path): path is string => !!path);
     setInput("");
     clearAttachments();
     if (inputRef.current) {
       inputRef.current.style.height = "auto";
     }
-    await sendMessage(content, imagesToSend, contextPrefix);
+    await sendMessage(
+      content,
+      imagesToSend,
+      contextPrefix,
+      attachmentPathsToSend.length > 0 ? attachmentPathsToSend : undefined,
+    );
   };
 
   return (
@@ -682,7 +670,7 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
           onFileSelect={handleFileSelect}
           onFileSelectNative={handleFileSelectNative}
           onFolderSelect={handleFolderSelect}
-          onAddFilePath={addTextFile}
+          onAddFilePath={addAttachmentFromPath}
           previewImage={previewImage}
           setPreviewImage={setPreviewImage}
           inputRef={inputRef}

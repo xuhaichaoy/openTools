@@ -233,9 +233,9 @@ async function syncAIConfig() {
   const dataType = "ai_config";
   const lastVersion = await getLastSyncVersion(dataType);
 
-  const config = useAIStore.getState().config;
-  const localVersion = normalizeSyncVersion(
-    (config as any)._syncVersion ?? 0,
+  let effectiveConfig = useAIStore.getState().config as AIConfigWithVersion;
+  let effectiveVersion = normalizeSyncVersion(
+    effectiveConfig._syncVersion ?? 0,
     0,
   );
 
@@ -243,44 +243,47 @@ async function syncAIConfig() {
   const cloudData = await pullData(dataType, lastVersion);
   if (cloudData && cloudData.items.length > 0) {
     const cloudItem = cloudData.items[0]; // AI 配置只有一条
-    if (cloudItem && cloudItem.version > localVersion) {
+    if (cloudItem && cloudItem.version > effectiveVersion) {
       // 云端配置更新 → 合并到本地（保留本地 api_key，不同步密钥）
       const cloudConfig = cloudItem.content;
       const merged = mergeCloudAIConfig(
-        config as AIConfigWithVersion,
+        effectiveConfig,
         cloudConfig,
         cloudItem.version,
       );
 
       useAIStore.getState().setConfig(merged);
       await useAIStore.getState().saveConfig(merged);
+      effectiveConfig = merged;
+      effectiveVersion = normalizeSyncVersion(cloudItem.version, effectiveVersion);
     }
   }
 
   // 2. PUSH（只推送非敏感配置）
   const syncContent = {
-    model: config.model,
-    temperature: config.temperature,
-    max_tokens: config.max_tokens,
-    system_prompt: config.system_prompt,
-    enable_advanced_tools: config.enable_advanced_tools,
-    enable_rag_auto_search: config.enable_rag_auto_search,
-    enable_native_tools: config.enable_native_tools,
-    enable_long_term_memory: config.enable_long_term_memory,
-    enable_memory_auto_recall: config.enable_memory_auto_recall,
-    enable_memory_auto_save: config.enable_memory_auto_save,
-    enable_memory_sync: config.enable_memory_sync,
-    source: config.source,
-    team_id: config.team_id,
-    team_config_id: config.team_config_id,
-    active_own_key_id: config.active_own_key_id,
+    model: effectiveConfig.model,
+    temperature: effectiveConfig.temperature,
+    max_tokens: effectiveConfig.max_tokens,
+    system_prompt: effectiveConfig.system_prompt,
+    enable_advanced_tools: effectiveConfig.enable_advanced_tools,
+    enable_rag_auto_search: effectiveConfig.enable_rag_auto_search,
+    enable_native_tools: effectiveConfig.enable_native_tools,
+    enable_long_term_memory: effectiveConfig.enable_long_term_memory,
+    enable_memory_auto_recall: effectiveConfig.enable_memory_auto_recall,
+    enable_memory_auto_save: effectiveConfig.enable_memory_auto_save,
+    enable_memory_sync: effectiveConfig.enable_memory_sync,
+    source: effectiveConfig.source,
+    team_id: effectiveConfig.team_id,
+    team_config_id: effectiveConfig.team_config_id,
+    protocol: effectiveConfig.protocol,
+    active_own_key_id: effectiveConfig.active_own_key_id,
   };
 
   await pushData(dataType, [
     {
       data_id: "default",
       content: syncContent,
-      version: localVersion > 0 ? localVersion : nowSyncVersion(),
+      version: effectiveVersion > 0 ? effectiveVersion : nowSyncVersion(),
       deleted: false,
     },
   ]);
@@ -289,7 +292,7 @@ async function syncAIConfig() {
   const cloudLatest = normalizeSyncVersion(cloudData?.latest_version ?? 0, 0);
   const newMax = Math.max(
     lastVersion,
-    localVersion,
+    effectiveVersion,
     cloudLatest,
   );
   await setLastSyncVersion(dataType, newMax);

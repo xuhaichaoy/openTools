@@ -139,7 +139,7 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       handleDragOver,
       removeAttachment,
       clearAttachments,
-      addTextFile,
+      addAttachmentFromPath,
     } = useInputAttachments();
     const openConfirmDialog = useConfirmDialogStore((s) => s.open);
 
@@ -302,20 +302,38 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
     const pendingHandoff = useAppStore((s) => s.pendingAgentHandoff);
     useEffect(() => {
       if (!pendingHandoff) return;
-      setInput(pendingHandoff.query);
-      if (pendingHandoff.attachmentPaths?.length) {
-        for (const p of pendingHandoff.attachmentPaths) {
-          void addTextFile(p);
+      let cancelled = false;
+
+      const applyHandoff = async () => {
+        setInput(pendingHandoff.query);
+        clearAttachments();
+        setPendingSourceHandoff(null);
+
+        if (pendingHandoff.attachmentPaths?.length) {
+          for (const path of pendingHandoff.attachmentPaths) {
+            if (cancelled) return;
+            await addAttachmentFromPath(path);
+          }
         }
-      }
-      if (pendingHandoff.sourceMode && pendingHandoff.sourceSessionId) {
-        setPendingSourceHandoff({
-          sourceMode: pendingHandoff.sourceMode,
-          sourceSessionId: pendingHandoff.sourceSessionId,
-        });
-      }
-      useAppStore.getState().setPendingAgentHandoff(null);
-    }, [pendingHandoff, addTextFile]);
+
+        if (!cancelled && pendingHandoff.sourceMode && pendingHandoff.sourceSessionId) {
+          setPendingSourceHandoff({
+            sourceMode: pendingHandoff.sourceMode,
+            sourceSessionId: pendingHandoff.sourceSessionId,
+          });
+        }
+      };
+
+      void applyHandoff().finally(() => {
+        if (!cancelled) {
+          useAppStore.getState().setPendingAgentHandoff(null);
+        }
+      });
+
+      return () => {
+        cancelled = true;
+      };
+    }, [pendingHandoff, addAttachmentFromPath, clearAttachments]);
 
     const { handleRun, handleStop } = useAgentRunActions({
       ai,
@@ -525,7 +543,7 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
             onRemoveAttachment={removeAttachment}
             onFolderSelect={handleFolderSelect}
             onFileSelectNative={handleFileSelectNative}
-            onAddFilePath={addTextFile}
+            onAddFilePath={addAttachmentFromPath}
             codingMode={codingMode}
             largeProjectMode={largeProjectMode}
             onToggleCodingMode={() => {

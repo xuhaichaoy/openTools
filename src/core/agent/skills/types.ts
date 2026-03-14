@@ -66,6 +66,12 @@ export interface AgentSkill {
 
   /** Dependencies (deer-flow SKILL.md `dependency` field) */
   dependency?: Record<string, string>;
+  /** 显式依赖的其他 Skill ID */
+  skillDependencies?: string[];
+  /** 激活后需要保证可用的工具名 */
+  toolDependencies?: string[];
+  /** 激活后需要加载的 MCP 服务器 ID */
+  mcpDependencies?: string[];
 }
 
 /**
@@ -84,6 +90,9 @@ export interface SkillMdFrontmatter {
   "trigger-patterns"?: string[];
   "auto-activate"?: boolean;
   dependency?: Record<string, string>;
+  "skill-dependencies"?: string[];
+  "tool-dependencies"?: string[];
+  "mcp-dependencies"?: string[];
 }
 
 /** 创建新 Skill 时的输入（省略自动生成的字段） */
@@ -93,8 +102,14 @@ export type AgentSkillInput = Omit<AgentSkill, "id" | "createdAt" | "updatedAt">
 export interface ResolvedSkillContext {
   /** 当前激活的 Skill ID 列表 */
   activeSkillIds: string[];
+  /** 当前可见的 Skill ID（包含依赖闭包） */
+  visibleSkillIds: string[];
   /** 合并后的 system prompt 片段（多个 Skill 用分隔符拼接） */
   mergedSystemPrompt: string;
   /** 合并后的工具过滤器 */
   mergedToolFilter: SkillToolFilter;
+  /** 依赖声明要求的工具名 */
+  dependencyToolNames: string[];
+  /** 依赖声明要求的 MCP 服务器名 */
+  dependencyMcpNames: string[];
 }

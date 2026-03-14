@@ -15,7 +15,10 @@ interface RAGState {
   searchQuery: string
 
   loadDocs: () => Promise<void>
-  importDoc: (filePath: string, tags?: string[]) => Promise<void>
+  importDoc: (filePath: string, tags?: string[], opts?: { autoIndex?: boolean }) => Promise<void>
+  parseDoc: (docId: string) => Promise<void>
+  indexDoc: (docId: string) => Promise<void>
+  retryDoc: (docId: string) => Promise<void>
   removeDoc: (docId: string) => Promise<void>
   reindexDoc: (docId: string) => Promise<void>
   search: (query: string) => Promise<RetrievalResult[]>
@@ -45,14 +48,53 @@ export const useRAGStore = create<RAGState>((set, get) => ({
     set({ isLoading: false })
   },
 
-  importDoc: async (filePath, tags) => {
+  importDoc: async (filePath, tags, opts) => {
     set({ isIndexing: true })
     try {
-      await invoke('rag_import_doc', { filePath, tags: tags || [] })
+      await invoke('rag_import_doc', { filePath, tags: tags || [], autoIndex: opts?.autoIndex ?? true })
       await get().loadDocs()
       await get().loadStats()
     } catch (e) {
       handleError(e, { context: '导入文档' })
+      throw e
+    }
+    set({ isIndexing: false })
+  },
+
+  parseDoc: async (docId) => {
+    set({ isIndexing: true })
+    try {
+      await invoke('rag_parse_doc', { docId })
+      await get().loadDocs()
+      await get().loadStats()
+    } catch (e) {
+      handleError(e, { context: '解析文档' })
+      throw e
+    }
+    set({ isIndexing: false })
+  },
+
+  indexDoc: async (docId) => {
+    set({ isIndexing: true })
+    try {
+      await invoke('rag_index_doc', { docId })
+      await get().loadDocs()
+      await get().loadStats()
+    } catch (e) {
+      handleError(e, { context: '文档入库' })
+      throw e
+    }
+    set({ isIndexing: false })
+  },
+
+  retryDoc: async (docId) => {
+    set({ isIndexing: true })
+    try {
+      await invoke('rag_retry_doc', { docId })
+      await get().loadDocs()
+      await get().loadStats()
+    } catch (e) {
+      handleError(e, { context: '重试文档处理' })
       throw e
     }
     set({ isIndexing: false })

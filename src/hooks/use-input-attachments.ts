@@ -242,6 +242,15 @@ async function buildDirTree(
   }
 }
 
+async function isDirectoryPath(path: string): Promise<boolean> {
+  try {
+    await invoke<string>("list_directory", { path });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function useInputAttachments() {
   const [attachments, setAttachments] = useState<InputAttachment[]>([]);
   const [folderRoots, setFolderRoots] = useState<string[]>([]);
@@ -459,6 +468,57 @@ export function useInputAttachments() {
     await addTextFile(path);
   }, [addTextFile]);
 
+  const addFolderFromPath = useCallback(async (selected: string) => {
+    setFolderRoots((prev) => prev.includes(selected) ? prev : [...prev, selected]);
+
+    const ignoreRules = await loadIgnoreRules(selected);
+    const isIgnored = createIgnoreMatcher(selected, ignoreRules);
+    const treeState = { visited: 0, truncated: false };
+    const tree = await buildDirTree(
+      selected,
+      0,
+      MAX_FOLDER_DEPTH,
+      "",
+      isIgnored,
+      treeState,
+    );
+    const treeWithHint = `${selected}/\n${tree}`;
+    setFolderTree((prev) => (prev ? `${prev}\n\n${treeWithHint}` : treeWithHint));
+
+    const folderName = selected.replace(/^.*[/\\]/, "") || selected;
+    setAttachments((prev) => {
+      if (prev.some((a) => a.type === "folder" && a.path === selected)) return prev;
+      return [
+        ...prev,
+        {
+          id: genId(),
+          type: "folder" as const,
+          name: folderName,
+          path: selected,
+          size: 0,
+        },
+      ];
+    });
+  }, []);
+
+  const addAttachmentFromPath = useCallback(async (path: string) => {
+    if (await isDirectoryPath(path)) {
+      await addFolderFromPath(path);
+      return;
+    }
+
+    const extName = ext(path);
+    if (IMAGE_EXT.has(extName)) {
+      await addImageFromPath(path);
+    } else if (SPREADSHEET_EXT.has(extName)) {
+      await addSpreadsheetFile(path);
+    } else if (DOCUMENT_EXT.has(extName) || MINDMAP_EXT.has(extName)) {
+      await addDocumentFile(path);
+    } else {
+      await addTextFile(path);
+    }
+  }, [addDocumentFile, addFolderFromPath, addImageFromPath, addSpreadsheetFile, addTextFile]);
+
   const handlePaste = useCallback(
     (e: ClipboardEvent) => {
       const items = e.clipboardData?.items;
@@ -593,41 +653,11 @@ export function useInputAttachments() {
         title: "选择文件夹",
       });
       if (!selected || typeof selected !== "string") return;
-
-      setFolderRoots((prev) => prev.includes(selected) ? prev : [...prev, selected]);
-
-      const ignoreRules = await loadIgnoreRules(selected);
-      const isIgnored = createIgnoreMatcher(selected, ignoreRules);
-      const treeState = { visited: 0, truncated: false };
-      const tree = await buildDirTree(
-        selected,
-        0,
-        MAX_FOLDER_DEPTH,
-        "",
-        isIgnored,
-        treeState,
-      );
-      const treeWithHint = `${selected}/\n${tree}`;
-      setFolderTree((prev) => (prev ? `${prev}\n\n${treeWithHint}` : treeWithHint));
-
-      const folderName = selected.replace(/^.*[/\\]/, "") || selected;
-      setAttachments((prev) => {
-        if (prev.some((a) => a.type === "folder" && a.path === selected)) return prev;
-        return [
-          ...prev,
-          {
-            id: genId(),
-            type: "folder" as const,
-            name: folderName,
-            path: selected,
-            size: 0,
-          },
-        ];
-      });
+      await addFolderFromPath(selected);
     } catch (err) {
       handleError(err, { context: "选择文件夹", silent: true });
     }
-  }, []);
+  }, [addFolderFromPath]);
 
   const handleDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault();
@@ -734,6 +764,9 @@ export function useInputAttachments() {
     addImageFromBlob,
     addImageFromPath,
     addTextFile,
+    addDocumentFile,
+    addFolderFromPath,
+    addAttachmentFromPath,
     addSpreadsheetFile,
   };
 }

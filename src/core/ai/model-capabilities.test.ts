@@ -37,4 +37,22 @@ describe("model capabilities", () => {
       source: "openclaw",
     });
   });
+
+  it("lets text-only hints override broad multimodal family matches", () => {
+    expect(resolveModelCapabilities("gpt-4o-mini-transcribe", "openai")).toEqual({
+      supportsImageInput: false,
+      source: "fallback",
+    });
+    expect(resolveModelCapabilities("text-embedding-3-large", "openai")).toEqual({
+      supportsImageInput: false,
+      source: "fallback",
+    });
+  });
+
+  it("keeps anthropic family fallback for Claude vision models", () => {
+    expect(resolveModelCapabilities("Claude 3.7 Sonnet", "anthropic")).toEqual({
+      supportsImageInput: true,
+      source: "fallback",
+    });
+  });
 });
