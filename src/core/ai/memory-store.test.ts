@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildMemoryPromptBlock,
+  composeAgentMemoryContent,
   extractMemoryCandidates,
   rankMemoriesForRecall,
   sanitizeCandidateStrict,
@@ -101,5 +102,15 @@ describe("memory-store", () => {
     ]);
     expect(prompt).toContain("长期记忆");
     expect(prompt).toContain("默认用中文回答");
+  });
+
+  it("composes agent memory content without trailing colon when value is empty", () => {
+    expect(composeAgentMemoryContent("用户偏好简洁代码风格", "")).toBe(
+      "用户偏好简洁代码风格",
+    );
+  });
+
+  it("composes agent memory content with key and value when both exist", () => {
+    expect(composeAgentMemoryContent("语言", "中文")).toBe("语言: 中文");
   });
 });

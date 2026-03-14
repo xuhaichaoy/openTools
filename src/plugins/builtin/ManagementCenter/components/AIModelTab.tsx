@@ -6,6 +6,7 @@ import type { OwnKeyModelConfig } from "@/core/ai/types";
 import { useTeamStore } from "@/store/team-store";
 import {
   deleteMemory,
+  listMemoryCandidates,
   listConfirmedMemories,
   type AIMemoryItem,
 } from "@/core/ai/memory-store";
@@ -78,6 +79,21 @@ function Toggle({
   );
 }
 
+function ScopePills({ items }: { items: string[] }) {
+  return (
+    <div className="mt-1.5 flex flex-wrap gap-1">
+      {items.map((item) => (
+        <span
+          key={item}
+          className="rounded-full border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-[var(--color-text-secondary)]"
+        >
+          {item}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 // ── 团队模型信息 ──
 interface TeamModelInfo {
   config_id: string;
@@ -94,7 +110,7 @@ interface ContainerRuntimeAvailability {
 }
 
 type AIModelSource = "own_key" | "team" | "platform";
-type AIConfigPanel = "source" | "abilities" | "prompt" | "channels";
+type AIConfigPanel = "source" | "assistant" | "knowledge" | "channels";
 
 function toTime(value?: string | null): number {
   if (!value) return 0;
@@ -140,6 +156,7 @@ export function AIModelTab() {
   const { config, setConfig, saveConfig, ownKeys, loadOwnKeys, saveOwnKeys, selectOwnKeyModel } =
     useAIStore();
   const [savedMemories, setSavedMemories] = useState<AIMemoryItem[]>([]);
+  const [pendingMemoryCount, setPendingMemoryCount] = useState(0);
   const [loadingMemories, setLoadingMemories] = useState(false);
   const [deletingMemoryId, setDeletingMemoryId] = useState<string | null>(null);
   const [activePanel, setActivePanel] = useState<AIConfigPanel>("source");
@@ -159,8 +176,12 @@ export function AIModelTab() {
   const loadSavedMemories = async () => {
     setLoadingMemories(true);
     try {
-      const items = await listConfirmedMemories();
+      const [items, candidates] = await Promise.all([
+        listConfirmedMemories(),
+        listMemoryCandidates(),
+      ]);
       setSavedMemories(items);
+      setPendingMemoryCount(candidates.length);
     } catch (e) {
       handleError(e, { context: "加载长期记忆列表", silent: true });
     } finally {
@@ -169,8 +190,12 @@ export function AIModelTab() {
   };
 
   useEffect(() => {
-    if (!config.enable_long_term_memory) return;
-    loadSavedMemories();
+    if (!config.enable_long_term_memory) {
+      setSavedMemories([]);
+      setPendingMemoryCount(0);
+      return;
+    }
+    void loadSavedMemories();
   }, [config.enable_long_term_memory]);
 
   const refreshContainerAvailability = async () => {
@@ -277,11 +302,16 @@ export function AIModelTab() {
         </span>
       </div>
 
+      <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2.5 text-[10px] text-[var(--color-text-secondary)]">
+        管理中心负责维护模型池与全局执行基座；AI 助手顶部模型选择会按 Ask / Agent / Cluster / Dialog 分别记住默认模型，不会覆盖这里的能力开关。
+        <ScopePills items={["Ask 默认", "Agent 默认", "Cluster 默认", "Dialog 默认"]} />
+      </div>
+
       <div className="grid grid-cols-4 gap-2">
         {[
-          { id: "source" as const, label: "模型来源", icon: Key },
-          { id: "abilities" as const, label: "能力开关", icon: ShieldAlert },
-          { id: "prompt" as const, label: "提示词", icon: MessageSquare },
+          { id: "source" as const, label: "模型池", icon: Key },
+          { id: "assistant" as const, label: "助手基座", icon: ShieldAlert },
+          { id: "knowledge" as const, label: "知识库", icon: BookOpen },
           { id: "channels" as const, label: "IM 通道", icon: Radio },
         ].map((panel) => (
           <button
@@ -301,6 +331,11 @@ export function AIModelTab() {
 
       {activePanel === "source" && (
         <>
+          <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2.5 text-[10px] text-[var(--color-text-secondary)]">
+            这里定义 AI 助手可选的模型来源与模型池。真正进入 Ask / Agent / Cluster / Dialog 后，顶部模型选择器会分别记住每个模式自己的默认模型。
+            <ScopePills items={["模型池", "四模式默认模型"]} />
+          </div>
+
           <div className="grid gap-2">
             {sources.map((src) => {
               const active = config.source === src.id;
@@ -348,22 +383,12 @@ export function AIModelTab() {
           </div>
 
           {config.source === "own_key" && (
-            <>
-              <OwnKeySection
-                ownKeys={ownKeys}
-                activeId={config.active_own_key_id}
-                onSave={saveOwnKeys}
-                onSelect={selectOwnKeyModel}
-              />
-              <details className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-[var(--space-compact-3)]">
-                <summary className="text-xs font-semibold cursor-pointer select-none">
-                  Embedding API（知识库向量化）配置
-                </summary>
-                <div className="mt-3">
-                  <EmbeddingConfigSection />
-                </div>
-              </details>
-            </>
+            <OwnKeySection
+              ownKeys={ownKeys}
+              activeId={config.active_own_key_id}
+              onSave={saveOwnKeys}
+              onSelect={selectOwnKeyModel}
+            />
           )}
 
           {config.source === "team" && (
@@ -396,12 +421,16 @@ export function AIModelTab() {
         </>
       )}
 
-      {activePanel === "abilities" && (
+      {activePanel === "assistant" && (
         <div className="bg-[var(--color-bg)] rounded-xl p-[var(--space-compact-3)] border border-[var(--color-border)] space-y-[var(--space-compact-2)]">
           <div className="flex items-center gap-2">
             <ShieldAlert className="w-3.5 h-3.5 text-amber-500" />
-            <span className="text-xs font-semibold">能力开关</span>
+            <span className="text-xs font-semibold">助手执行基座</span>
           </div>
+          <p className="text-[10px] text-[var(--color-text-secondary)]">
+            这里配置 Ask / Agent / Cluster / Dialog 共用的执行基座，包括工具权限、长期记忆、调度重试和系统提示词。
+          </p>
+          <ScopePills items={["Ask", "Agent", "Cluster", "Dialog", "调度"]} />
 
           <label className="flex items-center justify-between cursor-pointer">
             <div className="flex-1 pr-3">
@@ -411,6 +440,7 @@ export function AIModelTab() {
               <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
                 开启后 AI 可执行 shell 命令、读写本地文件、获取系统信息等。危险操作会弹窗确认。
               </p>
+              <ScopePills items={["Ask", "Agent", "Cluster", "Dialog"]} />
             </div>
             <Toggle
               checked={config.enable_advanced_tools}
@@ -438,6 +468,7 @@ export function AIModelTab() {
                 Agent 编排参数
               </span>
             </div>
+            <ScopePills items={["Agent", "Cluster", "调度"]} />
 
             <label className="block">
               <span className="text-[10px] text-[var(--color-text-secondary)]">
@@ -575,6 +606,7 @@ export function AIModelTab() {
                 <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
                   开启后 AI 可调用日历、提醒事项、备忘录、邮件、快捷指令、打开应用等本机能力。
                 </p>
+                <ScopePills items={["Ask", "Agent", "Cluster", "Dialog"]} />
               </div>
               <Toggle
                 checked={config.enable_native_tools}
@@ -597,37 +629,17 @@ export function AIModelTab() {
                 <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
                   当前平台不支持该能力，已自动关闭。
                 </p>
+                <ScopePills items={["Ask", "Agent", "Cluster", "Dialog"]} />
               </div>
             </div>
           )}
-
-          <label className="flex items-center justify-between cursor-pointer">
-            <div className="flex-1 pr-3">
-              <div className="flex items-center gap-1.5">
-                <BookOpen className="w-3 h-3 text-indigo-400" />
-                <span className="text-xs text-[var(--color-text)]">
-                  对话时自动检索知识库
-                </span>
-              </div>
-              <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
-                开启后，每次对话会自动从 RAG 知识库中检索相关内容并注入上下文，提升回答准确性。
-              </p>
-            </div>
-            <Toggle
-              checked={config.enable_rag_auto_search}
-              onChange={() =>
-                updateAndSave({
-                  enable_rag_auto_search: !config.enable_rag_auto_search,
-                })
-              }
-            />
-          </label>
 
           <div className="pt-2 border-t border-[var(--color-border)]/50 space-y-2">
             <div className="flex items-center gap-1.5">
               <Database className="w-3 h-3 text-cyan-400" />
               <span className="text-xs text-[var(--color-text)]">长期记忆</span>
             </div>
+            <ScopePills items={["Ask", "Agent", "Cluster", "Dialog"]} />
 
             <label className="flex items-center justify-between cursor-pointer">
               <div className="flex-1 pr-3">
@@ -713,6 +725,9 @@ export function AIModelTab() {
             </label>
 
             <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-2.5 space-y-2">
+              <div className="rounded-lg border border-dashed border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-2 text-[10px] text-[var(--color-text-secondary)]">
+                待确认候选 {pendingMemoryCount} 条。完整的候选确认、手动添加、搜索和编辑，请到左侧 `AI 记忆` 页面。
+              </div>
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
                   已确认记忆（{savedMemories.length}）
@@ -777,28 +792,64 @@ export function AIModelTab() {
               )}
             </div>
           </div>
+
+          <div className="pt-2 border-t border-[var(--color-border)]/50 space-y-2">
+            <div className="flex items-center gap-2">
+              <MessageSquare className="w-3.5 h-3.5 text-indigo-400" />
+              <span className="text-xs font-semibold">全局补充提示词</span>
+            </div>
+            <p className="text-[10px] text-[var(--color-text-secondary)]">
+              追加到默认系统提示词之后，会同步作用于 Ask / Agent / Cluster / Dialog。更适合放稳定规则，不适合放一次性任务。
+            </p>
+            <ScopePills items={["Ask", "Agent", "Cluster", "Dialog"]} />
+            <textarea
+              className="w-full bg-[var(--color-bg-secondary)] text-[var(--color-text)] text-xs rounded-lg px-3 py-2 outline-none border-0 focus:ring-2 resize-none min-h-[140px] max-h-[220px] leading-relaxed"
+              style={promptRingStyle}
+              value={config.system_prompt}
+              onChange={(e) =>
+                setConfig({ ...config, system_prompt: e.target.value })
+              }
+              onBlur={() => saveConfig(config)}
+              placeholder="可选。在默认系统提示词之后追加你自己的长期规则，例如“默认先给结论再解释”“代码回答优先列出验证结果”等..."
+            />
+          </div>
         </div>
       )}
 
-      {activePanel === "prompt" && (
+      {activePanel === "knowledge" && (
         <div className="bg-[var(--color-bg)] rounded-xl p-[var(--space-compact-3)] border border-[var(--color-border)] space-y-2">
           <div className="flex items-center gap-2">
-            <MessageSquare className="w-3.5 h-3.5 text-indigo-400" />
-            <span className="text-xs font-semibold">自定义系统提示词</span>
+            <BookOpen className="w-3.5 h-3.5 text-indigo-400" />
+            <span className="text-xs font-semibold">知识库与检索基座</span>
           </div>
-          <textarea
-            className="w-full bg-[var(--color-bg-secondary)] text-[var(--color-text)] text-xs rounded-lg px-3 py-2 outline-none border-0 focus:ring-2 resize-none min-h-[140px] max-h-[220px] leading-relaxed"
-            style={promptRingStyle}
-            value={config.system_prompt}
-            onChange={(e) =>
-              setConfig({ ...config, system_prompt: e.target.value })
-            }
-            onBlur={() => saveConfig(config)}
-            placeholder="可选。在默认系统提示词之后追加你自己的指令，例如「回答风格偏口语化」「回答末尾附上英文翻译」等..."
-          />
           <p className="text-[10px] text-[var(--color-text-secondary)]">
-            留空则使用默认提示词；填写后会追加到默认提示词之后。建议将可长期复用的内容写入“长期记忆”而不是提示词。
+            这里统一配置对话时的知识库自动检索，以及知识库索引阶段使用的 Embedding / Rerank / OCR 能力。它们独立于模型来源。
           </p>
+          <ScopePills items={["Ask", "Agent", "Cluster", "Dialog"]} />
+
+          <label className="flex items-center justify-between cursor-pointer rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-3 py-2.5">
+            <div className="flex-1 pr-3">
+              <div className="flex items-center gap-1.5">
+                <BookOpen className="w-3 h-3 text-indigo-400" />
+                <span className="text-xs text-[var(--color-text)]">
+                  对话时自动检索知识库
+                </span>
+              </div>
+              <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
+                开启后，Ask / Agent / Cluster / Dialog 在发送请求前都会自动注入相关知识库内容。
+              </p>
+            </div>
+            <Toggle
+              checked={config.enable_rag_auto_search}
+              onChange={() =>
+                updateAndSave({
+                  enable_rag_auto_search: !config.enable_rag_auto_search,
+                })
+              }
+            />
+          </label>
+
+          <EmbeddingConfigSection />
         </div>
       )}
 
@@ -872,29 +923,81 @@ function TrustLevelSelector() {
 // ── Embedding API 配置（知识库向量化专用） ──
 
 export function EmbeddingConfigSection() {
-  const { config: ragConfig, updateConfig } = useRAGStore();
+  type ChunkPreset = NonNullable<ReturnType<typeof useRAGStore.getState>["config"]["chunkPreset"]>;
+  const { config: ragConfig, updateConfig, loadConfig } = useRAGStore();
+  const [chunkPreset, setChunkPreset] = useState<ChunkPreset>(ragConfig.chunkPreset || "general");
+  const [chunkSize, setChunkSize] = useState(String(ragConfig.chunkSize || 512));
+  const [chunkOverlap, setChunkOverlap] = useState(String(ragConfig.chunkOverlap || 50));
+  const [topK, setTopK] = useState(String(ragConfig.topK || 5));
+  const [recallTopK, setRecallTopK] = useState(String(ragConfig.recallTopK || 20));
   const [embBaseUrl, setEmbBaseUrl] = useState(ragConfig.embeddingBaseUrl || "");
   const [embApiKey, setEmbApiKey] = useState(ragConfig.embeddingApiKey || "");
   const [embModel, setEmbModel] = useState(ragConfig.embeddingModel || "text-embedding-3-small");
+  const [enableRerank, setEnableRerank] = useState(!!ragConfig.enableRerank);
+  const [rerankBaseUrl, setRerankBaseUrl] = useState(ragConfig.rerankBaseUrl || "");
+  const [rerankApiKey, setRerankApiKey] = useState(ragConfig.rerankApiKey || "");
+  const [rerankModel, setRerankModel] = useState(ragConfig.rerankModel || "");
+  const [ocrBaseUrl, setOcrBaseUrl] = useState(ragConfig.ocrBaseUrl || "");
+  const [ocrToken, setOcrToken] = useState(ragConfig.ocrToken || "");
   const [showKey, setShowKey] = useState(false);
+  const [showRerankKey, setShowRerankKey] = useState(false);
+  const [showOcrToken, setShowOcrToken] = useState(false);
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
-    const nextBaseUrl = ragConfig.embeddingBaseUrl || "";
-    const nextApiKey = ragConfig.embeddingApiKey || "";
-    const nextModel = ragConfig.embeddingModel || "text-embedding-3-small";
+    loadConfig();
+  }, [loadConfig]);
+
+  useEffect(() => {
     queueMicrotask(() => {
-      setEmbBaseUrl(nextBaseUrl);
-      setEmbApiKey(nextApiKey);
-      setEmbModel(nextModel);
+      setChunkPreset(ragConfig.chunkPreset || "general");
+      setChunkSize(String(ragConfig.chunkSize || 512));
+      setChunkOverlap(String(ragConfig.chunkOverlap || 50));
+      setTopK(String(ragConfig.topK || 5));
+      setRecallTopK(String(ragConfig.recallTopK || 20));
+      setEmbBaseUrl(ragConfig.embeddingBaseUrl || "");
+      setEmbApiKey(ragConfig.embeddingApiKey || "");
+      setEmbModel(ragConfig.embeddingModel || "text-embedding-3-small");
+      setEnableRerank(!!ragConfig.enableRerank);
+      setRerankBaseUrl(ragConfig.rerankBaseUrl || "");
+      setRerankApiKey(ragConfig.rerankApiKey || "");
+      setRerankModel(ragConfig.rerankModel || "");
+      setOcrBaseUrl(ragConfig.ocrBaseUrl || "");
+      setOcrToken(ragConfig.ocrToken || "");
     });
-  }, [ragConfig.embeddingBaseUrl, ragConfig.embeddingApiKey, ragConfig.embeddingModel]);
+  }, [
+    ragConfig.chunkPreset,
+    ragConfig.chunkSize,
+    ragConfig.chunkOverlap,
+    ragConfig.topK,
+    ragConfig.recallTopK,
+    ragConfig.enableRerank,
+    ragConfig.rerankBaseUrl,
+    ragConfig.rerankApiKey,
+    ragConfig.rerankModel,
+    ragConfig.embeddingBaseUrl,
+    ragConfig.embeddingApiKey,
+    ragConfig.embeddingModel,
+    ragConfig.ocrBaseUrl,
+    ragConfig.ocrToken,
+  ]);
 
   const handleSave = async () => {
     await updateConfig({
+      chunkPreset: chunkPreset as typeof ragConfig.chunkPreset,
+      chunkSize: Math.max(80, Number(chunkSize) || 512),
+      chunkOverlap: Math.max(0, Number(chunkOverlap) || 50),
+      topK: Math.max(1, Number(topK) || 5),
+      recallTopK: Math.max(Number(topK) || 5, Number(recallTopK) || 20),
+      enableRerank,
+      rerankBaseUrl,
+      rerankApiKey,
+      rerankModel,
       embeddingBaseUrl: embBaseUrl,
       embeddingApiKey: embApiKey,
       embeddingModel: embModel,
+      ocrBaseUrl: ocrBaseUrl,
+      ocrToken: ocrToken,
     });
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
@@ -904,11 +1007,141 @@ export function EmbeddingConfigSection() {
     <div className="bg-[var(--color-bg)] rounded-xl p-[var(--space-compact-3)] border border-[var(--color-border)] space-y-[var(--space-compact-2)]">
       <div className="flex items-center gap-2">
         <Database className="w-3.5 h-3.5 text-emerald-400" />
-        <span className="text-xs font-semibold">Embedding API 配置</span>
+        <span className="text-xs font-semibold">知识库索引配置</span>
       </div>
       <p className="text-[10px] text-[var(--color-text-secondary)]">
-        知识库导入需要调用 Embedding API 生成向量。若你的聊天 API 提供商不支持 /embeddings 端点，可在此单独配置。留空则复用上方 AI 模型的地址和密钥。
+        统一配置知识库的分块策略、Embedding 向量化与图片 OCR。留空时优先复用当前 AI / 服务器 / 登录配置。
       </p>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+        <div>
+          <label className="text-[10px] text-[var(--color-text-secondary)]">分块预设</label>
+          <select
+            className="w-full mt-1 bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-1.5 px-2.5 text-xs outline-none focus:ring-2 focus:ring-emerald-400/20"
+            value={chunkPreset}
+            onChange={(e) => { setChunkPreset(e.target.value as ChunkPreset); setSaved(false); }}
+          >
+            <option value="general">通用文档</option>
+            <option value="qa">问答 FAQ</option>
+            <option value="book">书籍长文</option>
+            <option value="laws">法规条文</option>
+            <option value="code">代码文档</option>
+            <option value="custom">自定义</option>
+          </select>
+        </div>
+        <div>
+          <label className="text-[10px] text-[var(--color-text-secondary)]">Chunk Size</label>
+          <input
+            type="number"
+            min={80}
+            className="w-full mt-1 bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-1.5 px-2.5 text-xs outline-none focus:ring-2 focus:ring-emerald-400/20"
+            placeholder="512"
+            value={chunkSize}
+            onChange={(e) => { setChunkSize(e.target.value); setSaved(false); }}
+          />
+        </div>
+        <div>
+          <label className="text-[10px] text-[var(--color-text-secondary)]">Chunk Overlap</label>
+          <input
+            type="number"
+            min={0}
+            className="w-full mt-1 bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-1.5 px-2.5 text-xs outline-none focus:ring-2 focus:ring-emerald-400/20"
+            placeholder="50"
+            value={chunkOverlap}
+            onChange={(e) => { setChunkOverlap(e.target.value); setSaved(false); }}
+          />
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+        <div>
+          <label className="text-[10px] text-[var(--color-text-secondary)]">最终返回 Top K</label>
+          <input
+            type="number"
+            min={1}
+            className="w-full mt-1 bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-1.5 px-2.5 text-xs outline-none focus:ring-2 focus:ring-emerald-400/20"
+            placeholder="5"
+            value={topK}
+            onChange={(e) => { setTopK(e.target.value); setSaved(false); }}
+          />
+        </div>
+        <div>
+          <label className="text-[10px] text-[var(--color-text-secondary)]">召回候选 Recall Top K</label>
+          <input
+            type="number"
+            min={1}
+            className="w-full mt-1 bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-1.5 px-2.5 text-xs outline-none focus:ring-2 focus:ring-emerald-400/20"
+            placeholder="20"
+            value={recallTopK}
+            onChange={(e) => { setRecallTopK(e.target.value); setSaved(false); }}
+          />
+        </div>
+      </div>
+
+      <div className="text-[10px] text-[var(--color-text-secondary)] bg-[var(--color-bg-secondary)] rounded-lg px-3 py-2 border border-[var(--color-border)]">
+        “通用 / FAQ / 书籍 / 法规 / 代码” 预设会自动选择更合适的分块边界；选择“自定义”时将严格使用你填写的 Size / Overlap。
+      </div>
+
+      <div className="pt-2 border-t border-[var(--color-border)]/50 space-y-2">
+        <label className="flex items-center justify-between cursor-pointer">
+          <div className="flex-1 pr-3">
+            <span className="text-xs text-[var(--color-text)]">启用 Rerank 重排序</span>
+            <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
+              先扩大召回候选，再用 Rerank 模型做最终排序。适合多文档、长文档和语义接近的结果混排。
+            </p>
+          </div>
+          <Toggle
+            checked={enableRerank}
+            onChange={() => { setEnableRerank(!enableRerank); setSaved(false); }}
+          />
+        </label>
+
+        <div className={enableRerank ? "space-y-2" : "space-y-2 opacity-50"}>
+          <div>
+            <label className="text-[10px] text-[var(--color-text-secondary)]">Rerank API 地址</label>
+            <input
+              type="text"
+              disabled={!enableRerank}
+              className="w-full mt-1 bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-1.5 px-2.5 text-xs outline-none focus:ring-2 focus:ring-emerald-400/20 disabled:opacity-60"
+              placeholder="留空时优先复用 Embedding / AI 地址"
+              value={rerankBaseUrl}
+              onChange={(e) => { setRerankBaseUrl(e.target.value); setSaved(false); }}
+            />
+          </div>
+
+          <div>
+            <label className="text-[10px] text-[var(--color-text-secondary)]">Rerank API Key</label>
+            <div className="relative mt-1">
+              <input
+                type={showRerankKey ? "text" : "password"}
+                disabled={!enableRerank}
+                className="w-full bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-1.5 px-2.5 pr-8 text-xs outline-none focus:ring-2 focus:ring-emerald-400/20 disabled:opacity-60"
+                placeholder="留空时优先复用 Embedding / AI Key"
+                value={rerankApiKey}
+                onChange={(e) => { setRerankApiKey(e.target.value); setSaved(false); }}
+              />
+              <button
+                onClick={() => setShowRerankKey(!showRerankKey)}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+              >
+                {showRerankKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <label className="text-[10px] text-[var(--color-text-secondary)]">Rerank 模型</label>
+            <input
+              type="text"
+              disabled={!enableRerank}
+              className="w-full mt-1 bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-1.5 px-2.5 text-xs outline-none focus:ring-2 focus:ring-emerald-400/20 disabled:opacity-60"
+              placeholder="例如 BAAI/bge-reranker-v2-m3"
+              value={rerankModel}
+              onChange={(e) => { setRerankModel(e.target.value); setSaved(false); }}
+            />
+          </div>
+        </div>
+      </div>
 
       <div>
         <label className="text-[10px] text-[var(--color-text-secondary)]">Embedding API 地址</label>
@@ -951,6 +1184,46 @@ export function EmbeddingConfigSection() {
         />
       </div>
 
+      <div className="pt-2 border-t border-[var(--color-border)]/50 space-y-2">
+        <div className="flex items-center gap-2">
+          <Radio className="w-3.5 h-3.5 text-sky-400" />
+          <span className="text-xs font-semibold">图片 OCR 配置</span>
+        </div>
+        <p className="text-[10px] text-[var(--color-text-secondary)]">
+          本地知识库导入图片时会优先使用这里的 OCR 配置；留空则自动复用当前服务器地址和登录 token。
+        </p>
+
+        <div>
+          <label className="text-[10px] text-[var(--color-text-secondary)]">OCR 服务地址</label>
+          <input
+            type="text"
+            className="w-full mt-1 bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-1.5 px-2.5 text-xs outline-none focus:ring-2 focus:ring-emerald-400/20"
+            placeholder="http://localhost:3000（留空复用服务器地址）"
+            value={ocrBaseUrl}
+            onChange={(e) => { setOcrBaseUrl(e.target.value); setSaved(false); }}
+          />
+        </div>
+
+        <div>
+          <label className="text-[10px] text-[var(--color-text-secondary)]">OCR Token</label>
+          <div className="relative mt-1">
+            <input
+              type={showOcrToken ? "text" : "password"}
+              className="w-full bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg py-1.5 px-2.5 pr-8 text-xs outline-none focus:ring-2 focus:ring-emerald-400/20"
+              placeholder="留空复用登录态"
+              value={ocrToken}
+              onChange={(e) => { setOcrToken(e.target.value); setSaved(false); }}
+            />
+            <button
+              onClick={() => setShowOcrToken(!showOcrToken)}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+            >
+              {showOcrToken ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+            </button>
+          </div>
+        </div>
+      </div>
+
       <button
         onClick={handleSave}
         className="flex items-center gap-1.5 text-xs px-4 py-1.5 rounded-lg transition-colors font-semibold"
@@ -960,7 +1233,7 @@ export function EmbeddingConfigSection() {
         }}
       >
         {saved ? <Check className="w-3 h-3" /> : <Save className="w-3 h-3" />}
-        {saved ? "已保存" : "保存 Embedding 配置"}
+        {saved ? "已保存" : "保存知识库配置"}
       </button>
     </div>
   );

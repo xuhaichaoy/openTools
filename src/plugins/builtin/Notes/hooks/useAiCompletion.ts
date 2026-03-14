@@ -5,11 +5,9 @@ import type { AIConfig, AIRequestMessage } from "@/core/ai/types";
 import { handleError } from "@/core/errors";
 import { resolveRoutedConfig } from "@/core/ai/router";
 import {
-  appendMemoryCandidates,
-  buildMemoryPromptBlock,
-  extractMemoryCandidates,
-  recallMemories,
-} from "@/core/ai/memory-store";
+  buildAssistantMemoryPromptForQuery,
+  queueAssistantMemoryCandidates,
+} from "@/core/ai/assistant-memory";
 
 export function useAiCompletion(onAccept?: (text: string) => void) {
   const [completion, setCompletion] = useState("");
@@ -54,15 +52,14 @@ Continuation:`;
 
       if (completionConfig.enable_long_term_memory) {
         if (completionConfig.enable_memory_auto_save) {
-          const candidates = extractMemoryCandidates(prompt);
-          if (candidates.length > 0) {
-            await appendMemoryCandidates(candidates);
-          }
+          await queueAssistantMemoryCandidates(context.trim());
         }
 
         if (completionConfig.enable_memory_auto_recall) {
-          const recalled = await recallMemories(prompt, { topK: 6 });
-          const promptBlock = buildMemoryPromptBlock(recalled);
+          const promptBlock = await buildAssistantMemoryPromptForQuery(context.trim(), {
+            topK: 6,
+            preferSemantic: true,
+          });
           if (promptBlock) {
             enrichedMessages = [{ role: "system", content: promptBlock }, ...messages];
           }

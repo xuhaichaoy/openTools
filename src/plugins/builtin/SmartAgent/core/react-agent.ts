@@ -99,6 +99,8 @@ export interface AgentConfig {
   roleOverride?: string;
   /** Skill 系统注入的领域知识和行为约束（由 skill-resolver 生成） */
   skillsPrompt?: string;
+  /** 管理中心提供的全局补充指令，跨 Ask / Agent / Cluster / Dialog 共享 */
+  extraSystemPrompt?: string;
   /** 跳过内置的 detectCodingContext + codingBlock，由 Skills 系统统一提供编程指引 */
   skipInternalCodingBlock?: boolean;
   /** Coding Execution Policy（注入 system prompt 而非 user message，避免占历史空间） */
@@ -894,6 +896,7 @@ export class ReActAgent {
             confirmDangerousAction: this.config.confirmDangerousAction,
             userMemoryPrompt: this.config.userMemoryPrompt,
             skillsPrompt: this.config.skillsPrompt,
+            extraSystemPrompt: this.config.extraSystemPrompt,
             skipInternalCodingBlock: this.config.skipInternalCodingBlock,
             contextLimit: this.config.contextLimit,
             initialMode: this.config.initialMode,
@@ -1276,6 +1279,7 @@ ${s.taskStrategy}
 
     const sections: PromptSection[] = [
       { name: "identity_rules", content: identityAndRules, priority: 10 },
+      { name: "extraSystem", content: s.extraSystemBlock, priority: 20, maxTokens: 500 },
       { name: "codingBlock", content: codingHint, priority: 30, maxTokens: 400 },
       { name: "skills", content: s.skillsBlock, priority: 40, maxTokens: 600 },
       { name: "memory", content: s.memoryBlock ? `- **记住偏好**: 发现用户明确偏好时，用 save_user_memory 工具记录${s.memoryBlock}` : "", priority: 50, maxTokens: 400 },
@@ -1497,6 +1501,7 @@ ${s.taskStrategy}
 
     const skillsBlock = this.config.skillsPrompt || "";
     const memoryBlock = this.config.userMemoryPrompt || "";
+    const extraSystemBlock = this.config.extraSystemPrompt || "";
     const codingHintBlock = this.config.codingHint || "";
 
     return {
@@ -1508,6 +1513,7 @@ ${s.taskStrategy}
       taskStrategy,
       skillsBlock,
       memoryBlock,
+      extraSystemBlock,
       codingHintBlock,
     };
   }
@@ -1557,6 +1563,7 @@ ${s.taskStrategy}
 
     const sections: PromptSection[] = [
       { name: "identity_rules", content: identityAndRules, priority: 10 },
+      { name: "extraSystem", content: s.extraSystemBlock, priority: 20, maxTokens: 500 },
       { name: "codingBlock", content: s.codingBlock, priority: 30, maxTokens: 800 },
       { name: "skills", content: s.skillsBlock, priority: 40, maxTokens: 600 },
       { name: "memory", content: s.memoryBlock ? `- 发现用户有明确偏好或习惯时，使用 save_user_memory 工具记录${s.memoryBlock}` : "", priority: 50, maxTokens: 400 },

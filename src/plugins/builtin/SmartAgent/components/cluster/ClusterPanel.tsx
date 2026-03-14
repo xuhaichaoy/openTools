@@ -625,8 +625,18 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
 
     const abortController = new AbortController();
 
+    const configuredConcurrency = Math.max(
+      1,
+      Math.min(8, aiConfig.agent_max_concurrency ?? 4),
+    );
+    const recommendedConcurrency = openClawMode
+      ? 2
+      : codingMode && largeProjectMode
+        ? 3
+        : configuredConcurrency;
+
     const orchestrator = new ClusterOrchestrator({
-      maxConcurrency: openClawMode ? 2 : codingMode && largeProjectMode ? 3 : 4,
+      maxConcurrency: Math.min(configuredConcurrency, recommendedConcurrency),
       signal: abortController.signal,
       autoReviewCodeSteps: autoReview || codingMode || openClawMode,
       maxReviewRetries: openClawMode ? 4 : codingMode ? 3 : 2,

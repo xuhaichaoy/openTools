@@ -15,6 +15,8 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
+import { getServerUrl } from "@/store/server-store";
+import { useAuthStore } from "@/store/auth-store";
 
 export interface ParsedDocument {
   /** 原始文件路径 */
@@ -53,7 +55,6 @@ export interface DocumentInput {
 const FORMAT_EXTENSIONS: Record<string, DocumentFormat> = {
   ".pdf": "pdf",
   ".docx": "docx",
-  ".doc": "docx",
   ".md": "markdown",
   ".mdx": "markdown",
   ".markdown": "markdown",
@@ -122,21 +123,19 @@ class PdfParser implements DocumentParser {
     const start = Date.now();
 
     try {
-      const result = await invoke<{ text: string; pages: number; metadata: Record<string, unknown> }>(
-        "parse_pdf",
-        { path: input.filePath },
-      );
+      const text = await invoke<string>("extract_document_text", {
+        path: input.filePath,
+      });
       return {
         filePath: input.filePath,
-        title: (result.metadata.title as string) ?? input.filePath.split("/").pop() ?? "PDF Document",
-        content: result.text,
+        title: input.filePath.split("/").pop() ?? "PDF Document",
+        content: text,
         format: "pdf",
-        metadata: result.metadata,
-        pageCount: result.pages,
+        metadata: {},
         parseTimeMs: Date.now() - start,
       };
     } catch {
-      throw new Error(`PDF parsing failed for ${input.filePath}. Ensure Rust pdf-extract backend is available.`);
+      throw new Error(`PDF parsing failed for ${input.filePath}. Ensure Rust document extraction backend is available.`);
     }
   }
 }
@@ -149,23 +148,16 @@ class ExcelParser implements DocumentParser {
     const start = Date.now();
 
     try {
-      const result = await invoke<{ sheets: Array<{ name: string; rows: string[][] }> }>(
-        "parse_excel",
-        { path: input.filePath },
-      );
-
-      const content = result.sheets.map((sheet) => {
-        const header = `## ${sheet.name}\n`;
-        const table = sheet.rows.map((row) => row.join("\t")).join("\n");
-        return header + table;
-      }).join("\n\n");
+      const content = await invoke<string>("extract_spreadsheet_text", {
+        filePath: input.filePath,
+      });
 
       return {
         filePath: input.filePath,
         title: input.filePath.split("/").pop() ?? "Spreadsheet",
         content,
         format: input.format,
-        metadata: { sheetCount: result.sheets.length },
+        metadata: {},
         parseTimeMs: Date.now() - start,
       };
     } catch {
@@ -194,16 +186,31 @@ class ImageParser implements DocumentParser {
     const start = Date.now();
 
     try {
-      const result = await invoke<{ text: string; confidence: number }>(
-        "ocr_image",
-        { path: input.filePath },
-      );
+      const base64 = await invoke<string>("read_file_base64", { filePath: input.filePath });
+      const result = await invoke<{
+        full_text: string;
+        language: string;
+        rotation_detected: boolean;
+        rotation_angle: number;
+      }>("ocr_detect_advanced", {
+        imageBase64: base64,
+        lang: "ch",
+        detectRotation: false,
+        mergeParagraph: true,
+        baseUrl: getServerUrl(),
+        token: useAuthStore.getState().token ?? "",
+      });
       return {
         filePath: input.filePath,
         title: input.filePath.split("/").pop() ?? "Image",
-        content: result.text,
+        content: result.full_text,
         format: "image",
-        metadata: { ocrConfidence: result.confidence },
+        metadata: {
+          language: result.language,
+          rotationDetected: result.rotation_detected,
+          rotationAngle: result.rotation_angle,
+          method: "ocr-service",
+        },
         parseTimeMs: Date.now() - start,
       };
     } catch {

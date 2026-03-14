@@ -34,6 +34,7 @@ const generateId = () =>
 
 import { estimateTokens } from "@/core/ai/token-utils";
 import { createLogger } from "@/core/logger";
+import { useAIStore } from "@/store/ai-store";
 
 const _agentActorLogger = createLogger("AgentActor");
 const actorLog = (name: string, ...args: unknown[]) => {
@@ -822,7 +823,14 @@ export class AgentActor {
     runOverrides?: ActorRunOverrides,
   ): Promise<string> {
     const effectiveModelOverride = runOverrides?.model ?? this.modelOverride;
-    const effectiveMaxIterations = runOverrides?.maxIterations ?? this.maxIterations;
+    const globalMaxIterations = Math.max(
+      5,
+      Math.min(50, useAIStore.getState().config.agent_max_iterations ?? 25),
+    );
+    const effectiveMaxIterations = Math.max(
+      1,
+      Math.min(runOverrides?.maxIterations ?? this.maxIterations, globalMaxIterations),
+    );
     const effectiveSystemPromptOverride = runOverrides?.systemPromptAppend
       ? [this.systemPromptOverride ?? this.role.systemPrompt, runOverrides.systemPromptAppend]
         .filter(Boolean)
@@ -831,7 +839,10 @@ export class AgentActor {
     const effectiveContextTokens = runOverrides?.contextTokens ?? this._contextTokens;
     const effectiveToolPolicy = runOverrides?.toolPolicy ?? this.toolPolicy;
     const effectiveMiddlewareOverrides = runOverrides?.middlewareOverrides ?? this._middlewareOverrides;
-    const effectiveTemperature = runOverrides?.temperature ?? this.role.temperature;
+    const effectiveTemperature = runOverrides?.temperature
+      ?? this.role.temperature
+      ?? useAIStore.getState().config.temperature
+      ?? 0.7;
 
     actorLog(this.role.name, `runWithInbox: model=${effectiveModelOverride ?? "default"}, maxIter=${effectiveMaxIterations}, inboxSize=${this.inbox.length}`);
 

@@ -13,6 +13,8 @@ import {
 import { shouldAutoCollapseProcess } from "../core/ui-state";
 import { useMcpStore } from "@/store/mcp-store";
 import { invoke } from "@tauri-apps/api/core";
+import { useAIStore } from "@/store/ai-store";
+import { filterAssistantToolsByConfig } from "@/core/ai/assistant-config";
 
 interface UseAgentEffectsParams {
   ai?: MToolsAI;
@@ -41,6 +43,8 @@ export function useAgentEffects({
   setResetPerRunState,
   setNotifyToolCalled,
 }: UseAgentEffectsParams) {
+  const aiConfig = useAIStore((s) => s.config);
+
   useEffect(() => {
     if (!historyLoaded) void loadHistory();
     void loadScheduledTasks();
@@ -142,8 +146,16 @@ export function useAgentEffects({
       });
     }
 
-    setAvailableTools(tools);
+    setAvailableTools(filterAssistantToolsByConfig(tools, aiConfig));
     setResetPerRunState(() => builtinResult.resetPerRunState);
     setNotifyToolCalled(() => builtinResult.notifyToolCalled);
-  }, [ai, confirmHostFallback, askUser, setAvailableTools, setResetPerRunState, setNotifyToolCalled]);
+  }, [
+    ai,
+    aiConfig,
+    confirmHostFallback,
+    askUser,
+    setAvailableTools,
+    setResetPerRunState,
+    setNotifyToolCalled,
+  ]);
 }

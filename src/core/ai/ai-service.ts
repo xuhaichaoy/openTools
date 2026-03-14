@@ -36,11 +36,9 @@ export async function quickChat(
 ): Promise<string> {
   const { resolveRoutedConfig } = await import('./router')
   const {
-    appendMemoryCandidates,
-    buildMemoryPromptBlock,
-    extractMemoryCandidates,
-    recallMemories,
-  } = await import('./memory-store')
+    buildAssistantMemoryPromptForQuery,
+    queueAssistantMemoryCandidates,
+  } = await import('./assistant-memory')
 
   const config = options?.config ?? (await getAIConfig())
   const routedConfig = await resolveRoutedConfig(config)
@@ -51,12 +49,13 @@ export async function quickChat(
     const lastUser = [...messages].reverse().find((m) => m.role === 'user' && m.content?.trim())
     if (lastUser) {
       if (config.enable_memory_auto_save) {
-        const candidates = extractMemoryCandidates(lastUser.content.trim())
-        if (candidates.length > 0) await appendMemoryCandidates(candidates)
+        await queueAssistantMemoryCandidates(lastUser.content.trim())
       }
       if (config.enable_memory_auto_recall) {
-        const recalled = await recallMemories(lastUser.content.trim(), { topK: 6 })
-        const prompt = buildMemoryPromptBlock(recalled)
+        const prompt = await buildAssistantMemoryPromptForQuery(lastUser.content.trim(), {
+          topK: 6,
+          preferSemantic: true,
+        })
         if (prompt) enriched = [{ role: 'system', content: prompt }, ...enriched]
       }
     }

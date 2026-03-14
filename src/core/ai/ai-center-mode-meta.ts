@@ -41,7 +41,7 @@ export const AI_CENTER_MODE_META: Record<AICenterMode, AICenterModeMeta> = {
   dialog: {
     label: "Dialog",
     boundaryHeadline: "多 Agent 持续协作房间",
-    boundaryDetail: "适合 review、debug、brainstorm；如果目标是直接落地代码，优先 Agent。",
+    boundaryDetail: "适合 review、debug、brainstorm；如果目标是落地代码，优先 Agent。",
     modelScopeShort: "Dialog 房间默认模型",
     modelScope: "顶部模型会记住 Dialog 模式自己的选择，未单独覆写模型的 Agent 会按它运行。",
     skillScopeShort: "房间内按 Agent 任务生效",

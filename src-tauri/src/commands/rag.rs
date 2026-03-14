@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
+const DEFAULT_CHUNK_PRESET: &str = "general";
+
 // ── 类型定义 ──
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -64,16 +66,32 @@ pub struct RetrievalResult {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct RAGConfig {
+    #[serde(default = "default_chunk_preset")]
+    pub chunk_preset: String,
     pub chunk_size: usize,
     pub chunk_overlap: usize,
     pub top_k: usize,
+    #[serde(default = "default_recall_top_k")]
+    pub recall_top_k: usize,
     pub score_threshold: f32,
+    #[serde(default)]
+    pub enable_rerank: bool,
+    #[serde(default)]
+    pub rerank_model: Option<String>,
+    #[serde(default)]
+    pub rerank_base_url: Option<String>,
+    #[serde(default)]
+    pub rerank_api_key: Option<String>,
     pub embedding_model: String,
     pub embedding_dimension: usize,
     #[serde(default)]
     pub embedding_base_url: Option<String>,
     #[serde(default)]
     pub embedding_api_key: Option<String>,
+    #[serde(default)]
+    pub ocr_base_url: Option<String>,
+    #[serde(default)]
+    pub ocr_token: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -88,16 +106,32 @@ pub struct RAGStats {
 impl Default for RAGConfig {
     fn default() -> Self {
         Self {
+            chunk_preset: default_chunk_preset(),
             chunk_size: 512,
             chunk_overlap: 50,
             top_k: 5,
+            recall_top_k: default_recall_top_k(),
             score_threshold: 0.3,
+            enable_rerank: false,
+            rerank_model: None,
+            rerank_base_url: None,
+            rerank_api_key: None,
             embedding_model: "text-embedding-3-small".to_string(),
             embedding_dimension: 1536,
             embedding_base_url: None,
             embedding_api_key: None,
+            ocr_base_url: None,
+            ocr_token: None,
         }
     }
+}
+
+fn default_chunk_preset() -> String {
+    DEFAULT_CHUNK_PRESET.to_string()
+}
+
+fn default_recall_top_k() -> usize {
+    20
 }
 
 // ── 工具函数 ──
@@ -284,6 +318,189 @@ fn chunk_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
     chunks
 }
 
+#[derive(Clone, Copy)]
+struct ChunkPresetConfig {
+    chunk_size: usize,
+    overlap: usize,
+    min_chunk_size: usize,
+    separators: &'static [&'static str],
+}
+
+fn resolve_chunk_preset(config: &RAGConfig) -> ChunkPresetConfig {
+    match config.chunk_preset.as_str() {
+        "qa" => ChunkPresetConfig {
+            chunk_size: 300,
+            overlap: 30,
+            min_chunk_size: 50,
+            separators: &["\n\n", "\nQ:", "\n问:", "\n问题", "\n", "。", ".", "？", "?"],
+        },
+        "book" => ChunkPresetConfig {
+            chunk_size: 1000,
+            overlap: 100,
+            min_chunk_size: 200,
+            separators: &["\n\n\n", "\n\n", "\n# ", "\n## ", "\n### ", "\n", "。", "."],
+        },
+        "laws" => ChunkPresetConfig {
+            chunk_size: 400,
+            overlap: 40,
+            min_chunk_size: 80,
+            separators: &["\n\n", "\n第", "\n条", "\n款", "\n", "；", ";", "。", "."],
+        },
+        "code" => ChunkPresetConfig {
+            chunk_size: 2000,
+            overlap: 200,
+            min_chunk_size: 100,
+            separators: &[
+                "\n\nfunction ",
+                "\n\nclass ",
+                "\n\ndef ",
+                "\n\npub fn ",
+                "\n\nimpl ",
+                "\n\n",
+                "\n",
+            ],
+        },
+        "custom" => ChunkPresetConfig {
+            chunk_size: config.chunk_size.max(80),
+            overlap: config.chunk_overlap.min(config.chunk_size.saturating_sub(1)),
+            min_chunk_size: config.chunk_size.saturating_div(5).max(40),
+            separators: &["\n\n", "\n", "。", ".", "！", "!", "？", "?"],
+        },
+        _ => ChunkPresetConfig {
+            chunk_size: 500,
+            overlap: 50,
+            min_chunk_size: 100,
+            separators: &["\n\n", "\n", "。", ".", "！", "!", "？", "?", "；", ";"],
+        },
+    }
+}
+
+fn tail_chars(text: &str, char_count: usize) -> String {
+    if char_count == 0 {
+        return String::new();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let start = chars.len().saturating_sub(char_count);
+    chars[start..].iter().collect()
+}
+
+fn force_split_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return Vec::new();
+    }
+
+    let approx_chunk_chars = (chunk_size * 3).max(160);
+    let approx_overlap_chars = (overlap * 2).min(approx_chunk_chars / 2).max(0);
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
+
+    while start < chars.len() {
+        let end = (start + approx_chunk_chars).min(chars.len());
+        let chunk: String = chars[start..end].iter().collect();
+        let trimmed = chunk.trim();
+        if !trimmed.is_empty() {
+            chunks.push(trimmed.to_string());
+        }
+        if end >= chars.len() {
+            break;
+        }
+        start = end.saturating_sub(approx_overlap_chars);
+        if start >= end {
+            start = end;
+        }
+    }
+
+    chunks
+}
+
+fn chunk_text_with_preset(text: &str, preset: ChunkPresetConfig) -> Vec<String> {
+    fn split_recursive(text: &str, preset: ChunkPresetConfig, sep_idx: usize, output: &mut Vec<String>) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+
+        let token_count = estimate_tokens(trimmed);
+        if token_count <= preset.chunk_size {
+            if token_count >= preset.min_chunk_size || output.is_empty() {
+                output.push(trimmed.to_string());
+            }
+            return;
+        }
+
+        if sep_idx >= preset.separators.len() {
+            for chunk in force_split_text(trimmed, preset.chunk_size, preset.overlap) {
+                if estimate_tokens(&chunk) >= preset.min_chunk_size || output.is_empty() {
+                    output.push(chunk);
+                }
+            }
+            return;
+        }
+
+        let separator = preset.separators[sep_idx];
+        let parts: Vec<&str> = trimmed.split(separator).collect();
+        if parts.len() <= 1 {
+            split_recursive(trimmed, preset, sep_idx + 1, output);
+            return;
+        }
+
+        let mut current = String::new();
+        for part in parts {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+
+            let candidate = if current.is_empty() {
+                part.to_string()
+            } else {
+                format!("{}{}{}", current, separator, part)
+            };
+
+            if estimate_tokens(&candidate) > preset.chunk_size && !current.is_empty() {
+                let current_trimmed = current.trim().to_string();
+                if estimate_tokens(&current_trimmed) >= preset.min_chunk_size || output.is_empty() {
+                    output.push(current_trimmed.clone());
+                }
+
+                let overlap_text = tail_chars(&current_trimmed, (preset.overlap * 2).max(24));
+                current = if overlap_text.is_empty() {
+                    part.to_string()
+                } else {
+                    format!("{}{}{}", overlap_text, separator, part)
+                };
+
+                if estimate_tokens(&current) > preset.chunk_size {
+                    let oversized = current.clone();
+                    current.clear();
+                    split_recursive(&oversized, preset, sep_idx + 1, output);
+                }
+            } else {
+                current = candidate;
+            }
+        }
+
+        let current_trimmed = current.trim();
+        if current_trimmed.is_empty() {
+            return;
+        }
+
+        if estimate_tokens(current_trimmed) > preset.chunk_size {
+            split_recursive(current_trimmed, preset, sep_idx + 1, output);
+        } else if estimate_tokens(current_trimmed) >= preset.min_chunk_size || output.is_empty() {
+            output.push(current_trimmed.to_string());
+        }
+    }
+
+    let mut chunks = Vec::new();
+    split_recursive(text, preset, 0, &mut chunks);
+    if chunks.is_empty() && !text.trim().is_empty() {
+        chunks.push(text.trim().to_string());
+    }
+    chunks
+}
+
 /// 调用 Embedding API 获取向量
 async fn get_embeddings(app: &AppHandle, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
     let rag_config = load_rag_config(app);
@@ -376,6 +593,198 @@ async fn get_embeddings(app: &AppHandle, texts: &[String]) -> Result<Vec<Vec<f32
     Ok(embeddings)
 }
 
+fn resolve_rerank_url(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    if trimmed.ends_with("/rerank") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/rerank")
+    }
+}
+
+fn extract_rerank_results(
+    payload: &serde_json::Value,
+) -> Option<Vec<(usize, f32)>> {
+    let candidates = payload
+        .get("results")
+        .and_then(|value| value.as_array())
+        .or_else(|| payload.get("data").and_then(|value| value.as_array()))
+        .or_else(|| {
+            payload
+                .get("output")
+                .and_then(|value| value.get("results"))
+                .and_then(|value| value.as_array())
+        })?;
+
+    let mut items = Vec::new();
+    for candidate in candidates {
+        let index = candidate
+            .get("index")
+            .or_else(|| candidate.get("document_index"))
+            .and_then(|value| value.as_u64())
+            .map(|value| value as usize);
+        let score = candidate
+            .get("relevance_score")
+            .or_else(|| candidate.get("score"))
+            .or_else(|| candidate.get("relevance"))
+            .and_then(|value| value.as_f64())
+            .map(|value| value as f32);
+
+        if let (Some(index), Some(score)) = (index, score) {
+            items.push((index, score));
+        }
+    }
+
+    if items.is_empty() {
+        None
+    } else {
+        Some(items)
+    }
+}
+
+fn normalize_rank_scores(scores: &[f32]) -> Vec<f32> {
+    if scores.is_empty() {
+        return Vec::new();
+    }
+
+    let min_score = scores.iter().cloned().fold(f32::INFINITY, f32::min);
+    let max_score = scores
+        .iter()
+        .cloned()
+        .fold(f32::NEG_INFINITY, f32::max);
+
+    if (max_score - min_score).abs() < f32::EPSILON {
+        return vec![0.7; scores.len()];
+    }
+
+    scores
+        .iter()
+        .map(|score| ((score - min_score) / (max_score - min_score)) * 0.7 + 0.3)
+        .collect()
+}
+
+async fn rerank_results(
+    app: &AppHandle,
+    query: &str,
+    candidates: &[RetrievalResult],
+) -> Result<Vec<RetrievalResult>, String> {
+    let rag_config = load_rag_config(app);
+    if !rag_config.enable_rerank || candidates.is_empty() {
+        return Ok(candidates.to_vec());
+    }
+
+    use tauri_plugin_store::StoreExt;
+    let store = app.store("config.json").map_err(|e| e.to_string())?;
+    let ai_config = store.get("ai_config");
+
+    let model = rag_config
+        .rerank_model
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "已开启重排序，但未配置 Rerank 模型".to_string())?
+        .to_string();
+
+    let base_url = rag_config
+        .rerank_base_url
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            rag_config
+                .embedding_base_url
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or_else(|| {
+            ai_config
+                .as_ref()
+                .and_then(|value| value.get("base_url"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("https://api.openai.com/v1")
+        })
+        .to_string();
+
+    let raw_api_key = rag_config
+        .rerank_api_key
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            rag_config
+                .embedding_api_key
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or_else(|| {
+            ai_config
+                .as_ref()
+                .and_then(|value| value.get("api_key"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+        })
+        .to_string();
+
+    let api_key = crate::crypto::maybe_decrypt(&raw_api_key);
+    if api_key.is_empty() {
+        return Err("已开启重排序，但未配置 Rerank API Key".to_string());
+    }
+
+    let documents: Vec<String> = candidates
+        .iter()
+        .map(|item| item.chunk.content.clone())
+        .collect();
+    let body = serde_json::json!({
+        "model": model,
+        "query": query,
+        "documents": documents,
+        "top_n": candidates.len(),
+        "return_documents": false,
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| format!("创建 Rerank HTTP 客户端失败: {}", e))?;
+    let response = client
+        .post(resolve_rerank_url(&base_url))
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Rerank API 请求失败: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(format!("Rerank API 返回错误 {}: {}", status, text));
+    }
+
+    let payload: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("解析 Rerank 响应失败: {}", e))?;
+    let rerank_items = extract_rerank_results(&payload)
+        .ok_or_else(|| "Rerank 响应缺少可用排序结果".to_string())?;
+
+    let raw_scores: Vec<f32> = rerank_items.iter().map(|(_, score)| *score).collect();
+    let normalized_scores = normalize_rank_scores(&raw_scores);
+
+    let mut reranked = Vec::new();
+    for ((index, _), normalized_score) in rerank_items.iter().zip(normalized_scores.iter()) {
+        if let Some(item) = candidates.get(*index) {
+            let mut next = item.clone();
+            next.score = *normalized_score;
+            reranked.push(next);
+        }
+    }
+
+    if reranked.is_empty() {
+        return Err("Rerank 结果为空".to_string());
+    }
+
+    Ok(reranked)
+}
+
 /// 余弦相似度
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
@@ -394,7 +803,12 @@ fn load_rag_config(app: &AppHandle) -> RAGConfig {
     let path = get_rag_dir(app).join("config.json");
     if path.exists() {
         if let Ok(content) = std::fs::read_to_string(&path) {
-            return serde_json::from_str(&content).unwrap_or_default();
+            let mut config: RAGConfig = serde_json::from_str(&content).unwrap_or_default();
+            config.top_k = config.top_k.max(1);
+            config.recall_top_k = config.recall_top_k.max(config.top_k).max(5);
+            config.chunk_size = config.chunk_size.max(80);
+            config.chunk_overlap = config.chunk_overlap.min(config.chunk_size.saturating_sub(1));
+            return config;
         }
     }
     RAGConfig::default()
@@ -402,7 +816,15 @@ fn load_rag_config(app: &AppHandle) -> RAGConfig {
 
 fn save_rag_config(app: &AppHandle, config: &RAGConfig) {
     let path = get_rag_dir(app).join("config.json");
-    if let Ok(json) = serde_json::to_string_pretty(config) {
+    let mut normalized = config.clone();
+    normalized.top_k = normalized.top_k.max(1);
+    normalized.recall_top_k = normalized.recall_top_k.max(normalized.top_k).max(5);
+    normalized.chunk_size = normalized.chunk_size.max(80);
+    normalized.chunk_overlap = normalized
+        .chunk_overlap
+        .min(normalized.chunk_size.saturating_sub(1));
+
+    if let Ok(json) = serde_json::to_string_pretty(&normalized) {
         let _ = std::fs::write(&path, json);
     }
 }
@@ -476,10 +898,134 @@ fn detect_format(path: &str) -> String {
     match ext.as_str() {
         "md" | "markdown" => "md".to_string(),
         "pdf" => "pdf".to_string(),
+        "docx" => "docx".to_string(),
+        "pptx" | "ppt" => "pptx".to_string(),
         "json" => "json".to_string(),
         "csv" => "csv".to_string(),
+        "xls" | "xlsx" => "xlsx".to_string(),
         "html" | "htm" => "html".to_string(),
+        "xmind" => "xmind".to_string(),
+        "mm" => "mm".to_string(),
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tif" | "tiff" => {
+            "image".to_string()
+        }
         _ => "txt".to_string(),
+    }
+}
+
+fn strip_html_tags_simple(html: &str) -> String {
+    let mut result = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => result.push(ch),
+            _ => {}
+        }
+    }
+    result
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#x27;", "'")
+        .replace("&apos;", "'")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
+}
+
+fn load_persisted_store_json(
+    app: &AppHandle,
+    filename: &str,
+    key: &str,
+) -> Option<serde_json::Value> {
+    use tauri_plugin_store::StoreExt;
+
+    let store = app.store(filename).ok()?;
+    let raw = store.get(key)?;
+    if let Some(text) = raw.as_str() {
+        serde_json::from_str::<serde_json::Value>(text).ok()
+    } else {
+        Some(raw)
+    }
+}
+
+fn resolve_ocr_settings(app: &AppHandle, rag_config: &RAGConfig) -> Option<(String, Option<String>)> {
+    let base_url = rag_config
+        .ocr_base_url
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_string())
+        .or_else(|| {
+            load_persisted_store_json(app, "server-settings.json", "mtools-server-settings")
+                .and_then(|json| {
+                    json.get("state")
+                        .and_then(|state| state.get("serverUrl"))
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.trim().to_string())
+                })
+        })
+        .unwrap_or_else(|| "http://localhost:3000".to_string());
+
+    let token = rag_config
+        .ocr_token
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_string())
+        .or_else(|| {
+            load_persisted_store_json(app, "auth.json", "mtools-auth").and_then(|json| {
+                json.get("state")
+                    .and_then(|state| state.get("token"))
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.trim().to_string())
+            })
+        });
+
+    Some((base_url, token.filter(|value| !value.is_empty())))
+}
+
+async fn extract_image_text_with_ocr(app: &AppHandle, path: &str) -> Result<String, String> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+
+    let rag_config = load_rag_config(app);
+    let (base_url, token) = resolve_ocr_settings(app, &rag_config)
+        .ok_or_else(|| "图片 OCR 需要先登录并配置服务器地址，或在知识库设置中单独填写 OCR 配置".to_string())?;
+
+    let bytes = std::fs::read(path).map_err(|e| format!("读取图片失败: {}", e))?;
+    let image_base64 = B64.encode(&bytes);
+    let result = crate::commands::ocr::ocr_detect_advanced(
+        image_base64,
+        Some("ch".to_string()),
+        Some(false),
+        Some(true),
+        base_url,
+        token,
+    )
+    .await?;
+
+    Ok(result.full_text)
+}
+
+async fn extract_content_from_path(
+    app: &AppHandle,
+    path: &str,
+    format: &str,
+) -> Result<String, String> {
+    match format {
+        "txt" | "md" | "json" => {
+            std::fs::read_to_string(path).map_err(|e| format!("读取源文件失败: {}", e))
+        }
+        "html" => {
+            let raw = std::fs::read_to_string(path).map_err(|e| format!("读取 HTML 失败: {}", e))?;
+            Ok(strip_html_tags_simple(&raw))
+        }
+        "csv" | "xlsx" => crate::commands::system::extract_spreadsheet_text(path.to_string(), None).await,
+        "pdf" | "docx" | "pptx" | "xmind" | "mm" => {
+            crate::commands::system::extract_document_text(path.to_string()).await
+        }
+        "image" => extract_image_text_with_ocr(app, path).await,
+        _ => std::fs::read_to_string(path).map_err(|e| format!("读取源文件失败: {}", e)),
     }
 }
 
@@ -758,16 +1304,13 @@ async fn parse_doc_internal(
     save_doc_record(app, &doc);
     emit_doc_status(app, doc_id, "parsing", None);
 
-    let parse_result = (|| -> Result<KnowledgeDoc, String> {
+    let parse_result: Result<KnowledgeDoc, String> = async {
         let mut parsed_doc = doc.clone();
         let content = match inline_content {
             Some(value) => value.to_string(),
             None if parsed_doc.path.starts_with("cloud://") => load_parsed_content(app, doc_id)
                 .ok_or_else(|| "云端文档缺少可重建的解析内容，请重新从文档空间索引".to_string())?,
-            None => {
-                std::fs::read_to_string(&parsed_doc.path)
-                    .map_err(|e| format!("读取源文件失败: {}", e))?
-            }
+            None => extract_content_from_path(app, &parsed_doc.path, &parsed_doc.format).await?,
         };
 
         save_parsed_content(app, doc_id, &content)?;
@@ -795,7 +1338,8 @@ async fn parse_doc_internal(
         save_doc_record(app, &parsed_doc);
         emit_doc_status(app, doc_id, "parsed", None);
         Ok(parsed_doc)
-    })();
+    }
+    .await;
 
     match parse_result {
         Ok(parsed) => Ok(parsed),
@@ -837,7 +1381,12 @@ async fn index_doc_internal(app: &AppHandle, doc_id: &str) -> Result<KnowledgeDo
         save_parsed_content(app, &doc_id, &content)?;
 
         // 1) 分块
-        let text_chunks = chunk_text(&content, config.chunk_size, config.chunk_overlap);
+        let chunk_preset = resolve_chunk_preset(&config);
+        let text_chunks = if config.chunk_preset == "custom" {
+            chunk_text(&content, config.chunk_size, config.chunk_overlap)
+        } else {
+            chunk_text_with_preset(&content, chunk_preset)
+        };
         let chunks: Vec<DocChunk> = text_chunks
             .iter()
             .enumerate()
@@ -1163,21 +1712,30 @@ pub async fn rag_search(
 ) -> Result<Vec<RetrievalResult>, String> {
     let config = load_rag_config(&app);
     let top_k = top_k.unwrap_or(config.top_k);
+    let recall_top_k = config.recall_top_k.max(top_k).max(5);
     let threshold = threshold.unwrap_or(config.score_threshold);
+    let docs = load_docs_index(&app);
 
     // 始终执行关键词搜索（含自动重建）
     let mut kw_index = load_keyword_index(&app);
     ensure_keyword_index(&app, &mut kw_index);
-    let keyword_results = bm25_search(&app, &kw_index, &query, top_k * 2);
+    let keyword_results = bm25_search(&app, &kw_index, &query, recall_top_k);
 
-    // 尝试向量搜索（如果有 Embedding API 配置）
-    let vector_results = match get_embeddings(&app, &[query.clone()]).await {
+    let has_vector_docs = docs.iter().any(|doc| {
+        (doc.status == "indexed_full" || doc.status == "indexed")
+            && !load_vectors_for_doc(&app, &doc.id).is_empty()
+    });
+
+    // 尝试向量搜索（仅在存在向量索引文档时进行）
+    let vector_results = if !has_vector_docs {
+        Vec::new()
+    } else {
+        match get_embeddings(&app, &[query.clone()]).await {
         Ok(query_embeddings) => {
             let query_vec = query_embeddings.into_iter().next().unwrap_or_default();
             if query_vec.is_empty() {
                 Vec::new()
             } else {
-                let docs = load_docs_index(&app);
                 let mut results = Vec::new();
                 for doc in &docs {
                     if doc.status != "indexed_full" && doc.status != "indexed" {
@@ -1202,18 +1760,36 @@ pub async fn rag_search(
                         .partial_cmp(&a.score)
                         .unwrap_or(std::cmp::Ordering::Equal)
                 });
-                results.truncate(top_k * 2);
+                results.truncate(recall_top_k);
                 results
             }
         }
         Err(_) => Vec::new(),
+        }
     };
 
     // RRF（Reciprocal Rank Fusion）合并两路结果
     if vector_results.is_empty() {
-        let mut r = keyword_results;
-        r.truncate(top_k);
-        return Ok(r);
+        let mut results = keyword_results;
+        results.truncate(recall_top_k);
+        if config.enable_rerank {
+            match rerank_results(&app, &query, &results).await {
+                Ok(mut reranked) => {
+                    reranked.sort_by(|a, b| {
+                        b.score
+                            .partial_cmp(&a.score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    reranked.truncate(top_k);
+                    return Ok(reranked);
+                }
+                Err(err) => {
+                    log::warn!("Rerank 可选增强跳过: {}", err);
+                }
+            }
+        }
+        results.truncate(top_k);
+        return Ok(results);
     }
 
     let k_rrf: f64 = 60.0;
@@ -1244,6 +1820,50 @@ pub async fn rag_search(
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+
+    if !fused.is_empty() {
+        let max_score = fused
+            .iter()
+            .map(|item| item.score)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let min_score = fused
+            .iter()
+            .map(|item| item.score)
+            .fold(f32::INFINITY, f32::min);
+        let range = if max_score > min_score {
+            max_score - min_score
+        } else {
+            0.0
+        };
+
+        for item in &mut fused {
+            item.score = if range > 0.0 {
+                ((item.score - min_score) / range) * 0.7 + 0.3
+            } else {
+                0.7
+            };
+        }
+    }
+
+    fused.truncate(recall_top_k);
+
+    if config.enable_rerank {
+        match rerank_results(&app, &query, &fused).await {
+            Ok(mut reranked) => {
+                reranked.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                reranked.truncate(top_k);
+                return Ok(reranked);
+            }
+            Err(err) => {
+                log::warn!("Rerank 可选增强跳过: {}", err);
+            }
+        }
+    }
+
     fused.truncate(top_k);
 
     Ok(fused)
@@ -1348,6 +1968,12 @@ pub async fn rag_get_stats(app: AppHandle) -> Result<RAGStats, String> {
         total_tokens,
         index_size,
     })
+}
+
+/// 获取 RAG 配置
+#[tauri::command]
+pub async fn rag_get_config(app: AppHandle) -> Result<RAGConfig, String> {
+    Ok(load_rag_config(&app))
 }
 
 /// 设置 RAG 配置

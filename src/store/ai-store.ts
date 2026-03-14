@@ -24,15 +24,15 @@ import {
   startStreamingChat,
 } from "@/core/services/ai-chat-service";
 import {
-  appendMemoryCandidates,
-  buildMemoryPromptBlock,
   confirmMemoryCandidate as confirmAIMemoryCandidate,
   dismissMemoryCandidate as dismissAIMemoryCandidate,
-  extractMemoryCandidates,
   listMemoryCandidates,
-  recallMemories,
   type AIMemoryCandidate,
 } from "@/core/ai/memory-store";
+import {
+  buildAssistantMemoryPromptForQuery,
+  queueAssistantMemoryCandidates,
+} from "@/core/ai/assistant-memory";
 import { loadAndResolveSkills } from "@/store/skill-store";
 import { useMcpStore, executeMcpTool } from "@/store/mcp-store";
 
@@ -555,12 +555,9 @@ export const useAIStore = create<AIState>((set, get) => ({
       const candidateConvId = conversationId ?? undefined;
       Promise.resolve().then(async () => {
         try {
-          const candidates = extractMemoryCandidates(content, { conversationId: candidateConvId });
-          if (candidates.length > 0) {
-            await appendMemoryCandidates(candidates);
-            const nextCandidates = await listMemoryCandidates();
-            set({ memoryCandidates: nextCandidates });
-          }
+          await queueAssistantMemoryCandidates(content, {
+            conversationId: candidateConvId,
+          });
         } catch (e) {
           handleError(e, { context: "提取长期记忆候选", silent: true });
         }
@@ -587,26 +584,20 @@ export const useAIStore = create<AIState>((set, get) => ({
 
     // 记忆召回和 API 请求并行执行：不让记忆召回阻塞请求发出
     const memoryRecallPromise = (state.config.enable_long_term_memory && state.config.enable_memory_auto_recall)
-      ? recallMemories(content, {
+      ? buildAssistantMemoryPromptForQuery(content, {
           conversationId: conversationId ?? undefined,
           topK: 6,
+          timeoutMs: 500,
+          preferSemantic: true,
         }).catch((e) => {
           handleError(e, { context: "召回长期记忆", silent: true });
-          return [] as Awaited<ReturnType<typeof recallMemories>>;
+          return "";
         })
-      : Promise.resolve([] as Awaited<ReturnType<typeof recallMemories>>);
+      : Promise.resolve("");
 
-    const MEMORY_TIMEOUT_MS = 500;
-    const memories = await Promise.race([
-      memoryRecallPromise,
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), MEMORY_TIMEOUT_MS)),
-    ]);
-
-    if (memories && memories.length > 0) {
-      const memoryPrompt = buildMemoryPromptBlock(memories);
-      if (memoryPrompt) {
-        apiMessages.unshift({ role: "system", content: memoryPrompt });
-      }
+    const memoryPrompt = await memoryRecallPromise;
+    if (memoryPrompt) {
+      apiMessages.unshift({ role: "system", content: memoryPrompt });
     }
 
     if (!conversationId) {

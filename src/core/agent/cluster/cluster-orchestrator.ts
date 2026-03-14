@@ -25,6 +25,8 @@ import type {
   ModelRoutingConfig,
   PlanApprovalRequest,
 } from "./types";
+import { useAIStore } from "@/store/ai-store";
+import { buildAssistantSupplementalPrompt } from "@/core/ai/assistant-config";
 
 const CLUSTER_EXECUTION_TIMEOUT_MS = 1_800_000; // 30 minutes
 const STEP_EXECUTION_TIMEOUT_MS = 300_000; // 5 minutes per step
@@ -41,11 +43,20 @@ async function retryChat(
   ai: ReturnType<typeof getMToolsAI>,
   params: Parameters<ReturnType<typeof getMToolsAI>["chat"]>[0],
   signal?: AbortSignal,
-  maxRetries = 2,
+  maxRetries?: number,
 ): Promise<{ content: string }> {
   const TRANSIENT_RE = /decoding|network|econnreset|timeout|stream|fetch/i;
+  const aiConfig = useAIStore.getState().config;
+  const resolvedMaxRetries = Math.max(
+    0,
+    Math.min(10, maxRetries ?? aiConfig.agent_retry_max ?? 3),
+  );
+  const baseDelayMs = Math.max(
+    500,
+    Math.min(60000, aiConfig.agent_retry_backoff_ms ?? 5000),
+  );
   let lastError: unknown;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+  for (let attempt = 0; attempt <= resolvedMaxRetries; attempt++) {
     if (signal?.aborted) throw new Error("Aborted");
     try {
       return await ai.chat(params);
@@ -68,8 +79,8 @@ async function retryChat(
         });
       }
 
-      if (!TRANSIENT_RE.test(msg) || attempt === maxRetries) throw err;
-      const delay = 1000 * 2 ** attempt;
+      if (!TRANSIENT_RE.test(msg) || attempt === resolvedMaxRetries) throw err;
+      const delay = baseDelayMs * 2 ** attempt;
       await new Promise((r) => setTimeout(r, delay));
     }
   }
@@ -295,10 +306,14 @@ export class ClusterOrchestrator {
     const imageHint = this.runImages?.length
       ? `\n\n注意：用户已附带 ${this.runImages.length} 张图片，这些图片会自动传递给每个执行步骤的 Agent，无需再通过工具去寻找或获取图片。请在规划时考虑这些已有图片。`
       : "";
+    const globalAssistantPrompt = buildAssistantSupplementalPrompt(
+      useAIStore.getState().config.system_prompt,
+    );
 
     const plannerSystemPrompt = `${ROLE_PLANNER.systemPrompt}
 ${reviewHint}
 ${codingPlannerHint}
+${globalAssistantPrompt ? `\n\n${globalAssistantPrompt}` : ""}
 
 ${forceMode ? `强制使用模式: ${forceMode}` : "根据任务复杂度自动选择 multi_role 或 parallel_split 模式。"}
 
@@ -916,6 +931,9 @@ ${stepResult}
   ): Promise<ReviewFeedback> {
     const ai = getMToolsAI();
     const modelOverride = this.resolveModel("reviewer");
+    const globalAssistantPrompt = buildAssistantSupplementalPrompt(
+      useAIStore.getState().config.system_prompt,
+    );
 
     const reviewPrompt = `## 审查目标
 步骤 ID: ${step.id}
@@ -938,7 +956,12 @@ ${stepResult}
 
     const response = await retryChat(ai, {
       messages: [
-        { role: "system", content: ROLE_REVIEWER.systemPrompt },
+        {
+          role: "system",
+          content: globalAssistantPrompt
+            ? `${ROLE_REVIEWER.systemPrompt}\n\n${globalAssistantPrompt}`
+            : ROLE_REVIEWER.systemPrompt,
+        },
         { role: "user", content: reviewPrompt },
       ],
       temperature: ROLE_REVIEWER.temperature,
@@ -1023,6 +1046,9 @@ ${stepResult}
       ? `
 5. 如果涉及代码改动，必须清晰列出：修改文件路径、关键变更点、验证命令与结果、剩余风险`
       : "";
+    const globalAssistantPrompt = buildAssistantSupplementalPrompt(
+      useAIStore.getState().config.system_prompt,
+    );
 
     const aggregatePrompt = `你是一个结果汇总专家。多个 Agent 已经协作完成了用户的任务，请汇总所有结果，给出最终的、完整的答案。
 
@@ -1054,7 +1080,7 @@ ${stepSummaries}
 3. **标注来源**：重要结论注明来自哪个步骤（如需要）
 4. **处理失败**：如果某步骤失败，说明原因并基于成功步骤给出最佳答案
 5. **代码变更保留细节**：如果涉及代码修改，保留具体的文件路径、修改内容等关键细节
-6. **用中文回答**`;
+6. **用中文回答**${globalAssistantPrompt ? `\n\n${globalAssistantPrompt}` : ""}`;
 
     const response = await retryChat(ai, {
       messages: [

@@ -3,21 +3,25 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
-    "lint": "eslint .",
-    "preview": "vite preview",
-    "tauri": "tauri",
-    "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build",
-    "tauri:build:win": "node scripts/build-win-with-helper.mjs --build",
-    "helper:copy": "node scripts/build-win-with-helper.mjs",
-    "test": "vitest run",
-    "test:watch": "vitest",
+    "check:node": "node ./scripts/ensure-node.cjs",
+    "dev": "node ./scripts/ensure-node.cjs && vite",
+    "build": "node ./scripts/ensure-node.cjs && tsc -b && vite build",
+    "lint": "node ./scripts/ensure-node.cjs && eslint .",
+    "preview": "node ./scripts/ensure-node.cjs && vite preview",
+    "tauri": "node ./scripts/ensure-node.cjs && tauri",
+    "tauri:dev": "node ./scripts/ensure-node.cjs && tauri dev",
+    "tauri:build": "node ./scripts/ensure-node.cjs && tauri build",
+    "tauri:build:win": "node ./scripts/ensure-node.cjs && node scripts/build-win-with-helper.mjs --build",
+    "helper:copy": "node ./scripts/ensure-node.cjs && node scripts/build-win-with-helper.mjs",
+    "test": "node ./scripts/ensure-node.cjs && vitest run",
+    "test:watch": "node ./scripts/ensure-node.cjs && vitest",
     "quality:check": "bash ./scripts/quality-check.sh",
-    "official:build": "node ./scripts/official-build.mjs",
-    "official:publish": "node ./scripts/official-publish.mjs"
+    "official:build": "node ./scripts/ensure-node.cjs && node ./scripts/official-build.mjs",
+    "official:publish": "node ./scripts/ensure-node.cjs && node ./scripts/official-publish.mjs"
   },
   "dependencies": {
     "@dagrejs/dagre": "^2.0.4",

@@ -26,6 +26,7 @@ export function KnowledgeBase({ onBack }: { onBack?: () => void }) {
   const { onMouseDown } = useDragWindow();
 
   useEffect(() => {
+    rag.loadConfig();
     rag.loadDocs();
     rag.loadStats();
     if (isLoggedIn) {
@@ -223,7 +224,33 @@ function IndexedDocsPanel() {
       const selected = await open({
         multiple: true,
         filters: [
-          { name: "文档", extensions: ["txt", "md", "json", "csv", "html"] },
+          {
+            name: "文档",
+            extensions: [
+              "txt",
+              "md",
+              "json",
+              "csv",
+              "html",
+              "htm",
+              "pdf",
+              "docx",
+              "pptx",
+              "ppt",
+              "xls",
+              "xlsx",
+              "xmind",
+              "mm",
+              "png",
+              "jpg",
+              "jpeg",
+              "webp",
+              "bmp",
+              "gif",
+              "tif",
+              "tiff",
+            ],
+          },
         ],
       });
       if (selected) {
@@ -639,7 +666,13 @@ function CloudPanel({
           {scope === "personal" ? "个人文档" : `${teamName} · 团队文档`}
         </div>
         <div className="flex items-center gap-2">
-          <input ref={fileRef} type="file" accept=".txt,.md,.json,.csv,.html" onChange={handleUpload} className="hidden" />
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".txt,.md,.json,.csv,.html,.htm,.pdf,.docx,.ppt,.pptx,.xls,.xlsx,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff,.xmind,.mm"
+            onChange={handleUpload}
+            className="hidden"
+          />
           <button
             onClick={() => fileRef.current?.click()}
             disabled={uploading}

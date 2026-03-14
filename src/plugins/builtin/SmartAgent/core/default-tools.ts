@@ -1233,9 +1233,9 @@ export function createBuiltinAgentTools(
       const query = String(params.query || "").trim();
       if (!query) return { error: "搜索查询不能为空" };
       try {
-        const docs = await invokeTauri<Array<{ id: string }>>("rag_list_docs");
+        const docs = await invokeTauri<Array<{ id: string }>>("rag_list_doc_summaries");
         if (!docs || docs.length === 0) {
-          return { note: "用户知识库为空（未导入任何文档），请使用其他方式获取信息" };
+          return { note: "用户知识库为空或尚未完成索引，请先导入并入库文档" };
         }
       } catch {
         return { note: "知识库不可用，请使用其他方式获取信息" };

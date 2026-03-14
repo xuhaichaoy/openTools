@@ -8,6 +8,8 @@ import { createBuiltinAgentTools } from "@/plugins/builtin/SmartAgent/core/defau
 import { createActorCommunicationTools } from "../actor-tools";
 import { createActorMemoryTools } from "../actor-memory";
 import { createCodeSearchTools } from "@/core/code-index/code-search-tools";
+import { filterAssistantToolsByConfig } from "@/core/ai/assistant-config";
+import { useAIStore } from "@/store/ai-store";
 import type { ActorMiddleware, ActorRunContext } from "../actor-middleware";
 
 function getPluginTools(): AgentTool[] {
@@ -45,7 +47,7 @@ export class ToolResolverMiddleware implements ActorMiddleware {
       } catch { /* code index not available */ }
     }
 
-    ctx.tools = [
+    const allTools = [
       ...getPluginTools(),
       ...builtinResult.tools,
       ...ctx.extraTools,
@@ -53,6 +55,7 @@ export class ToolResolverMiddleware implements ActorMiddleware {
       ...memoryTools,
       ...codeSearchTools,
     ];
+    ctx.tools = filterAssistantToolsByConfig(allTools, useAIStore.getState().config);
 
     ctx.notifyToolCalled = builtinResult.notifyToolCalled;
   }

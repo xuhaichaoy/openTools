@@ -14,6 +14,7 @@ import {
   ArrowRightCircle,
   Sparkles,
   X,
+  MoreHorizontal,
 } from "lucide-react";
 import { useDragWindow } from "@/hooks/useDragWindow";
 import { ModelSelector } from "@/components/ai/ModelSelector";
@@ -30,6 +31,10 @@ import {
   isAICenterModelScopeCompatible,
   matchesAICenterModelScope,
 } from "@/core/ai/ai-center-model-scope";
+import {
+  describeAssistantConfigBrief,
+  getAIConfigSourceLabel,
+} from "@/core/ai/assistant-config";
 import { SkillsManager } from "@/components/ai/SkillsManager";
 import type { PluginContext } from "@/core/plugin-system/context";
 import type { ChatViewHandle } from "@/components/ai/ChatView";
@@ -67,7 +72,14 @@ export function AICenter({
   const aiCenterModelScopes = useAppStore((s) => s.aiCenterModelScopes);
   const setAICenterModelScope = useAppStore((s) => s.setAICenterModelScope);
   const modeMeta = AI_CENTER_MODE_META[mode];
+  const compactModeMetaBar = mode === "dialog" || mode === "ask";
   const aiConfig = useAIStore((s) => s.config);
+  const aiSourceLabel = getAIConfigSourceLabel(aiConfig.source);
+  const assistantConfigBrief = describeAssistantConfigBrief(aiConfig);
+  const memoryCandidates = useAIStore((s) => s.memoryCandidates);
+  const loadMemoryCandidates = useAIStore((s) => s.loadMemoryCandidates);
+  const confirmMemoryCandidate = useAIStore((s) => s.confirmMemoryCandidate);
+  const dismissMemoryCandidate = useAIStore((s) => s.dismissMemoryCandidate);
   const ownKeys = useAIStore((s) => s.ownKeys);
   const saveConfig = useAIStore((s) => s.saveConfig);
   const selectOwnKeyModel = useAIStore((s) => s.selectOwnKeyModel);
@@ -97,6 +109,10 @@ export function AICenter({
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    void loadMemoryCandidates();
+  }, [loadMemoryCandidates]);
 
   useEffect(() => {
     const scope = aiCenterModelScopes[mode];
@@ -160,6 +176,8 @@ export function AICenter({
   const chatRef = useRef<ChatViewHandle>(null);
   const agentRef = useRef<SmartAgentHandle>(null);
   const [showSkills, setShowSkills] = useState(false);
+  const [showAskMore, setShowAskMore] = useState(false);
+  const askMoreRef = useRef<HTMLDivElement>(null);
 
   const { onMouseDown } = useDragWindow();
   const conversationCount = useAIStore((s) => s.conversations.length);
@@ -175,6 +193,37 @@ export function AICenter({
 
   const iconBtn =
     "p-1.5 rounded-lg hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)] hover:text-[var(--color-text)] transition-colors";
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (askMoreRef.current && !askMoreRef.current.contains(event.target as Node)) {
+        setShowAskMore(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  useEffect(() => {
+    setShowAskMore(false);
+  }, [mode]);
+
+  const compactMetaCopy = mode === "ask"
+    ? {
+      detail: "提问 / 读图 / 轻工具",
+      model: "Ask 默认",
+      skill: "自动激活",
+    }
+    : mode === "dialog"
+      ? {
+        detail: "review / debug / brainstorm",
+        model: modeMeta.modelScopeShort,
+        skill: modeMeta.skillScopeShort,
+      }
+      : null;
+  const pendingMemoryCandidates = mode === "ask"
+    ? []
+    : memoryCandidates.slice(0, 2);
 
   const modeBtn = (m: AICenterMode, icon: React.ReactNode, label: string) => (
     <button
@@ -243,40 +292,68 @@ export function AICenter({
               <Search className="w-3.5 h-3.5" />
             </button>
             <button
-              onClick={() => chatRef.current?.exportChat()}
-              className={iconBtn}
-              title="导出对话"
-            >
-              <Download className="w-3.5 h-3.5" />
-            </button>
-            <button
               onClick={() => chatRef.current?.newChat()}
               className={iconBtn}
               title="新对话"
             >
               <Plus className="w-4 h-4" />
             </button>
-            <button
-              onClick={() => chatRef.current?.continueInAgent()}
-              className={iconBtn}
-              title="在 Agent 中继续（携带上下文）"
-            >
-              <ArrowRightCircle className="w-4 h-4" />
-            </button>
-            <button
-              onClick={() => chatRef.current?.continueInCluster()}
-              className={iconBtn}
-              title="在 Cluster 中继续（拆解并并行执行）"
-            >
-              <Network className="w-4 h-4" />
-            </button>
-            <button
-              onClick={() => chatRef.current?.continueInDialog()}
-              className={iconBtn}
-              title="在 Dialog 中继续（多 Agent 持续协作）"
-            >
-              <Users className="w-4 h-4" />
-            </button>
+            <div className="relative" ref={askMoreRef}>
+              <button
+                onClick={() => setShowAskMore((value) => !value)}
+                className={`${iconBtn} ${showAskMore ? "bg-[var(--color-bg-hover)] text-[var(--color-text)]" : ""}`}
+                title="更多操作"
+              >
+                <MoreHorizontal className="w-4 h-4" />
+              </button>
+              {showAskMore && (
+                <div className="absolute left-0 top-full z-20 mt-1 w-56 overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-xl">
+                  <button
+                    onClick={() => {
+                      chatRef.current?.exportChat();
+                      setShowAskMore(false);
+                    }}
+                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] text-[var(--color-text)] transition-colors hover:bg-[var(--color-bg-hover)]"
+                  >
+                    <Download className="w-3.5 h-3.5 text-[var(--color-text-secondary)]" />
+                    导出对话
+                  </button>
+                  <div className="border-t border-[var(--color-border)] px-3 py-1.5 text-[10px] text-[var(--color-text-tertiary)]">
+                    继续到其他模式
+                  </div>
+                  <button
+                    onClick={() => {
+                      chatRef.current?.continueInAgent();
+                      setShowAskMore(false);
+                    }}
+                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] text-[var(--color-text)] transition-colors hover:bg-[var(--color-bg-hover)]"
+                  >
+                    <ArrowRightCircle className="w-3.5 h-3.5 text-[var(--color-text-secondary)]" />
+                    用 Agent 继续
+                  </button>
+                  <button
+                    onClick={() => {
+                      chatRef.current?.continueInCluster();
+                      setShowAskMore(false);
+                    }}
+                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] text-[var(--color-text)] transition-colors hover:bg-[var(--color-bg-hover)]"
+                  >
+                    <Network className="w-3.5 h-3.5 text-[var(--color-text-secondary)]" />
+                    用 Cluster 继续
+                  </button>
+                  <button
+                    onClick={() => {
+                      chatRef.current?.continueInDialog();
+                      setShowAskMore(false);
+                    }}
+                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] text-[var(--color-text)] transition-colors hover:bg-[var(--color-bg-hover)]"
+                  >
+                    <Users className="w-3.5 h-3.5 text-[var(--color-text-secondary)]" />
+                    用 Dialog 继续
+                  </button>
+                </div>
+              )}
+            </div>
           </>
         )}
 
@@ -334,12 +411,6 @@ export function AICenter({
         )}
 
         {/* Dialog 模式操作按钮 */}
-        {mode === "dialog" && (
-          <span className="text-[11px] text-[var(--color-text-secondary)]">
-            优先从预设房间开始
-          </span>
-        )}
-
         <div className="flex-1" />
 
         <button
@@ -354,25 +425,81 @@ export function AICenter({
       </div>
 
       <div className="shrink-0 border-b border-[var(--color-border)] bg-[var(--color-bg-secondary)]/45">
-        <div className="flex flex-wrap items-center gap-1.5 px-3 py-1.5 text-[10px] text-[var(--color-text-secondary)]">
+        <div
+          className={`flex flex-wrap items-center gap-1.5 px-3 text-[10px] text-[var(--color-text-secondary)] ${
+            compactModeMetaBar ? "py-1" : "py-1.5"
+          }`}
+        >
           <span className="font-medium text-[var(--color-text)]">{modeMeta.boundaryHeadline}</span>
-          <span className="opacity-75">{modeMeta.boundaryDetail}</span>
+          {!compactModeMetaBar && <span className="opacity-75">{modeMeta.boundaryDetail}</span>}
+          {compactModeMetaBar && compactMetaCopy && <span className="opacity-70">{compactMetaCopy.detail}</span>}
           <div className="ml-auto flex flex-wrap items-center gap-1.5">
             <span
-              className="rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-0.5"
-              title={modeMeta.modelScope}
+              className={`rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] ${
+                compactModeMetaBar ? "px-1.5 py-0.5 text-[9px]" : "px-2 py-0.5"
+              }`}
+              title={`管理中心来源：${aiSourceLabel}；${assistantConfigBrief}`}
             >
-              模型：{modeMeta.modelScopeShort}
+              来源：{aiSourceLabel}
             </span>
             <span
-              className="rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-0.5"
+              className={`rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] ${
+                compactModeMetaBar ? "px-1.5 py-0.5 text-[9px]" : "px-2 py-0.5"
+              }`}
+              title={modeMeta.modelScope}
+            >
+              模型：{compactModeMetaBar && compactMetaCopy ? compactMetaCopy.model : modeMeta.modelScopeShort}
+            </span>
+            <span
+              className={`rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] ${
+                compactModeMetaBar ? "px-1.5 py-0.5 text-[9px]" : "px-2 py-0.5"
+              }`}
               title={modeMeta.skillScope}
             >
-              技能：{modeMeta.skillScopeShort}
+              技能：{compactModeMetaBar && compactMetaCopy ? compactMetaCopy.skill : modeMeta.skillScopeShort}
             </span>
           </div>
         </div>
       </div>
+
+      {pendingMemoryCandidates.length > 0 && (
+        <div className="shrink-0 border-b border-[var(--color-border)] bg-amber-500/5">
+          <div className="px-3 py-2">
+            <div className="mb-1.5 flex items-center justify-between gap-2 text-[10px] text-[var(--color-text-secondary)]">
+              <span>检测到待确认的长期记忆候选</span>
+              {memoryCandidates.length > pendingMemoryCandidates.length && (
+                <span>还有 {memoryCandidates.length - pendingMemoryCandidates.length} 条</span>
+              )}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {pendingMemoryCandidates.map((candidate) => (
+                <div
+                  key={candidate.id}
+                  className="min-w-0 flex-1 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-2"
+                >
+                  <div className="line-clamp-2 text-[11px] text-[var(--color-text)]">
+                    {candidate.content}
+                  </div>
+                  <div className="mt-2 flex items-center justify-end gap-2">
+                    <button
+                      onClick={() => { void dismissMemoryCandidate(candidate.id); }}
+                      className="rounded-md border border-[var(--color-border)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)]"
+                    >
+                      忽略
+                    </button>
+                    <button
+                      onClick={() => { void confirmMemoryCandidate(candidate.id); }}
+                      className="rounded-md bg-amber-500 px-2 py-0.5 text-[10px] text-white transition-colors hover:bg-amber-600"
+                    >
+                      记住
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ====== 内容区 ====== */}
       <div className="flex-1 overflow-hidden relative">

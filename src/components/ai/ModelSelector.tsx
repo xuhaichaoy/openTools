@@ -33,6 +33,7 @@ export function ModelSelector({ scopeMode }: { scopeMode?: AICenterMode }) {
     status: "idle",
   });
   const [openUp, setOpenUp] = useState(true);
+  const [dropdownWidth, setDropdownWidth] = useState<number | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
 
@@ -242,27 +243,81 @@ export function ModelSelector({ scopeMode }: { scopeMode?: AICenterMode }) {
     setOpen(false);
   };
 
+  const computeDropdownWidth = useCallback(() => {
+    const triggerWidth = btnRef.current?.offsetWidth ?? 0;
+    const viewportWidth = window.innerWidth;
+    const maxWidth = Math.max(260, Math.min(440, viewportWidth - 16));
+    const minWidth = Math.max(220, triggerWidth);
+
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      setDropdownWidth(Math.min(maxWidth, minWidth));
+      return;
+    }
+
+    const rows = source === "own_key"
+      ? ownKeys.map((k) => ({
+        title: k.name || k.model,
+        subtitle: `${k.protocol === "anthropic" ? "Anthropic" : "OpenAI"} · ${k.model}`,
+      }))
+      : source === "team"
+        ? teamModelsState.models.map((m) => ({
+          title: m.display_name,
+          subtitle: `${m.protocol === "anthropic" ? "Anthropic" : "OpenAI"} · ${m.model_name} · P${m.priority}`,
+        }))
+        : [];
+
+    let widest = 0;
+    for (const row of rows) {
+      ctx.font = "600 12px system-ui";
+      widest = Math.max(widest, ctx.measureText(row.title).width);
+      ctx.font = "400 10px system-ui";
+      widest = Math.max(widest, ctx.measureText(row.subtitle).width);
+    }
+
+    const estimatedWidth = Math.ceil(widest + 92);
+    setDropdownWidth(Math.min(maxWidth, Math.max(minWidth, estimatedWidth)));
+  }, [ownKeys, source, teamModelsState.models]);
+
   const positionClass = openUp
     ? "bottom-full mb-1"
     : "top-full mt-1";
+
+  useEffect(() => {
+    if (!open) return;
+    const updateLayout = () => {
+      computeDirection();
+      computeDropdownWidth();
+    };
+    updateLayout();
+    window.addEventListener("resize", updateLayout);
+    return () => window.removeEventListener("resize", updateLayout);
+  }, [open, computeDirection, computeDropdownWidth]);
 
   return (
     <div className="relative" ref={ref}>
       <button
         ref={btnRef}
         onClick={handleToggle}
-        className="flex items-center gap-1.5 text-[11px] text-[var(--color-text-secondary)] hover:text-[var(--color-text)] bg-[var(--color-bg-secondary)] hover:bg-[var(--color-bg-hover)] rounded-lg px-2.5 py-1.5 transition-colors border border-[var(--color-border)]"
+        className="flex min-w-[180px] max-w-full items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2.5 py-1.5 text-[11px] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text)]"
+        style={{ maxWidth: "min(320px, 34vw)" }}
+        title={getDisplayName()}
       >
         <Sparkles className="w-3 h-3 text-indigo-400" />
-        <span className="max-w-[120px] truncate">{getDisplayName()}</span>
+        <span className="min-w-0 flex-1 truncate text-left">{getDisplayName()}</span>
         <ChevronDown
-          className={`w-3 h-3 transition-transform ${open ? "rotate-180" : ""}`}
+          className={`h-3 w-3 shrink-0 transition-transform ${open ? "rotate-180" : ""}`}
         />
       </button>
 
       {open && (
         <div
-          className={`absolute ${positionClass} left-0 w-60 bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg shadow-xl overflow-hidden z-50`}
+          className={`absolute ${positionClass} right-0 z-50 overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] shadow-xl`}
+          style={{
+            width: dropdownWidth ? `${dropdownWidth}px` : undefined,
+            maxWidth: "calc(100vw - 1rem)",
+          }}
         >
           <div className="max-h-[280px] overflow-y-auto py-1">
             {/* 自有 Key 模式 */}
@@ -275,27 +330,30 @@ export function ModelSelector({ scopeMode }: { scopeMode?: AICenterMode }) {
                       <button
                         key={k.id}
                         onClick={() => handleSelectOwnKey(k.id)}
-                        className={`w-full flex items-center justify-between px-3 py-2 text-xs hover:bg-[var(--color-bg-hover)] transition-colors ${
+                        className={`w-full px-3 py-2 text-xs transition-colors hover:bg-[var(--color-bg-hover)] ${
                           isActive
                             ? "text-[var(--color-accent)]"
                             : "text-[var(--color-text)]"
                         }`}
+                        title={k.name || k.model}
                       >
-                        <div className="flex items-center gap-2">
-                          <Cpu className="w-3 h-3 shrink-0" />
-                          <div className="text-left">
-                            <div className="font-medium">
-                              {k.name || k.model}
-                            </div>
-                            <div className="text-[10px] text-[var(--color-text-secondary)]">
-                              {k.protocol === "anthropic"
-                                ? "Anthropic"
-                                : "OpenAI"}{" "}
-                              · {k.model}
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex min-w-0 flex-1 items-start gap-2">
+                            <Cpu className="mt-0.5 h-3 w-3 shrink-0" />
+                            <div className="min-w-0 flex-1 text-left">
+                              <div className="font-medium leading-snug [overflow-wrap:anywhere]">
+                                {k.name || k.model}
+                              </div>
+                              <div className="mt-0.5 text-[10px] text-[var(--color-text-secondary)] [overflow-wrap:anywhere]">
+                                {k.protocol === "anthropic"
+                                  ? "Anthropic"
+                                  : "OpenAI"}{" "}
+                                · {k.model}
+                              </div>
                             </div>
                           </div>
+                          {isActive && <Check className="mt-0.5 h-3.5 w-3.5 shrink-0" />}
                         </div>
-                        {isActive && <Check className="w-3.5 h-3.5 shrink-0" />}
                       </button>
                     );
                   })
@@ -317,25 +375,28 @@ export function ModelSelector({ scopeMode }: { scopeMode?: AICenterMode }) {
                       <button
                         key={m.config_id}
                         onClick={() => handleSelectTeamModel(m)}
-                        className={`w-full flex items-center justify-between px-3 py-2 text-xs hover:bg-[var(--color-bg-hover)] transition-colors ${
+                        className={`w-full px-3 py-2 text-xs transition-colors hover:bg-[var(--color-bg-hover)] ${
                           isActive
                             ? "text-[var(--color-accent)]"
                             : "text-[var(--color-text)]"
                         }`}
+                        title={m.display_name}
                       >
-                        <div className="flex items-center gap-2">
-                          <Cpu className="w-3 h-3 shrink-0" />
-                          <div className="text-left">
-                            <div className="font-medium">{m.display_name}</div>
-                            <div className="text-[10px] text-[var(--color-text-secondary)]">
-                              {m.protocol === "anthropic"
-                                ? "Anthropic"
-                                : "OpenAI"}{" "}
-                              · {m.model_name} · P{m.priority}
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex min-w-0 flex-1 items-start gap-2">
+                            <Cpu className="mt-0.5 h-3 w-3 shrink-0" />
+                            <div className="min-w-0 flex-1 text-left">
+                              <div className="font-medium leading-snug [overflow-wrap:anywhere]">{m.display_name}</div>
+                              <div className="mt-0.5 text-[10px] text-[var(--color-text-secondary)] [overflow-wrap:anywhere]">
+                                {m.protocol === "anthropic"
+                                  ? "Anthropic"
+                                  : "OpenAI"}{" "}
+                                · {m.model_name} · P{m.priority}
+                              </div>
                             </div>
                           </div>
+                          {isActive && <Check className="mt-0.5 h-3.5 w-3.5 shrink-0" />}
                         </div>
-                        {isActive && <Check className="w-3.5 h-3.5 shrink-0" />}
                       </button>
                     );
                   })

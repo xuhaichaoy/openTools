@@ -205,6 +205,12 @@ export async function appendMemoryCandidates(
   candidates: AIMemoryCandidate[],
 ): Promise<void> {
   if (!candidates.length) return;
+  const confirmed = await aiMemoryDb.getAll();
+  const confirmedSet = new Set(
+    confirmed
+      .filter((item) => !item.deleted)
+      .map((item) => normalizeForCompare(item.content)),
+  );
   const existing = await aiMemoryCandidateDb.getAll();
   const merged = [...candidates, ...existing];
   const dedup = new Map<string, AIMemoryCandidate>();
@@ -212,6 +218,7 @@ export async function appendMemoryCandidates(
   for (const candidate of merged) {
     const key = normalizeForCompare(candidate.content);
     if (!key) continue;
+    if (confirmedSet.has(key)) continue;
     if (!dedup.has(key)) {
       dedup.set(key, candidate);
       continue;
@@ -251,6 +258,7 @@ export async function deleteMemory(memoryId: string): Promise<void> {
     deleted: true,
     updated_at: now,
   });
+  invalidateMemoryVectorIndex();
 }
 
 export async function confirmMemoryCandidate(
@@ -265,55 +273,84 @@ export async function confirmMemoryCandidate(
     await dismissMemoryCandidate(candidateId);
     return null;
   }
+  const saved = await saveConfirmedMemory(sanitized.sanitized, {
+    conversationId: candidate.conversation_id,
+    confidence: candidate.confidence,
+    source: "user",
+  });
+  await dismissMemoryCandidate(candidateId);
+  return saved;
+}
+
+export async function saveConfirmedMemory(
+  content: string,
+  options?: {
+    kind?: AIMemoryKind;
+    source?: AIMemorySource;
+    conversationId?: string;
+    scope?: AIMemoryScope;
+    confidence?: number;
+    importance?: number;
+    tags?: string[];
+  },
+): Promise<AIMemoryItem | null> {
+  const sanitized = sanitizeCandidateStrict(content);
+  if (!sanitized.ok) return null;
 
   const text = sanitized.sanitized;
   const now = Date.now();
-  const kind = inferKind(text);
-  const tags = inferTags(text);
-  const importance = inferImportance(kind, text);
+  const kind = options?.kind ?? inferKind(text);
+  const inferredTags = inferTags(text);
+  const mergedTags = [...new Set([...(options?.tags || []), ...inferredTags])];
   const normalized = normalizeForCompare(text);
+  const importance = clamp(
+    options?.importance ?? inferImportance(kind, text),
+    0.1,
+    1,
+  );
+  const confidence = clamp(options?.confidence ?? 0.9, 0.1, 1);
   const memories = await aiMemoryDb.getAll();
   const existing = memories.find(
     (item) => !item.deleted && normalizeForCompare(item.content) === normalized,
   );
 
-  let saved: AIMemoryItem | null = null;
   if (existing) {
-    const mergedTags = [...new Set([...(existing.tags || []), ...tags])];
-    saved =
+    const updated =
       (await aiMemoryDb.update(existing.id, {
         content: trimMemoryContent(text),
-        tags: mergedTags,
+        tags: [...new Set([...(existing.tags || []), ...mergedTags])],
         kind,
         importance: Math.max(existing.importance ?? 0.5, importance),
-        confidence: Math.max(existing.confidence ?? 0.5, candidate.confidence),
+        confidence: Math.max(existing.confidence ?? 0.5, confidence),
+        source: options?.source ?? existing.source,
         updated_at: now,
-        conversation_id: candidate.conversation_id ?? existing.conversation_id,
-        scope: candidate.conversation_id ? "conversation" : existing.scope,
+        conversation_id: options?.conversationId ?? existing.conversation_id,
+        scope: options?.scope
+          ?? (options?.conversationId ? "conversation" : existing.scope),
         deleted: false,
       })) ?? null;
-  } else {
-    const created: AIMemoryItem = {
-      id: createId("mem"),
-      content: trimMemoryContent(text),
-      kind,
-      tags,
-      scope: candidate.conversation_id ? "conversation" : "global",
-      conversation_id: candidate.conversation_id,
-      importance,
-      confidence: candidate.confidence,
-      source: "user",
-      created_at: now,
-      updated_at: now,
-      last_used_at: null,
-      use_count: 0,
-      deleted: false,
-    };
-    saved = await aiMemoryDb.create(created);
+    if (updated) invalidateMemoryVectorIndex();
+    return updated;
   }
 
-  await dismissMemoryCandidate(candidateId);
-  return saved;
+  const created = await aiMemoryDb.create({
+    id: createId("mem"),
+    content: trimMemoryContent(text),
+    kind,
+    tags: mergedTags,
+    scope: options?.scope ?? (options?.conversationId ? "conversation" : "global"),
+    conversation_id: options?.conversationId,
+    importance,
+    confidence,
+    source: options?.source ?? "user",
+    created_at: now,
+    updated_at: now,
+    last_used_at: null,
+    use_count: 0,
+    deleted: false,
+  });
+  invalidateMemoryVectorIndex();
+  return created;
 }
 
 function scoreMemory(
@@ -448,12 +485,21 @@ const AGENT_KIND_MAP: Record<string, AIMemoryKind> = {
   constraint: "constraint",
 };
 
+export function composeAgentMemoryContent(key: string, value: string): string {
+  const normalizedKey = normalizeWhitespace(String(key || ""));
+  const normalizedValue = normalizeWhitespace(String(value || ""));
+  if (normalizedKey && normalizedValue) {
+    return `${normalizedKey}: ${normalizedValue}`;
+  }
+  return normalizedKey || normalizedValue;
+}
+
 export async function addMemoryFromAgent(
   key: string,
   value: string,
   category: string = "preference",
 ): Promise<AIMemoryItem | null> {
-  const content = `${key}: ${value}`;
+  const content = composeAgentMemoryContent(key, value);
   const sanitized = sanitizeCandidateStrict(content);
   if (!sanitized.ok) return null;
 
@@ -470,7 +516,7 @@ export async function addMemoryFromAgent(
   );
 
   if (existing) {
-    return (
+    const updated = (
       (await aiMemoryDb.update(existing.id, {
         content: trimMemoryContent(text),
         kind,
@@ -480,9 +526,11 @@ export async function addMemoryFromAgent(
         use_count: (existing.use_count || 0) + 1,
       })) ?? null
     );
+    if (updated) invalidateMemoryVectorIndex();
+    return updated;
   }
 
-  return await aiMemoryDb.create({
+  const created = await aiMemoryDb.create({
     id: createId("mem"),
     content: trimMemoryContent(text),
     kind,
@@ -497,6 +545,8 @@ export async function addMemoryFromAgent(
     use_count: 1,
     deleted: false,
   });
+  invalidateMemoryVectorIndex();
+  return created;
 }
 
 // ── Semantic Recall (vector-store based, inspired by cocoindex-code sqlite-vec) ──
@@ -504,13 +554,14 @@ export async function addMemoryFromAgent(
 let _memoryVectorStoreReady = false;
 
 /**
- * Ensure memory vector store is hydrated from the persistent memory DB.
- * Called lazily on first semantic recall. Incremental — only indexes new/updated items.
+ * Ensure the in-memory vector index is rebuilt from the latest persistent
+ * memory snapshot. Called lazily on first semantic recall after invalidation.
  */
 async function ensureMemoryVectorIndex(): Promise<void> {
   if (_memoryVectorStoreReady) return;
   const { getMemoryVectorStore } = await import("./vector-store");
   const store = getMemoryVectorStore();
+  await store.clear();
   const all = await aiMemoryDb.getAll();
   const active = all.filter((m) => !m.deleted);
   if (active.length > 0) {
@@ -621,7 +672,7 @@ export async function updateMemoryContent(
 ): Promise<AIMemoryItem | null> {
   const sanitized = sanitizeCandidateStrict(content);
   if (!sanitized.ok) return null;
-  return (
+  const updated = (
     (await aiMemoryDb.update(memoryId, {
       content: trimMemoryContent(sanitized.sanitized),
       kind: inferKind(sanitized.sanitized),
@@ -629,6 +680,8 @@ export async function updateMemoryContent(
       updated_at: Date.now(),
     })) ?? null
   );
+  if (updated) invalidateMemoryVectorIndex();
+  return updated;
 }
 
 // ── Get Memory Stats ──
@@ -790,6 +843,7 @@ export async function mergeMemoryCandidatesIntoStore(
           updated_at: Date.now(),
         });
         updated++;
+        invalidateMemoryVectorIndex();
       } else {
         skipped++;
       }
@@ -812,6 +866,7 @@ export async function mergeMemoryCandidatesIntoStore(
         deleted: false,
       });
       added++;
+      invalidateMemoryVectorIndex();
     }
   }
 
@@ -823,6 +878,7 @@ export async function mergeMemoryCandidatesIntoStore(
     const toDelete = sorted.slice(MAX_FACTS);
     for (const m of toDelete) {
       await aiMemoryDb.update(m.id, { deleted: true, updated_at: Date.now() });
+      invalidateMemoryVectorIndex();
     }
   }
 

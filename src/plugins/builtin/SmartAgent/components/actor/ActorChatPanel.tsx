@@ -34,7 +34,6 @@ import { useTeamStore } from "@/store/team-store";
 import { useClusterPlanApprovalStore } from "@/store/cluster-plan-approval-store";
 import { api } from "@/core/api/client";
 import {
-  AI_CENTER_MODE_META,
   describeAICenterSource,
 } from "@/core/ai/ai-center-mode-meta";
 import { routeToAICenter } from "@/core/ai/ai-center-routing";
@@ -75,6 +74,21 @@ const TaskCenterPanel = lazy(() => import("../TaskCenterPanel"));
 const KnowledgeGraphView = lazy(() => import("../KnowledgeGraphView"));
 
 type DialogOverlay = "tasks" | "graph" | null;
+
+const DIALOG_STARTER_PROMPTS = [
+  {
+    label: "做一次实现评审",
+    prompt: "请你们一起 review 当前实现，从架构、风险和可维护性三个角度给出结论。",
+  },
+  {
+    label: "一起定位问题",
+    prompt: "请一起定位这个问题，先提出怀疑点，再收敛成可执行的排查顺序。",
+  },
+  {
+    label: "拆解一个方案",
+    prompt: "请把这个需求拆成可执行方案，分别给出实现路径、风险和协作分工。",
+  },
+] as const;
 
 function basename(path: unknown): string {
   const s = String(path ?? "");
@@ -1450,7 +1464,7 @@ function CapabilityBadges({ tags }: { tags?: AgentCapability[] }) {
 
 // ── Status Bar ──
 
-function ActorStatusBar({ actors }: { actors: ActorSnapshot[] }) {
+function ActorStatusBar({ actors, compact = false }: { actors: ActorSnapshot[]; compact?: boolean }) {
   return (
     <div className="flex items-center gap-1.5 flex-wrap">
       {actors.map((actor, i) => {
@@ -1459,12 +1473,12 @@ function ActorStatusBar({ actors }: { actors: ActorSnapshot[] }) {
         return (
           <div
             key={actor.id}
-            className={`flex items-center gap-1.5 rounded-full border px-2 py-1 text-[10px] ${color.bg} ${color.text} ${color.border}`}
+            className={`flex items-center gap-1.5 rounded-full border ${compact ? "px-2 py-0.5 text-[10px]" : "px-2 py-1 text-[10px]"} ${color.bg} ${color.text} ${color.border}`}
           >
             <div className={`w-1.5 h-1.5 rounded-full ${color.dot} ${isThinking ? "animate-pulse" : ""}`} />
             <span className="font-medium">{actor.roleName}</span>
-            <CapabilityBadges tags={actor.capabilities?.tags} />
-            {actor.modelOverride && (
+            {!compact && <CapabilityBadges tags={actor.capabilities?.tags} />}
+            {!compact && actor.modelOverride && (
               <span className="opacity-60 max-w-[80px] truncate">{actor.modelOverride}</span>
             )}
             {isThinking && <Loader2 className="w-2.5 h-2.5 animate-spin" />}
@@ -1940,6 +1954,8 @@ function DialogWorkspaceDock({
   requirePlanApproval,
   onTogglePlanApproval,
   lastPlanReview,
+  graphAvailable,
+  onOpenGraph,
 }: {
   panel: WorkspacePanel;
   onPanelChange: (panel: WorkspacePanel) => void;
@@ -1958,6 +1974,8 @@ function DialogWorkspaceDock({
   requirePlanApproval: boolean;
   onTogglePlanApproval: (value: boolean) => void;
   lastPlanReview: { status: "approved" | "rejected"; timestamp: number; plan: ClusterPlan } | null;
+  graphAvailable: boolean;
+  onOpenGraph: (() => void) | null;
 }) {
   const actorById = useMemo(() => {
     const map = new Map<string, ActorSnapshot>();
@@ -2052,35 +2070,35 @@ function DialogWorkspaceDock({
   }> = [
     {
       id: "todos",
-      label: "Todo",
+      label: "待办",
       icon: ListChecks,
       count: activeTodoCount || totalTodoCount,
       description: activeTodoCount > 0 ? `${activeTodoCount} 个活跃待办` : "查看全部 Agent 待办",
     },
     {
       id: "artifacts",
-      label: "Artifacts",
+      label: "产物",
       icon: FileDown,
       count: artifacts.length,
       description: artifacts.length > 0 ? "浏览本轮生成的文件产物" : "当前还没有生成文件产物",
     },
     {
       id: "uploads",
-      label: "Uploads",
+      label: "上传",
       icon: FolderOpen,
       count: sessionUploads.length,
       description: sessionUploads.length > 0 ? "查看会话上传与上下文附件" : "当前会话没有登记上传项",
     },
     {
       id: "subtasks",
-      label: "Subtasks",
+      label: "子任务",
       icon: Network,
       count: sortedTasks.length,
       description: openSessionCount > 0 ? `${openSessionCount} 个子会话仍可继续交互` : "查看已派发子任务与子会话",
     },
     {
       id: "plan",
-      label: "Plan",
+      label: "计划",
       icon: ShieldCheck,
       count: draftPlan?.steps.length ?? 0,
       description: requirePlanApproval ? "发送前会先审批执行计划" : "当前发送将直接进入执行",
@@ -2091,55 +2109,69 @@ function DialogWorkspaceDock({
     ? workspaceTabs.find((tab) => tab.id === panel) ?? null
     : null;
   const ActivePanelIcon = activePanelMeta?.icon ?? ListChecks;
+  const defaultPanel = useMemo<Exclude<WorkspacePanel, null>>(() => {
+    if (activeTodoCount > 0 || totalTodoCount > 0) return "todos";
+    if (sortedTasks.length > 0) return "subtasks";
+    if (artifacts.length > 0) return "artifacts";
+    if (sessionUploads.length > 0) return "uploads";
+    return "plan";
+  }, [activeTodoCount, totalTodoCount, sortedTasks.length, artifacts.length, sessionUploads.length]);
+  const summaryItems = useMemo(() => {
+    const items = [
+      { key: "todos", label: "待办", value: activeTodoCount || totalTodoCount },
+      { key: "artifacts", label: "产物", value: artifacts.length },
+      { key: "uploads", label: "上传", value: sessionUploads.length },
+      { key: "subtasks", label: "子任务", value: sortedTasks.length },
+    ];
+    return items.filter((item) => item.value > 0).slice(0, 3);
+  }, [activeTodoCount, totalTodoCount, artifacts.length, sessionUploads.length, sortedTasks.length]);
+  const currentPanelLabel = activePanelMeta ? `工作台 · ${activePanelMeta.label}` : "工作台";
 
   return (
     <>
-      <div className="flex flex-wrap items-center gap-2">
-        {workspaceTabs.map((tab) => {
-          const active = panel === tab.id;
-          const Icon = tab.icon;
-          return (
-            <button
-              key={tab.id}
-              onClick={() => onPanelChange(active ? null : tab.id)}
-              className={`group inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] transition-all ${
-                active
-                  ? "border-[var(--color-accent)]/35 bg-[var(--color-accent)]/10 text-[var(--color-text)] shadow-sm"
-                  : "border-[var(--color-border)] bg-[var(--color-bg)]/75 text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/25 hover:text-[var(--color-text)]"
-              }`}
-              title={tab.description}
-            >
-              <span
-                className={`flex h-5 w-5 items-center justify-center rounded-full ${
-                  active ? "bg-[var(--color-accent)]/12 text-[var(--color-accent)]" : "bg-[var(--color-bg-secondary)] text-[var(--color-text-tertiary)] group-hover:text-[var(--color-text-secondary)]"
-                }`}
-              >
-                <Icon className="w-3 h-3" />
-              </span>
-              <span>{tab.label}</span>
-              {tab.count > 0 && (
-                <span
-                  className={`rounded-full px-1.5 py-0.5 text-[9px] ${
-                    active
-                      ? "bg-[var(--color-bg)] text-[var(--color-text-secondary)]"
-                      : "bg-[var(--color-bg-secondary)] text-[var(--color-text-tertiary)]"
-                  }`}
-                >
-                  {tab.count}
-                </span>
-              )}
-            </button>
-          );
-        })}
-        {panel && (
-          <button
-            onClick={() => onPanelChange(null)}
-            className="inline-flex items-center gap-1 rounded-full border border-transparent px-2 py-1 text-[10px] text-[var(--color-text-tertiary)] hover:border-[var(--color-border)] hover:bg-[var(--color-bg)]"
+      <div className="flex flex-wrap items-center justify-end gap-1.5">
+        {summaryItems.map((item) => (
+          <span
+            key={item.key}
+            className="inline-flex items-center gap-1 rounded-full border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/80 px-2 py-1 text-[10px] text-[var(--color-text-secondary)]"
           >
-            <X className="w-3.5 h-3.5" />
-            收起
+            <span>{item.label}</span>
+            <span className="rounded-full bg-[var(--color-bg)] px-1.5 py-0.5 text-[9px] text-[var(--color-text-tertiary)]">
+              {item.value}
+            </span>
+          </span>
+        ))}
+        <span
+          className={`inline-flex items-center rounded-full border px-2 py-1 text-[10px] ${
+            requirePlanApproval
+              ? "border-amber-500/25 bg-amber-500/10 text-amber-700"
+              : "border-[var(--color-border)] bg-[var(--color-bg-secondary)]/80 text-[var(--color-text-secondary)]"
+          }`}
+        >
+          {requirePlanApproval ? "发送前审批" : "直接发送"}
+        </span>
+        {graphAvailable && onOpenGraph && (
+          <button
+            onClick={onOpenGraph}
+            className="inline-flex items-center gap-1 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1 text-[10px] text-[var(--color-text-secondary)] hover:border-fuchsia-500/30 hover:text-fuchsia-600 transition-colors"
+            title="查看当前房间的角色关系、消息流和子任务派发"
+          >
+            <Network className="w-3 h-3" />
+            协作图
           </button>
         )}
+        <button
+          onClick={() => onPanelChange(panel ? null : defaultPanel)}
+          className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] transition-colors ${
+            panel
+              ? "border-[var(--color-accent)]/35 bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
+              : "border-[var(--color-border)] bg-[var(--color-bg)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/25 hover:text-[var(--color-text)]"
+          }`}
+          title="打开会话工作台"
+        >
+          <ListChecks className="w-3 h-3" />
+          {currentPanelLabel}
+        </button>
       </div>
 
       {panel && activePanelMeta && (
@@ -2167,6 +2199,46 @@ function DialogWorkspaceDock({
               >
                 <X className="w-4 h-4" />
               </button>
+            </div>
+            <div className="border-b border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2">
+              <div className="flex flex-wrap gap-1.5">
+                {workspaceTabs.map((tab) => {
+                  const active = panel === tab.id;
+                  const Icon = tab.icon;
+                  return (
+                    <button
+                      key={tab.id}
+                      onClick={() => onPanelChange(tab.id)}
+                      className={`group inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] transition-all ${
+                        active
+                          ? "border-[var(--color-accent)]/35 bg-[var(--color-accent)]/10 text-[var(--color-text)] shadow-sm"
+                          : "border-[var(--color-border)] bg-[var(--color-bg)]/75 text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/25 hover:text-[var(--color-text)]"
+                      }`}
+                      title={tab.description}
+                    >
+                      <span
+                        className={`flex h-5 w-5 items-center justify-center rounded-full ${
+                          active ? "bg-[var(--color-accent)]/12 text-[var(--color-accent)]" : "bg-[var(--color-bg-secondary)] text-[var(--color-text-tertiary)] group-hover:text-[var(--color-text-secondary)]"
+                        }`}
+                      >
+                        <Icon className="w-3 h-3" />
+                      </span>
+                      <span>{tab.label}</span>
+                      {tab.count > 0 && (
+                        <span
+                          className={`rounded-full px-1.5 py-0.5 text-[9px] ${
+                            active
+                              ? "bg-[var(--color-bg)] text-[var(--color-text-secondary)]"
+                              : "bg-[var(--color-bg-secondary)] text-[var(--color-text-tertiary)]"
+                          }`}
+                        >
+                          {tab.count}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
 
             <div className="flex-1 overflow-auto bg-[var(--color-bg-secondary)]/35">
@@ -2526,7 +2598,6 @@ function DialogWorkspaceDock({
 // ── Main Panel ──
 
 export function ActorChatPanel({ active = true }: { active?: boolean }) {
-  const dialogMeta = AI_CENTER_MODE_META.dialog;
   const [showConfig, setShowConfig] = useState(false);
   const [overlay, setOverlay] = useState<DialogOverlay>(null);
   const [workspacePanel, setWorkspacePanel] = useState<WorkspacePanel>(null);
@@ -2551,10 +2622,13 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   });
   const [lastPlanReview, setLastPlanReview] = useState<{ status: "approved" | "rejected"; timestamp: number; plan: ClusterPlan } | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const chatScrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const inputWrapRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const initRef = useRef(false);
+  const dialogUserScrolledUpRef = useRef(false);
+  const dialogScrollThrottleRef = useRef(0);
 
   const {
     active: systemActive, actors, dialogHistory, pendingUserInteractions, spawnedTasks, artifacts: structuredArtifacts,
@@ -2587,6 +2661,24 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
 
   const runningActors = useMemo(() => actors.filter((a) => a.status === "running"), [actors]);
   const hasRunningActors = runningActors.length > 0;
+  const runningActivityKey = useMemo(
+    () =>
+      runningActors
+        .map((actor) => {
+          const steps = actor.currentTask?.steps ?? [];
+          const lastStep = steps[steps.length - 1];
+          return [
+            actor.id,
+            steps.length,
+            lastStep?.type ?? "",
+            lastStep?.timestamp ?? 0,
+            lastStep?.streaming ? 1 : 0,
+            lastStep?.content?.length ?? 0,
+          ].join(":");
+        })
+        .join("|"),
+    [runningActors],
+  );
 
   // Auto-init: mount 时自动创建 ActorSystem
   // ActorSystemStore 会负责恢复磁盘会话快照或补齐默认 Agent。
@@ -2649,16 +2741,61 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     }
   }, [requirePlanApproval]);
 
+  const scrollDialogToBottom = useCallback((instant = false) => {
+    const container = chatScrollRef.current;
+    if (!container) return;
+
+    if (instant) {
+      container.scrollTop = container.scrollHeight;
+    } else {
+      chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+    dialogUserScrolledUpRef.current = false;
+  }, []);
+
+  useEffect(() => {
+    const container = chatScrollRef.current;
+    if (!container) return;
+
+    const handleScroll = () => {
+      const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+      if (distanceFromBottom > 280) {
+        dialogUserScrolledUpRef.current = true;
+      } else if (distanceFromBottom < 48) {
+        dialogUserScrolledUpRef.current = false;
+      }
+    };
+
+    handleScroll();
+    container.addEventListener("scroll", handleScroll, { passive: true });
+    return () => container.removeEventListener("scroll", handleScroll);
+  }, []);
+
   const lastDialogLengthRef = useRef(0);
   useEffect(() => {
     if (dialogHistory.length > lastDialogLengthRef.current) {
-      // Only auto-scroll when new messages arrive, not on re-renders
       requestAnimationFrame(() => {
-        chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+        scrollDialogToBottom();
       });
     }
     lastDialogLengthRef.current = dialogHistory.length;
-  }, [dialogHistory.length]);
+  }, [dialogHistory.length, scrollDialogToBottom]);
+
+  useEffect(() => {
+    if (!hasRunningActors) return;
+    if (dialogUserScrolledUpRef.current) return;
+
+    const now = Date.now();
+    if (now - dialogScrollThrottleRef.current < 150) return;
+    dialogScrollThrottleRef.current = now;
+
+    const id = requestAnimationFrame(() => {
+      const container = chatScrollRef.current;
+      if (!container) return;
+      container.scrollTop = container.scrollHeight;
+    });
+    return () => cancelAnimationFrame(id);
+  }, [hasRunningActors, runningActivityKey]);
 
   useEffect(() => {
     if (active && systemActive) sync();
@@ -3176,6 +3313,15 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   const coordinatorName = coordinatorActorId
     ? actorById.get(coordinatorActorId)?.roleName ?? null
     : null;
+  const collaborationGraphAvailable = actors.length > 1 || dialogHistory.length > 0 || spawnedTasks.length > 0;
+
+  const handleUseStarterPrompt = useCallback((prompt: string) => {
+    setInput(prompt);
+    setInputNotice(null);
+    requestAnimationFrame(() => {
+      inputRef.current?.focus();
+    });
+  }, []);
 
   useEffect(() => {
     const element = inputRef.current;
@@ -3276,42 +3422,27 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   return (
     <div className="relative flex h-full flex-col overflow-hidden bg-[var(--color-bg)]">
       <div className="shrink-0 border-b border-[var(--color-border)] bg-[var(--color-bg)]">
-        <div className="mx-auto flex w-full max-w-6xl flex-col gap-2 px-3 py-2.5">
+        <div className="mx-auto flex w-full max-w-6xl flex-col gap-2 px-3 py-2">
           <div className="flex flex-wrap items-center gap-1.5">
-            <div className="flex min-w-0 items-center gap-1.5">
+            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
               <Users className="h-4 w-4 text-[var(--color-accent)]" />
-              <span className="text-[13px] font-semibold text-[var(--color-text)]">Dialog · 多 Agent 持续协作</span>
+              <span className="text-[13px] font-semibold text-[var(--color-text)]">协作房间</span>
+              <span className={`rounded-full px-2 py-0.5 text-[10px] ${
+                actors.length > 0
+                  ? "bg-emerald-500/10 text-emerald-600"
+                  : "bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]"
+              }`}>
+                {actors.length > 0 ? `${actors.length} 个 Agent` : "等待配置"}
+              </span>
+              {coordinatorName && (
+                <span className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
+                  协调者 {coordinatorName}
+                </span>
+              )}
+              <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
+                {routingModeMeta.icon} {routingModeMeta.label}
+              </span>
             </div>
-            <span className={`rounded-full px-2 py-0.5 text-[10px] ${
-              actors.length > 0
-                ? "bg-emerald-500/10 text-emerald-600"
-                : "bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]"
-            }`}>
-              {actors.length > 0 ? `${actors.length} 个 Agent` : "等待配置"}
-            </span>
-            {coordinatorName && (
-              <span className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
-                协调者 {coordinatorName}
-              </span>
-            )}
-            <span className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
-              {routingModeMeta.icon} {routingModeMeta.label}
-            </span>
-            {requirePlanApproval && (
-              <span className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
-                发送前审批
-              </span>
-            )}
-            {pendingUserInteractions.length > 0 && (
-              <span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-700">
-                {pendingUserInteractions.length} 条待回复
-              </span>
-            )}
-            {hasRunningActors && (
-              <span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-700">
-                {runningActors.length} 个运行中
-              </span>
-            )}
             <div className="ml-auto flex flex-wrap items-center gap-1.5">
               <button
                 onClick={handleToggleConfig}
@@ -3337,18 +3468,6 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                 <ListChecks className="w-3 h-3" />
                 任务中心
               </button>
-              <button
-                onClick={() => handleToggleOverlay("graph")}
-                className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] transition-colors ${
-                  overlay === "graph"
-                    ? "border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-600"
-                    : "border-[var(--color-border)] bg-[var(--color-bg)] text-[var(--color-text-secondary)] hover:border-fuchsia-500/25 hover:text-fuchsia-600"
-                }`}
-                title="知识图谱"
-              >
-                <Network className="w-3 h-3" />
-                图谱
-              </button>
               {hasRunningActors && (
                 <button
                   onClick={handleStop}
@@ -3368,39 +3487,57 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                   转 Agent
                 </button>
               )}
-              <button
-                onClick={handleNewTopic}
-                className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1 text-[10px] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/25 hover:text-[var(--color-accent)] transition-colors"
-                title="清空对话和 Agent 记忆，保留当前 Agent 阵容"
-              >
-                <RotateCcw className="w-3 h-3" />
-                新话题
-              </button>
-              <button
-                onClick={handleFullReset}
-                className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1 text-[10px] text-[var(--color-text-secondary)] hover:border-red-500/25 hover:text-red-600 transition-colors"
-                title="销毁所有 Agent，回到初始状态"
-              >
-                <Trash2 className="w-3 h-3" />
-                重置
-              </button>
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-[var(--color-text-secondary)]">
-            <span>{dialogMeta.boundaryHeadline}</span>
-            <span className="opacity-70">{dialogMeta.boundaryDetail}</span>
-            <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2 py-0.5" title={dialogMeta.modelScope}>
-              模型：{dialogMeta.modelScopeShort}
-            </span>
-            <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2 py-0.5" title={dialogMeta.skillScope}>
-              技能：{dialogMeta.skillScopeShort}
-            </span>
-          </div>
+          {(pendingUserInteractions.length > 0 || hasRunningActors || openSessionCount > 0 || activeTodoCount > 0 || dialogHistory.length > 0) && (
+            <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-[var(--color-text-secondary)]">
+              {pendingUserInteractions.length > 0 && (
+                <span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-amber-700">
+                  {pendingUserInteractions.length} 条待回复
+                </span>
+              )}
+              {hasRunningActors && (
+                <span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-amber-700">
+                  {runningActors.length} 个运行中
+                </span>
+              )}
+              {openSessionCount > 0 && (
+                <span className="rounded-full bg-blue-500/10 px-2 py-0.5 text-blue-700">
+                  {openSessionCount} 个子会话可继续
+                </span>
+              )}
+              {activeTodoCount > 0 && (
+                <span className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5">
+                  {activeTodoCount} 个活跃待办
+                </span>
+              )}
+              <div className="ml-auto flex flex-wrap items-center gap-1.5">
+                {dialogHistory.length > 0 && (
+                  <button
+                    onClick={handleNewTopic}
+                    className="inline-flex items-center gap-1 rounded-full border border-transparent px-2 py-1 text-[10px] text-[var(--color-text-tertiary)] hover:border-[var(--color-border)] hover:bg-[var(--color-bg-secondary)] hover:text-[var(--color-text-secondary)] transition-colors"
+                    title="清空对话和 Agent 记忆，保留当前 Agent 阵容"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    新话题
+                  </button>
+                )}
+                <button
+                  onClick={handleFullReset}
+                  className="inline-flex items-center gap-1 rounded-full border border-transparent px-2 py-1 text-[10px] text-[var(--color-text-tertiary)] hover:border-red-500/20 hover:bg-red-500/5 hover:text-red-600 transition-colors"
+                  title="销毁所有 Agent，回到初始状态"
+                >
+                  <Trash2 className="w-3 h-3" />
+                  重置房间
+                </button>
+              </div>
+            </div>
+          )}
 
           {actors.length > 0 && (
             <div className="flex flex-wrap items-center gap-2">
-              <ActorStatusBar actors={actors} />
+              <ActorStatusBar actors={actors} compact />
               <div className="min-w-0 flex-1" />
               <DialogWorkspaceDock
                 panel={workspacePanel}
@@ -3420,70 +3557,92 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                 requirePlanApproval={requirePlanApproval}
                 onTogglePlanApproval={setRequirePlanApproval}
                 lastPlanReview={lastPlanReview}
+                graphAvailable={collaborationGraphAvailable}
+                onOpenGraph={collaborationGraphAvailable ? () => handleToggleOverlay("graph") : null}
               />
             </div>
           )}
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
-        <div className="mx-auto flex w-full max-w-5xl flex-col gap-4">
+      <div ref={chatScrollRef} className="min-h-0 flex-1 overflow-y-auto px-3 py-2.5">
+        <div className="mx-auto flex w-full max-w-6xl flex-col gap-3.5">
           {dialogHistory.length === 0 && (
-            <div className="rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-secondary)]/25 px-4 py-6 text-center">
-              <div className="flex flex-col items-center gap-2">
+            <div className="rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-secondary)]/20 px-4 py-4 text-center">
+              <div className="flex flex-col items-center gap-1.5">
                 <Bot className="w-5 h-5 text-[var(--color-text-tertiary)] opacity-60" />
                 <div className="text-[13px] font-medium text-[var(--color-text)]">
-                  {actors.length > 0 ? "从下方输入框开始一条新对话" : "先添加 Agent，再开始对话"}
+                  {actors.length > 0 ? "从下方发起一条协作任务" : "先搭一个协作房间，再开始对话"}
                 </div>
                 <div className="text-[11px] text-[var(--color-text-secondary)]">
                   {actors.length > 0
                     ? "适合 review、debug、brainstorm 这类持续协作；如果目标是直接改代码，优先切到 Agent。"
                     : "建议先保留一个协调者，再按分析、编写或审查角色继续补充。"}
                 </div>
-                <div className="mt-1 flex flex-wrap justify-center gap-2">
-                  <button
-                    onClick={() => handleApplyPreset("code_review")}
-                    className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[11px] text-[var(--color-text-secondary)] hover:border-cyan-500/25 hover:text-cyan-600 transition-colors"
-                  >
-                    快速建 Review 房间
-                  </button>
-                  <button
-                    onClick={() => handleApplyPreset("debug_session")}
-                    className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[11px] text-[var(--color-text-secondary)] hover:border-amber-500/25 hover:text-amber-600 transition-colors"
-                  >
-                    快速建 Debug 房间
-                  </button>
-                  <button
-                    onClick={() => handleApplyPreset("brainstorming")}
-                    className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[11px] text-[var(--color-text-secondary)] hover:border-emerald-500/25 hover:text-emerald-600 transition-colors"
-                  >
-                    快速建 Brainstorm 房间
-                  </button>
+                <div className="mt-0.5 flex flex-wrap justify-center gap-2">
+                  {actors.length > 0
+                    ? DIALOG_STARTER_PROMPTS.map((item) => (
+                      <button
+                        key={item.label}
+                        onClick={() => handleUseStarterPrompt(item.prompt)}
+                        className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[11px] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/25 hover:text-[var(--color-accent)] transition-colors"
+                      >
+                        {item.label}
+                      </button>
+                    ))
+                    : (
+                      <>
+                        <button
+                          onClick={() => handleApplyPreset("code_review")}
+                          className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[11px] text-[var(--color-text-secondary)] hover:border-cyan-500/25 hover:text-cyan-600 transition-colors"
+                        >
+                          快速建 Review 房间
+                        </button>
+                        <button
+                          onClick={() => handleApplyPreset("debug_session")}
+                          className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[11px] text-[var(--color-text-secondary)] hover:border-amber-500/25 hover:text-amber-600 transition-colors"
+                        >
+                          快速建 Debug 房间
+                        </button>
+                        <button
+                          onClick={() => handleApplyPreset("brainstorming")}
+                          className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[11px] text-[var(--color-text-secondary)] hover:border-emerald-500/25 hover:text-emerald-600 transition-colors"
+                        >
+                          快速建 Brainstorm 房间
+                        </button>
+                      </>
+                    )}
+                </div>
+                <div className="flex flex-wrap justify-center gap-2 text-[10px] text-[var(--color-text-secondary)]">
                   <button
                     onClick={() => {
                       setOverlay(null);
                       setWorkspacePanel(null);
                       setShowConfig(true);
                     }}
-                    className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[11px] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/25 hover:text-[var(--color-accent)] transition-colors"
+                    className="inline-flex items-center gap-1 rounded-full border border-transparent px-2 py-1 hover:border-[var(--color-border)] hover:bg-[var(--color-bg)] hover:text-[var(--color-text)] transition-colors"
                   >
                     <Settings2 className="w-3 h-3" />
-                    管理 Agent
+                    {actors.length > 0 ? "调整 Agent 阵容" : "管理 Agent"}
                   </button>
-                  <button
-                    onClick={() => handleToggleOverlay("tasks")}
-                    className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[11px] text-[var(--color-text-secondary)] hover:border-blue-500/25 hover:text-blue-600 transition-colors"
-                  >
-                    <ListChecks className="w-3 h-3" />
-                    任务中心
-                  </button>
-                  <button
-                    onClick={() => setRoutingMode("smart")}
-                    className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[11px] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/25 hover:text-[var(--color-accent)] transition-colors"
-                  >
-                    <span>⚡</span>
-                    切到智能路由
-                  </button>
+                  {actors.length > 0 && (
+                    <button
+                      onClick={() => handleWorkspacePanelChange("plan")}
+                      className="inline-flex items-center gap-1 rounded-full border border-transparent px-2 py-1 hover:border-[var(--color-border)] hover:bg-[var(--color-bg)] hover:text-[var(--color-text)] transition-colors"
+                    >
+                      <ShieldCheck className="w-3 h-3" />
+                      查看执行计划
+                    </button>
+                  )}
+                  {actors.length === 0 && (
+                    <button
+                      onClick={() => setRoutingMode("smart")}
+                      className="inline-flex items-center gap-1 rounded-full border border-transparent px-2 py-1 hover:border-[var(--color-border)] hover:bg-[var(--color-bg)] hover:text-[var(--color-text)] transition-colors"
+                    >
+                      <span>⚡</span>
+                      默认改为智能路由
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
@@ -3611,7 +3770,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
         onDrop={handleDrop}
         onDragOver={handleDragOver}
       >
-        <div className="mx-auto w-full max-w-5xl px-3 py-2.5">
+        <div className="mx-auto w-full max-w-6xl px-3 py-2">
           <input
             ref={fileInputRef}
             type="file"
@@ -3623,7 +3782,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
 
           <div className="overflow-visible rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-[0_12px_32px_-24px_rgba(15,23,42,0.35)]">
             {(incomingHandoff || focusedSessionTask || pendingUserInteractions.length > 0 || attachments.length > 0 || inputNotice) && (
-              <div className="space-y-2 border-b border-[var(--color-border)] bg-[linear-gradient(135deg,rgba(15,23,42,0.02),transparent_45%)] px-3 py-3">
+              <div className="space-y-2 border-b border-[var(--color-border)] bg-[linear-gradient(135deg,rgba(15,23,42,0.02),transparent_45%)] px-3 py-2.5">
                 {incomingHandoff?.sourceMode && (
                   <div className="flex flex-wrap items-center gap-2 rounded-xl border border-cyan-500/15 bg-cyan-500/10 px-3 py-1.5 text-[10px] text-cyan-700">
                     <span>已接力自 {describeAICenterSource(incomingHandoff)}</span>
@@ -3751,7 +3910,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
               )}
               <textarea
                 ref={inputRef}
-                className="w-full resize-none bg-transparent px-3 pt-3 pb-2 text-[14px] leading-6 focus:outline-none min-h-[64px] max-h-[180px]"
+                className="w-full resize-none bg-transparent px-3 pt-2.5 pb-2 text-[14px] leading-6 focus:outline-none min-h-[56px] max-h-[160px]"
                 rows={1}
                 placeholder={selectedPendingMessageId === NEW_MESSAGE_TARGET
                   ? "作为新消息发送，不会绑定到待回复问题..."
@@ -3770,7 +3929,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
               />
             </div>
 
-            <div className="flex flex-col gap-2 border-t border-[var(--color-border)] px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-col gap-2 border-t border-[var(--color-border)] px-3 py-1.5 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex flex-wrap items-center gap-2">
                 <AttachDropdown
                   onFileClick={() => {
@@ -3924,19 +4083,19 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
           <div
             className={`absolute inset-3 z-[35] flex flex-col overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-2xl md:inset-y-3 md:right-3 md:left-auto ${
               overlay === "graph"
-                ? "md:w-[min(720px,calc(100%-1rem))]"
+                ? "md:w-[min(680px,calc(100%-1rem))]"
                 : "md:w-[min(520px,calc(100%-1rem))]"
             }`}
           >
             <div className="flex items-center justify-between gap-3 border-b border-[var(--color-border)] bg-[var(--color-bg)]/95 px-4 py-3 backdrop-blur-sm">
               <div>
                 <div className="text-[13px] font-medium text-[var(--color-text)]">
-                  {overlay === "tasks" ? "任务中心" : "知识图谱"}
+                  {overlay === "tasks" ? "任务中心" : "协作图"}
                 </div>
                 <div className="mt-1 text-[10px] text-[var(--color-text-secondary)]">
                   {overlay === "tasks"
                     ? "查看全局任务执行情况，不打断当前对话流。"
-                    : "从角色关系、消息流和子任务派发角度观察系统结构。"}
+                    : "用于观察角色关系、消息流和子任务派发，本身不会改变对话结果。"}
                 </div>
               </div>
               <button
@@ -3950,7 +4109,13 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
               <Suspense fallback={<div className="p-4 text-xs text-[var(--color-text-secondary)]">加载中...</div>}>
                 {overlay === "tasks" && <TaskCenterPanel />}
                 {overlay === "graph" && graphData && (
-                  <KnowledgeGraphView data={graphData} className="h-full" />
+                  graphData.nodes.length > 0
+                    ? <KnowledgeGraphView data={graphData} className="h-full" />
+                    : (
+                      <div className="flex h-full items-center justify-center px-6 text-center text-[12px] text-[var(--color-text-secondary)]">
+                        当前协作还没有形成可观察的结构，等房间里出现多 Agent、消息往来或子任务后，这里才会更有价值。
+                      </div>
+                    )
                 )}
               </Suspense>
             </div>

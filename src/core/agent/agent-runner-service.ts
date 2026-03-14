@@ -18,6 +18,15 @@ import {
 } from "@/plugins/builtin/SmartAgent/core/react-agent";
 import { loadAndResolveSkills } from "@/store/skill-store";
 import { applySkillToolFilter } from "@/core/agent/skills/skill-resolver";
+import {
+  buildAssistantSupplementalPrompt,
+  filterAssistantToolsByConfig,
+  shouldAutoSaveAssistantMemory,
+  shouldRecallAssistantMemory,
+} from "@/core/ai/assistant-config";
+import { useAgentMemoryStore } from "@/store/agent-memory-store";
+import { autoExtractMemories } from "@/core/agent/actor/actor-memory";
+import { buildKnowledgeContextMessages } from "@/core/agent/actor/middlewares/knowledge-base-middleware";
 
 type QueueItem = {
   task: AgentScheduledTask;
@@ -331,7 +340,8 @@ export class AgentRunnerService {
 
   private async executeTaskInternal(task: AgentScheduledTask, attempt: number) {
     const ai = getMToolsAI();
-    const availableTools = buildRunnerTools();
+    const aiConfig = useAIStore.getState().config;
+    const availableTools = filterAssistantToolsByConfig(buildRunnerTools(), aiConfig);
 
     const store = useAgentStore.getState();
     let sessionId = task.session_id || store.currentSessionId;
@@ -366,9 +376,7 @@ export class AgentRunnerService {
     }
 
     const startedAt = Date.now();
-    const fcCompatibilityKey = buildAgentFCCompatibilityKey(
-      useAIStore.getState().config,
-    );
+    const fcCompatibilityKey = buildAgentFCCompatibilityKey(aiConfig);
     store.updateTask(sessionId, taskId, {
       status: "running",
       retry_count: attempt,
@@ -381,17 +389,39 @@ export class AgentRunnerService {
     const skillsPrompt = skillCtx.mergedSystemPrompt || undefined;
     const hasCodingWorkflowSkill = skillCtx.visibleSkillIds.includes("builtin-coding-workflow");
     const toolsForRun = applySkillToolFilter(availableTools, skillCtx.mergedToolFilter);
+    let userMemoryPrompt: string | undefined;
+    if (shouldRecallAssistantMemory(aiConfig)) {
+      let memorySnap = useAgentMemoryStore.getState();
+      if (!memorySnap.loaded) {
+        try {
+          await memorySnap.load();
+          memorySnap = useAgentMemoryStore.getState();
+        } catch {
+          memorySnap = useAgentMemoryStore.getState();
+        }
+      }
+      userMemoryPrompt = await memorySnap.getMemoriesForQueryPromptAsync(task.query, {
+        topK: 6,
+        preferSemantic: true,
+      }) || undefined;
+    }
+    const knowledgeContextMessages = await buildKnowledgeContextMessages(task.query);
+    const extraSystemPrompt = buildAssistantSupplementalPrompt(aiConfig.system_prompt);
 
     const collectedSteps: AgentStep[] = [];
     const agent = new ReActAgent(
       ai,
       toolsForRun,
       {
-        maxIterations: 8,
+        maxIterations: Math.max(5, Math.min(50, aiConfig.agent_max_iterations ?? 25)),
         verbose: true,
         fcCompatibilityKey,
+        temperature: aiConfig.temperature ?? 0.7,
+        userMemoryPrompt,
         skillsPrompt,
+        extraSystemPrompt,
         skipInternalCodingBlock: hasCodingWorkflowSkill,
+        contextMessages: knowledgeContextMessages,
       },
       (step) => {
         const findLastIdx = (pred: (s: AgentStep) => boolean) => {
@@ -424,6 +454,9 @@ export class AgentRunnerService {
     );
 
     const result = await agent.run(task.query);
+    if (shouldAutoSaveAssistantMemory(aiConfig)) {
+      void autoExtractMemories(`${task.query}\n${result}`, task.id).catch(() => undefined);
+    }
 
     const finishedAt = Date.now();
     useAgentStore.getState().updateTask(sessionId, taskId, {

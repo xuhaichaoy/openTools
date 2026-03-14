@@ -5,6 +5,7 @@ import path from "path";
 import fs from "fs";
 
 const host = process.env.TAURI_DEV_HOST;
+const runtimeTarget = "es2019";
 
 function reactScreenshotsCssAlias() {
   let distCssPath: string | null = null;
@@ -41,13 +42,22 @@ function reactScreenshotsCssAlias() {
 
 export default defineConfig({
   plugins: [react(), tailwindcss(), reactScreenshotsCssAlias()],
+  esbuild: {
+    target: runtimeTarget,
+  },
   optimizeDeps: {
     exclude: ["react-screenshots"],
+    esbuildOptions: {
+      target: runtimeTarget,
+    },
   },
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
     },
+  },
+  build: {
+    target: runtimeTarget,
   },
   clearScreen: false,
   server: {

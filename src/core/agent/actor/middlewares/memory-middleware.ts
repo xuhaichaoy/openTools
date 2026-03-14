@@ -1,4 +1,6 @@
 import { useAgentMemoryStore } from "@/store/agent-memory-store";
+import { useAIStore } from "@/store/ai-store";
+import { shouldRecallAssistantMemory } from "@/core/ai/assistant-config";
 import type { ActorMiddleware, ActorRunContext } from "../actor-middleware";
 
 /**
@@ -9,6 +11,11 @@ export class MemoryMiddleware implements ActorMiddleware {
   readonly name = "Memory";
 
   async apply(ctx: ActorRunContext): Promise<void> {
+    if (!shouldRecallAssistantMemory(useAIStore.getState().config)) {
+      ctx.userMemoryPrompt = undefined;
+      return;
+    }
+
     let memorySnap = useAgentMemoryStore.getState();
     if (!memorySnap.loaded) {
       try {
@@ -19,8 +26,10 @@ export class MemoryMiddleware implements ActorMiddleware {
       }
     }
 
-    // Use async version to ensure fresh memories on first call
-    const userMemory = await memorySnap.getMemoriesForPromptAsync();
+    const userMemory = await memorySnap.getMemoriesForQueryPromptAsync(ctx.query, {
+      topK: 6,
+      preferSemantic: true,
+    });
     ctx.userMemoryPrompt = userMemory
       ? `\n\n## 用户偏好\n${userMemory}`
       : undefined;

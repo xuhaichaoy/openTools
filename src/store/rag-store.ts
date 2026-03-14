@@ -14,6 +14,7 @@ interface RAGState {
   searchResults: RetrievalResult[]
   searchQuery: string
 
+  loadConfig: () => Promise<void>
   loadDocs: () => Promise<void>
   importDoc: (filePath: string, tags?: string[], opts?: { autoIndex?: boolean }) => Promise<void>
   parseDoc: (docId: string) => Promise<void>
@@ -36,6 +37,15 @@ export const useRAGStore = create<RAGState>((set, get) => ({
   isIndexing: false,
   searchResults: [],
   searchQuery: '',
+
+  loadConfig: async () => {
+    try {
+      const config = await invoke<RAGConfig>('rag_get_config')
+      set({ config: { ...DEFAULT_RAG_CONFIG, ...config } })
+    } catch (e) {
+      handleError(e, { context: '加载 RAG 配置', silent: true })
+    }
+  },
 
   loadDocs: async () => {
     set({ isLoading: true })

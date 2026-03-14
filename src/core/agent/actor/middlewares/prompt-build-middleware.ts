@@ -1,3 +1,5 @@
+import { buildAssistantSupplementalPrompt } from "@/core/ai/assistant-config";
+import { useAIStore } from "@/store/ai-store";
 import type { ActorMiddleware, ActorRunContext } from "../actor-middleware";
 
 /**
@@ -11,6 +13,13 @@ export class PromptBuildMiddleware implements ActorMiddleware {
 
   async apply(ctx: ActorRunContext): Promise<void> {
     let prompt = ctx.systemPromptOverride ?? ctx.role.systemPrompt ?? "";
+    const extraSystemPrompt = buildAssistantSupplementalPrompt(
+      useAIStore.getState().config.system_prompt,
+    );
+
+    if (extraSystemPrompt) {
+      prompt += `\n\n${extraSystemPrompt}`;
+    }
 
     if (ctx.workspace) {
       prompt += `\n\n## 工作目录\n你的工作目录为: ${ctx.workspace}\n执行 shell 命令和文件操作时，请在此目录下进行。`;

@@ -427,6 +427,7 @@ pub fn run() {
             commands::rag::rag_list_doc_summaries,
             commands::rag::rag_read_doc_chunks,
             commands::rag::rag_get_stats,
+            commands::rag::rag_get_config,
             commands::rag::rag_set_config,
             // ── DataForge ──
             commands::data_forge::dataforge_get_scripts,

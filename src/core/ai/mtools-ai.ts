@@ -21,11 +21,9 @@ import { resolveModelCapabilities } from "@/core/ai/model-capabilities";
 import { resolveRoutedConfig } from "@/core/ai/router";
 import { createLogger } from "@/core/logger";
 import {
-  appendMemoryCandidates,
-  buildMemoryPromptBlock,
-  extractMemoryCandidates,
-  recallMemories,
-} from "@/core/ai/memory-store";
+  buildAssistantMemoryPromptForQuery,
+  queueAssistantMemoryCandidates,
+} from "@/core/ai/assistant-memory";
 
 const aiLog = createLogger("MToolsAI");
 const STREAM_STALL_TIMEOUT_MS = 120_000;
@@ -297,10 +295,7 @@ async function injectMemoryForMessages(
   if (config.enable_memory_auto_save) {
     Promise.resolve().then(async () => {
       try {
-        const candidates = extractMemoryCandidates(userText, { conversationId });
-        if (candidates.length > 0) {
-          await appendMemoryCandidates(candidates);
-        }
+        await queueAssistantMemoryCandidates(userText, { conversationId });
       } catch { /* non-critical */ }
     });
   }
@@ -308,15 +303,14 @@ async function injectMemoryForMessages(
   if (!config.enable_memory_auto_recall) return messages;
 
   try {
-    const recalled = await Promise.race([
-      recallMemories(userText, { conversationId, topK: 6 }),
-      new Promise<null>((r) => setTimeout(() => r(null), MEMORY_INJECT_TIMEOUT_MS)),
-    ]);
-    if (recalled) {
-      const memoryPrompt = buildMemoryPromptBlock(recalled);
-      if (memoryPrompt) {
-        return [{ role: "system", content: memoryPrompt }, ...messages];
-      }
+    const memoryPrompt = await buildAssistantMemoryPromptForQuery(userText, {
+      conversationId,
+      topK: 6,
+      timeoutMs: MEMORY_INJECT_TIMEOUT_MS,
+      preferSemantic: true,
+    });
+    if (memoryPrompt) {
+      return [{ role: "system", content: memoryPrompt }, ...messages];
     }
   } catch { /* non-critical, proceed without memory */ }
 

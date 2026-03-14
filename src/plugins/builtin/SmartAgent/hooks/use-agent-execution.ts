@@ -19,6 +19,13 @@ import {
 } from "../core/ui-state";
 import { useAgentRunningStore } from "@/store/agent-running-store";
 import { recordAIRouteEvent } from "@/store/ai-route-store";
+import {
+  buildAssistantSupplementalPrompt,
+  shouldAutoSaveAssistantMemory,
+  shouldRecallAssistantMemory,
+} from "@/core/ai/assistant-config";
+import { autoExtractMemories } from "@/core/agent/actor/actor-memory";
+import { buildKnowledgeContextMessages } from "@/core/agent/actor/middlewares/knowledge-base-middleware";
 
 type AgentStoreState = ReturnType<typeof useAgentStore.getState>;
 export const AGENT_EXECUTION_HEARTBEAT_INTERVAL_MS = 10_000;
@@ -276,13 +283,7 @@ export function useAgentExecution({
         true,
       );
 
-      let memorySnap = useAgentMemoryStore.getState();
-      if (!memorySnap.loaded) {
-        await memorySnap.load();
-        memorySnap = useAgentMemoryStore.getState();
-      }
-      const userMemoryPrompt = memorySnap.getMemoriesForPrompt();
-
+      const aiConfig = useAIStore.getState().config;
       const skillContext = await loadAndResolveSkills(query);
       const skillsPrompt = skillContext.mergedSystemPrompt || undefined;
       const hasCodingWorkflowSkill = skillContext.visibleSkillIds.includes("builtin-coding-workflow");
@@ -290,9 +291,27 @@ export function useAgentExecution({
         availableTools,
         skillContext.mergedToolFilter,
       );
-
-      const aiConfig = useAIStore.getState().config;
       const runProfile = normalizeCodingExecutionProfile(opts?.runProfile);
+      let userMemoryPrompt: string | undefined;
+      if (shouldRecallAssistantMemory(aiConfig)) {
+        let memorySnap = useAgentMemoryStore.getState();
+        if (!memorySnap.loaded) {
+          await memorySnap.load();
+          memorySnap = useAgentMemoryStore.getState();
+        }
+        userMemoryPrompt = await memorySnap.getMemoriesForQueryPromptAsync(query, {
+          topK: 6,
+          preferSemantic: true,
+        }) || undefined;
+      }
+
+      const contextLimit = runProfile.largeProjectMode ? 160_000 : undefined;
+      const knowledgeContextMessages = await buildKnowledgeContextMessages(query, {
+        contextTokens: contextLimit,
+      });
+      const extraSystemPrompt = buildAssistantSupplementalPrompt(
+        aiConfig.system_prompt,
+      );
       const maxIterations = getEnhancedAgentMaxIterations(
         aiConfig.agent_max_iterations ?? 25,
         runProfile,
@@ -327,11 +346,13 @@ export function useAgentExecution({
           temperature: aiConfig.temperature ?? 0.7,
           verbose: true,
           fcCompatibilityKey,
-          userMemoryPrompt: userMemoryPrompt || undefined,
+          userMemoryPrompt,
           skillsPrompt,
+          extraSystemPrompt,
           skipInternalCodingBlock: hasCodingWorkflowSkill,
           codingHint: opts?.codingHint,
-          ...(runProfile.largeProjectMode ? { contextLimit: 160_000 } : {}),
+          ...(contextLimit ? { contextLimit } : {}),
+          contextMessages: knowledgeContextMessages,
           dangerousToolPatterns: [
             "write_file",
             "open_path",
@@ -451,6 +472,9 @@ export function useAgentExecution({
           try {
             const result = await agent.run(effectiveQuery, abortController.signal, opts?.images);
             updateTask(sessionId, taskId, { answer: result, status: "success" });
+            if (shouldAutoSaveAssistantMemory(aiConfig)) {
+              void autoExtractMemories(`${query}\n${result}`, taskId).catch(() => undefined);
+            }
             lastError = null;
             break;
           } catch (e) {

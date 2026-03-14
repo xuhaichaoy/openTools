@@ -3,14 +3,20 @@ import {
   semanticRecall,
   recallMemories,
   addMemoryFromAgent,
-  buildMemoryPromptBlock,
   extractMemoryCandidates,
-  appendMemoryCandidates,
   listConfirmedMemories,
   llmExtractMemories,
-  mergeMemoryCandidatesIntoStore,
   type AIMemoryItem,
 } from "@/core/ai/memory-store";
+import { useAIStore } from "@/store/ai-store";
+import {
+  shouldAutoSaveAssistantMemory,
+  shouldRecallAssistantMemory,
+} from "@/core/ai/assistant-config";
+import {
+  appendAssistantMemoryCandidates,
+  buildAssistantMemoryPromptForQuery,
+} from "@/core/ai/assistant-memory";
 
 const MAX_SEARCH_RESULTS = 8;
 const MAX_EXTRACT_CONTENT_LENGTH = 2000;
@@ -113,13 +119,16 @@ function formatMemoryItem(m: AIMemoryItem) {
 
 /**
  * Extract memories from conversation using LLM-based extraction (primary)
- * with regex-based fallback. Merges results directly into the memory store
- * using confidence-based dedup (inspired by deer-flow's memory updater).
+ * with regex-based fallback. Results are queued as memory candidates and
+ * require user confirmation before entering the long-term memory store.
  */
 export async function autoExtractMemories(
   conversationContent: string,
   conversationId?: string,
 ): Promise<number> {
+  if (!shouldAutoSaveAssistantMemory(useAIStore.getState().config)) {
+    return 0;
+  }
   if (!conversationContent || conversationContent.length < 20) return 0;
 
   const truncated = conversationContent.slice(0, MAX_EXTRACT_CONTENT_LENGTH);
@@ -128,15 +137,15 @@ export async function autoExtractMemories(
   const llmCandidates = await llmExtractMemories(truncated, { conversationId }).catch(() => []);
 
   if (llmCandidates.length > 0) {
-    const result = await mergeMemoryCandidatesIntoStore(llmCandidates);
-    return result.added + result.updated;
+    await appendAssistantMemoryCandidates(llmCandidates);
+    return llmCandidates.length;
   }
 
   // Fallback to regex-based heuristic
   const candidates = extractMemoryCandidates(truncated, { conversationId });
   if (candidates.length === 0) return 0;
 
-  await appendMemoryCandidates(candidates);
+  await appendAssistantMemoryCandidates(candidates);
   return candidates.length;
 }
 
@@ -144,11 +153,11 @@ export async function autoExtractMemories(
  * 构建记忆 prompt 片段（用于注入 system prompt）。
  */
 export async function buildActorMemoryPrompt(query: string): Promise<string> {
-  try {
-    const memories = await semanticRecall(query, { topK: 6 });
-    return buildMemoryPromptBlock(memories);
-  } catch {
-    const fallback = await recallMemories(query, { topK: 6 });
-    return buildMemoryPromptBlock(fallback);
+  if (!shouldRecallAssistantMemory(useAIStore.getState().config)) {
+    return "";
   }
+  return buildAssistantMemoryPromptForQuery(query, {
+    topK: 6,
+    preferSemantic: true,
+  });
 }

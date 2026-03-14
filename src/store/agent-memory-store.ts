@@ -6,6 +6,7 @@ import {
   buildMemoryPromptBlock,
   migrateAgentMemory,
 } from "@/core/ai/memory-store";
+import { buildAssistantMemoryPromptForQuery } from "@/core/ai/assistant-memory";
 
 export interface UserMemory {
   key: string;
@@ -32,6 +33,10 @@ interface AgentMemoryState {
   getMemoriesForPromptAsync: () => Promise<string>;
   /** Sync version — returns cached prompt (may be stale on first call) */
   getMemoriesForPrompt: () => string;
+  getMemoriesForQueryPromptAsync: (
+    query: string,
+    options?: { topK?: number; conversationId?: string; preferSemantic?: boolean },
+  ) => Promise<string>;
 }
 
 let cachedPrompt = "";
@@ -101,5 +106,13 @@ export const useAgentMemoryStore = create<AgentMemoryState>((set, get) => ({
         console.warn("[AgentMemoryStore] background refresh failed:", err);
       });
     return cachedPrompt;
+  },
+
+  getMemoriesForQueryPromptAsync: async (query, options) => {
+    return buildAssistantMemoryPromptForQuery(query, {
+      topK: options?.topK ?? 6,
+      conversationId: options?.conversationId,
+      preferSemantic: options?.preferSemantic ?? true,
+    });
   },
 }));

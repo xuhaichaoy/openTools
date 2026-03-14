@@ -4,6 +4,14 @@ import { useAgentMemoryStore } from "@/store/agent-memory-store";
 import { loadAndResolveSkills } from "@/store/skill-store";
 import { applySkillToolFilter } from "@/core/agent/skills/skill-resolver";
 import { buildAgentFCCompatibilityKey } from "@/core/agent/fc-compatibility";
+import {
+  buildAssistantSupplementalPrompt,
+  filterAssistantToolsByConfig,
+  shouldAutoSaveAssistantMemory,
+  shouldRecallAssistantMemory,
+} from "@/core/ai/assistant-config";
+import { autoExtractMemories } from "@/core/agent/actor/actor-memory";
+import { buildKnowledgeContextMessages } from "@/core/agent/actor/middlewares/knowledge-base-middleware";
 import { registry } from "@/core/plugin-system/registry";
 import {
   ReActAgent,
@@ -42,7 +50,8 @@ function getBuiltinTools(askUser?: AskUserCallback): { tools: AgentTool[]; reset
 }
 
 export function buildAllTools(askUser?: AskUserCallback): AgentTool[] {
-  return [...getPluginTools(), ...getBuiltinTools(askUser).tools];
+  const tools = [...getPluginTools(), ...getBuiltinTools(askUser).tools];
+  return filterAssistantToolsByConfig(tools, useAIStore.getState().config);
 }
 
 function filterToolsForRole(tools: AgentTool[], role: AgentRole): AgentTool[] {
@@ -99,15 +108,23 @@ export class LocalAgentBridge implements AgentBridge {
     options?: AgentBridgeRunOptions,
   ): Promise<AgentBridgeResult> {
     const ai = getMToolsAI();
+    const aiConfig = useAIStore.getState().config;
     const builtinResult = getBuiltinTools(this.askUser);
     builtinResult.resetPerRunState();
     const { notifyToolCalled } = builtinResult;
     const allTools = [...getPluginTools(), ...builtinResult.tools];
     const role = options?.role;
-    const tools = role ? filterToolsForRole(allTools, role) : allTools;
+    const configFilteredTools = filterAssistantToolsByConfig(allTools, aiConfig);
+    const tools = role ? filterToolsForRole(configFilteredTools, role) : configFilteredTools;
+    const globalMaxIterations = Math.max(
+      1,
+      Math.min(50, aiConfig.agent_max_iterations ?? 25),
+    );
+    const requestedMaxIterations = options?.maxIterations ?? role?.maxIterations ?? globalMaxIterations;
+    const maxIterations = Math.max(1, Math.min(requestedMaxIterations, globalMaxIterations));
 
     const fcCompatibilityKey = buildAgentFCCompatibilityKey(
-      useAIStore.getState().config,
+      aiConfig,
     );
 
     const { _images: contextImages, ...contextForText } = context;
@@ -121,17 +138,25 @@ export class LocalAgentBridge implements AgentBridge {
     const rolePrompt = role?.systemPrompt ?? "";
     const fullQuery = `${task}${contextStr}`;
 
-    let memorySnap = useAgentMemoryStore.getState();
-    if (!memorySnap.loaded) {
-      try { await memorySnap.load(); memorySnap = useAgentMemoryStore.getState(); } catch { /* ignore */ }
+    let userMemoryPrompt: string | undefined;
+    if (shouldRecallAssistantMemory(aiConfig)) {
+      let memorySnap = useAgentMemoryStore.getState();
+      if (!memorySnap.loaded) {
+        try { await memorySnap.load(); memorySnap = useAgentMemoryStore.getState(); } catch { /* ignore */ }
+      }
+      const userMemory = await memorySnap.getMemoriesForQueryPromptAsync(task, {
+        topK: 6,
+        preferSemantic: true,
+      });
+      userMemoryPrompt = userMemory ? `\n\n## 用户偏好\n${userMemory}` : undefined;
     }
-    const userMemory = memorySnap.getMemoriesForPrompt();
-    const userMemoryPrompt = userMemory ? `\n\n## 用户偏好\n${userMemory}` : undefined;
 
     const skillCtx = await loadAndResolveSkills(task, role?.id);
     const skillsPrompt = skillCtx.mergedSystemPrompt || undefined;
     const hasCodingWorkflowSkill = skillCtx.visibleSkillIds.includes("builtin-coding-workflow");
     const toolsAfterSkills = applySkillToolFilter(tools, skillCtx.mergedToolFilter);
+    const knowledgeContextMessages = await buildKnowledgeContextMessages(task);
+    const extraSystemPrompt = buildAssistantSupplementalPrompt(aiConfig.system_prompt);
 
     const collectedSteps: AgentStep[] = [];
     this.abortController = new AbortController();
@@ -143,19 +168,21 @@ export class LocalAgentBridge implements AgentBridge {
       ai,
       toolsAfterSkills,
       {
-        maxIterations: options?.maxIterations ?? role?.maxIterations ?? 10,
+        maxIterations,
         verbose: true,
         fcCompatibilityKey,
-        temperature: role?.temperature,
+        temperature: role?.temperature ?? aiConfig.temperature ?? 0.7,
         initialMode: role?.readonly ? "plan" : "execute",
-        userMemoryPrompt: userMemoryPrompt,
+        userMemoryPrompt,
         skillsPrompt,
+        extraSystemPrompt,
         skipInternalCodingBlock: hasCodingWorkflowSkill,
         roleOverride: rolePrompt || undefined,
         dangerousToolPatterns: ["write_file", "run_shell_command", "native_"],
         confirmDangerousAction: this.confirmDangerousAction,
         onToolExecuted: notifyToolCalled,
         modelOverride: role?.modelOverride,
+        contextMessages: knowledgeContextMessages,
       },
       (step) => {
         collectedSteps.push(step);
@@ -166,8 +193,15 @@ export class LocalAgentBridge implements AgentBridge {
     try {
       const answer = await retryAsync(
         () => agent.run(fullQuery, signal, images),
-        { maxRetries: 2, baseDelayMs: 1000, signal },
+        {
+          maxRetries: Math.max(0, Math.min(10, aiConfig.agent_retry_max ?? 3)),
+          baseDelayMs: Math.max(500, Math.min(60000, aiConfig.agent_retry_backoff_ms ?? 5000)),
+          signal,
+        },
       );
+      if (shouldAutoSaveAssistantMemory(aiConfig)) {
+        void autoExtractMemories(`${task}\n${answer}`, this.id).catch(() => undefined);
+      }
       return { answer, steps: collectedSteps };
     } catch (e) {
       const error = e instanceof Error ? e.message : String(e);

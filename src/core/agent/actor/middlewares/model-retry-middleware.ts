@@ -9,6 +9,7 @@
 
 import type { ActorMiddleware, ActorRunContext } from "../actor-middleware";
 import { createLogger } from "@/core/logger";
+import { useAIStore } from "@/store/ai-store";
 
 const log = createLogger("ModelRetry");
 
@@ -116,18 +117,38 @@ export async function withRetry<T>(
 
 export class ModelRetryMiddleware implements ActorMiddleware {
   readonly name = "ModelRetry";
-  private config: Required<RetryConfig>;
+  private baseConfig: Required<RetryConfig>;
 
   constructor(config?: RetryConfig) {
-    this.config = { ...DEFAULT_CONFIG, ...config };
+    this.baseConfig = { ...DEFAULT_CONFIG, ...config };
+  }
+
+  private resolveConfig(): Required<RetryConfig> {
+    const aiConfig = useAIStore.getState().config;
+    const initialDelayMs = Math.max(
+      500,
+      Math.min(60000, aiConfig.agent_retry_backoff_ms ?? this.baseConfig.initialDelayMs),
+    );
+    const maxRetries = Math.max(
+      0,
+      Math.min(10, aiConfig.agent_retry_max ?? this.baseConfig.maxRetries),
+    );
+
+    return {
+      ...this.baseConfig,
+      maxRetries,
+      initialDelayMs,
+      maxDelayMs: Math.max(this.baseConfig.maxDelayMs, initialDelayMs * 4),
+    };
   }
 
   async apply(ctx: ActorRunContext): Promise<void> {
-    ctx.retryConfig = this.config;
+    const config = this.resolveConfig();
+    ctx.retryConfig = config;
     ctx.withRetry = withRetry as ActorRunContext["withRetry"];
 
     // Add tool execution timeout protection (no retry — just timeout)
-    const toolTimeoutMs = this.config.toolTimeoutMs;
+    const toolTimeoutMs = config.toolTimeoutMs;
     if (toolTimeoutMs > 0) {
       ctx.tools = ctx.tools.map((tool) => {
         const originalExecute = tool.execute;
