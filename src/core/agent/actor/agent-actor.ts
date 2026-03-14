@@ -14,15 +14,17 @@ import { autoExtractMemories } from "./actor-memory";
 import { appendToolCallSync as appendToolCall, appendToolResultSync as appendToolResult } from "./actor-transcript";
 import type { ActorRunContext } from "./actor-middleware";
 import { runMiddlewareChain } from "./actor-middleware";
-import { createDefaultMiddlewares } from "./middlewares";
+import { ClarificationInterrupt, createDefaultMiddlewares } from "./middlewares";
 import type {
   AgentCapabilities,
   ActorConfig,
   ActorEvent,
   ActorEventType,
+  ActorRunOverrides,
   ActorStatus,
   ActorTask,
   InboxMessage,
+  MiddlewareOverrides,
   ThinkingLevel,
   ToolPolicy,
 } from "./types";
@@ -42,6 +44,108 @@ const actorLog = (name: string, ...args: unknown[]) => {
 type ActorEventHandler = (event: ActorEvent) => void;
 export type AskUserCallback = (questions: AskUserQuestion[]) => Promise<AskUserAnswers>;
 type ConfirmDangerousAction = (toolName: string, params: Record<string, unknown>) => Promise<boolean>;
+
+const ARTIFACT_TOOL_NAMES = new Set(["write_file", "str_replace_edit", "json_edit"]);
+const INTERIM_SYNTHESIS_PATTERNS = [
+  /(正在|继续|稍后|马上|随后).*(整理|汇总|整合|输出|总结)/u,
+  /(先|我会|正在).*(看|检查|处理|拉齐)/u,
+  /(working on it|pulling .* together|give me a few|let me compile|i'?ll gather)/i,
+];
+
+function basename(path: string): string {
+  const normalized = String(path ?? "").replace(/\\/g, "/");
+  return normalized.split("/").pop() || normalized;
+}
+
+function inferArtifactLanguage(path: string): string | undefined {
+  const fileName = basename(path).toLowerCase();
+  const ext = fileName.includes(".") ? fileName.split(".").pop() : "";
+  switch (ext) {
+    case "ts":
+    case "tsx":
+      return "typescript";
+    case "js":
+    case "jsx":
+      return "javascript";
+    case "json":
+      return "json";
+    case "md":
+      return "markdown";
+    case "py":
+      return "python";
+    case "rs":
+      return "rust";
+    case "html":
+    case "htm":
+      return "html";
+    case "css":
+      return "css";
+    case "yaml":
+    case "yml":
+      return "yaml";
+    default:
+      return ext || undefined;
+  }
+}
+
+function buildArtifactPayloadFromToolCall(
+  actorId: string,
+  actorSystem: ActorSystem,
+  toolName: string,
+  params: Record<string, unknown>,
+): void {
+  if (!ARTIFACT_TOOL_NAMES.has(toolName)) return;
+  const path = typeof params.path === "string" ? params.path.trim() : "";
+  if (!path) return;
+
+  let summary = "生成文件产物";
+  let preview: string | undefined;
+  let fullContent: string | undefined;
+
+  if (toolName === "write_file") {
+    summary = "通过 write_file 生成文件";
+    if (typeof params.content === "string") {
+      fullContent = params.content;
+      preview = params.content.slice(0, 1200);
+    }
+  } else if (toolName === "str_replace_edit") {
+    summary = "通过 str_replace_edit 修改文件";
+    if (typeof params.newText === "string") {
+      fullContent = params.newText;
+      preview = params.newText.slice(0, 1200);
+    } else if (typeof params.oldText === "string") {
+      preview = params.oldText.slice(0, 1200);
+    }
+  } else if (toolName === "json_edit") {
+    summary = "通过 json_edit 修改结构化文件";
+    preview = JSON.stringify(params, null, 2).slice(0, 1200);
+  }
+
+  const relatedRun = actorSystem
+    .getSpawnedTasksSnapshot()
+    .filter((record) => record.mode === "session" && record.sessionOpen && record.targetActorId === actorId)
+    .sort((a, b) => (b.lastActiveAt ?? b.spawnedAt) - (a.lastActiveAt ?? a.spawnedAt))[0];
+
+  actorSystem.recordArtifact({
+    actorId,
+    path,
+    source: toolName === "write_file" ? "tool_write" : "tool_edit",
+    toolName,
+    summary,
+    preview,
+    fullContent,
+    language: inferArtifactLanguage(path),
+    timestamp: Date.now(),
+    relatedRunId: relatedRun?.runId,
+  });
+}
+
+function isLikelyInterimSynthesisReply(content: string): boolean {
+  const normalized = content.trim();
+  if (!normalized) return true;
+  if (normalized.length > 220) return false;
+  return INTERIM_SYNTHESIS_PATTERNS.some((pattern) => pattern.test(normalized));
+}
 
 /** Dialog 模式下每个 Agent 使用的全能角色（不做工具过滤） */
 export const DIALOG_FULL_ROLE: AgentRole = {
@@ -158,7 +262,13 @@ export class AgentActor {
           .map((_, i) => `q${i + 1}: ...`)
           .join("\n")}`;
       }
-      const reply = await this.actorSystem.askUserInChat(this.id, questionText);
+      const interaction = await this.actorSystem.askUserInChat(this.id, questionText, {
+        interactionType: "question",
+      });
+      if (interaction.status !== "answered") {
+        throw new Error(interaction.status === "timed_out" ? "用户未回复" : "交互已取消");
+      }
+      const reply = interaction.content;
       actorLog(this.role.name, `askUser: got reply="${reply.slice(0, 60)}"`);
 
       const parseReplies = (): string[] => {
@@ -214,42 +324,32 @@ export class AgentActor {
     return this._workspace;
   }
 
-  /** spawn 时的额外系统提示（通过 SpawnTaskOverrides 注入） */
-  private _spawnSystemPromptAppend?: string;
-  /** spawn 时覆盖的温度 */
-  private _spawnTemperature?: number;
+  get timeoutSeconds(): number | undefined {
+    return this._timeoutSeconds;
+  }
 
-  /**
-   * 在 spawn_task 时动态覆盖运行参数（Subagent 独立配置）。
-   * 覆盖是临时性的，仅影响当前 spawn 任务的执行。
-   */
-  applySpawnOverride(key: string, value: unknown): void {
-    switch (key) {
-      case "model":
-        (this as { modelOverride?: string }).modelOverride = String(value);
-        break;
-      case "maxIterations":
-        this.maxIterations = Number(value);
-        break;
-      case "toolPolicy":
-        this.toolPolicy = value as ToolPolicy;
-        break;
-      case "contextTokens":
-        this._contextTokens = Number(value);
-        break;
-      case "thinkingLevel":
-        this._thinkingLevel = value as ThinkingLevel;
-        break;
-      case "systemPromptAppend":
-        this._spawnSystemPromptAppend = String(value);
-        break;
-      case "middlewareOverrides":
-        this._middlewareOverrides = value as import("./types").MiddlewareOverrides;
-        break;
-      case "temperature":
-        this._spawnTemperature = Number(value);
-        break;
-    }
+  get contextTokens(): number | undefined {
+    return this._contextTokens;
+  }
+
+  get thinkingLevel(): ThinkingLevel | undefined {
+    return this._thinkingLevel;
+  }
+
+  get toolPolicyConfig(): ToolPolicy | undefined {
+    if (!this.toolPolicy) return undefined;
+    return {
+      allow: this.toolPolicy.allow ? [...this.toolPolicy.allow] : undefined,
+      deny: this.toolPolicy.deny ? [...this.toolPolicy.deny] : undefined,
+    };
+  }
+
+  get middlewareOverrides(): MiddlewareOverrides | undefined {
+    if (!this._middlewareOverrides) return undefined;
+    return {
+      disable: this._middlewareOverrides.disable ? [...this._middlewareOverrides.disable] : undefined,
+      approvalLevel: this._middlewareOverrides.approvalLevel,
+    };
   }
 
   /** 注入额外的 AgentTool（如 spawn_task / send_message / agents 等通信工具） */
@@ -304,7 +404,8 @@ export class AgentActor {
         }).join("\n\n");
       }
 
-      void this.assignTask(query);
+      const allImages = messages.flatMap((m) => m.images ?? []);
+      void this.assignTask(query, allImages.length > 0 ? allImages : undefined);
     });
   }
 
@@ -327,7 +428,11 @@ export class AgentActor {
    * 分配任务并异步执行。
    * 包含会话记忆（上下文连续）和等待循环（等待 spawned tasks 完成后整合）。
    */
-  async assignTask(query: string, images?: string[], opts?: { publishResult?: boolean }): Promise<ActorTask> {
+  async assignTask(
+    query: string,
+    images?: string[],
+    opts?: { publishResult?: boolean; runOverrides?: ActorRunOverrides },
+  ): Promise<ActorTask> {
     actorLog(this.role.name, `📋 assignTask START: query="${query.slice(0, 80)}", status=${this._status}, publishResult=${opts?.publishResult !== false}, inbox=${this.inbox.length}`);
     const task: ActorTask = {
       id: generateId(),
@@ -345,6 +450,10 @@ export class AgentActor {
       this.setStatus("running");
       actorLog(this.role.name, `📋 assignTask RUNNING: taskId=${task.id}, status changed to running`);
       this.emit("task_started", { taskId: task.id, query });
+      const emitTaskStep = (step: AgentStep) => {
+        task.steps.push(step);
+        this.emit("step", { taskId: task.id, step });
+      };
 
       if (this._timeoutSeconds && this._timeoutSeconds > 0) {
         globalTimeoutId = setTimeout(() => {
@@ -355,11 +464,13 @@ export class AgentActor {
 
       actorLog(this.role.name, `📝 assignTask: executing with sessionHistory=${this.sessionHistory.length} entries, inbox=${this.inbox.length}`);
       this._capturedInboxUserQuery = undefined;
-      let result = await this.runWithInbox(query, images, (step) => {
-        task.steps.push(step);
-        this.emit("step", { taskId: task.id, step });
-      });
-      const historyQuery = this._capturedInboxUserQuery || query;
+      let { result, finalQuery: executedQuery } = await this.runWithClarifications(
+        query,
+        images,
+        emitTaskStep,
+        opts?.runOverrides,
+      );
+      const historyQuery = this._capturedInboxUserQuery || executedQuery;
       this._capturedInboxUserQuery = undefined;
       this.appendSessionHistory("user", historyQuery);
       this.appendSessionHistory("assistant", result ?? "");
@@ -368,6 +479,7 @@ export class AgentActor {
       const WAIT_POLL_MS = 5_000;
       const MAX_WAIT_ROUNDS = 60; // 最多等 5 分钟
       let waitRound = 0;
+      let processedSpawnFollowUps = 0;
       while (
         this.actorSystem?.getActiveSpawnedTasks(this.id).length &&
         waitRound < MAX_WAIT_ROUNDS
@@ -376,18 +488,49 @@ export class AgentActor {
         actorLog(this.role.name, `assignTask: waiting for ${activeCount} spawned tasks (round ${waitRound + 1})...`);
         await this.waitForInbox(WAIT_POLL_MS);
         if (this.inbox.length > 0) {
-          const followUpQuery = this.buildFollowUpFromInbox();
-          actorLog(this.role.name, `assignTask: processing ${this.inbox.length} inbox messages in follow-up run`);
-          const followUpResult = await this.runWithInbox(
+          const drainedMessages = this.drainInbox();
+          const followUpQuery = this.buildFollowUpFromMessages(drainedMessages);
+          actorLog(this.role.name, `assignTask: processing ${drainedMessages.length} inbox messages in follow-up run`);
+          const { result: followUpResult, finalQuery: followUpHistoryQuery } = await this.runWithClarifications(
             followUpQuery,
             undefined,
-            (step) => { task.steps.push(step); this.emit("step", { taskId: task.id, step }); },
+            emitTaskStep,
+            opts?.runOverrides,
           );
-          this.appendSessionHistory("user", followUpQuery);
+          this.appendSessionHistory("user", followUpHistoryQuery);
           this.appendSessionHistory("assistant", followUpResult ?? "");
           result = followUpResult ?? result;
+          processedSpawnFollowUps++;
         }
         waitRound++;
+      }
+
+      if (
+        processedSpawnFollowUps > 0 &&
+        isLikelyInterimSynthesisReply(String(result ?? ""))
+      ) {
+        emitTaskStep({
+          type: "observation",
+          content: "所有子任务已结束，正在触发一次最终综合，避免停留在中间态回复。",
+          timestamp: Date.now(),
+        });
+        const finalSynthesisPrompt = [
+          "你派发的子任务现在都已经结束。",
+          "请基于当前会话中的已有结果和刚收到的子任务反馈，输出给上游的最终综合答复。",
+          "要求：",
+          "1. 直接给结论，不要再说“稍后整理”“继续汇总”之类的中间态话术。",
+          "2. 明确列出已经完成的部分与最终判断。",
+          "3. 如果仍有缺口，只说明真实缺口，不要重复之前已经完成的工作。",
+        ].join("\n");
+        const { result: finalSynthesisResult, finalQuery: finalSynthesisQuery } = await this.runWithClarifications(
+          finalSynthesisPrompt,
+          undefined,
+          emitTaskStep,
+          opts?.runOverrides,
+        );
+        this.appendSessionHistory("user", finalSynthesisQuery);
+        this.appendSessionHistory("assistant", finalSynthesisResult ?? "");
+        result = finalSynthesisResult ?? result;
       }
 
       if (globalTimeoutId) clearTimeout(globalTimeoutId);
@@ -477,9 +620,9 @@ export class AgentActor {
     }
   }
 
-  /** 从 inbox 中构建后续查询（用于等待循环） */
-  private buildFollowUpFromInbox(): string {
-    const messages = this.inbox.map((m) => {
+  /** 从已 drain 的消息构建后续查询（用于等待循环） */
+  private buildFollowUpFromMessages(drained: InboxMessage[]): string {
+    const messages = drained.map((m) => {
       const sender = m.from === "user" ? "用户" : (this.actorSystem?.get(m.from)?.role.name ?? m.from);
       return `[${sender}]: ${m.content.slice(0, 300)}`;
     });
@@ -504,7 +647,131 @@ export class AgentActor {
 
   /** 停止当前任务 */
   abort(): void {
+    this.actorSystem?.cancelPendingInteractionsForActor(this.id);
     this.abortController?.abort();
+  }
+
+  private async runWithClarifications(
+    query: string,
+    images?: string[],
+    onStep?: (step: AgentStep) => void,
+    runOverrides?: ActorRunOverrides,
+  ): Promise<{ result: string; finalQuery: string }> {
+    let currentQuery = query;
+    let currentImages = images;
+
+    while (true) {
+      try {
+        const result = await this.runWithInbox(currentQuery, currentImages, onStep, runOverrides);
+        return { result, finalQuery: currentQuery };
+      } catch (error) {
+        if (!(error instanceof ClarificationInterrupt)) {
+          throw error;
+        }
+
+        const resolution = await this.waitForClarification(error, onStep);
+        currentQuery = this.buildClarificationResumeQuery(currentQuery, error, resolution);
+        if (resolution.images?.length) {
+          currentImages = [...new Set([...(currentImages ?? []), ...resolution.images])];
+        }
+      }
+    }
+  }
+
+  private async waitForClarification(
+    interrupt: ClarificationInterrupt,
+    onStep?: (step: AgentStep) => void,
+  ): Promise<{
+    status: "answered" | "timed_out" | "cancelled";
+    answer: string;
+    rawInput?: string;
+    wasOptionSelection?: boolean;
+    images?: string[];
+  }> {
+    const question = interrupt.question.trim();
+    onStep?.({
+      type: "observation",
+      content: `等待用户澄清：${question}`,
+      toolName: "ask_clarification",
+      timestamp: Date.now(),
+    });
+
+    if (!interrupt.waitForReply) {
+      return { status: "timed_out", answer: "" };
+    }
+
+    this.setStatus("waiting");
+    const waitingAbort = new AbortController();
+    this.abortController = waitingAbort;
+
+    try {
+      const resolution = await Promise.race([
+        interrupt.waitForReply(),
+        new Promise<never>((_, reject) => {
+          waitingAbort.signal.addEventListener("abort", () => reject(new Error("Aborted")), { once: true });
+        }),
+      ]);
+
+      if (resolution.status === "answered") {
+        onStep?.({
+          type: "observation",
+          content: resolution.images?.length
+            ? `用户澄清：${resolution.answer}（附带 ${resolution.images.length} 张图片）`
+            : `用户澄清：${resolution.answer}`,
+          toolName: "ask_clarification",
+          timestamp: Date.now(),
+        });
+      } else {
+        onStep?.({
+          type: "observation",
+          content: resolution.status === "timed_out"
+            ? "用户未在规定时间内回答澄清问题，将基于已有信息继续执行。"
+            : "澄清交互已取消，将基于已有信息继续执行。",
+          toolName: "ask_clarification",
+          timestamp: Date.now(),
+        });
+      }
+
+      return resolution;
+    } finally {
+      if (this.abortController === waitingAbort) {
+        this.abortController = null;
+      }
+      if (!waitingAbort.signal.aborted && this._status !== "stopped") {
+        this.setStatus("running");
+      }
+    }
+  }
+
+  private buildClarificationResumeQuery(
+    baseQuery: string,
+    interrupt: ClarificationInterrupt,
+    resolution: {
+      status: "answered" | "timed_out" | "cancelled";
+      answer: string;
+      rawInput?: string;
+      wasOptionSelection?: boolean;
+      images?: string[];
+    },
+  ): string {
+    const clarificationBlock = resolution.status === "answered"
+      ? [
+          "[用户澄清补充]",
+          `问题：${interrupt.question}`,
+          `回答：${resolution.answer}`,
+          resolution.images?.length ? `附带图片：\n${resolution.images.map((image) => `- ${image}`).join("\n")}` : "",
+          resolution.wasOptionSelection ? `原始输入：${resolution.rawInput ?? resolution.answer}` : "",
+          "请基于这个澄清继续原任务，不要重复之前已经完成的工作。",
+        ].filter(Boolean).join("\n")
+      : [
+          "[澄清未完成]",
+          `问题：${interrupt.question}`,
+          resolution.status === "timed_out"
+            ? "用户暂未回复，请基于已有信息继续执行，并在结果中明确你的假设。"
+            : "本次澄清已取消，请基于已有信息继续执行，并在结果中明确你的假设。",
+        ].join("\n");
+
+    return `${baseQuery}\n\n${clarificationBlock}`;
   }
 
   /** 完全停止 Actor */
@@ -552,8 +819,21 @@ export class AgentActor {
     query: string,
     images?: string[],
     onStep?: (step: AgentStep) => void,
+    runOverrides?: ActorRunOverrides,
   ): Promise<string> {
-    actorLog(this.role.name, `runWithInbox: model=${this.modelOverride ?? "default"}, maxIter=${this.maxIterations}, inboxSize=${this.inbox.length}`);
+    const effectiveModelOverride = runOverrides?.model ?? this.modelOverride;
+    const effectiveMaxIterations = runOverrides?.maxIterations ?? this.maxIterations;
+    const effectiveSystemPromptOverride = runOverrides?.systemPromptAppend
+      ? [this.systemPromptOverride ?? this.role.systemPrompt, runOverrides.systemPromptAppend]
+        .filter(Boolean)
+        .join("\n\n")
+      : this.systemPromptOverride;
+    const effectiveContextTokens = runOverrides?.contextTokens ?? this._contextTokens;
+    const effectiveToolPolicy = runOverrides?.toolPolicy ?? this.toolPolicy;
+    const effectiveMiddlewareOverrides = runOverrides?.middlewareOverrides ?? this._middlewareOverrides;
+    const effectiveTemperature = runOverrides?.temperature ?? this.role.temperature;
+
+    actorLog(this.role.name, `runWithInbox: model=${effectiveModelOverride ?? "default"}, maxIter=${effectiveMaxIterations}, inboxSize=${this.inbox.length}`);
 
     const ctx: ActorRunContext = {
       query,
@@ -561,17 +841,17 @@ export class AgentActor {
       onStep,
       actorId: this.id,
       role: this.role,
-      modelOverride: this.modelOverride,
-      maxIterations: this.maxIterations,
-      systemPromptOverride: this.systemPromptOverride,
+      modelOverride: effectiveModelOverride,
+      maxIterations: effectiveMaxIterations,
+      systemPromptOverride: effectiveSystemPromptOverride,
       workspace: this._workspace,
-      contextTokens: this._contextTokens,
-      toolPolicy: this.toolPolicy,
+      contextTokens: effectiveContextTokens,
+      toolPolicy: effectiveToolPolicy,
       actorSystem: this.actorSystem,
       askUser: this.askUser,
       confirmDangerousAction: this.confirmDangerousAction,
       extraTools: this.extraTools,
-      middlewareOverrides: this._middlewareOverrides,
+      middlewareOverrides: effectiveMiddlewareOverrides,
       tools: [],
       rolePrompt: "",
       hasCodingWorkflowSkill: false,
@@ -589,10 +869,10 @@ export class AgentActor {
       ai,
       ctx.tools,
       {
-        maxIterations: this.maxIterations,
+        maxIterations: effectiveMaxIterations,
         verbose: true,
         fcCompatibilityKey: ctx.fcCompatibilityKey,
-        temperature: this.role.temperature,
+        temperature: effectiveTemperature,
         initialMode: "execute",
         userMemoryPrompt: ctx.userMemoryPrompt,
         skillsPrompt: ctx.skillsPrompt,
@@ -601,8 +881,8 @@ export class AgentActor {
         dangerousToolPatterns: ["write_file", "run_shell_command", "native_"],
         confirmDangerousAction: this.confirmDangerousAction,
         onToolExecuted: ctx.notifyToolCalled,
-        modelOverride: this.modelOverride,
-        contextBudget: this._contextTokens,
+        modelOverride: effectiveModelOverride,
+        contextBudget: effectiveContextTokens,
         contextMessages: ctx.contextMessages,
         inboxDrain: () => {
           const drained = this.drainInbox();
@@ -626,6 +906,7 @@ export class AgentActor {
         if (this.actorSystem && step.toolName) {
           if (step.type === "action" && step.toolInput) {
             appendToolCall(this.actorSystem.sessionId, this.id, step.toolName, step.toolInput);
+            buildArtifactPayloadFromToolCall(this.id, this.actorSystem, step.toolName, step.toolInput);
           } else if (step.type === "observation" && step.toolOutput !== undefined) {
             appendToolResult(this.actorSystem.sessionId, this.id, step.toolName, step.toolOutput);
           }

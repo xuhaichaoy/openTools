@@ -68,7 +68,10 @@ pub async fn execute_tool(app: &AppHandle, name: &str, args: &str) -> Result<Str
                 return Err("url 不能为空".to_string());
             }
             if !url.starts_with("http://") && !url.starts_with("https://") {
-                return Err(format!("无效的 URL（必须以 http:// 或 https:// 开头）: {}", url));
+                return Err(format!(
+                    "无效的 URL（必须以 http:// 或 https:// 开头）: {}",
+                    url
+                ));
             }
             let body = crate::commands::system::web_fetch_url(url.clone()).await?;
             let trimmed = body.trim();

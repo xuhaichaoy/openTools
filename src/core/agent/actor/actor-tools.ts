@@ -266,12 +266,14 @@ export function createActorCommunicationTools(
           .filter((a) => a.id !== actorId)
           .map((a) => ({
             name: a.role.name,
+            isCoordinator: system.getCoordinatorId() === a.id,
             status: a.status,
             currentTask: a.currentTask?.query?.slice(0, 100) ?? null,
             model: a.modelOverride ?? "(default)",
           })),
         self: {
           name: selfActor?.role.name ?? actorId,
+          isCoordinator: system.getCoordinatorId() === actorId,
         },
         task_tree: descendants.map((r) => ({
           runId: r.runId,

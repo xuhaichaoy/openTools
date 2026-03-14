@@ -651,11 +651,15 @@ pub async fn write_text_file(
 
 /// 创建目录（受路径白名单保护，支持递归创建）
 #[tauri::command]
-pub async fn create_directory(app: tauri::AppHandle, path: String, recursive: Option<bool>) -> Result<String, String> {
+pub async fn create_directory(
+    app: tauri::AppHandle,
+    path: String,
+    recursive: Option<bool>,
+) -> Result<String, String> {
     validate_path_access(&app, &path)?;
     let p = std::path::Path::new(&path);
     let recursive = recursive.unwrap_or(true);
-    
+
     if p.exists() {
         if p.is_dir() {
             return Ok(format!("目录已存在: {}", path));
@@ -663,13 +667,13 @@ pub async fn create_directory(app: tauri::AppHandle, path: String, recursive: Op
             return Err(format!("路径存在但不是目录: {}", path));
         }
     }
-    
+
     if recursive {
         std::fs::create_dir_all(p).map_err(|e| format!("创建目录失败: {}", e))?;
     } else {
         std::fs::create_dir(p).map_err(|e| format!("创建目录失败: {}", e))?;
     }
-    
+
     Ok(format!("已创建目录: {}", path))
 }
 
@@ -678,29 +682,37 @@ pub async fn create_directory(app: tauri::AppHandle, path: String, recursive: Op
 pub async fn delete_file(app: tauri::AppHandle, path: String) -> Result<String, String> {
     validate_path_access(&app, &path)?;
     let p = std::path::Path::new(&path);
-    
+
     if !p.exists() {
         return Err(format!("路径不存在: {}", path));
     }
-    
+
     let metadata = std::fs::metadata(p).map_err(|e| format!("获取元数据失败: {}", e))?;
-    
+
     if metadata.is_dir() {
         // 检查目录是否为空
-        if std::fs::read_dir(p).map_err(|e| format!("读取目录失败: {}", e))?.next().is_some() {
+        if std::fs::read_dir(p)
+            .map_err(|e| format!("读取目录失败: {}", e))?
+            .next()
+            .is_some()
+        {
             return Err(format!("目录非空，请先删除内容: {}", path));
         }
         std::fs::remove_dir(p).map_err(|e| format!("删除目录失败: {}", e))?;
     } else {
         std::fs::remove_file(p).map_err(|e| format!("删除文件失败: {}", e))?;
     }
-    
+
     Ok(format!("已删除: {}", path))
 }
 
 /// 移动/重命名文件或目录
 #[tauri::command]
-pub async fn move_file(app: tauri::AppHandle, source: String, destination: String) -> Result<String, String> {
+pub async fn move_file(
+    app: tauri::AppHandle,
+    source: String,
+    destination: String,
+) -> Result<String, String> {
     validate_path_access(&app, &source)?;
     validate_path_access(&app, &destination)?;
 
@@ -900,7 +912,11 @@ pub async fn web_fetch_url(url: String) -> Result<String, String> {
 
     let status = resp.status();
     if !status.is_success() {
-        return Err(format!("HTTP {}: {}", status.as_u16(), status.canonical_reason().unwrap_or("Unknown")));
+        return Err(format!(
+            "HTTP {}: {}",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("Unknown")
+        ));
     }
 
     let body = resp
@@ -987,8 +1003,12 @@ async fn search_bing(
     query: &str,
     max_results: usize,
 ) -> Result<Vec<(String, String, String)>, String> {
-    let encoded = percent_encoding::utf8_percent_encode(query, percent_encoding::NON_ALPHANUMERIC).to_string();
-    let url = format!("https://www.bing.com/search?q={}&count={}", encoded, max_results);
+    let encoded = percent_encoding::utf8_percent_encode(query, percent_encoding::NON_ALPHANUMERIC)
+        .to_string();
+    let url = format!(
+        "https://www.bing.com/search?q={}&count={}",
+        encoded, max_results
+    );
 
     let resp = client
         .get(&url)
@@ -1039,9 +1059,15 @@ async fn search_duckduckgo(
 ) -> Result<Vec<(String, String, String)>, String> {
     let resp = client
         .post("https://lite.duckduckgo.com/lite/")
-        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        )
         .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(format!("q={}", percent_encoding::utf8_percent_encode(query, percent_encoding::NON_ALPHANUMERIC)))
+        .body(format!(
+            "q={}",
+            percent_encoding::utf8_percent_encode(query, percent_encoding::NON_ALPHANUMERIC)
+        ))
         .send()
         .await
         .map_err(|e| format!("请求失败: {}", e))?;
@@ -1075,7 +1101,8 @@ async fn search_duckduckgo(
 
         // Try extracting href from the block (it may appear as href="..." before class)
         // Let's find the actual URL by looking at result-link blocks differently
-        let snippet_text = if let Some(snippet_block) = block.split("class='result-snippet'").nth(1) {
+        let snippet_text = if let Some(snippet_block) = block.split("class='result-snippet'").nth(1)
+        {
             extract_tag_content(snippet_block, "", "</td>")
                 .or_else(|| extract_tag_content(snippet_block, "", "</span>"))
                 .map(|s| strip_html_tags(&s).trim().to_string())
@@ -1091,10 +1118,21 @@ async fn search_duckduckgo(
 
     // Alternative parsing: split by "result-link" href
     if results.is_empty() {
-        for block in html.split("class=\"result-link\"").chain(html.split("class='result-link'")).skip(1).take(max_results) {
-            let title_text = block.split("</a>").next()
+        for block in html
+            .split("class=\"result-link\"")
+            .chain(html.split("class='result-link'"))
+            .skip(1)
+            .take(max_results)
+        {
+            let title_text = block
+                .split("</a>")
+                .next()
                 .map(|s| {
-                    let clean = if let Some(pos) = s.rfind('>') { &s[pos + 1..] } else { s };
+                    let clean = if let Some(pos) = s.rfind('>') {
+                        &s[pos + 1..]
+                    } else {
+                        s
+                    };
                     strip_html_tags(clean).trim().to_string()
                 })
                 .unwrap_or_default();
@@ -1106,7 +1144,9 @@ async fn search_duckduckgo(
 
             if !title_text.is_empty() && link.starts_with("http") {
                 results.push((title_text, link, String::new()));
-                if results.len() >= max_results { break; }
+                if results.len() >= max_results {
+                    break;
+                }
             }
         }
     }
@@ -1122,11 +1162,19 @@ fn decode_search_redirect(url: &str) -> Option<String> {
         let uddg_pos = url.find("uddg=")?;
         let encoded = &url[uddg_pos + 5..];
         let end = encoded.find('&').unwrap_or(encoded.len());
-        Some(percent_encoding::percent_decode_str(&encoded[..end]).decode_utf8_lossy().to_string())
+        Some(
+            percent_encoding::percent_decode_str(&encoded[..end])
+                .decode_utf8_lossy()
+                .to_string(),
+        )
     } else if url.starts_with("/url?q=") {
         let cleaned = &url[7..];
         let end = cleaned.find('&').unwrap_or(cleaned.len());
-        Some(percent_encoding::percent_decode_str(&cleaned[..end]).decode_utf8_lossy().to_string())
+        Some(
+            percent_encoding::percent_decode_str(&cleaned[..end])
+                .decode_utf8_lossy()
+                .to_string(),
+        )
     } else if url.starts_with("http") {
         Some(url.to_string())
     } else {
@@ -1183,7 +1231,7 @@ pub async fn extract_spreadsheet_text(
     file_path: String,
     max_rows: Option<usize>,
 ) -> Result<String, String> {
-    use calamine::{open_workbook_auto, Reader, Data};
+    use calamine::{open_workbook_auto, Data, Reader};
 
     let mut workbook = open_workbook_auto(&file_path).map_err(|e| e.to_string())?;
     let sheet_names = workbook.sheet_names().to_vec();
@@ -1198,10 +1246,13 @@ pub async fn extract_spreadsheet_text(
                     output.push_str(&format!("... (截断，共 {} 行)\n", range.height()));
                     break;
                 }
-                let cells: Vec<String> = row.iter().map(|c| match c {
-                    Data::Empty => String::new(),
-                    other => other.to_string(),
-                }).collect();
+                let cells: Vec<String> = row
+                    .iter()
+                    .map(|c| match c {
+                        Data::Empty => String::new(),
+                        other => other.to_string(),
+                    })
+                    .collect();
                 output.push_str(&cells.join("\t"));
                 output.push('\n');
             }
@@ -1258,8 +1309,7 @@ fn extract_docx_text(path: &str) -> Result<String, String> {
     use quick_xml::reader::Reader as XmlReader;
 
     let file = std::fs::File::open(path).map_err(|e| format!("打开 DOCX 失败: {}", e))?;
-    let mut archive =
-        zip::ZipArchive::new(file).map_err(|e| format!("解压 DOCX 失败: {}", e))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("解压 DOCX 失败: {}", e))?;
 
     let doc_xml = archive
         .by_name("word/document.xml")
@@ -1313,8 +1363,7 @@ fn extract_pptx_text(path: &str) -> Result<String, String> {
     use quick_xml::reader::Reader as XmlReader;
 
     let file = std::fs::File::open(path).map_err(|e| format!("打开 PPTX 失败: {}", e))?;
-    let mut archive =
-        zip::ZipArchive::new(file).map_err(|e| format!("解压 PPTX 失败: {}", e))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("解压 PPTX 失败: {}", e))?;
 
     let slide_names: Vec<String> = (0..archive.len())
         .filter_map(|i| {
@@ -1345,8 +1394,9 @@ fn extract_pptx_text(path: &str) -> Result<String, String> {
     let mut result = String::new();
 
     for (idx, slide_name) in sorted_slides.iter().enumerate() {
-        let slide_file =
-            archive.by_name(slide_name).map_err(|e| format!("读取幻灯片失败: {}", e))?;
+        let slide_file = archive
+            .by_name(slide_name)
+            .map_err(|e| format!("读取幻灯片失败: {}", e))?;
         let mut reader = XmlReader::from_reader(std::io::BufReader::new(slide_file));
         reader.config_mut().trim_text(true);
 
@@ -1401,8 +1451,7 @@ fn extract_pptx_text(path: &str) -> Result<String, String> {
 
 fn extract_xmind_text(path: &str) -> Result<String, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("打开 XMind 失败: {}", e))?;
-    let mut archive =
-        zip::ZipArchive::new(file).map_err(|e| format!("解压 XMind 失败: {}", e))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("解压 XMind 失败: {}", e))?;
 
     if let Ok(mut entry) = archive.by_name("content.json") {
         let mut content = String::new();
@@ -1415,7 +1464,10 @@ fn extract_xmind_text(path: &str) -> Result<String, String> {
         let mut result = String::new();
         if let Some(sheets) = json.as_array() {
             for (i, sheet) in sheets.iter().enumerate() {
-                let title = sheet.get("title").and_then(|t| t.as_str()).unwrap_or("Sheet");
+                let title = sheet
+                    .get("title")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("Sheet");
                 result.push_str(&format!("## {}\n", title));
                 if let Some(root) = sheet.get("rootTopic") {
                     xmind_topic_to_text(root, 0, &mut result);

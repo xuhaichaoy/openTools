@@ -32,7 +32,7 @@ fn get_app_url(app: &AppHandle) -> WebviewUrl {
     // 开发模式：始终使用 dev server URL（不用 main_win.url()，它可能返回 tauri://localhost/）
     #[cfg(debug_assertions)]
     {
-        if let Ok(dev_url) = Url::parse("http://localhost:5173/") {
+        if let Ok(dev_url) = Url::parse("http://localhost:5180/") {
             println!("[ScreenCapture] get_app_url returning dev url: {}", dev_url);
             return WebviewUrl::External(dev_url);
         }

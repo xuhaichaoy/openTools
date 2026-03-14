@@ -128,4 +128,64 @@ describe("ReActAgent FC compatibility cache", () => {
     expect(answer).toContain("write_file");
     expect(fcCalls).toBe(2);
   });
+
+  it("should recover malformed write_file arguments with raw html content", async () => {
+    let fcCalls = 0;
+    let capturedPath = "";
+    let capturedContent = "";
+
+    const ai = createMockAI(async () => {
+      fcCalls += 1;
+      if (fcCalls === 1) {
+        return {
+          type: "tool_calls",
+          toolCalls: [
+            {
+              id: "call-write-file",
+              type: "function",
+              function: {
+                name: "write_file",
+                arguments:
+                  "{\"path\":\"/Users/haichao/Downloads/demo.html\",\"content\":\"<!doctype html>\n<html lang=\"zh-CN\">\n  <head>\n    <meta charset=\"UTF-8\" />\n    <title>Demo</title>\n  </head>\n  <body>\n    <button class=\"cta\">Run</button>\n  </body>\n</html>\"}",
+              },
+            },
+          ],
+        };
+      }
+
+      return {
+        type: "content",
+        content: "已写入 demo.html",
+      };
+    });
+
+    const tools: AgentTool[] = [
+      {
+        name: "write_file",
+        description: "write",
+        parameters: {
+          path: { type: "string", description: "path" },
+          content: { type: "string", description: "content" },
+        },
+        execute: async (params) => {
+          capturedPath = String(params.path ?? "");
+          capturedContent = String(params.content ?? "");
+          return { ok: true, path: capturedPath };
+        },
+      },
+    ];
+
+    const agent = new ReActAgent(ai, tools, {
+      maxIterations: 4,
+      fcCompatibilityKey: "recover-malformed-write-file",
+    });
+
+    const answer = await agent.run("根据图片生成一个 html 页面并保存到 Downloads");
+
+    expect(answer).toContain("已写入 demo.html");
+    expect(capturedPath).toBe("/Users/haichao/Downloads/demo.html");
+    expect(capturedContent).toContain('<meta charset="UTF-8" />');
+    expect(capturedContent).toContain('<button class="cta">Run</button>');
+    expect(fcCalls).toBe(2);
+  });
 });

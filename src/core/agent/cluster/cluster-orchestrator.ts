@@ -60,6 +60,7 @@ async function retryChat(
           messages: params.messages.map((m) => ({
             role: m.role,
             content: m.content,
+            ...(m.images?.length ? { images: m.images } : {}),
           })),
           model: params.model,
           temperature: params.temperature,

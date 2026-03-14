@@ -1,10 +1,44 @@
 use std::collections::HashMap;
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 
 use super::StreamCancellation;
 use crate::commands::ai::request::build_api_request;
 use crate::commands::ai::tools::executor::execute_tool;
 use crate::commands::ai::types::{AIConfig, ChatMessage, FunctionCall, ToolCall};
+
+const FIRST_CHUNK_TIMEOUT_SECS: u64 = 120;
+const STREAM_IDLE_TIMEOUT_SECS: u64 = 120;
+
+fn value_as_nonempty_str(value: &serde_json::Value) -> Option<&str> {
+    value
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            value
+                .get("text")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(|| {
+            value
+                .as_array()
+                .and_then(|items| items.iter().find_map(value_as_nonempty_str))
+        })
+}
+
+fn extract_openai_reasoning_text(delta: &serde_json::Value) -> Option<&str> {
+    let obj = delta.as_object()?;
+    obj.get("reasoning")
+        .and_then(value_as_nonempty_str)
+        .or_else(|| obj.get("reasoning_content").and_then(value_as_nonempty_str))
+        .or_else(|| obj.get("reasoning_text").and_then(value_as_nonempty_str))
+        .or_else(|| {
+            obj.iter()
+                .filter(|(k, _)| !["role", "content", "tool_calls"].contains(&k.as_str()))
+                .find_map(|(_, v)| value_as_nonempty_str(v))
+        })
+}
 
 /// OpenAI 兼容协议的流式对话处理（含多轮 tool_calls 循环）
 pub async fn openai_stream_loop(
@@ -16,6 +50,7 @@ pub async fn openai_stream_loop(
     tools: &[serde_json::Value],
 ) -> Result<(), String> {
     let cancellation = app.state::<StreamCancellation>();
+    let started_at = std::time::Instant::now();
 
     let mut request = build_api_request(
         &config.model,
@@ -46,7 +81,8 @@ pub async fn openai_stream_loop(
     let mut req_builder = client
         .post(&url)
         .header("Authorization", format!("Bearer {}", config.api_key))
-        .header("Content-Type", "application/json");
+        .header("Content-Type", "application/json")
+        .header("Accept-Encoding", "identity");
     if url.contains("coding.dashscope") || url.contains("coding-intl.dashscope") {
         req_builder = req_builder.header("User-Agent", "openclaw/1.0.0");
     }
@@ -81,9 +117,21 @@ pub async fn openai_stream_loop(
     let mut buffer = String::new();
     let mut pending_tool_calls: Vec<ToolCall> = Vec::new();
     let mut tc_args_buffer: HashMap<usize, String> = HashMap::new();
+    let mut got_first_chunk = false;
+    let mut chunk_count: usize = 0;
+    let mut line_count: usize = 0;
+    let mut byte_count: usize = 0;
 
-    while let Some(chunk) = stream.next().await {
+    loop {
         if cancellation.is_cancelled(conversation_id) {
+            log::warn!(
+                "[ai_chat_stream] cancelled conv={} elapsed={}ms chunks={} lines={} bytes={}",
+                conversation_id,
+                started_at.elapsed().as_millis(),
+                chunk_count,
+                line_count,
+                byte_count
+            );
             cancellation.clear(conversation_id);
             let _ = app.emit(
                 "ai-stream-done",
@@ -92,11 +140,62 @@ pub async fn openai_stream_loop(
             return Ok(());
         }
 
+        let timeout_secs = if got_first_chunk {
+            STREAM_IDLE_TIMEOUT_SECS
+        } else {
+            FIRST_CHUNK_TIMEOUT_SECS
+        };
+
+        let next =
+            match tokio::time::timeout(Duration::from_secs(timeout_secs), stream.next()).await {
+                Ok(next) => next,
+                Err(_) => {
+                    let msg = if got_first_chunk {
+                        format!("流读取空闲超时（{}s）", STREAM_IDLE_TIMEOUT_SECS)
+                    } else {
+                        format!("等待首个流响应超时（{}s）", FIRST_CHUNK_TIMEOUT_SECS)
+                    };
+                    log::error!(
+                        "[ai_chat_stream] timeout conv={} elapsed={}ms chunks={} lines={} err={}",
+                        conversation_id,
+                        started_at.elapsed().as_millis(),
+                        chunk_count,
+                        line_count,
+                        msg
+                    );
+                    let _ = app.emit(
+                        "ai-stream-error",
+                        serde_json::json!({
+                            "conversation_id": conversation_id,
+                            "error": msg.clone(),
+                        }),
+                    );
+                    cancellation.clear(conversation_id);
+                    return Err(msg);
+                }
+            };
+
+        let Some(chunk) = next else {
+            break;
+        };
+
+        if !got_first_chunk {
+            got_first_chunk = true;
+            log::info!(
+                "[ai_chat_stream] first chunk conv={} latency={}ms",
+                conversation_id,
+                started_at.elapsed().as_millis()
+            );
+        }
+
         match chunk {
             Ok(bytes) => {
+                chunk_count += 1;
+                byte_count += bytes.len();
                 buffer.push_str(&String::from_utf8_lossy(&bytes));
 
                 while let Some(pos) = buffer.find('\n') {
+                    line_count += 1;
                     let line = buffer[..pos].trim().to_string();
                     buffer = buffer[pos + 1..].to_string();
 
@@ -179,15 +278,15 @@ pub async fn openai_stream_loop(
                                 let mut follow_builder = client
                                     .post(&follow_url)
                                     .header("Authorization", format!("Bearer {}", config.api_key))
-                                    .header("Content-Type", "application/json");
-                                if follow_url.contains("coding.dashscope") || follow_url.contains("coding-intl.dashscope") {
-                                    follow_builder = follow_builder.header("User-Agent", "openclaw/1.0.0");
-                                }
-                                match follow_builder
-                                    .json(&follow_request)
-                                    .send()
-                                    .await
+                                    .header("Content-Type", "application/json")
+                                    .header("Accept-Encoding", "identity");
+                                if follow_url.contains("coding.dashscope")
+                                    || follow_url.contains("coding-intl.dashscope")
                                 {
+                                    follow_builder =
+                                        follow_builder.header("User-Agent", "openclaw/1.0.0");
+                                }
+                                match follow_builder.json(&follow_request).send().await {
                                     Ok(resp) => {
                                         if let Ok(body) = resp.text().await {
                                             if let Ok(parsed) =
@@ -314,6 +413,15 @@ pub async fn openai_stream_loop(
                             "ai-stream-done",
                             serde_json::json!({ "conversation_id": conversation_id }),
                         );
+                        log::info!(
+                            "[ai_chat_stream] done conv={} elapsed={}ms chunks={} lines={} bytes={} tool_calls={}",
+                            conversation_id,
+                            started_at.elapsed().as_millis(),
+                            chunk_count,
+                            line_count,
+                            byte_count,
+                            pending_tool_calls.len()
+                        );
                         cancellation.clear(conversation_id);
                         return Ok(());
                     }
@@ -362,23 +470,57 @@ pub async fn openai_stream_loop(
                                 }
                             }
                         }
+
+                        if let Some(thinking_text) = extract_openai_reasoning_text(delta) {
+                            let _ = app.emit(
+                                "ai-stream-thinking",
+                                serde_json::json!({
+                                    "conversation_id": conversation_id,
+                                    "content": thinking_text,
+                                }),
+                            );
+                        }
                     }
                 }
             }
             Err(e) => {
+                let err_msg = format!("流读取错误: {}", e);
+                log::error!(
+                    "[ai_chat_stream] read error conv={} elapsed={}ms chunks={} lines={} err={}",
+                    conversation_id,
+                    started_at.elapsed().as_millis(),
+                    chunk_count,
+                    line_count,
+                    err_msg
+                );
+                if got_first_chunk && chunk_count > 10 {
+                    log::warn!(
+                            "[ai_chat_stream] treating read error as stream end (chunks={} lines={}), conv={}",
+                            chunk_count, line_count, conversation_id
+                        );
+                    break;
+                }
                 let _ = app.emit(
                     "ai-stream-error",
                     serde_json::json!({
                         "conversation_id": conversation_id,
-                        "error": format!("流读取错误: {}", e),
+                        "error": err_msg.clone(),
                     }),
                 );
                 cancellation.clear(conversation_id);
-                return Err(format!("流读取错误: {}", e));
+                return Err(err_msg);
             }
         }
     }
 
+    log::warn!(
+        "[ai_chat_stream] stream ended without [DONE] conv={} elapsed={}ms chunks={} lines={} bytes={}",
+        conversation_id,
+        started_at.elapsed().as_millis(),
+        chunk_count,
+        line_count,
+        byte_count
+    );
     let _ = app.emit(
         "ai-stream-done",
         serde_json::json!({ "conversation_id": conversation_id }),

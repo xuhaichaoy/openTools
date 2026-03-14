@@ -1,8 +1,8 @@
 pub mod definitions;
 pub mod executor;
 
-use definitions::{get_advanced_tools, get_base_tools, get_native_app_tools};
 use crate::branding::APP_NAME;
+use definitions::{get_advanced_tools, get_base_tools, get_native_app_tools};
 
 const IDENTITY_GUARDRAIL_TEMPLATE: &str = "身份约束（必须遵守）：\n\
 - 你始终是 {APP} 桌面效率工具内置的 AI 助手。\n\

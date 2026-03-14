@@ -127,8 +127,15 @@ export class TodoListMiddleware implements ActorMiddleware {
         `- [${t.status === "in_progress" ? "进行中" : "待办"}] ${t.title}${t.notes ? ` (${t.notes})` : ""}`,
       ).join("\n");
       ctx.contextMessages = [
-        { role: "user" as const, content: `[系统注入] 当前待办事项：\n${todoSummary}` },
-        { role: "assistant" as const, content: "好的，我会关注这些待办事项的进展。" },
+        {
+          role: "user" as const,
+          content: [
+            "[系统提醒] 你之前创建的待办列表依然有效，即使原始工具调用已经不在当前上下文里。",
+            "当前活跃待办如下：",
+            todoSummary,
+            "当任何事项状态变化时，请主动调用 todo_update 保持待办列表同步。",
+          ].join("\n"),
+        },
         ...ctx.contextMessages,
       ];
     }
@@ -148,4 +155,14 @@ export function clearAllTodos(): void {
 /** Get todos for external access (e.g., UI display) */
 export function getActorTodoList(actorId: string): readonly TodoItem[] {
   return getActorTodos(actorId);
+}
+
+/** Replace todos for an actor (used by session restore / external sync) */
+export function replaceActorTodoList(actorId: string, items: readonly TodoItem[]): void {
+  actorTodos.set(
+    actorId,
+    items.map((item) => ({
+      ...item,
+    })),
+  );
 }

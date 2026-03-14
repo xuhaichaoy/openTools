@@ -169,9 +169,7 @@ fn create_session(config: &SshConnectionConfig) -> Result<ssh2::Session, String>
                 }
             }
             if !authed {
-                return Err(
-                    "SSH agent authentication failed: no matching identity".to_string(),
-                );
+                return Err("SSH agent authentication failed: no matching identity".to_string());
             }
         }
         _ => return Err(format!("Unknown auth type: {}", config.auth_type)),
@@ -187,7 +185,10 @@ fn create_session(config: &SshConnectionConfig) -> Result<ssh2::Session, String>
     session.set_keepalive(true, SSH_KEEPALIVE_INTERVAL_SECS);
     log_ssh_info(
         &config.id,
-        &format!("keepalive enabled interval={}s", SSH_KEEPALIVE_INTERVAL_SECS),
+        &format!(
+            "keepalive enabled interval={}s",
+            SSH_KEEPALIVE_INTERVAL_SECS
+        ),
     );
 
     Ok(session)
@@ -251,7 +252,10 @@ pub async fn ssh_connect(
         configs.insert(session_id.clone(), config);
     }
     {
-        let mut connected = manager.connected.lock().map_err(|e| format!("Lock: {}", e))?;
+        let mut connected = manager
+            .connected
+            .lock()
+            .map_err(|e| format!("Lock: {}", e))?;
         connected.insert(session_id.clone(), true);
     }
     log_ssh_info(&session_id, "ssh_connect success");
@@ -279,7 +283,10 @@ pub async fn ssh_disconnect(
         }
     }
     {
-        let mut connected = manager.connected.lock().map_err(|e| format!("Lock: {}", e))?;
+        let mut connected = manager
+            .connected
+            .lock()
+            .map_err(|e| format!("Lock: {}", e))?;
         connected.remove(&session_id);
     }
     {
@@ -321,16 +328,17 @@ pub async fn ssh_shell_open(
     };
 
     let session = create_session(&config).map_err(|e| {
-        log_ssh_warn(&session_id, &format!("create session for shell failed: {}", e));
+        log_ssh_warn(
+            &session_id,
+            &format!("create session for shell failed: {}", e),
+        );
         e
     })?;
-    let mut channel = session
-        .channel_session()
-        .map_err(|e| {
-            let msg = format!("Channel open failed: {}", e);
-            log_ssh_warn(&session_id, &msg);
-            msg
-        })?;
+    let mut channel = session.channel_session().map_err(|e| {
+        let msg = format!("Channel open failed: {}", e);
+        log_ssh_warn(&session_id, &msg);
+        msg
+    })?;
     channel
         .request_pty("xterm-256color", None, Some((cols, rows, 0, 0)))
         .map_err(|e| {
@@ -338,13 +346,11 @@ pub async fn ssh_shell_open(
             log_ssh_warn(&session_id, &msg);
             msg
         })?;
-    channel
-        .shell()
-        .map_err(|e| {
-            let msg = format!("Shell request failed: {}", e);
-            log_ssh_warn(&session_id, &msg);
-            msg
-        })?;
+    channel.shell().map_err(|e| {
+        let msg = format!("Shell request failed: {}", e);
+        log_ssh_warn(&session_id, &msg);
+        msg
+    })?;
     log_ssh_info(&session_id, "shell channel opened");
 
     // Non-blocking mode avoids transport read timeout edge-cases in blocking mode.
@@ -383,8 +389,7 @@ pub async fn ssh_shell_open(
         log_ssh_info(&session_id_for_log, "shell thread started");
         let close_reason = 'shell_loop: loop {
             let mut did_work = false;
-            if last_keepalive.elapsed() >= Duration::from_secs(SSH_KEEPALIVE_INTERVAL_SECS as u64)
-            {
+            if last_keepalive.elapsed() >= Duration::from_secs(SSH_KEEPALIVE_INTERVAL_SECS as u64) {
                 // Keepalive failures can be transient on unstable networks.
                 // Do not force-close the shell here; real disconnects are still
                 // detected by read/write/eof.
@@ -450,7 +455,10 @@ pub async fn ssh_shell_open(
                         if write_drain_error_count == 1 || write_drain_error_count % 20 == 0 {
                             log_ssh_warn(
                                 &session_id_for_log,
-                                &format!("channel.write returned 0 count={}", write_drain_error_count),
+                                &format!(
+                                    "channel.write returned 0 count={}",
+                                    write_drain_error_count
+                                ),
                             );
                         }
                     }
@@ -582,7 +590,10 @@ pub async fn ssh_shell_open(
             }
         };
 
-        log_ssh_warn(&session_id_for_log, &format!("shell loop exiting: {}", close_reason));
+        log_ssh_warn(
+            &session_id_for_log,
+            &format!("shell loop exiting: {}", close_reason),
+        );
         if !recent_output.is_empty() {
             let recent = recent_output.replace('\r', "\\r").replace('\n', "\\n");
             log_ssh_info(
@@ -613,13 +624,11 @@ pub async fn ssh_shell_write(
         .shell_writers
         .lock()
         .map_err(|e| format!("Lock: {}", e))?;
-    let tx = writers
-        .get(&session_id)
-        .ok_or_else(|| {
-            let msg = format!("No shell for session {}", session_id);
-            log_ssh_warn(&session_id, &msg);
-            msg
-        })?;
+    let tx = writers.get(&session_id).ok_or_else(|| {
+        let msg = format!("No shell for session {}", session_id);
+        log_ssh_warn(&session_id, &msg);
+        msg
+    })?;
     tx.send(ShellMsg::Data(data.into_bytes())).map_err(|e| {
         let msg = format!("Send error: {}", e);
         log_ssh_warn(&session_id, &msg);
@@ -639,13 +648,11 @@ pub async fn ssh_shell_resize(
         .shell_writers
         .lock()
         .map_err(|e| format!("Lock: {}", e))?;
-    let tx = writers
-        .get(&session_id)
-        .ok_or_else(|| {
-            let msg = format!("No shell for session {}", session_id);
-            log_ssh_warn(&session_id, &msg);
-            msg
-        })?;
+    let tx = writers.get(&session_id).ok_or_else(|| {
+        let msg = format!("No shell for session {}", session_id);
+        log_ssh_warn(&session_id, &msg);
+        msg
+    })?;
     tx.send(ShellMsg::Resize(cols, rows)).map_err(|e| {
         let msg = format!("Send error: {}", e);
         log_ssh_warn(&session_id, &msg);
@@ -667,10 +674,7 @@ fn get_sftp_config(
         .ok_or(format!("Config {} not found", session_id))
 }
 
-fn ensure_sftp_session(
-    manager: &State<'_, SshManager>,
-    session_id: &str,
-) -> Result<(), String> {
+fn ensure_sftp_session(manager: &State<'_, SshManager>, session_id: &str) -> Result<(), String> {
     {
         let sessions = manager
             .sftp_sessions

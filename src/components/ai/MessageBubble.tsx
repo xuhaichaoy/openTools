@@ -5,6 +5,7 @@ import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { useAIStore } from "@/store/ai-store";
+import { stripReasoningTagsFromText } from "@/core/ai/reasoning-tag-stream";
 import { ToolCallDisplay } from "./ToolCallDisplay";
 import { routeToAICenter } from "@/core/ai/ai-center-routing";
 import type { ChatMessage } from "@/core/ai/types";
@@ -330,20 +331,42 @@ export const MessageBubble = memo(function MessageBubble({
   const [editText, setEditText] = useState(msg.content);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
+  const [showThinking, setShowThinking] = useState(false);
   const { editAndResend, isStreaming } = useAIStore();
   const editRef = useRef<HTMLTextAreaElement>(null);
 
   const TRUNCATE_LENGTH = 2000;
-  const shouldTruncate = !isUser && !expanded && msg.content.length > TRUNCATE_LENGTH && !msg.streaming;
-  const displayContent = shouldTruncate 
-    ? msg.content.slice(0, TRUNCATE_LENGTH) + "\n\n..."
-    : msg.content;
+  const sanitizedAssistantContent = useMemo(
+    () =>
+      isUser
+        ? msg.content
+        : stripReasoningTagsFromText(msg.content, {
+            mode: "strict",
+            trim: "none",
+          }),
+    [isUser, msg.content],
+  );
+  const shouldTruncate =
+    !isUser &&
+    !expanded &&
+    sanitizedAssistantContent.length > TRUNCATE_LENGTH &&
+    !msg.streaming;
+  const displayContent = shouldTruncate
+    ? sanitizedAssistantContent.slice(0, TRUNCATE_LENGTH) + "\n\n..."
+    : sanitizedAssistantContent;
 
   // 简单文本检测：不含 Markdown 语法且不在流式中时跳过 ReactMarkdown
   const isPlainText = useMemo(() => {
     if (msg.streaming) return false;
-    return !MARKDOWN_PATTERN.test(msg.content);
-  }, [msg.content, msg.streaming]);
+    return !MARKDOWN_PATTERN.test(displayContent);
+  }, [displayContent, msg.streaming]);
+  const hasThinking = Boolean(msg.thinkingContent?.trim());
+
+  useEffect(() => {
+    if (msg.thinkingStreaming && msg.thinkingContent?.trim()) {
+      setShowThinking(true);
+    }
+  }, [msg.thinkingContent, msg.thinkingStreaming]);
 
   const mdComponents = useMemo(() => ({
     code: MdCode,
@@ -400,6 +423,30 @@ export const MessageBubble = memo(function MessageBubble({
             <div>
               {msg.toolCalls && msg.toolCalls.length > 0 && (
                 <ToolCallDisplay toolCalls={msg.toolCalls} />
+              )}
+              {hasThinking && (
+                <div className="mb-2 rounded-2xl border border-indigo-500/15 bg-indigo-500/5 overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setShowThinking((v) => !v)}
+                    className="w-full flex items-center justify-between px-3 py-2 text-left text-xs text-[var(--color-text-secondary)] hover:bg-indigo-500/5 transition-colors"
+                  >
+                    <span>{msg.thinkingStreaming ? "思考中" : "思考过程"}</span>
+                    {showThinking ? (
+                      <ChevronUp className="w-3.5 h-3.5 shrink-0" />
+                    ) : (
+                      <ChevronDown className="w-3.5 h-3.5 shrink-0" />
+                    )}
+                  </button>
+                  {showThinking && (
+                    <div className="px-3 pb-3 text-[12px] leading-6 whitespace-pre-wrap text-[var(--color-text-secondary)] border-t border-indigo-500/10">
+                      {msg.thinkingContent}
+                      {msg.thinkingStreaming && (
+                        <span className="inline-block w-1.5 h-3 bg-indigo-400 animate-pulse ml-1 align-middle" />
+                      )}
+                    </div>
+                  )}
+                </div>
               )}
               <div
                 className={`prose prose-invert prose-base max-w-none [&_p]:leading-7 [&_p]:my-2 [&_li]:my-1 first:[&_p]:mt-0 last:[&_p]:mb-0 ${msg.streaming ? "min-h-[1.5rem]" : ""}`}

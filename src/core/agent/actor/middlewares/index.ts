@@ -5,13 +5,19 @@ export { PromptBuildMiddleware } from "./prompt-build-middleware";
 export { ToolPolicyMiddleware } from "./tool-policy-middleware";
 export { FCCompatibilityMiddleware } from "./fc-compatibility-middleware";
 export { SpawnLimitMiddleware } from "./spawn-limit-middleware";
-export { HumanApprovalMiddleware, clearSessionApprovals, preApproveToolForSession } from "./human-approval-middleware";
+export {
+  HumanApprovalMiddleware,
+  clearSessionApprovals,
+  getSessionApprovalsSnapshot,
+  preApproveToolForSession,
+  restoreSessionApprovals,
+} from "./human-approval-middleware";
 export type { ApprovalPolicy, ApprovalRule } from "./human-approval-middleware";
 export { ModelRetryMiddleware, withRetry, isRetryableError, extractRetryAfter } from "./model-retry-middleware";
 export type { RetryConfig } from "./model-retry-middleware";
 export { KnowledgeBaseMiddleware, registerKnowledgeBase, unregisterKnowledgeBase, getRegisteredKnowledgeBases } from "./knowledge-base-middleware";
 export type { KnowledgeBaseRef } from "./knowledge-base-middleware";
-export { TodoListMiddleware, clearActorTodos, clearAllTodos, getActorTodoList } from "./todo-list-middleware";
+export { TodoListMiddleware, clearActorTodos, clearAllTodos, getActorTodoList, replaceActorTodoList } from "./todo-list-middleware";
 export type { TodoItem } from "./todo-list-middleware";
 export { PatchToolCallsMiddleware } from "./patch-tool-calls-middleware";
 export { SummarizationMiddleware } from "./summarization-middleware";
@@ -22,6 +28,7 @@ export type { ToolCallRecord, AgentSessionStats } from "./telemetry-middleware";
 export { TitleMiddleware, onSessionTitleUpdate, resetTitleGeneration } from "./title-middleware";
 export type { TitleUpdateCallback } from "./title-middleware";
 export { ClarificationMiddleware, ClarificationInterrupt } from "./clarification-middleware";
+export { SessionUploadsMiddleware } from "./session-uploads-middleware";
 
 import type { ActorMiddleware } from "../actor-middleware";
 import { ToolResolverMiddleware } from "./tool-resolver";
@@ -41,6 +48,7 @@ import { SuggestionsMiddleware } from "./suggestions-middleware";
 import { TelemetryMiddleware } from "./telemetry-middleware";
 import { TitleMiddleware } from "./title-middleware";
 import { ClarificationMiddleware } from "./clarification-middleware";
+import { SessionUploadsMiddleware } from "./session-uploads-middleware";
 
 /**
  * Default middleware chain order (evolved from deer-flow + Yuxi-Know + cocoindex conventions):
@@ -58,7 +66,7 @@ import { ClarificationMiddleware } from "./clarification-middleware";
  * Default middleware chain order:
  *
  *   Title → ToolResolver → FCCompatibility → PatchToolCalls → Memory → KnowledgeBase
- *   → Skill → TodoList → Clarification → Suggestions → ToolPolicy → HumanApproval
+ *   → SessionUploads → Skill → TodoList → Clarification → Suggestions → ToolPolicy → HumanApproval
  *   → Telemetry → ModelRetry → SpawnLimit → Summarization → PromptBuild
  *
  * New additions:
@@ -73,6 +81,7 @@ export function createDefaultMiddlewares(): ActorMiddleware[] {
     new PatchToolCallsMiddleware(),
     new MemoryMiddleware(),
     new KnowledgeBaseMiddleware(),
+    new SessionUploadsMiddleware(),
     new SkillMiddleware(),
     new TodoListMiddleware(),
     new ClarificationMiddleware(),

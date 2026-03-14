@@ -16,7 +16,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useAIStore } from "@/store/ai-store";
 import type { AIConfig } from "@/core/ai/types";
-import { getRoutedConfig } from "@/core/ai/router";
+import { AssistantReasoningStreamNormalizer } from "@/core/ai/reasoning-tag-stream";
+import { resolveModelCapabilities } from "@/core/ai/model-capabilities";
+import { resolveRoutedConfig } from "@/core/ai/router";
+import { createLogger } from "@/core/logger";
 import {
   appendMemoryCandidates,
   buildMemoryPromptBlock,
@@ -24,8 +27,25 @@ import {
   recallMemories,
 } from "@/core/ai/memory-store";
 
+const aiLog = createLogger("MToolsAI");
+const STREAM_STALL_TIMEOUT_MS = 120_000;
+const STREAM_FIRST_CHUNK_TIMEOUT_MS = 300_000; // Increased for image models
+const STREAM_HARD_TIMEOUT_MS = 600_000;
+
 const generateId = () =>
   Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
+
+function traceStreamEvent(
+  conversationId: string,
+  phase: string,
+  payload?: unknown,
+): void {
+  if (payload === undefined) {
+    console.log(`[AI TRACE][${conversationId}][${phase}]`);
+    return;
+  }
+  console.log(`[AI TRACE][${conversationId}][${phase}]`, payload);
+}
 
 /** 获取当前 AI 配置 */
 function getConfig(): AIConfig {
@@ -85,6 +105,177 @@ function attachAbortBridge(signal: AbortSignal | undefined, conversationId: stri
 interface SimpleAIMessage {
   role: string;
   content?: string;
+}
+
+const IMAGE_FALLBACK_TEXT =
+  "[用户发送了图片，但当前模型或协议不支持图片识别，请提醒用户切换到支持视觉输入的模型或接口]";
+
+function inferImageMimeType(pathOrDataUrl: string): string {
+  if (pathOrDataUrl.startsWith("data:")) {
+    const match = pathOrDataUrl.match(/^data:([^;,]+)[;,]/i);
+    if (match?.[1]) return match[1];
+  }
+
+  const normalized = pathOrDataUrl.toLowerCase();
+  if (normalized.endsWith(".jpg") || normalized.endsWith(".jpeg")) return "image/jpeg";
+  if (normalized.endsWith(".gif")) return "image/gif";
+  if (normalized.endsWith(".webp")) return "image/webp";
+  if (normalized.endsWith(".bmp")) return "image/bmp";
+  return "image/png";
+}
+
+function isRemoteImageUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value);
+}
+
+function appendImageFallbackText(content?: string): string {
+  const prefix = content?.trim() ?? "";
+  return prefix ? `${prefix}\n\n${IMAGE_FALLBACK_TEXT}` : IMAGE_FALLBACK_TEXT;
+}
+
+function parseDataUrl(value: string): { mime: string; base64: string } | null {
+  const match = value.match(/^data:([^;,]+);base64,(.+)$/i);
+  if (!match?.[1] || !match?.[2]) return null;
+  return { mime: match[1], base64: match[2] };
+}
+
+async function readImagePayload(
+  imageRef: string,
+): Promise<{ dataUrl: string; mime: string; base64: string } | null> {
+  if (!imageRef) return null;
+
+  const dataUrlPayload = parseDataUrl(imageRef);
+  if (dataUrlPayload) {
+    return {
+      dataUrl: imageRef,
+      mime: dataUrlPayload.mime,
+      base64: dataUrlPayload.base64,
+    };
+  }
+
+  if (isRemoteImageUrl(imageRef)) {
+    return {
+      dataUrl: imageRef,
+      mime: inferImageMimeType(imageRef),
+      base64: "",
+    };
+  }
+
+  const base64 = await invoke<string>("read_file_base64", { filePath: imageRef });
+  const mime = inferImageMimeType(imageRef);
+  return {
+    dataUrl: `data:${mime};base64,${base64}`,
+    mime,
+    base64,
+  };
+}
+
+async function buildDirectOpenAIMessage(
+  message: { role: string; content: string; images?: string[] },
+  supportsImageInput: boolean,
+): Promise<Record<string, unknown>> {
+  if (message.role !== "user" || !message.images?.length) {
+    return {
+      role: message.role,
+      content: message.content,
+    };
+  }
+
+  if (!supportsImageInput) {
+    return {
+      role: message.role,
+      content: appendImageFallbackText(message.content),
+    };
+  }
+
+  const parts: Array<Record<string, unknown>> = [];
+  if (message.content.trim()) {
+    parts.push({ type: "text", text: message.content });
+  }
+
+  for (const imageRef of message.images) {
+    const payload = await readImagePayload(imageRef).catch((error) => {
+      aiLog.warn("[chatDirect] failed to read image for openai payload", {
+        imageRef,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    });
+    if (!payload) continue;
+
+    parts.push({
+      type: "image_url",
+      image_url: {
+        url: payload.dataUrl,
+        detail: "auto",
+      },
+    });
+  }
+
+  return {
+    role: message.role,
+    content: parts.length > 0 ? parts : appendImageFallbackText(message.content),
+  };
+}
+
+async function buildDirectAnthropicMessage(
+  message: { role: string; content: string; images?: string[] },
+  supportsImageInput: boolean,
+): Promise<Record<string, unknown>> {
+  const normalizedRole = message.role === "assistant" ? "assistant" : "user";
+
+  if (message.role !== "user" || !message.images?.length) {
+    return {
+      role: normalizedRole,
+      content: message.content.trim()
+        ? [{ type: "text", text: message.content }]
+        : "",
+    };
+  }
+
+  if (!supportsImageInput) {
+    return {
+      role: normalizedRole,
+      content: [{ type: "text", text: appendImageFallbackText(message.content) }],
+    };
+  }
+
+  const parts: Array<Record<string, unknown>> = [];
+  if (message.content.trim()) {
+    parts.push({ type: "text", text: message.content });
+  }
+
+  for (const imageRef of message.images) {
+    const payload = await readImagePayload(imageRef).catch((error) => {
+      aiLog.warn("[chatDirect] failed to read image for anthropic payload", {
+        imageRef,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    });
+    if (!payload) continue;
+
+    if (isRemoteImageUrl(payload.dataUrl) || !payload.base64) {
+      aiLog.warn("[chatDirect] skip remote image for anthropic direct request", { imageRef });
+      continue;
+    }
+
+    parts.push({
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: payload.mime,
+        data: payload.base64,
+      },
+    });
+  }
+
+  return {
+    role: normalizedRole,
+    content: parts.length > 0
+      ? parts
+      : [{ type: "text", text: appendImageFallbackText(message.content) }],
+  };
 }
 
 const MEMORY_INJECT_TIMEOUT_MS = 500;
@@ -153,62 +344,114 @@ export function createMToolsAI(): MToolsAI {
         baseConfig,
         options.requestPolicy,
       );
-      const routed = getRoutedConfig(effectiveConfig);
 
       return new Promise((resolve, reject) => {
         let content = "";
         const abortBridge = attachAbortBridge(options.signal, conversationId);
         let cleaned = false;
+        let settled = false;
+        let stallTimer: ReturnType<typeof setTimeout> | null = null;
+        let hardTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+        let lastActivityAt = Date.now();
+        const startedAt = Date.now();
+        
         const unlisteners: Array<() => void> = [];
         const cleanup = () => {
           if (cleaned) return;
           cleaned = true;
+          if (stallTimer) clearTimeout(stallTimer);
+          if (hardTimeoutTimer) clearTimeout(hardTimeoutTimer);
           for (const fn of unlisteners) fn();
           abortBridge.detach();
         };
 
+        const safeResolve = (value: { content: string }) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve(value);
+        };
+
+        const safeReject = (error: Error) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(error);
+        };
+
+        const kickWatchdog = (phase: string) => {
+          lastActivityAt = Date.now();
+          if (stallTimer) clearTimeout(stallTimer);
+          const timeoutMs = content.length === 0 ? STREAM_FIRST_CHUNK_TIMEOUT_MS : STREAM_STALL_TIMEOUT_MS;
+          stallTimer = setTimeout(() => {
+            const idleMs = Date.now() - lastActivityAt;
+            aiLog.error("[chat] stall timeout", { conversationId, phase, idleMs });
+            void invoke("ai_stop_stream", { conversationId }).catch(() => undefined);
+            safeReject(new Error(`ai_chat_stream 卡住（phase=${phase}, idle=${idleMs}ms）`));
+          }, timeoutMs);
+        };
+
+        hardTimeoutTimer = setTimeout(() => {
+          aiLog.error("[chat] hard timeout", { conversationId, elapsedMs: Date.now() - startedAt });
+          void invoke("ai_stop_stream", { conversationId }).catch(() => undefined);
+          safeReject(new Error(`ai_chat_stream 总耗时超时超时`));
+        }, STREAM_HARD_TIMEOUT_MS);
+
+        kickWatchdog("init");
+
         void (async () => {
-          const [u1, u2, u3] = await Promise.all([
+          const [u1, u2, u3, u4] = await Promise.all([
             listen<{ conversation_id: string; content: string }>(
               "ai-stream-chunk",
               (event) => {
                 if (event.payload.conversation_id === conversationId) {
+                  kickWatchdog("chunk");
                   content += event.payload.content;
+                  traceStreamEvent(conversationId, "chunk", event.payload.content);
                 }
               },
             ),
             listen<{ conversation_id: string }>(
               "ai-stream-done",
               (event) => {
-                if (event.payload.conversation_id === conversationId) {
-                  cleanup();
+                if (event.payload.conversation_id === conversationId && !settled) {
+                  kickWatchdog("done");
                   if (abortBridge.isAborted()) {
-                    reject(new Error("Aborted"));
+                    safeReject(new Error("Aborted"));
                     return;
                   }
-                  resolve({ content });
+                  traceStreamEvent(conversationId, "done", content);
+                  safeResolve({ content });
                 }
               },
             ),
             listen<{ conversation_id: string; error: string }>(
               "ai-stream-error",
               (event) => {
-                if (event.payload.conversation_id === conversationId) {
-                  cleanup();
+                if (event.payload.conversation_id === conversationId && !settled) {
+                  kickWatchdog("error");
                   if (abortBridge.isAborted()) {
-                    reject(new Error("Aborted"));
+                    safeReject(new Error("Aborted"));
                     return;
                   }
-                  reject(new Error(event.payload.error));
+                  traceStreamEvent(conversationId, "error", event.payload.error);
+                  safeReject(new Error(event.payload.error));
+                }
+              },
+            ),
+            listen<{ conversation_id: string; raw_line: string }>(
+              "ai-stream-raw",
+              (event) => {
+                if (event.payload.conversation_id === conversationId) {
+                  traceStreamEvent(conversationId, "raw", event.payload.raw_line);
                 }
               },
             ),
           ]);
-          unlisteners.push(u1, u2, u3);
+          unlisteners.push(u1, u2, u3, u4);
 
           if (abortBridge.isAborted()) {
-            cleanup();
-            reject(new Error("Aborted"));
+            safeReject(new Error("Aborted"));
             return;
           }
 
@@ -221,7 +464,10 @@ export function createMToolsAI(): MToolsAI {
             effectiveConfig,
             conversationId,
           );
+          const routed = await resolveRoutedConfig(effectiveConfig);
 
+          kickWatchdog("invoke_start");
+          aiLog.info("[chat] invoke ai_chat_stream", { conversationId });
           await invoke("ai_chat_stream", {
             messages: enrichedMessages,
             config: routed,
@@ -229,12 +475,11 @@ export function createMToolsAI(): MToolsAI {
             skipTools: !!options.skipTools,
           });
         })().catch((e) => {
-          cleanup();
           if (abortBridge.isAborted()) {
-            reject(new Error("Aborted"));
+            safeReject(new Error("Aborted"));
             return;
           }
-          reject(e);
+          safeReject(e);
         });
       });
     },
@@ -246,64 +491,142 @@ export function createMToolsAI(): MToolsAI {
       const config = getConfig();
       const conversationId = `sdk-${generateId()}`;
       const effectiveConfig = applyRequestPolicy(config, options.requestPolicy);
-      const routed = getRoutedConfig(effectiveConfig);
       let fullContent = "";
+      const reasoningStream = new AssistantReasoningStreamNormalizer();
 
       return new Promise((resolve, reject) => {
         const abortBridge = attachAbortBridge(options.signal, conversationId);
         let cleaned = false;
+        let settled = false;
+        let stallTimer: ReturnType<typeof setTimeout> | null = null;
+        let hardTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+        let lastActivityAt = Date.now();
+        const startedAt = Date.now();
+        
         const unlisteners: Array<() => void> = [];
         const cleanup = () => {
           if (cleaned) return;
           cleaned = true;
+          if (stallTimer) clearTimeout(stallTimer);
+          if (hardTimeoutTimer) clearTimeout(hardTimeoutTimer);
           for (const fn of unlisteners) fn();
           abortBridge.detach();
         };
 
+        const safeResolve = () => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve();
+        };
+
+        const safeReject = (error: Error) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(error);
+        };
+
+        const kickWatchdog = (phase: string) => {
+          lastActivityAt = Date.now();
+          if (stallTimer) clearTimeout(stallTimer);
+          const timeoutMs = fullContent.length === 0 ? STREAM_FIRST_CHUNK_TIMEOUT_MS : STREAM_STALL_TIMEOUT_MS;
+          stallTimer = setTimeout(() => {
+            const idleMs = Date.now() - lastActivityAt;
+            aiLog.error("[stream] stall timeout", { conversationId, phase, idleMs });
+            void invoke("ai_stop_stream", { conversationId }).catch(() => undefined);
+            safeReject(new Error(`ai_chat_stream 卡住（phase=${phase}, idle=${idleMs}ms）`));
+          }, timeoutMs);
+        };
+
+        hardTimeoutTimer = setTimeout(() => {
+          aiLog.error("[stream] hard timeout", { conversationId, elapsedMs: Date.now() - startedAt });
+          void invoke("ai_stop_stream", { conversationId }).catch(() => undefined);
+          safeReject(new Error(`ai_chat_stream 总耗时超时`));
+        }, STREAM_HARD_TIMEOUT_MS);
+
+        kickWatchdog("init");
+
         void (async () => {
-          const [u1, u2, u3] = await Promise.all([
+          const [u1, u2, u3, u4] = await Promise.all([
             listen<{ conversation_id: string; content: string }>(
               "ai-stream-chunk",
               (event) => {
                 if (event.payload.conversation_id === conversationId) {
-                  fullContent += event.payload.content;
-                  options.onChunk(event.payload.content);
+                  kickWatchdog("chunk");
+                  const parsed = reasoningStream.processTextChunk(
+                    event.payload.content,
+                  );
+                  if (parsed.visible) {
+                    fullContent += parsed.visible;
+                    traceStreamEvent(conversationId, "chunk", parsed.visible);
+                    options.onChunk(parsed.visible);
+                  }
+                  if (parsed.thinking) {
+                    traceStreamEvent(
+                      conversationId,
+                      "thinking_inline",
+                      parsed.thinking,
+                    );
+                  }
                 }
               },
             ),
             listen<{ conversation_id: string }>(
               "ai-stream-done",
               (event) => {
-                if (event.payload.conversation_id === conversationId) {
-                  cleanup();
+                if (event.payload.conversation_id === conversationId && !settled) {
+                  kickWatchdog("done");
                   if (abortBridge.isAborted()) {
-                    reject(new Error("Aborted"));
+                    safeReject(new Error("Aborted"));
                     return;
                   }
+                  const remaining = reasoningStream.flush();
+                  if (remaining.visible) {
+                    fullContent += remaining.visible;
+                    traceStreamEvent(conversationId, "chunk", remaining.visible);
+                    options.onChunk(remaining.visible);
+                  }
+                  if (remaining.thinking) {
+                    traceStreamEvent(
+                      conversationId,
+                      "thinking_inline",
+                      remaining.thinking,
+                    );
+                  }
+                  traceStreamEvent(conversationId, "done", fullContent);
                   options.onDone?.(fullContent);
-                  resolve();
+                  safeResolve();
                 }
               },
             ),
             listen<{ conversation_id: string; error: string }>(
               "ai-stream-error",
               (event) => {
-                if (event.payload.conversation_id === conversationId) {
-                  cleanup();
+                if (event.payload.conversation_id === conversationId && !settled) {
+                  kickWatchdog("error");
                   if (abortBridge.isAborted()) {
-                    reject(new Error("Aborted"));
+                    safeReject(new Error("Aborted"));
                     return;
                   }
-                  reject(new Error(event.payload.error));
+                  traceStreamEvent(conversationId, "error", event.payload.error);
+                  safeReject(new Error(event.payload.error));
+                }
+              },
+            ),
+            listen<{ conversation_id: string; raw_line: string }>(
+              "ai-stream-raw",
+              (event) => {
+                if (event.payload.conversation_id === conversationId) {
+                  traceStreamEvent(conversationId, "raw", event.payload.raw_line);
                 }
               },
             ),
           ]);
-          unlisteners.push(u1, u2, u3);
+          unlisteners.push(u1, u2, u3, u4);
 
           if (abortBridge.isAborted()) {
-            cleanup();
-            reject(new Error("Aborted"));
+            safeReject(new Error("Aborted"));
             return;
           }
 
@@ -316,19 +639,21 @@ export function createMToolsAI(): MToolsAI {
             effectiveConfig,
             conversationId,
           );
+          const routed = await resolveRoutedConfig(effectiveConfig);
 
+          kickWatchdog("invoke_start");
+          aiLog.info("[stream] invoke ai_chat_stream", { conversationId });
           await invoke("ai_chat_stream", {
             messages: enrichedMessages,
             config: routed,
             conversationId,
           });
         })().catch((e) => {
-          cleanup();
           if (abortBridge.isAborted()) {
-            reject(new Error("Aborted"));
+            safeReject(new Error("Aborted"));
             return;
           }
-          reject(e);
+          safeReject(e);
         });
       });
     },
@@ -374,34 +699,134 @@ export function createMToolsAI(): MToolsAI {
      * 后端传递 tools 给 API，收到 tool_calls 时通知前端，不自动执行。
      */
     async streamWithTools(options) {
-      const config = getConfig();
-      if (options.modelOverride) {
-        config.model = options.modelOverride;
-      }
+      const config: AIConfig = {
+        ...getConfig(),
+        ...(options.modelOverride ? { model: options.modelOverride } : {}),
+      };
       const conversationId = `agent-${generateId()}`;
-      const routed = getRoutedConfig(config);
       let fullContent = "";
+      const reasoningStream = new AssistantReasoningStreamNormalizer();
       let resolvedToolCalls: AIToolCall[] | null = null;
 
       return new Promise((resolve, reject) => {
+        const startedAt = Date.now();
         const abortBridge = attachAbortBridge(options.signal, conversationId);
         let cleaned = false;
+        let settled = false;
+        let stallTimer: ReturnType<typeof setTimeout> | null = null;
+        let hardTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+        let lastActivityAt = startedAt;
+        let firstChunkAt: number | null = null;
+        let chunkCount = 0;
+        let chunkChars = 0;
         const unlisteners: Array<() => void> = [];
         const cleanup = () => {
           if (cleaned) return;
           cleaned = true;
+          if (stallTimer) clearTimeout(stallTimer);
+          if (hardTimeoutTimer) clearTimeout(hardTimeoutTimer);
           for (const fn of unlisteners) fn();
           abortBridge.detach();
+          aiLog.info("[streamWithTools] cleanup", {
+            conversationId,
+            elapsedMs: Date.now() - startedAt,
+            chunkCount,
+            chunkChars,
+            hasToolCalls: !!resolvedToolCalls?.length,
+          });
         };
 
+        const safeResolve = (value: { type: "tool_calls"; toolCalls: AIToolCall[] } | { type: "content"; content: string }) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve(value);
+        };
+
+        const safeReject = (error: Error) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(error);
+        };
+
+        const kickWatchdog = (phase: string) => {
+          lastActivityAt = Date.now();
+          if (stallTimer) clearTimeout(stallTimer);
+          const timeoutMs = chunkCount === 0
+            ? STREAM_FIRST_CHUNK_TIMEOUT_MS
+            : STREAM_STALL_TIMEOUT_MS;
+          stallTimer = setTimeout(() => {
+            const idleMs = Date.now() - lastActivityAt;
+            const timeoutSec = Math.floor(timeoutMs / 1000);
+            const message = `ai_agent_stream 卡住超过 ${timeoutSec} 秒（phase=${phase}, idle=${idleMs}ms）`;
+            aiLog.error("[streamWithTools] stall timeout", {
+              conversationId,
+              phase,
+              idleMs,
+              chunkCount,
+              chunkChars,
+            });
+            void invoke("ai_stop_stream", { conversationId }).catch(() => undefined);
+            safeReject(new Error(message));
+          }, timeoutMs);
+        };
+
+        hardTimeoutTimer = setTimeout(() => {
+          const elapsedMs = Date.now() - startedAt;
+          const message = `ai_agent_stream 总耗时超过 ${Math.floor(STREAM_HARD_TIMEOUT_MS / 1000)} 秒，已自动终止`;
+          aiLog.error("[streamWithTools] hard timeout", {
+            conversationId,
+            elapsedMs,
+            chunkCount,
+            chunkChars,
+          });
+          void invoke("ai_stop_stream", { conversationId }).catch(() => undefined);
+          safeReject(new Error(message));
+        }, STREAM_HARD_TIMEOUT_MS);
+
+        kickWatchdog("init");
+
         void (async () => {
-          const [u1, u2, u3, u4] = await Promise.all([
+          const listeners = await Promise.all([
+            listen<{ conversation_id: string; raw_line: string }>(
+              "ai-stream-raw",
+              (event) => {
+                if (event.payload.conversation_id === conversationId) {
+                  traceStreamEvent(conversationId, "raw", event.payload.raw_line);
+                }
+              },
+            ),
             listen<{ conversation_id: string; content: string }>(
               "ai-stream-chunk",
               (event) => {
                 if (event.payload.conversation_id === conversationId) {
-                  fullContent += event.payload.content;
-                  options.onChunk(event.payload.content);
+                  kickWatchdog("chunk");
+                  if (!firstChunkAt) {
+                    firstChunkAt = Date.now();
+                    aiLog.info("[streamWithTools] first chunk", {
+                      conversationId,
+                      latencyMs: firstChunkAt - startedAt,
+                    });
+                  }
+                  chunkCount += 1;
+                  chunkChars += event.payload.content.length;
+                  const parsed = reasoningStream.processTextChunk(
+                    event.payload.content,
+                  );
+                  if (parsed.visible) {
+                    fullContent += parsed.visible;
+                    traceStreamEvent(conversationId, "chunk", parsed.visible);
+                    options.onChunk(parsed.visible);
+                  }
+                  if (parsed.thinking) {
+                    traceStreamEvent(
+                      conversationId,
+                      "thinking_inline",
+                      parsed.thinking,
+                    );
+                    options.onThinking?.(parsed.thinking);
+                  }
                 }
               },
             ),
@@ -410,46 +835,135 @@ export function createMToolsAI(): MToolsAI {
               (event) => {
                 if (event.payload.conversation_id === conversationId) {
                   resolvedToolCalls = event.payload.tool_calls;
+                  kickWatchdog("tool_calls");
+                  traceStreamEvent(conversationId, "tool_calls", event.payload.tool_calls);
+                  aiLog.info("[streamWithTools] tool calls received", {
+                    conversationId,
+                    count: resolvedToolCalls.length,
+                  });
                 }
               },
             ),
             listen<{ conversation_id: string }>(
               "ai-stream-done",
               (event) => {
-                if (event.payload.conversation_id === conversationId) {
-                  cleanup();
-                  if (abortBridge.isAborted()) {
-                    reject(new Error("Aborted"));
+                if (event.payload.conversation_id !== conversationId || settled) {
+                  return;
+                }
+                kickWatchdog("done");
+                traceStreamEvent(
+                  conversationId,
+                  "done",
+                  resolvedToolCalls && resolvedToolCalls.length > 0
+                    ? { toolCalls: resolvedToolCalls }
+                    : fullContent,
+                );
+                aiLog.info("[streamWithTools] done event", {
+                  conversationId,
+                  elapsedMs: Date.now() - startedAt,
+                  chunkCount,
+                  chunkChars,
+                  hasToolCalls: !!resolvedToolCalls?.length,
+                });
+                if (abortBridge.isAborted()) {
+                  safeReject(new Error("Aborted"));
+                  return;
+                }
+                const remaining = reasoningStream.flush();
+                if (remaining.visible) {
+                  fullContent += remaining.visible;
+                  traceStreamEvent(conversationId, "chunk", remaining.visible);
+                  options.onChunk(remaining.visible);
+                }
+                if (remaining.thinking) {
+                  traceStreamEvent(
+                    conversationId,
+                    "thinking_inline",
+                    remaining.thinking,
+                  );
+                  options.onThinking?.(remaining.thinking);
+                }
+                if (resolvedToolCalls && resolvedToolCalls.length > 0) {
+                  safeResolve({ type: "tool_calls", toolCalls: resolvedToolCalls });
+                } else {
+                  if (!fullContent.trim()) {
+                    const emptyErr = new Error("FC_INCOMPATIBLE: ai_agent_stream 返回空响应（无 chunk 且无 tool_calls）");
+                    aiLog.error("[streamWithTools] empty stream result", {
+                      conversationId,
+                      elapsedMs: Date.now() - startedAt,
+                      chunkCount,
+                      chunkChars,
+                    });
+                    safeReject(emptyErr);
                     return;
                   }
-                  if (resolvedToolCalls && resolvedToolCalls.length > 0) {
-                    resolve({ type: "tool_calls", toolCalls: resolvedToolCalls });
-                  } else {
-                    options.onDone?.(fullContent);
-                    resolve({ type: "content", content: fullContent });
-                  }
+                  options.onDone?.(fullContent);
+                  safeResolve({ type: "content", content: fullContent });
                 }
               },
             ),
             listen<{ conversation_id: string; error: string }>(
               "ai-stream-error",
               (event) => {
+                if (event.payload.conversation_id !== conversationId || settled) {
+                  return;
+                }
+                kickWatchdog("error");
+                traceStreamEvent(conversationId, "error", event.payload.error);
+                aiLog.error("[streamWithTools] error event", {
+                  conversationId,
+                  elapsedMs: Date.now() - startedAt,
+                  chunkCount,
+                  chunkChars,
+                  error: event.payload.error,
+                });
+                if (abortBridge.isAborted()) {
+                  safeReject(new Error("Aborted"));
+                  return;
+                }
+                const remaining = reasoningStream.flush();
+                if (remaining.thinking) {
+                  traceStreamEvent(
+                    conversationId,
+                    "thinking_inline",
+                    remaining.thinking,
+                  );
+                  options.onThinking?.(remaining.thinking);
+                }
+                safeReject(new Error(event.payload.error));
+              },
+            ),
+            listen<{ conversation_id: string; content: string }>(
+              "ai-stream-thinking",
+              (event) => {
                 if (event.payload.conversation_id === conversationId) {
-                  cleanup();
-                  if (abortBridge.isAborted()) {
-                    reject(new Error("Aborted"));
-                    return;
+                  kickWatchdog("thinking");
+                  const parsed = reasoningStream.processThinkingChunk(
+                    event.payload.content ?? "",
+                  );
+                  traceStreamEvent(conversationId, "thinking", parsed.thinking);
+                  if (parsed.thinking) {
+                    options.onThinking?.(parsed.thinking);
                   }
-                  reject(new Error(event.payload.error));
+                }
+              },
+            ),
+            listen<{ conversation_id: string; content: string }>(
+              "ai-stream-tool-args",
+              (event) => {
+                if (event.payload.conversation_id === conversationId) {
+                  kickWatchdog("tool-args");
+                  traceStreamEvent(conversationId, "tool_args", event.payload.content ?? "");
+                  options.onToolArgs?.(event.payload.content ?? "");
                 }
               },
             ),
           ]);
-          unlisteners.push(u1, u2, u3, u4);
+          unlisteners.push(...listeners);
+          aiLog.info("[streamWithTools] listeners ready", { conversationId });
 
           if (abortBridge.isAborted()) {
-            cleanup();
-            reject(new Error("Aborted"));
+            safeReject(new Error("Aborted"));
             return;
           }
 
@@ -462,19 +976,46 @@ export function createMToolsAI(): MToolsAI {
             ...(m.name ? { name: m.name } : {}),
           }));
 
+          kickWatchdog("invoke_start");
+          const routed = await resolveRoutedConfig(config);
+          aiLog.info("[streamWithTools] start", {
+            conversationId,
+            model: routed.model,
+            protocol: routed.protocol ?? "openai",
+            source: routed.source,
+            baseUrl: routed.base_url,
+            teamId: routed.team_id,
+            teamConfigId: routed.team_config_id,
+            tools: options.tools?.length ?? 0,
+            messages: options.messages.length,
+          });
+          aiLog.info("[streamWithTools] invoke ai_agent_stream", {
+            conversationId,
+            messages: finalMessages.length,
+            tools: options.tools?.length ?? 0,
+          });
           await invoke("ai_agent_stream", {
             messages: finalMessages,
             config: routed,
             tools: options.tools,
             conversationId,
           });
+          aiLog.info("[streamWithTools] invoke resolved", {
+            conversationId,
+            elapsedMs: Date.now() - startedAt,
+          });
         })().catch((e) => {
-          cleanup();
+          const errMsg = e instanceof Error ? e.message : String(e);
+          aiLog.error("[streamWithTools] invoke failed", {
+            conversationId,
+            elapsedMs: Date.now() - startedAt,
+            error: errMsg,
+          });
           if (abortBridge.isAborted()) {
-            reject(new Error("Aborted"));
+            safeReject(new Error("Aborted"));
             return;
           }
-          reject(e);
+          safeReject(e instanceof Error ? e : new Error(errMsg));
         });
       });
     },
@@ -502,19 +1043,46 @@ export async function chatDirect(options: {
   signal?: AbortSignal;
 }): Promise<{ content: string }> {
   const config = getConfig();
-  const routed = getRoutedConfig({
+  const routed = await resolveRoutedConfig({
     ...config,
     ...(options.model ? { model: options.model } : {}),
     ...(options.temperature != null ? { temperature: options.temperature } : {}),
   });
-  const url = `${routed.base_url}/chat/completions`;
+  const isAnthropic = routed.protocol === "anthropic";
+  const url = isAnthropic
+    ? `${routed.base_url}/v1/messages`
+    : `${routed.base_url}/chat/completions`;
+  const supportsImageInput = resolveModelCapabilities(
+    routed.model,
+    routed.protocol,
+  ).supportsImageInput;
 
-  const body: Record<string, unknown> = {
-    model: routed.model,
-    messages: options.messages.map((m) => ({ role: m.role, content: m.content })),
-    temperature: routed.temperature ?? 0.7,
-  };
-  if (routed.max_tokens) body.max_tokens = routed.max_tokens;
+  const systemMessages = options.messages
+    .filter((message) => message.role === "system" && message.content.trim())
+    .map((message) => message.content.trim());
+  const directMessages = await Promise.all(
+    options.messages
+      .filter((message) => !isAnthropic || message.role !== "system")
+      .map((message) => isAnthropic
+        ? buildDirectAnthropicMessage(message, supportsImageInput)
+        : buildDirectOpenAIMessage(message, supportsImageInput)),
+  );
+  const body: Record<string, unknown> = isAnthropic
+    ? {
+        model: routed.model,
+        messages: directMessages,
+        temperature: routed.temperature ?? 0.7,
+        max_tokens: routed.max_tokens ?? 2048,
+        ...(systemMessages.length > 0
+          ? { system: systemMessages.join("\n\n") }
+          : {}),
+      }
+    : {
+        model: routed.model,
+        messages: directMessages,
+        temperature: routed.temperature ?? 0.7,
+      };
+  if (!isAnthropic && routed.max_tokens) body.max_tokens = routed.max_tokens;
   if (routed.team_id) {
     body.team_id = routed.team_id;
     if (routed.team_config_id) body.team_config_id = routed.team_config_id;
@@ -522,8 +1090,13 @@ export async function chatDirect(options: {
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    Authorization: `Bearer ${routed.api_key}`,
   };
+  if (isAnthropic && routed.source === "own_key") {
+    headers["x-api-key"] = routed.api_key;
+    headers["anthropic-version"] = "2023-06-01";
+  } else {
+    headers.Authorization = `Bearer ${routed.api_key}`;
+  }
   if (url.includes("coding.dashscope") || url.includes("coding-intl.dashscope")) {
     headers["User-Agent"] = "openclaw/1.0.0";
   }
@@ -541,6 +1114,13 @@ export async function chatDirect(options: {
   }
 
   const data = await resp.json();
-  const content = data?.choices?.[0]?.message?.content ?? "";
+  const content = isAnthropic
+    ? Array.isArray(data?.content)
+      ? data.content
+          .filter((part: { type?: string }) => part?.type === "text")
+          .map((part: { text?: string }) => part?.text ?? "")
+          .join("")
+      : ""
+    : data?.choices?.[0]?.message?.content ?? "";
   return { content };
 }

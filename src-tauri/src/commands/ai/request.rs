@@ -1,4 +1,15 @@
+use super::model_capabilities::{supports_image_input, AIProtocol};
 use super::types::ChatMessage;
+
+const IMAGE_FALLBACK_TEXT: &str =
+    "[用户发送了图片，但当前模型或协议不支持图片识别，请提醒用户切换到支持视觉输入的模型或接口]";
+
+fn text_content_block(text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "text",
+        "text": text,
+    })
+}
 
 /// 将 ChatMessage 转为 Vision API 兼容的 JSON（含图片 multipart content）
 pub fn message_to_api_json(msg: &ChatMessage) -> serde_json::Value {
@@ -88,7 +99,30 @@ pub fn build_api_request(
     tools: &[serde_json::Value],
     stream: bool,
 ) -> serde_json::Value {
-    let api_messages: Vec<serde_json::Value> = messages.iter().map(message_to_api_json).collect();
+    let vision = supports_image_input(model, AIProtocol::OpenAI);
+    let api_messages: Vec<serde_json::Value> = if vision {
+        messages.iter().map(message_to_api_json).collect()
+    } else {
+        messages
+            .iter()
+            .map(|m| {
+                let has_images = m.images.as_ref().map_or(false, |imgs| !imgs.is_empty());
+                if has_images && m.role == "user" {
+                    let mut degraded = m.clone();
+                    degraded.images = None;
+                    let prefix = degraded.content.as_deref().unwrap_or("").to_string();
+                    degraded.content = Some(if prefix.is_empty() {
+                        IMAGE_FALLBACK_TEXT.to_string()
+                    } else {
+                        format!("{}\n\n{}", prefix, IMAGE_FALLBACK_TEXT)
+                    });
+                    message_to_api_json(&degraded)
+                } else {
+                    message_to_api_json(m)
+                }
+            })
+            .collect()
+    };
     let mut req = serde_json::json!({
         "model": model,
         "messages": api_messages,
@@ -131,10 +165,32 @@ pub fn build_anthropic_request(
     tools: &[serde_json::Value],
     stream: bool,
 ) -> serde_json::Value {
+    let vision = supports_image_input(model, AIProtocol::Anthropic);
     let api_messages: Vec<serde_json::Value> = messages
         .iter()
         .filter(|m| m.role != "system")
-        .map(|m| message_to_anthropic_json(m))
+        .map(|m| {
+            let has_images = m.images.as_ref().map_or(false, |imgs| !imgs.is_empty());
+            if !vision && has_images && m.role == "user" {
+                log::info!(
+                    "[anthropic_request] image input downgraded for model={} role={} reason=vision_unsupported_in_current_protocol image_count={}",
+                    model,
+                    m.role,
+                    m.images.as_ref().map(|imgs| imgs.len()).unwrap_or(0)
+                );
+                let mut degraded = m.clone();
+                degraded.images = None;
+                let prefix = degraded.content.as_deref().unwrap_or("").to_string();
+                degraded.content = Some(if prefix.is_empty() {
+                    IMAGE_FALLBACK_TEXT.to_string()
+                } else {
+                    format!("{}\n\n{}", prefix, IMAGE_FALLBACK_TEXT)
+                });
+                message_to_anthropic_json(&degraded)
+            } else {
+                message_to_anthropic_json(m)
+            }
+        })
         .collect();
 
     let anthropic_tools = convert_tools_to_anthropic(tools);
@@ -218,40 +274,169 @@ pub fn message_to_anthropic_json(msg: &ChatMessage) -> serde_json::Value {
         let mut parts: Vec<serde_json::Value> = Vec::new();
         if let Some(text) = &msg.content {
             if !text.is_empty() {
-                parts.push(serde_json::json!({ "type": "text", "text": text }));
+                parts.push(text_content_block(text));
             }
         }
         if let Some(images) = &msg.images {
             for img_path in images {
-                if let Ok(bytes) = std::fs::read(img_path) {
-                    let ext = std::path::Path::new(img_path)
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("png");
-                    let mime = match ext {
-                        "jpg" | "jpeg" => "image/jpeg",
-                        "gif" => "image/gif",
-                        "webp" => "image/webp",
-                        _ => "image/png",
-                    };
-                    use base64::Engine;
-                    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                    parts.push(serde_json::json!({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": mime,
-                            "data": b64,
-                        }
-                    }));
+                match std::fs::read(img_path) {
+                    Ok(bytes) => {
+                        let ext = std::path::Path::new(img_path)
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("png");
+                        let mime = match ext {
+                            "jpg" | "jpeg" => "image/jpeg",
+                            "gif" => "image/gif",
+                            "webp" => "image/webp",
+                            _ => "image/png",
+                        };
+                        log::info!(
+                            "[anthropic_request] loaded image path={} bytes={} mime={}",
+                            img_path,
+                            bytes.len(),
+                            mime
+                        );
+                        use base64::Engine;
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        parts.push(serde_json::json!({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": mime,
+                                "data": b64,
+                            }
+                        }));
+                    }
+                    Err(err) => {
+                        log::warn!(
+                            "[anthropic_request] failed to read image path={} err={}",
+                            img_path,
+                            err
+                        );
+                    }
                 }
             }
         }
         serde_json::json!({ "role": "user", "content": parts })
     } else {
+        let mut parts: Vec<serde_json::Value> = Vec::new();
+        if let Some(text) = &msg.content {
+            if !text.is_empty() {
+                parts.push(text_content_block(text));
+            }
+        }
         serde_json::json!({
             "role": msg.role,
-            "content": msg.content.as_deref().unwrap_or(""),
+            "content": if parts.is_empty() {
+                serde_json::json!(msg.content.as_deref().unwrap_or(""))
+            } else {
+                serde_json::json!(parts)
+            },
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_anthropic_request, build_api_request};
+    use crate::commands::ai::types::ChatMessage;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn write_temp_png() -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("mtools-test-{nanos}.png"));
+        let png_bytes: &[u8] = &[
+            0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n', 0x00, 0x00, 0x00, 0x0d, b'I', b'H',
+            b'D', b'R', 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, b'I', b'D', b'A', b'T', 0x08,
+            0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xc9, 0xfe, 0x92,
+            0xef, 0x00, 0x00, 0x00, 0x00, b'I', b'E', b'N', b'D', 0xae, 0x42, 0x60, 0x82,
+        ];
+        std::fs::write(&path, png_bytes).expect("write temp png");
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn minimax_anthropic_request_downgrades_image_input_to_fallback_text() {
+        let request = build_anthropic_request(
+            "MiniMax-M2.5",
+            &[ChatMessage {
+                role: "user".to_string(),
+                content: Some("请根据图片生成页面".to_string()),
+                images: Some(vec!["/tmp/demo.png".to_string()]),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            }],
+            "",
+            0.7,
+            Some(1024),
+            &[],
+            false,
+        );
+
+        let content = request["messages"][0]["content"]
+            .as_array()
+            .expect("anthropic messages should use content blocks");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"].as_str(), Some("text"));
+
+        let text = content[0]["text"].as_str().unwrap_or("");
+        assert!(text.contains("请根据图片生成页面"));
+        assert!(text.contains("当前模型或协议不支持图片识别"));
+    }
+
+    #[test]
+    fn qwen3_5_plus_openai_request_keeps_image_blocks() {
+        let image_path = write_temp_png();
+        let request = build_api_request(
+            "qwen3.5-plus",
+            &[ChatMessage {
+                role: "user".to_string(),
+                content: Some("请分析这张图片".to_string()),
+                images: Some(vec![image_path.clone()]),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            }],
+            0.7,
+            Some(1024),
+            &[],
+            false,
+        );
+
+        let content = request["messages"][0]["content"]
+            .as_array()
+            .expect("openai vision messages should use content array");
+        assert_eq!(content[0]["type"].as_str(), Some("text"));
+        assert_eq!(content[1]["type"].as_str(), Some("image_url"));
+        let _ = std::fs::remove_file(image_path);
+    }
+
+    #[test]
+    fn minimax_openai_request_downgrades_image_input_to_fallback_text() {
+        let request = build_api_request(
+            "MiniMax-M2.5",
+            &[ChatMessage {
+                role: "user".to_string(),
+                content: Some("看看这张图".to_string()),
+                images: Some(vec!["/tmp/demo.png".to_string()]),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            }],
+            0.7,
+            Some(1024),
+            &[],
+            false,
+        );
+
+        let content = request["messages"][0]["content"].as_str().unwrap_or("");
+        assert!(content.contains("看看这张图"));
+        assert!(content.contains("当前模型或协议不支持图片识别"));
     }
 }

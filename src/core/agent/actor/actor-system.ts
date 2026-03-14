@@ -1,11 +1,19 @@
 import { AgentActor, type AskUserCallback } from "./agent-actor";
 import type {
+  ApprovalRequest,
   AgentCapabilities,
   ActorConfig,
   ActorEvent,
+  DialogArtifactRecord,
+  DialogExecutionPlan,
   DialogMessage,
   InboxMessage,
+  PendingInteraction,
+  PendingInteractionReplyMode,
+  PendingInteractionResult,
+  PendingInteractionType,
   PendingReply,
+  SessionUploadRecord,
   SpawnedTaskRecord,
   SpawnedTaskEventDetail,
 } from "./types";
@@ -70,6 +78,77 @@ function summarizeError(error: unknown): string {
   if (error instanceof Error) return error.message || "error";
   if (typeof error === "string") return error;
   return "unknown error";
+}
+
+function basename(path: string): string {
+  const normalized = String(path ?? "").replace(/\\/g, "/");
+  return normalized.split("/").pop() || normalized;
+}
+
+function dirname(path: string): string {
+  const normalized = String(path ?? "").replace(/\\/g, "/");
+  const parts = normalized.split("/");
+  if (parts.length <= 1) return "";
+  return parts.slice(0, -1).join("/") || "/";
+}
+
+function inferLanguageFromPath(path: string): string | undefined {
+  const fileName = basename(path).toLowerCase();
+  const ext = fileName.includes(".") ? fileName.split(".").pop() : "";
+  switch (ext) {
+    case "ts":
+    case "tsx":
+      return "typescript";
+    case "js":
+    case "jsx":
+      return "javascript";
+    case "json":
+      return "json";
+    case "md":
+      return "markdown";
+    case "rs":
+      return "rust";
+    case "py":
+      return "python";
+    case "css":
+    case "scss":
+    case "less":
+      return "css";
+    case "html":
+    case "htm":
+      return "html";
+    case "yaml":
+    case "yml":
+      return "yaml";
+    case "sh":
+    case "bash":
+    case "zsh":
+      return "bash";
+    default:
+      return ext || undefined;
+  }
+}
+
+function getInteractionRequestKind(type: PendingInteractionType): DialogMessage["kind"] {
+  switch (type) {
+    case "clarification":
+      return "clarification_request";
+    case "approval":
+      return "approval_request";
+    default:
+      return "agent_message";
+  }
+}
+
+function getInteractionResponseKind(type: PendingInteractionType): DialogMessage["kind"] {
+  switch (type) {
+    case "clarification":
+      return "clarification_response";
+    case "approval":
+      return "approval_response";
+    default:
+      return "user_input";
+  }
 }
 
 const LOW_SIGNAL_COORDINATION_TEXTS = new Set([
@@ -250,7 +329,13 @@ export class ActorSystem {
   private dialogHistory: DialogMessage[] = [];
   private eventHandlers: SystemEventHandler[] = [];
   private pendingReplies = new Map<string, PendingReply>();
+  private pendingInteractions = new Map<string, PendingInteraction>();
   private spawnedTasks = new Map<string, SpawnedTaskRecord>();
+  private artifactRecords = new Map<string, DialogArtifactRecord>();
+  private sessionUploads = new Map<string, SessionUploadRecord>();
+  private coordinatorActorId: string | null = null;
+  private dialogExecutionPlan: DialogExecutionPlan | null = null;
+  private focusedSpawnedSessionRunId: string | null = null;
   private options: ActorSystemOptions;
   readonly sessionId: string;
   private hooks = new Map<HookType, Array<HookHandler<any>>>();
@@ -299,8 +384,20 @@ export class ActorSystem {
 
     actor.on((event) => {
       this.emitEvent(event);
+      if (event.type === "task_started") {
+        this.markSpawnedSessionTaskStarted(event.actorId, event.timestamp);
+      }
       if (event.type === "task_completed" || event.type === "task_error") {
         const detail = (event.detail ?? {}) as Record<string, unknown>;
+        this.markSpawnedSessionTaskEnded(
+          event.actorId,
+          event.type === "task_completed" ? "completed" : (String(detail.error ?? "") === "Aborted" ? "aborted" : "error"),
+          event.timestamp,
+          {
+            result: detail.result as string | undefined,
+            error: detail.error as string | undefined,
+          },
+        );
         void this.runHooks<EndHookContext>("onEnd", {
           system: this,
           actorId: event.actorId,
@@ -315,6 +412,9 @@ export class ActorSystem {
     });
 
     this.actors.set(finalConfig.id, actor);
+    if (!this.coordinatorActorId) {
+      this.coordinatorActorId = finalConfig.id;
+    }
     this.ensureUniqueActorNames();
     log(`spawn: ${finalConfig.role.name} (${finalConfig.id}), model=${finalConfig.modelOverride ?? "default"}`);
     this.syncTranscriptActors();
@@ -335,7 +435,15 @@ export class ActorSystem {
     });
     this.cascadeAbortSpawns(actorId);
     actor.stop();
+    for (const record of this.spawnedTasks.values()) {
+      if (record.targetActorId === actorId || record.spawnerActorId === actorId) {
+        this.closeSpawnedSessionRecord(record);
+      }
+    }
     this.actors.delete(actorId);
+    if (this.coordinatorActorId === actorId) {
+      this.coordinatorActorId = this.getFirstActor()?.id ?? null;
+    }
     this.syncTranscriptActors();
   }
 
@@ -344,12 +452,18 @@ export class ActorSystem {
     this._cron.cancelAll();
     for (const record of this.spawnedTasks.values()) {
       if (record.timeoutId) clearTimeout(record.timeoutId);
+      this.closeSpawnedSessionRecord(record);
     }
     this.spawnedTasks.clear();
+    this.artifactRecords.clear();
+    this.sessionUploads.clear();
+    this.focusedSpawnedSessionRunId = null;
     for (const actor of this.actors.values()) {
       actor.stop();
     }
     this.actors.clear();
+    this.coordinatorActorId = null;
+    this.dialogExecutionPlan = null;
     this.dialogHistory = [];
     this.pendingReplies.clear();
   }
@@ -403,6 +517,223 @@ export class ActorSystem {
     return undefined;
   }
 
+  private getDialogPlanCoordinator(filter?: (a: AgentActor) => boolean): AgentActor | undefined {
+    const coordinatorId = this.dialogExecutionPlan?.coordinatorActorId;
+    if (!coordinatorId) return undefined;
+    const coordinator = this.actors.get(coordinatorId);
+    if (coordinator && (!filter || filter(coordinator))) {
+      return coordinator;
+    }
+    return undefined;
+  }
+
+  getCoordinator(filter?: (a: AgentActor) => boolean): AgentActor | undefined {
+    const planCoordinator = this.getDialogPlanCoordinator(filter);
+    if (planCoordinator) {
+      return planCoordinator;
+    }
+
+    const coordinator = this.coordinatorActorId ? this.actors.get(this.coordinatorActorId) : undefined;
+    if (coordinator && (!filter || filter(coordinator))) {
+      return coordinator;
+    }
+    return this.getFirstActor(filter);
+  }
+
+  getCoordinatorId(): string | null {
+    return this.getCoordinator()?.id ?? null;
+  }
+
+  setCoordinator(actorId: string): void {
+    if (!this.actors.has(actorId)) {
+      throw new Error(`Coordinator ${actorId} not found`);
+    }
+    this.coordinatorActorId = actorId;
+  }
+
+  getDialogExecutionPlan(): DialogExecutionPlan | null {
+    if (!this.dialogExecutionPlan) return null;
+    return {
+      ...this.dialogExecutionPlan,
+      initialRecipientActorIds: [...this.dialogExecutionPlan.initialRecipientActorIds],
+      participantActorIds: [...this.dialogExecutionPlan.participantActorIds],
+      allowedMessagePairs: this.dialogExecutionPlan.allowedMessagePairs.map((edge) => ({ ...edge })),
+      allowedSpawnPairs: this.dialogExecutionPlan.allowedSpawnPairs.map((edge) => ({ ...edge })),
+    };
+  }
+
+  private normalizeDialogExecutionPlan(
+    plan: DialogExecutionPlan,
+    opts?: { preserveRuntimeState?: boolean },
+  ): DialogExecutionPlan {
+    const dedupe = (values: string[]) => [...new Set(values.filter(Boolean))];
+    const preserveRuntimeState = opts?.preserveRuntimeState ?? false;
+
+    return {
+      ...plan,
+      approvedAt: plan.approvedAt || Date.now(),
+      initialRecipientActorIds: dedupe(plan.initialRecipientActorIds),
+      participantActorIds: dedupe(plan.participantActorIds),
+      coordinatorActorId: plan.coordinatorActorId && this.actors.has(plan.coordinatorActorId)
+        ? plan.coordinatorActorId
+        : undefined,
+      allowedMessagePairs: plan.allowedMessagePairs
+        .filter((edge) => edge.fromActorId && edge.toActorId)
+        .map((edge) => ({ ...edge })),
+      allowedSpawnPairs: plan.allowedSpawnPairs
+        .filter((edge) => edge.fromActorId && edge.toActorId)
+        .map((edge) => ({ ...edge })),
+      state: preserveRuntimeState ? plan.state : "armed",
+      activatedAt: preserveRuntimeState ? plan.activatedAt : undefined,
+      sourceMessageId: preserveRuntimeState ? plan.sourceMessageId : undefined,
+    };
+  }
+
+  armDialogExecutionPlan(plan: DialogExecutionPlan): void {
+    this.dialogExecutionPlan = this.normalizeDialogExecutionPlan(plan);
+    log(`armDialogExecutionPlan: ${plan.summary}`);
+  }
+
+  restoreDialogExecutionPlan(plan: DialogExecutionPlan): void {
+    this.dialogExecutionPlan = this.normalizeDialogExecutionPlan(plan, { preserveRuntimeState: true });
+    log(`restoreDialogExecutionPlan: ${plan.summary}`);
+  }
+
+  clearDialogExecutionPlan(): void {
+    if (this.dialogExecutionPlan) {
+      log(`clearDialogExecutionPlan: ${this.dialogExecutionPlan.summary}`);
+    }
+    this.dialogExecutionPlan = null;
+  }
+
+  private activateDialogExecutionPlan(sourceMessageId: string): void {
+    if (!this.dialogExecutionPlan || this.dialogExecutionPlan.state === "active") return;
+    this.dialogExecutionPlan = {
+      ...this.dialogExecutionPlan,
+      state: "active",
+      activatedAt: Date.now(),
+      sourceMessageId,
+    };
+    log(`activateDialogExecutionPlan: sourceMessageId=${sourceMessageId}`);
+  }
+
+  private isDialogPlanEdgeAllowed(
+    pairs: DialogExecutionPlan["allowedMessagePairs"] | DialogExecutionPlan["allowedSpawnPairs"],
+    fromActorId: string,
+    toActorId: string,
+  ): boolean {
+    return pairs.some((edge) => edge.fromActorId === fromActorId && edge.toActorId === toActorId);
+  }
+
+  private assertUserDispatchMatchesPlan(
+    recipientActorIds: string[],
+    mode: "send" | "broadcast" | "broadcastAndResolve",
+  ): void {
+    const plan = this.dialogExecutionPlan;
+    if (!plan) return;
+
+    const expected = new Set(plan.initialRecipientActorIds);
+    const actual = new Set(recipientActorIds);
+    const matches = expected.size === actual.size && [...expected].every((id) => actual.has(id));
+
+    if (!matches) {
+      const expectedLabel = [...expected].join(", ") || "none";
+      const actualLabel = [...actual].join(", ") || "none";
+      throw new Error(
+        `[dialog_plan] ${mode} 目标不在已批准计划内（expected=${expectedLabel}, actual=${actualLabel}）`,
+      );
+    }
+  }
+
+  private assertActorMessageAllowed(fromActorId: string, toActorId: string): void {
+    const plan = this.dialogExecutionPlan;
+    if (!plan) return;
+
+    if (!plan.participantActorIds.includes(fromActorId) || !plan.participantActorIds.includes(toActorId)) {
+      throw new Error(`[dialog_plan] ${fromActorId} 或 ${toActorId} 不在已批准协作范围内`);
+    }
+
+    if (!this.isDialogPlanEdgeAllowed(plan.allowedMessagePairs, fromActorId, toActorId)) {
+      throw new Error(`[dialog_plan] ${fromActorId} -> ${toActorId} 的消息未在已批准计划中`);
+    }
+  }
+
+  private assertActorSpawnAllowed(spawnerActorId: string, targetActorId: string): void {
+    const plan = this.dialogExecutionPlan;
+    if (!plan) return;
+
+    if (!plan.participantActorIds.includes(spawnerActorId) || !plan.participantActorIds.includes(targetActorId)) {
+      throw new Error(`[dialog_plan] ${spawnerActorId} 或 ${targetActorId} 不在已批准协作范围内`);
+    }
+
+    if (!this.isDialogPlanEdgeAllowed(plan.allowedSpawnPairs, spawnerActorId, targetActorId)) {
+      throw new Error(`[dialog_plan] ${spawnerActorId} -> ${targetActorId} 的 spawn_task 未在已批准计划中`);
+    }
+  }
+
+  private finalizeSpawnedTaskHistoryWindow(record: SpawnedTaskRecord, targetActor?: AgentActor): void {
+    if (typeof record.sessionHistoryEndIndex === "number") return;
+    const resolvedTarget = targetActor ?? this.actors.get(record.targetActorId);
+    record.sessionHistoryEndIndex = resolvedTarget?.getSessionHistory().length ?? record.sessionHistoryStartIndex;
+  }
+
+  private getArtifactKey(path: string): string {
+    return path.trim().replace(/\\/g, "/");
+  }
+
+  private getOpenSpawnedSessionByRunId(runId: string): SpawnedTaskRecord | undefined {
+    const record = this.spawnedTasks.get(runId);
+    if (!record || record.mode !== "session" || !record.sessionOpen) return undefined;
+    return record;
+  }
+
+  private getOpenSpawnedSessionByTarget(targetActorId: string): SpawnedTaskRecord | undefined {
+    return [...this.spawnedTasks.values()]
+      .filter((record) => record.mode === "session" && record.sessionOpen && record.targetActorId === targetActorId)
+      .sort((a, b) => (b.lastActiveAt ?? b.spawnedAt) - (a.lastActiveAt ?? a.spawnedAt))[0];
+  }
+
+  private closeSpawnedSessionRecord(record: SpawnedTaskRecord, closedAt = Date.now()): void {
+    if (!record.sessionOpen) return;
+    record.sessionOpen = false;
+    record.sessionClosedAt = closedAt;
+    record.lastActiveAt = closedAt;
+    const targetActor = this.actors.get(record.targetActorId);
+    record.sessionHistoryEndIndex = targetActor?.getSessionHistory().length ?? record.sessionHistoryEndIndex;
+    if (this.focusedSpawnedSessionRunId === record.runId) {
+      this.focusedSpawnedSessionRunId = null;
+    }
+  }
+
+  private markSpawnedSessionTaskStarted(actorId: string, timestamp: number): void {
+    for (const record of this.spawnedTasks.values()) {
+      if (record.mode !== "session" || !record.sessionOpen || record.targetActorId !== actorId) continue;
+      record.status = "running";
+      record.completedAt = undefined;
+      record.error = undefined;
+      record.lastActiveAt = timestamp;
+      record.sessionHistoryEndIndex = undefined;
+    }
+  }
+
+  private markSpawnedSessionTaskEnded(
+    actorId: string,
+    status: "completed" | "error" | "aborted",
+    timestamp: number,
+    detail?: { result?: string; error?: string },
+  ): void {
+    for (const record of this.spawnedTasks.values()) {
+      if (record.mode !== "session" || !record.sessionOpen || record.targetActorId !== actorId) continue;
+      record.status = status;
+      record.completedAt = timestamp;
+      record.result = detail?.result ?? record.result;
+      record.error = detail?.error ?? (status !== "completed" ? record.error : undefined);
+      record.lastActiveAt = timestamp;
+      const targetActor = this.actors.get(record.targetActorId);
+      record.sessionHistoryEndIndex = targetActor?.getSessionHistory().length ?? record.sessionHistoryEndIndex;
+    }
+  }
+
   // ── Messaging ──
 
   /**
@@ -414,9 +745,18 @@ export class ActorSystem {
     replyTo?: string;
     priority?: "normal" | "urgent";
     _briefContent?: string;
+    images?: string[];
+    bypassPlanCheck?: boolean;
+    relatedRunId?: string;
   }): DialogMessage {
     const target = this.actors.get(to);
     if (!target) throw new Error(`Actor ${to} not found`);
+
+    if (!opts?.bypassPlanCheck && from === "user") {
+      this.assertUserDispatchMatchesPlan([to], "send");
+    } else if (!opts?.bypassPlanCheck) {
+      this.assertActorMessageAllowed(from, to);
+    }
 
     const fromName = from === "user" ? "用户" : (this.actors.get(from)?.role.name ?? from);
     const toName = target.role.name;
@@ -432,9 +772,15 @@ export class ActorSystem {
       expectReply: opts?.expectReply,
       replyTo: opts?.replyTo,
       _briefContent: opts?._briefContent,
+      kind: from === "user" ? "user_input" : "agent_message",
+      relatedRunId: opts?.relatedRunId,
+      ...(opts?.images?.length ? { images: opts.images } : {}),
     };
 
     target.receive(msg);
+    if (from === "user" && !opts?.bypassPlanCheck) {
+      this.activateDialogExecutionPlan(msg.id);
+    }
     this.dialogHistory.push(msg);
     appendDialogMessage(this.sessionId, msg);
     this.emitEvent(msg);
@@ -463,9 +809,21 @@ export class ActorSystem {
    * - 来自 Agent：投递给除自己外的所有 Agent
    * 消息始终记录到 dialogHistory，UI 上全员可见。
    */
-  broadcast(from: string, content: string, opts?: { _briefContent?: string }): DialogMessage {
+  broadcast(from: string, content: string, opts?: { _briefContent?: string; images?: string[] }): DialogMessage {
     const fromName = from === "user" ? "用户" : (this.actors.get(from)?.role.name ?? from);
     log(`broadcast: ${fromName} → all, content="${content.slice(0, 80)}"`);
+
+    const recipientIds = [...this.actors.values()]
+      .filter((actor) => from === "user" || actor.id !== from)
+      .map((actor) => actor.id);
+
+    if (from === "user") {
+      this.assertUserDispatchMatchesPlan(recipientIds, "broadcast");
+    } else {
+      for (const recipientId of recipientIds) {
+        this.assertActorMessageAllowed(from, recipientId);
+      }
+    }
 
     const msg: DialogMessage = {
       id: generateId(),
@@ -475,10 +833,15 @@ export class ActorSystem {
       timestamp: Date.now(),
       priority: "normal",
       _briefContent: opts?._briefContent,
+      kind: from === "user" ? "user_input" : "agent_message",
+      ...(opts?.images?.length ? { images: opts.images } : {}),
     };
     this.dialogHistory.push(msg);
     appendDialogMessage(this.sessionId, msg);
     this.emitEvent(msg);
+    if (from === "user") {
+      this.activateDialogExecutionPlan(msg.id);
+    }
 
     for (const actor of this.actors.values()) {
       if (from !== "user" && actor.id === from) continue;
@@ -488,16 +851,26 @@ export class ActorSystem {
   }
 
   /**
-   * 群聊模式：广播消息并 resolve 所有等待用户回复的 pending replies。
+   * 群聊模式：广播消息给协调者或所有 Agent。
    *
    * 协调者投递策略：
-   * - 如果有 Agent 在等待用户回复（pendingReplies），resolve 它们，不额外投递
-   * - 否则，仅投递给第一个 Agent（协调者），其他 Agent 等待 spawn_task 激活
+   * - 当存在待用户交互项时，不再隐式消费，避免将新消息错误绑定到旧交互
+   * - 默认仅投递给协调者，其他 Agent 等待 spawn_task 激活
    * - 消息始终记录到 dialogHistory，UI 上所有人可见
    */
-  broadcastAndResolve(from: string, content: string, opts?: { _briefContent?: string }): DialogMessage {
+  broadcastAndResolve(from: string, content: string, opts?: { _briefContent?: string; images?: string[] }): DialogMessage {
     const fromName = from === "user" ? "用户" : (this.actors.get(from)?.role.name ?? from);
-    log(`broadcastAndResolve: ${fromName} → all, content="${content.slice(0, 80)}", pendingReplies=${this.pendingReplies.size}`);
+    log(`broadcastAndResolve: ${fromName} → all, content="${content.slice(0, 80)}", pendingInteractions=${this.pendingInteractions.size}`);
+
+    const planRecipientIds = from === "user" && this.dialogExecutionPlan?.initialRecipientActorIds.length
+      ? [...this.dialogExecutionPlan.initialRecipientActorIds]
+      : null;
+    const activePending = from === "user"
+      ? [...this.pendingInteractions.entries()].filter(([, p]) => p.status === "pending")
+      : [];
+    if (from === "user" && planRecipientIds) {
+      this.assertUserDispatchMatchesPlan(planRecipientIds, "broadcastAndResolve");
+    }
 
     const msg: DialogMessage = {
       id: generateId(),
@@ -507,37 +880,65 @@ export class ActorSystem {
       timestamp: Date.now(),
       priority: "normal",
       _briefContent: opts?._briefContent,
+      kind: from === "user" ? "user_input" : "agent_message",
+      relatedRunId: activePending.length === 1
+        ? this.dialogHistory.find((message) => message.id === activePending[0][0])?.relatedRunId
+        : undefined,
+      ...(opts?.images?.length ? { images: opts.images } : {}),
     };
     this.dialogHistory.push(msg);
     appendDialogMessage(this.sessionId, msg);
 
-    // resolve 所有等待用户回复的 pending replies
-    const agentsAwaitingReply = new Set<string>();
-    let resolved = 0;
-    for (const [id, pending] of this.pendingReplies) {
-      if (pending.fromActorId === "user") {
-        const qMsg = this.dialogHistory.find((m) => m.id === id);
-        if (qMsg) agentsAwaitingReply.add(qMsg.from);
-        if (pending.timeoutId) clearTimeout(pending.timeoutId);
-        this.pendingReplies.delete(id);
-        pending.resolve(msg);
-        resolved++;
-      }
-    }
-    if (resolved > 0) {
-      log(`broadcastAndResolve: resolved ${resolved} pending user replies`);
-    }
-
-    // 仅将消息投递给协调者（第一个非等待中的 Agent）
     if (from === "user") {
-      const first = this.getFirstActor((a) => !agentsAwaitingReply.has(a.id));
-      if (first) {
-        log(`broadcastAndResolve(coordinator): delivering only to coordinator ${first.role.name}`);
-        first.receive(msg);
-      } else {
-        log(`broadcastAndResolve: no available coordinator (all agents awaiting reply, reply resolved)`);
+      // 恰好 1 个待回复交互时，自动视为对该交互的回复（兼容 IM 等无法显式选择的入口）
+      if (activePending.length === 1) {
+        const [pendingMsgId, pending] = activePending[0];
+        log(`broadcastAndResolve: auto-resolving single pending interaction (msgId=${pendingMsgId}, type=${pending.type})`);
+        pending.status = "answered";
+        if (pending.timeoutId) clearTimeout(pending.timeoutId);
+        this.pendingInteractions.delete(pendingMsgId);
+        this.updateDialogMessage(pendingMsgId, { interactionStatus: "answered" });
+        pending.resolve({
+          interactionId: pending.id,
+          interactionType: pending.type,
+          status: "answered",
+          content,
+          message: msg,
+        });
       }
+
+      if (planRecipientIds?.length) {
+        const recipients = planRecipientIds
+          .map((actorId) => this.actors.get(actorId))
+          .filter((actor): actor is AgentActor => Boolean(actor));
+        for (const recipient of recipients) {
+          log(`broadcastAndResolve(plan): delivering to ${recipient.role.name}`);
+          recipient.receive(msg);
+        }
+      } else {
+        const agentsAwaitingReply = new Set(
+          [...this.pendingInteractions.values()]
+            .filter((p) => p.status === "pending")
+            .map((p) => p.fromActorId),
+        );
+        const coordinator = this.getCoordinator((a) => !agentsAwaitingReply.has(a.id));
+        if (coordinator) {
+          log(`broadcastAndResolve(coordinator): delivering to coordinator ${coordinator.role.name}`);
+          coordinator.receive(msg);
+        } else if (activePending.length > 0) {
+          log(`broadcastAndResolve: no available coordinator, pending interactions resolved`);
+        } else {
+          log(`broadcastAndResolve: no available coordinator and no pending interactions`);
+        }
+      }
+      this.activateDialogExecutionPlan(msg.id);
     } else {
+      const recipientIds = [...this.actors.values()]
+        .filter((actor) => actor.id !== from)
+        .map((actor) => actor.id);
+      for (const recipientId of recipientIds) {
+        this.assertActorMessageAllowed(from, recipientId);
+      }
       for (const actor of this.actors.values()) {
         if (actor.id === from) continue;
         actor.receive(msg);
@@ -640,25 +1041,36 @@ export class ActorSystem {
     const target = this.actors.get(targetActorId);
     if (!spawner) return { error: `Spawner ${spawnerActorId} not found` };
     if (!target) return { error: `Target ${targetActorId} not found` };
-
-    // Subagent 独立配置：在 spawn 时动态覆盖 target 的运行参数
-    if (opts?.overrides) {
-      const ov = opts.overrides;
-      if (ov.model) target.applySpawnOverride("model", ov.model);
-      if (ov.maxIterations) target.applySpawnOverride("maxIterations", ov.maxIterations);
-      if (ov.toolPolicy) target.applySpawnOverride("toolPolicy", ov.toolPolicy);
-      if (ov.contextTokens) target.applySpawnOverride("contextTokens", ov.contextTokens);
-      if (ov.thinkingLevel) target.applySpawnOverride("thinkingLevel", ov.thinkingLevel);
-      if (ov.systemPromptAppend) target.applySpawnOverride("systemPromptAppend", ov.systemPromptAppend);
-      if (ov.middlewareOverrides) target.applySpawnOverride("middlewareOverrides", ov.middlewareOverrides);
-      if (ov.temperature != null) target.applySpawnOverride("temperature", ov.temperature);
-      log(`spawnTask: applied overrides to ${target.role.name}`, JSON.stringify(ov).slice(0, 200));
+    try {
+      this.assertActorSpawnAllowed(spawnerActorId, targetActorId);
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : String(error) };
     }
 
-    // session 模式下允许 target 处于 running 状态（保持会话）
+    if (opts?.overrides) {
+      log(`spawnTask: prepared run overrides for ${target.role.name}`, JSON.stringify(opts.overrides).slice(0, 200));
+    }
+
     const mode = opts?.mode ?? "run";
+    const existingOpenSession = this.getOpenSpawnedSessionByTarget(targetActorId);
+    if (mode === "session" && existingOpenSession) {
+      if (existingOpenSession.spawnerActorId !== spawnerActorId) {
+        return {
+          error: `[sessions_spawn] ${target.role.name} 已绑定到另一个子会话（runId=${existingOpenSession.runId}）`,
+        };
+      }
+      return this.continueSpawnedSession(existingOpenSession.runId, spawnerActorId, task, {
+        label: opts?.label,
+        context: opts?.context,
+        attachments: opts?.attachments,
+      });
+    }
+
     if (mode === "run" && target.status === "running") {
       return { error: `[sessions_spawn] ${target.role.name} is already running a task (mode='run' requires idle target)` };
+    }
+    if (mode === "session" && target.status === "running") {
+      return { error: `[sessions_spawn] ${target.role.name} 正在执行其他任务，请等待空闲后再创建新的子会话` };
     }
 
     const depth = this.getSpawnDepth(spawnerActorId);
@@ -696,17 +1108,22 @@ export class ActorSystem {
       mode,
       expectsCompletionMessage,
       cleanup,
+      sessionHistoryStartIndex: target.getSessionHistory().length,
+      sessionOpen: mode === "session",
+      lastActiveAt: Date.now(),
     };
 
     // 超时处理
     record.timeoutId = setTimeout(() => {
       if (record.status !== "running") return;
+      cleanupRunningListener();
       const duration = Date.now() - record.spawnedAt;
       log(`⏱️ spawnTask TIMEOUT: ${targetName} (runId=${runId}), duration=${duration}ms, timeout=${timeoutMs}ms, targetStatus=${target.status}, aborting...`);
       record.status = "aborted";
       record.completedAt = Date.now();
       record.error = `Task timeout after ${timeoutMs / 1000}s`;
       target.abort();
+      this.finalizeSpawnedTaskHistoryWindow(record, target);
 
       if (expectsCompletionMessage) {
         this.send(targetActorId, spawnerActorId, `[Task timeout: ${label}]\n\n子任务超时未完成，已自动终止。`);
@@ -726,9 +1143,9 @@ export class ActorSystem {
       });
 
       // 超时时清理（如果需要，且目标非持久 Agent）
-      if (cleanup === "delete" && !target.persistent) {
+      if (cleanup === "delete" && mode !== "session" && !target.persistent) {
         this.kill(targetActorId);
-      } else if (cleanup === "delete" && target.persistent) {
+      } else if (cleanup === "delete" && mode !== "session" && target.persistent) {
         log(`spawnTask cleanup skipped on timeout: ${targetName} is persistent (runId=${runId})`);
       }
     }, timeoutMs);
@@ -760,11 +1177,39 @@ export class ActorSystem {
       runId, spawnerActorId, targetActorId,
       targetName, spawnerName, label, task,
     };
+    let detachRunningListener: (() => void) | undefined;
+    const cleanupRunningListener = () => {
+      if (!detachRunningListener) return;
+      detachRunningListener();
+      detachRunningListener = undefined;
+    };
     this.emitEvent({
       type: "spawned_task_started",
       actorId: targetActorId,
       timestamp: Date.now(),
       detail: { ...taskEventBase, status: "running" as const, elapsed: 0 },
+    });
+
+    detachRunningListener = target.on((event) => {
+      if (record.status !== "running" || event.type !== "step") return;
+      const step = (event.detail as { step?: { content?: string; type?: string; streaming?: boolean } } | undefined)?.step;
+      if (!step || step.streaming) return;
+
+      const message = typeof step.content === "string"
+        ? step.content.slice(0, 240)
+        : "";
+      this.emitEvent({
+        type: "spawned_task_running",
+        actorId: targetActorId,
+        timestamp: event.timestamp,
+        detail: {
+          ...taskEventBase,
+          status: "running" as const,
+          elapsed: Date.now() - record.spawnedAt,
+          message,
+          stepType: step.type as SpawnedTaskEventDetail["stepType"],
+        } satisfies SpawnedTaskEventDetail,
+      });
     });
 
     // 触发 onSpawnTask 钩子
@@ -782,7 +1227,11 @@ export class ActorSystem {
 
     // 执行任务并设置 Announce Flow 回调（含重试机制）
     // 子任务结果仅通过 announce 回送给委派者，避免全局广播造成协作噪音。
-    void target.assignTask(fullTask, undefined, { publishResult: false }).then((taskResult) => {
+    void target.assignTask(fullTask, undefined, {
+      publishResult: false,
+      runOverrides: opts?.overrides,
+    }).then((taskResult) => {
+      cleanupRunningListener();
       if (record.status !== "running") return;
       if (record.timeoutId) clearTimeout(record.timeoutId);
 
@@ -790,6 +1239,7 @@ export class ActorSystem {
         record.status = "completed";
         record.completedAt = Date.now();
         record.result = taskResult.result;
+        this.finalizeSpawnedTaskHistoryWindow(record, target);
         log(`✅ spawnTask COMPLETED: ${targetName} → announce to ${spawnerName}, runId=${runId}, duration=${Date.now() - record.spawnedAt}ms`);
         appendAnnounceEvent(this.sessionId, runId, "completed", taskResult.result);
         try { const { getTaskQueue } = require("@/core/task-center/task-queue"); getTaskQueue().complete(`spawn-${runId}`, taskResult.result?.slice(0, 500)); } catch { /* noop */ }
@@ -801,6 +1251,7 @@ export class ActorSystem {
         record.status = taskResult.status === "aborted" ? "aborted" : "error";
         record.completedAt = Date.now();
         record.error = taskResult.error ?? "unknown error";
+        this.finalizeSpawnedTaskHistoryWindow(record, target);
         log(`❌ spawnTask FAILED: ${targetName}, status=${taskResult.status}, error=${record.error}, runId=${runId}, duration=${Date.now() - record.spawnedAt}ms`);
         appendAnnounceEvent(this.sessionId, runId, record.status, undefined, record.error);
         try { const { getTaskQueue } = require("@/core/task-center/task-queue"); getTaskQueue().fail(`spawn-${runId}`, record.error || "unknown"); } catch { /* noop */ }
@@ -856,10 +1307,10 @@ export class ActorSystem {
       });
 
       // 根据 cleanup 策略决定是否删除子 agent（仅非持久 Agent 可删除）
-      if (cleanup === "delete" && !target.persistent) {
+      if (cleanup === "delete" && mode !== "session" && !target.persistent) {
         log(`spawnTask cleanup: deleting target ${targetName} (runId=${runId})`);
         this.kill(targetActorId);
-      } else if (cleanup === "delete" && target.persistent) {
+      } else if (cleanup === "delete" && mode !== "session" && target.persistent) {
         log(`spawnTask cleanup skipped: ${targetName} is persistent (runId=${runId})`);
       }
     });
@@ -895,6 +1346,178 @@ export class ActorSystem {
   /** 获取所有 spawned tasks 快照 */
   getSpawnedTasksSnapshot(): SpawnedTaskRecord[] {
     return [...this.spawnedTasks.values()];
+  }
+
+  getSpawnedTask(runId: string): SpawnedTaskRecord | undefined {
+    return this.spawnedTasks.get(runId);
+  }
+
+  getFocusedSpawnedSessionRunId(): string | null {
+    return this.focusedSpawnedSessionRunId;
+  }
+
+  focusSpawnedSession(runId: string | null): void {
+    if (runId === null) {
+      this.focusedSpawnedSessionRunId = null;
+      return;
+    }
+    const record = this.getOpenSpawnedSessionByRunId(runId);
+    if (!record) {
+      throw new Error(`Spawned session ${runId} 不存在或已关闭`);
+    }
+    this.focusedSpawnedSessionRunId = runId;
+    record.lastActiveAt = Date.now();
+  }
+
+  closeSpawnedSession(runId: string): void {
+    const record = this.getOpenSpawnedSessionByRunId(runId);
+    if (!record) return;
+    this.closeSpawnedSessionRecord(record);
+  }
+
+  continueSpawnedSession(
+    runId: string,
+    fromActorId: string,
+    content: string,
+    opts?: {
+      label?: string;
+      context?: string;
+      attachments?: string[];
+    },
+  ): SpawnedTaskRecord | { error: string } {
+    const record = this.getOpenSpawnedSessionByRunId(runId);
+    if (!record) {
+      return { error: `Spawned session ${runId} 不存在或已关闭` };
+    }
+    const spawner = this.actors.get(fromActorId);
+    const target = this.actors.get(record.targetActorId);
+    if (!spawner || !target) {
+      return { error: `子会话参与方不存在（runId=${runId}）` };
+    }
+    if (record.spawnerActorId !== fromActorId) {
+      return { error: `只有会话发起者 ${this.actors.get(record.spawnerActorId)?.role.name ?? record.spawnerActorId} 可以继续这个子会话` };
+    }
+
+    const chunks = [content];
+    if (opts?.context) chunks.push(`补充上下文：${opts.context}`);
+    if (opts?.attachments?.length) {
+      chunks.push(`附件文件路径：\n${opts.attachments.map((filePath) => `- ${filePath}`).join("\n")}`);
+    }
+    const sessionMessage = chunks.filter(Boolean).join("\n\n");
+
+    record.lastActiveAt = Date.now();
+    record.status = "running";
+    record.completedAt = undefined;
+    record.error = undefined;
+    if (opts?.label) {
+      record.label = opts.label;
+    }
+
+    this.send(fromActorId, record.targetActorId, sessionMessage, {
+      bypassPlanCheck: true,
+      relatedRunId: record.runId,
+    });
+
+    return record;
+  }
+
+  sendUserMessageToSpawnedSession(
+    runId: string,
+    content: string,
+    opts?: { _briefContent?: string; images?: string[] },
+  ): DialogMessage {
+    const record = this.getOpenSpawnedSessionByRunId(runId);
+    if (!record) {
+      throw new Error(`Spawned session ${runId} 不存在或已关闭`);
+    }
+    record.lastActiveAt = Date.now();
+    record.status = "running";
+    record.completedAt = undefined;
+    record.error = undefined;
+    this.focusedSpawnedSessionRunId = runId;
+    return this.send("user", record.targetActorId, content, {
+      _briefContent: opts?._briefContent,
+      images: opts?.images,
+      bypassPlanCheck: true,
+      relatedRunId: runId,
+    });
+  }
+
+  recordArtifact(record: Omit<DialogArtifactRecord, "id" | "fileName" | "directory"> & { id?: string }): DialogArtifactRecord {
+    const pathKey = this.getArtifactKey(record.path);
+    const existing = this.artifactRecords.get(pathKey);
+    const normalized: DialogArtifactRecord = {
+      id: record.id ?? existing?.id ?? `artifact-${generateId()}`,
+      actorId: record.actorId,
+      path: pathKey,
+      fileName: basename(pathKey),
+      directory: dirname(pathKey),
+      source: record.source,
+      toolName: record.toolName,
+      summary: record.summary,
+      preview: record.preview ?? existing?.preview,
+      fullContent: record.fullContent ?? existing?.fullContent,
+      language: record.language ?? existing?.language ?? inferLanguageFromPath(pathKey),
+      timestamp: record.timestamp,
+      relatedRunId: record.relatedRunId ?? existing?.relatedRunId,
+    };
+    this.artifactRecords.set(pathKey, normalized);
+    return normalized;
+  }
+
+  getArtifactRecordsSnapshot(): DialogArtifactRecord[] {
+    return [...this.artifactRecords.values()].sort((a, b) => b.timestamp - a.timestamp);
+  }
+
+  restoreArtifactRecords(records: readonly DialogArtifactRecord[]): void {
+    this.artifactRecords.clear();
+    for (const record of records) {
+      this.artifactRecords.set(this.getArtifactKey(record.path), { ...record });
+    }
+  }
+
+  registerSessionUploads(
+    records: readonly SessionUploadRecord[],
+    opts?: {
+      actorId?: string;
+      relatedRunId?: string;
+    },
+  ): void {
+    for (const record of records) {
+      const key = record.path ? this.getArtifactKey(record.path) : `${record.type}:${record.name}`;
+      this.sessionUploads.set(key, { ...record });
+      if (!record.path) continue;
+
+      const existingArtifact = this.artifactRecords.get(this.getArtifactKey(record.path));
+      const summary = record.type === "image"
+        ? `用户上传了图片：${record.name}`
+        : `用户上传了文件：${record.name}`;
+      this.recordArtifact({
+        actorId: opts?.actorId ?? existingArtifact?.actorId ?? "user",
+        path: record.path,
+        source: "upload",
+        summary,
+        preview: record.preview ?? record.excerpt ?? existingArtifact?.preview,
+        fullContent: record.excerpt ?? existingArtifact?.fullContent,
+        language: record.originalExt
+          ? record.originalExt.replace(/^\./, "").toLowerCase()
+          : existingArtifact?.language,
+        timestamp: record.addedAt,
+        relatedRunId: opts?.relatedRunId ?? existingArtifact?.relatedRunId,
+      });
+    }
+  }
+
+  getSessionUploadsSnapshot(): SessionUploadRecord[] {
+    return [...this.sessionUploads.values()].sort((a, b) => b.addedAt - a.addedAt);
+  }
+
+  restoreSessionUploads(records: readonly SessionUploadRecord[]): void {
+    this.sessionUploads.clear();
+    for (const record of records) {
+      const key = record.path ? this.getArtifactKey(record.path) : `${record.type}:${record.name}`;
+      this.sessionUploads.set(key, { ...record });
+    }
   }
 
   /**
@@ -954,10 +1577,12 @@ export class ActorSystem {
       content: `[STEER 指令] ${directive}`,
       timestamp: Date.now(),
       priority: "urgent",
+      kind: "system_notice",
     };
 
     actor.receive(msg);
     this.dialogHistory.push(msg);
+    appendDialogMessage(this.sessionId, msg);
     this.emitEvent(msg);
     return msg;
   }
@@ -973,7 +1598,13 @@ export class ActorSystem {
       const targetActor = this.actors.get(record.targetActorId);
       if (targetActor) {
         targetActor.abort();
+        this.finalizeSpawnedTaskHistoryWindow(record, targetActor);
         this.cascadeAbortSpawns(record.targetActorId);
+      } else {
+        this.finalizeSpawnedTaskHistoryWindow(record);
+      }
+      if (record.mode === "session") {
+        this.closeSpawnedSessionRecord(record);
       }
       log(`cascadeAbort: ${record.targetActorId} (spawned by ${actorId}), runId=${record.runId}`);
     }
@@ -1048,7 +1679,7 @@ export class ActorSystem {
 
     const actor = this.actors.get(actorId);
     const actorName = actor?.role.name ?? actorId;
-    const coordinatorId = this.getFirstActor()?.id;
+    const coordinatorId = this.getCoordinatorId();
     const fromNonCoordinator = coordinatorId ? actorId !== coordinatorId : false;
     const suppressLowSignal = opts?.suppressLowSignal ?? true;
 
@@ -1064,6 +1695,8 @@ export class ActorSystem {
       content: trimmed,
       timestamp: Date.now(),
       priority: "normal",
+      kind: "agent_result",
+      relatedRunId: this.getOpenSpawnedSessionByTarget(actorId)?.runId,
     };
     this.dialogHistory.push(msg);
     appendDialogMessage(this.sessionId, msg);
@@ -1095,10 +1728,37 @@ export class ActorSystem {
   askUserInChat(
     actorId: string,
     question: string,
-    timeoutMs = 300_000,
-  ): Promise<string> {
+    opts?: number | {
+      timeoutMs?: number;
+      interactionType?: PendingInteractionType;
+      options?: string[];
+      replyMode?: PendingInteractionReplyMode;
+      approvalRequest?: ApprovalRequest;
+    },
+  ): Promise<PendingInteractionResult> {
     const actorName = this.actors.get(actorId)?.role.name ?? actorId;
     log(`askUserInChat: ${actorName} asks user, question="${question.slice(0, 60)}"`);
+    const normalizedOpts = typeof opts === "number" ? { timeoutMs: opts } : (opts ?? {});
+    const timeoutMs = normalizedOpts.timeoutMs ?? 300_000;
+    const interactionType = normalizedOpts.interactionType ?? "question";
+    const options = normalizedOpts.options;
+    const replyMode = normalizedOpts.replyMode ?? "single";
+    const approvalRequest = normalizedOpts.approvalRequest;
+    const relatedRunId = this.getOpenSpawnedSessionByTarget(actorId)?.runId;
+    if (approvalRequest?.targetPath) {
+      this.recordArtifact({
+        actorId,
+        path: approvalRequest.targetPath,
+        source: "approval",
+        toolName: approvalRequest.toolName,
+        summary: approvalRequest.summary ?? "待确认的文件写入",
+        preview: approvalRequest.preview,
+        fullContent: approvalRequest.fullContent,
+        language: approvalRequest.previewLanguage,
+        timestamp: Date.now(),
+        relatedRunId,
+      });
+    }
     const msg: DialogMessage = {
       id: generateId(),
       from: actorId,
@@ -1107,20 +1767,46 @@ export class ActorSystem {
       timestamp: Date.now(),
       priority: "normal",
       expectReply: true,
+      kind: getInteractionRequestKind(interactionType),
+      interactionType,
+      interactionStatus: "pending",
+      options,
+      interactionId: generateId(),
+      approvalRequest,
+      relatedRunId,
     };
     this.dialogHistory.push(msg);
+    appendDialogMessage(this.sessionId, msg);
 
-    return new Promise<string>((resolve) => {
+    return new Promise<PendingInteractionResult>((resolve) => {
       const timeoutId = setTimeout(() => {
-        this.pendingReplies.delete(msg.id);
+        const pending = this.pendingInteractions.get(msg.id);
+        if (!pending) return;
+        pending.status = "timed_out";
+        this.pendingInteractions.delete(msg.id);
+        this.updateDialogMessage(msg.id, { interactionStatus: "timed_out" });
         this.emitEvent(msg); // re-sync so UI clears the pending indicator
-        resolve("（用户未回复，请根据已有信息继续执行）");
+        resolve({
+          interactionId: pending.id,
+          interactionType: pending.type,
+          status: "timed_out",
+          content: "",
+        });
       }, timeoutMs);
 
-      this.pendingReplies.set(msg.id, {
-        fromActorId: "user",
+      this.pendingInteractions.set(msg.id, {
+        id: msg.interactionId!,
+        fromActorId: actorId,
         messageId: msg.id,
-        resolve: (reply) => resolve(reply.content),
+        question,
+        type: interactionType,
+        replyMode,
+        status: "pending",
+        createdAt: msg.timestamp,
+        expiresAt: msg.timestamp + timeoutMs,
+        options,
+        approvalRequest,
+        resolve,
         timeoutId,
       });
 
@@ -1133,34 +1819,95 @@ export class ActorSystem {
    * 用户回复某条 expectReply 消息。
    * 由 UI 调用，将回复路由到等待中的 pending reply。
    */
-  replyToMessage(messageId: string, content: string): DialogMessage {
+  replyToMessage(
+    messageId: string,
+    content: string,
+    opts?: {
+      _briefContent?: string;
+      images?: string[];
+    },
+  ): DialogMessage {
+    const pendingInteraction = this.pendingInteractions.get(messageId);
+    const sourceMessage = this.dialogHistory.find((message) => message.id === messageId);
+    const relatedRunId = sourceMessage?.relatedRunId
+      ?? (pendingInteraction ? this.getOpenSpawnedSessionByTarget(pendingInteraction.fromActorId)?.runId : undefined);
     const msg: DialogMessage = {
       id: generateId(),
       from: "user",
-      to: undefined,
+      to: pendingInteraction?.fromActorId,
       content,
       timestamp: Date.now(),
       priority: "normal",
       replyTo: messageId,
+      _briefContent: opts?._briefContent,
+      kind: getInteractionResponseKind(pendingInteraction?.type ?? "question"),
+      interactionType: pendingInteraction?.type,
+      interactionId: pendingInteraction?.id,
+      interactionStatus: "answered",
+      relatedRunId,
+      ...(opts?.images?.length ? { images: opts.images } : {}),
     };
     this.dialogHistory.push(msg);
+    appendDialogMessage(this.sessionId, msg);
     this.emitEvent(msg);
 
-    const pending = this.pendingReplies.get(messageId);
-    if (pending) {
-      if (pending.timeoutId) clearTimeout(pending.timeoutId);
+    if (pendingInteraction) {
+      pendingInteraction.status = "answered";
+      if (pendingInteraction.timeoutId) clearTimeout(pendingInteraction.timeoutId);
+      this.pendingInteractions.delete(messageId);
+      this.updateDialogMessage(messageId, { interactionStatus: "answered" });
+      pendingInteraction.resolve({
+        interactionId: pendingInteraction.id,
+        interactionType: pendingInteraction.type,
+        status: "answered",
+        content,
+        message: msg,
+      });
+      return msg;
+    }
+
+    const pendingReply = this.pendingReplies.get(messageId);
+    if (pendingReply) {
+      if (pendingReply.timeoutId) clearTimeout(pendingReply.timeoutId);
       this.pendingReplies.delete(messageId);
-      pending.resolve(msg);
+      pendingReply.resolve(msg);
     }
 
     return msg;
   }
 
-  /** 获取所有等待用户回复的消息 ID */
-  getPendingUserReplies(): string[] {
-    return [...this.pendingReplies.entries()]
-      .filter(([, p]) => p.fromActorId === "user")
-      .map(([id]) => id);
+  /** 获取所有等待用户回复的交互 */
+  getPendingUserInteractions(): PendingInteraction[] {
+    return [...this.pendingInteractions.values()]
+      .filter((interaction) => interaction.status === "pending")
+      .sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  /** 取消某个 Actor 发起的所有待用户交互（用于任务 abort / actor stop） */
+  cancelPendingInteractionsForActor(actorId: string): number {
+    let cancelled = 0;
+
+    for (const [messageId, pending] of [...this.pendingInteractions.entries()]) {
+      if (pending.fromActorId !== actorId || pending.status !== "pending") continue;
+
+      pending.status = "cancelled";
+      if (pending.timeoutId) clearTimeout(pending.timeoutId);
+      this.pendingInteractions.delete(messageId);
+      this.updateDialogMessage(messageId, { interactionStatus: "cancelled" });
+      const updatedMessage = this.dialogHistory.find((message) => message.id === messageId);
+      if (updatedMessage) {
+        this.emitEvent(updatedMessage);
+      }
+      pending.resolve({
+        interactionId: pending.id,
+        interactionType: pending.type,
+        status: "cancelled",
+        content: "",
+      });
+      cancelled++;
+    }
+
+    return cancelled;
   }
 
   // ── Dialog History ──
@@ -1182,6 +1929,14 @@ export class ActorSystem {
   restoreDialogHistory(history: DialogMessage[]): void {
     this.dialogHistory = [...history];
     log("Restored", history.length, "dialog messages from persisted session");
+  }
+
+  /** 恢复子任务记录（用于 session 恢复后 UI 显示） */
+  restoreSpawnedTasks(records: Array<Omit<SpawnedTaskRecord, "timeoutId">>): void {
+    for (const record of records) {
+      this.spawnedTasks.set(record.runId, { ...record });
+    }
+    log("Restored", records.length, "spawned task records");
   }
 
   /** 恢复指定 Actor 的会话记忆 */
@@ -1206,6 +1961,9 @@ export class ActorSystem {
     archiveSession(oldSessionId, summary);
     this.dialogHistory = [];
     (this as any).sessionId = generateId();
+    this.artifactRecords.clear();
+    this.sessionUploads.clear();
+    this.focusedSpawnedSessionRunId = null;
 
     // 清空每个 Agent 的会话记忆
     for (const actor of this.actors.values()) {
@@ -1219,11 +1977,24 @@ export class ActorSystem {
       pending.resolve({ id, from: "system", content: "", timestamp: Date.now(), priority: "normal" as const });
     }
 
+    for (const [messageId, pending] of this.pendingInteractions) {
+      if (pending.timeoutId) clearTimeout(pending.timeoutId);
+      this.pendingInteractions.delete(messageId);
+      pending.resolve({
+        interactionId: pending.id,
+        interactionType: pending.type,
+        status: "cancelled",
+        content: "",
+      });
+    }
+
     // 清空 spawnedTasks
     for (const record of this.spawnedTasks.values()) {
       if (record.timeoutId) clearTimeout(record.timeoutId);
+      this.closeSpawnedSessionRecord(record);
     }
     this.spawnedTasks.clear();
+    this.dialogExecutionPlan = null;
 
     // 清空 transcript 内存缓存
     clearSessionCache();
@@ -1274,7 +2045,7 @@ export class ActorSystem {
   }
 
   /** 智能路由：根据任务内容自动选择最合适的 Agent（含负载感知） */
-  routeTask(taskDescription: string, _preferredCapabilities?: string[]): { agentId: string; reason: string }[] {
+  routeTask(taskDescription: string, preferredCapabilities?: string[]): { agentId: string; reason: string }[] {
     const agents = this.getAll();
     if (agents.length === 0) return [];
     if (agents.length === 1) {
@@ -1311,14 +2082,24 @@ export class ActorSystem {
       if (taskLower.includes(kw.toLowerCase())) caps.forEach((c) => matchedCaps.add(c));
     }
 
+    // 将 preferredCapabilities 也加入匹配集合
+    if (preferredCapabilities?.length) {
+      for (const cap of preferredCapabilities) {
+        matchedCaps.add(cap);
+      }
+    }
+
     // Tokenize task for expertise matching
     const taskTokens = taskLower.split(/[\s,.:;!?，。：；！？\n]+/).filter((t) => t.length > 1);
+
+    const coordinatorId = this.getCoordinatorId();
 
     const scored = agents.map((agent, idx) => {
       let score = 0;
       const agentCaps = agent.capabilities?.tags || [];
       const expertise = agent.capabilities?.expertise || [];
       const matchedLabels: string[] = [];
+      const scoreBreakdown: string[] = [];
 
       // Capability match: +10 per matched capability
       for (const cap of matchedCaps) {
@@ -1327,33 +2108,74 @@ export class ActorSystem {
           matchedLabels.push(CAPABILITY_LABELS[cap] ?? cap);
         }
       }
+      if (matchedLabels.length) {
+        scoreBreakdown.push(`能力匹配+${matchedLabels.length * 10}`);
+      }
+
+      // preferredCapabilities bonus: extra +5 for explicitly preferred
+      if (preferredCapabilities?.length) {
+        for (const pref of preferredCapabilities) {
+          if (agentCaps.includes(pref as any)) {
+            score += 5;
+            scoreBreakdown.push(`偏好能力${CAPABILITY_LABELS[pref] ?? pref}+5`);
+          }
+        }
+      }
 
       // Expertise keyword overlap: +5 per match
+      let expertiseMatches = 0;
       for (const exp of expertise) {
         if (taskTokens.some((t) => t.includes(exp.toLowerCase()) || exp.toLowerCase().includes(t))) {
           score += 5;
+          expertiseMatches++;
         }
+      }
+      if (expertiseMatches) {
+        scoreBreakdown.push(`专长匹配+${expertiseMatches * 5}`);
       }
 
       // No capability match: prefer coordinator / synthesis
       if (matchedCaps.size === 0) {
-        if (agentCaps.includes("coordinator")) score += 8;
-        else if (agentCaps.includes("synthesis")) score += 4;
+        if (agentCaps.includes("coordinator")) {
+          score += 8;
+          scoreBreakdown.push("无明确能力匹配→协调者+8");
+        } else if (agentCaps.includes("synthesis")) {
+          score += 4;
+          scoreBreakdown.push("无明确能力匹配→整合者+4");
+        }
       }
 
-      // Coordinator bonus (task decomposition ability)
-      if (agentCaps.includes("coordinator")) score += 2;
+      // Coordinator context affinity: if session has a coordinator,
+      // prefer routing through coordinator for complex/ambiguous tasks
+      if (coordinatorId === agent.id) {
+        score += 3;
+        scoreBreakdown.push("协调者上下文亲和+3");
+      }
 
       // Load balancing: idle agents get bonus, running agents penalized
-      if (agent.status === "idle") score += 3;
-      else if (agent.status === "running") score -= 5;
+      if (agent.status === "idle") {
+        score += 3;
+        scoreBreakdown.push("空闲+3");
+      } else if (agent.status === "running") {
+        score -= 5;
+        scoreBreakdown.push("忙碌-5");
+      }
+
+      // Inbox depth penalty: penalize agents with queued work
+      if (agent.pendingInboxCount > 0) {
+        const penalty = Math.min(agent.pendingInboxCount * 2, 6);
+        score -= penalty;
+        scoreBreakdown.push(`队列深度${agent.pendingInboxCount}→-${penalty}`);
+      }
 
       // Tiebreaker: stable ordering by spawn position (no randomness)
       score += (agents.length - idx) * 0.01;
 
       const reason = matchedLabels.length > 0
-        ? `擅长 ${matchedLabels.join("、")}`
-        : agent.status === "idle" ? "空闲可用" : "默认选择";
+        ? `擅长 ${matchedLabels.join("、")} [${scoreBreakdown.join(", ")}]`
+        : scoreBreakdown.length > 0
+          ? `${scoreBreakdown.join(", ")}`
+          : agent.status === "idle" ? "空闲可用" : "默认选择";
 
       return { agentId: agent.id, reason, score };
     });
@@ -1389,8 +2211,10 @@ export class ActorSystem {
         pendingInbox: a.pendingInboxCount,
         currentTask: a.currentTask,
       })),
+      coordinatorActorId: this.getCoordinatorId(),
+      dialogExecutionPlan: this.getDialogExecutionPlan(),
       dialogHistory: [...this.dialogHistory],
-      pendingReplies: this.pendingReplies.size,
+      pendingReplies: this.pendingReplies.size + this.pendingInteractions.size,
       spawnedTasks: [...this.spawnedTasks.values()].map((r) => ({
         runId: r.runId,
         spawner: r.spawnerActorId,
@@ -1483,5 +2307,11 @@ export class ActorSystem {
       this.sessionId,
       this.getAll().map((a) => ({ id: a.id, name: a.role.name, model: a.modelOverride })),
     );
+  }
+
+  private updateDialogMessage(messageId: string, patch: Partial<DialogMessage>): void {
+    const idx = this.dialogHistory.findIndex((message) => message.id === messageId);
+    if (idx < 0) return;
+    this.dialogHistory[idx] = { ...this.dialogHistory[idx], ...patch };
   }
 }

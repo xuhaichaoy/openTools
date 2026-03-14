@@ -228,8 +228,7 @@ fn open_or_build_db(project_path: &Path) -> Result<Connection, String> {
     }
 
     if db_path.exists() {
-        let conn =
-            Connection::open(&db_path).map_err(|e| format!("打开 CKG 数据库失败: {e}"))?;
+        let conn = Connection::open(&db_path).map_err(|e| format!("打开 CKG 数据库失败: {e}"))?;
         return Ok(conn);
     }
 
@@ -362,7 +361,15 @@ fn visit_node(
         _ => {
             for i in 0..node.child_count() {
                 if let Some(child) = node.child(i) {
-                    visit_node(conn, child, file_path, source, lang, parent_class, parent_function);
+                    visit_node(
+                        conn,
+                        child,
+                        file_path,
+                        source,
+                        lang,
+                        parent_class,
+                        parent_function,
+                    );
                 }
             }
         }
@@ -381,7 +388,8 @@ fn node_text<'a>(node: Node, source: &'a str) -> &'a str {
 }
 
 fn child_field_text<'a>(node: Node, field: &str, source: &'a str) -> Option<&'a str> {
-    node.child_by_field_name(field).map(|n| node_text(n, source))
+    node.child_by_field_name(field)
+        .map(|n| node_text(n, source))
 }
 
 fn insert_function(conn: &Connection, entry: &FunctionEntry) {
@@ -470,8 +478,8 @@ fn visit_python(
                         };
                         if let Some(fn_node) = def_node {
                             if let Some(method_name) = child_field_text(fn_node, "name", source) {
-                                let params_text = child_field_text(fn_node, "parameters", source)
-                                    .unwrap_or("()");
+                                let params_text =
+                                    child_field_text(fn_node, "parameters", source).unwrap_or("()");
                                 methods_str.push_str(&format!("- {method_name}{params_text}\n"));
                             }
                         }
@@ -502,7 +510,14 @@ fn visit_python(
     }
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
-            visit_python(conn, child, file_path, source, parent_class, parent_function);
+            visit_python(
+                conn,
+                child,
+                file_path,
+                source,
+                parent_class,
+                parent_function,
+            );
         }
     }
 }
@@ -572,7 +587,14 @@ fn visit_rust(
     }
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
-            visit_rust(conn, child, file_path, source, parent_class, parent_function);
+            visit_rust(
+                conn,
+                child,
+                file_path,
+                source,
+                parent_class,
+                parent_function,
+            );
         }
     }
 }
@@ -669,7 +691,14 @@ fn visit_ts_js(
     }
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
-            visit_ts_js(conn, child, file_path, source, parent_class, parent_function);
+            visit_ts_js(
+                conn,
+                child,
+                file_path,
+                source,
+                parent_class,
+                parent_function,
+            );
         }
     }
 }
@@ -755,7 +784,14 @@ fn visit_java(
     }
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
-            visit_java(conn, child, file_path, source, parent_class, parent_function);
+            visit_java(
+                conn,
+                child,
+                file_path,
+                source,
+                parent_class,
+                parent_function,
+            );
         }
     }
 }
@@ -789,8 +825,7 @@ fn visit_go(
         }
         "method_declaration" => {
             if let Some(name) = child_field_text(node, "name", source) {
-                let receiver = child_field_text(node, "receiver", source)
-                    .map(|s| s.to_string());
+                let receiver = child_field_text(node, "receiver", source).map(|s| s.to_string());
                 insert_function(
                     conn,
                     &FunctionEntry {
@@ -831,7 +866,14 @@ fn visit_go(
     }
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
-            visit_go(conn, child, file_path, source, parent_class, _parent_function);
+            visit_go(
+                conn,
+                child,
+                file_path,
+                source,
+                parent_class,
+                _parent_function,
+            );
         }
     }
 }
@@ -867,7 +909,14 @@ fn visit_c(
     }
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
-            visit_c(conn, child, file_path, source, parent_class, parent_function);
+            visit_c(
+                conn,
+                child,
+                file_path,
+                source,
+                parent_class,
+                parent_function,
+            );
         }
     }
 }
@@ -968,7 +1017,14 @@ fn visit_cpp(
     }
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
-            visit_cpp(conn, child, file_path, source, parent_class, parent_function);
+            visit_cpp(
+                conn,
+                child,
+                file_path,
+                source,
+                parent_class,
+                parent_function,
+            );
         }
     }
 }

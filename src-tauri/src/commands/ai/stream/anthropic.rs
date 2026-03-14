@@ -34,7 +34,6 @@ pub async fn anthropic_stream_loop(
 
         let mut req_builder = client
             .post(&url)
-            .header("x-api-key", &config.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("Content-Type", "application/json");
         if url.contains("coding.dashscope") || url.contains("coding-intl.dashscope") {
@@ -42,6 +41,8 @@ pub async fn anthropic_stream_loop(
         }
         if is_team {
             req_builder = req_builder.header("Authorization", format!("Bearer {}", config.api_key));
+        } else {
+            req_builder = req_builder.header("x-api-key", &config.api_key);
         }
 
         let final_request = if is_team {
@@ -59,16 +60,44 @@ pub async fn anthropic_stream_loop(
             request.clone()
         };
 
+        let _ = app.emit(
+            "ai-stream-raw",
+            serde_json::json!({
+                "conversation_id": conversation_id,
+                "raw_line": format!(
+                    "[RUST REQUEST START] POST {}\nPayload: {}",
+                    url,
+                    serde_json::to_string(&final_request).unwrap_or_default()
+                ),
+            }),
+        );
+
         let response = req_builder
             .json(&final_request)
             .send()
             .await
             .map_err(|e| format!("请求失败: {}", e))?;
 
-        if !response.status().is_success() {
-            let status = response.status();
+        let status = response.status();
+        let _ = app.emit(
+            "ai-stream-raw",
+            serde_json::json!({
+                "conversation_id": conversation_id,
+                "raw_line": format!("[RUST RESPONSE HEADERS RECEIVED] HTTP {}", status),
+            }),
+        );
+
+        if !status.is_success() {
             let status_code = status.as_u16();
             let body = response.text().await.unwrap_or_default();
+            let preview: String = body.chars().take(1200).collect();
+            let _ = app.emit(
+                "ai-stream-raw",
+                serde_json::json!({
+                    "conversation_id": conversation_id,
+                    "raw_line": format!("[RUST ERROR BODY] {}", preview),
+                }),
+            );
             let error_detail = if body.is_empty() {
                 format!("HTTP {} (无响应体)", status_code)
             } else {
@@ -122,6 +151,13 @@ pub async fn anthropic_stream_loop(
                             continue;
                         }
                         let data = &line[6..];
+                        let _ = app.emit(
+                            "ai-stream-raw",
+                            serde_json::json!({
+                                "conversation_id": conversation_id,
+                                "raw_line": format!("[RAW DATA] {}", data),
+                            }),
+                        );
 
                         let parsed: serde_json::Value = match serde_json::from_str(data) {
                             Ok(v) => v,
@@ -156,11 +192,27 @@ pub async fn anthropic_stream_loop(
                                             );
                                         }
                                     }
+                                    Some("thinking_delta") | Some("thinking") => {
+                                        let thinking_text = delta["thinking"]
+                                            .as_str()
+                                            .or_else(|| delta["text"].as_str())
+                                            .unwrap_or("");
+                                        if !thinking_text.is_empty() {
+                                            let _ = app.emit(
+                                                "ai-stream-thinking",
+                                                serde_json::json!({
+                                                    "conversation_id": conversation_id,
+                                                    "content": thinking_text,
+                                                }),
+                                            );
+                                        }
+                                    }
                                     Some("input_json_delta") => {
                                         if let Some(json_str) = delta["partial_json"].as_str() {
                                             current_tool_input.push_str(json_str);
                                         }
                                     }
+                                    Some("signature_delta") => {}
                                     _ => {}
                                 }
                             }

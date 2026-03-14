@@ -25,7 +25,9 @@ impl Default for CurrentShortcuts {
     fn default() -> Self {
         Self {
             toggle: "Super+Digit2".parse().expect("default toggle shortcut"),
-            context: "Control+Shift+KeyA".parse().expect("default context shortcut"),
+            context: "Control+Shift+KeyA"
+                .parse()
+                .expect("default context shortcut"),
         }
     }
 }
@@ -625,7 +627,8 @@ fn setup_shortcuts(
                             let text = app.clipboard().read_text().unwrap_or_default();
                             if !text.is_empty() {
                                 use tauri::Emitter;
-                                let _ = app.emit("context-action", serde_json::json!({ "text": text }));
+                                let _ =
+                                    app.emit("context-action", serde_json::json!({ "text": text }));
                                 if let Some(window) = app.get_webview_window("main") {
                                     show_window(&window, &suppress_for_shortcut);
                                 }
@@ -636,10 +639,18 @@ fn setup_shortcuts(
             })
             .build(),
     )?;
-    if app.global_shortcut().register(default.toggle.clone()).is_err() {
+    if app
+        .global_shortcut()
+        .register(default.toggle.clone())
+        .is_err()
+    {
         log::warn!("全局快捷键 唤醒/隐藏 注册失败（可能已被占用），将不生效");
     }
-    if app.global_shortcut().register(default.context.clone()).is_err() {
+    if app
+        .global_shortcut()
+        .register(default.context.clone())
+        .is_err()
+    {
         log::warn!("全局快捷键 上下文操作 注册失败（可能已被占用），将不生效");
     }
     Ok(())

@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod model_capabilities;
 pub mod request;
 pub mod stream;
 pub mod tools;
@@ -11,6 +12,15 @@ pub use types::{AIConfig, ChatMessage, OwnKeyModelConfig};
 use tauri::{AppHandle, Manager};
 
 use crate::error::AppError;
+
+fn build_stream_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
 
 fn should_force_rag_for_query(query: &str) -> bool {
     let q = query.trim().to_lowercase();
@@ -231,11 +241,12 @@ pub async fn ai_chat(messages: Vec<ChatMessage>, config: AIConfig) -> Result<Str
         let url = format!("{}/v1/messages", config.base_url);
         let mut req_builder = client
             .post(&url)
-            .header("x-api-key", &config.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("Content-Type", "application/json");
         if is_team {
             req_builder = req_builder.header("Authorization", format!("Bearer {}", config.api_key));
+        } else {
+            req_builder = req_builder.header("x-api-key", &config.api_key);
         }
 
         let final_request = if let Some(ref tid) = config.team_id {
@@ -340,7 +351,7 @@ pub async fn ai_chat_stream(
     extra_tools: Option<Vec<serde_json::Value>>,
     skip_tools: Option<bool>,
 ) -> Result<(), AppError> {
-    let client = reqwest::Client::new();
+    let client = build_stream_client();
     let cancellation = app.state::<StreamCancellation>();
     cancellation.reset(&conversation_id);
 

@@ -211,14 +211,24 @@ class ImageParser implements DocumentParser {
       try {
         const { getMToolsAI } = await import("@/core/ai/mtools-ai");
         const ai = getMToolsAI();
-        const text = await ai.chat([
-          { role: "system", content: "Extract all text content from this image. Return only the extracted text." },
-          { role: "user", content: `[Image: ${input.filePath}]` },
-        ]);
+        const response = await ai.chat({
+          messages: [
+            {
+              role: "system",
+              content: "Extract all visible text from the image. Preserve line breaks when possible. Return only the extracted text.",
+            },
+            {
+              role: "user",
+              content: "请提取这张图片中的全部文字。",
+              images: [input.filePath],
+            },
+          ],
+          skipTools: true,
+        });
         return {
           filePath: input.filePath,
           title: input.filePath.split("/").pop() ?? "Image",
-          content: String(text),
+          content: response.content.trim(),
           format: "image",
           metadata: { method: "llm-vision" },
           parseTimeMs: Date.now() - start,

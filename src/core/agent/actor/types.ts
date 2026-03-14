@@ -22,15 +22,133 @@ export interface InboxMessage {
   expectReply?: boolean;
   /** 如果这条消息是对某条消息的回复 */
   replyTo?: string;
+  /** 附带的图片路径（本地文件路径） */
+  images?: string[];
 }
 
 // ── Dialog Messages（UI 层使用） ──
+
+export type DialogMessageKind =
+  | "user_input"
+  | "agent_message"
+  | "agent_result"
+  | "clarification_request"
+  | "clarification_response"
+  | "approval_request"
+  | "approval_response"
+  | "system_notice";
+
+export type PendingInteractionType = "question" | "clarification" | "approval";
+export type PendingInteractionStatus = "pending" | "answered" | "timed_out" | "cancelled";
+export type PendingInteractionReplyMode = "single" | "broadcast";
+
+export interface ApprovalRequestDetail {
+  label: string;
+  value: string;
+  mono?: boolean;
+}
+
+export type ApprovalDecisionPolicy = "always-allow" | "ask-every-time" | "deny";
+
+export interface ApprovalDecisionOption {
+  label: string;
+  policy: ApprovalDecisionPolicy;
+  cacheKey?: string;
+  description?: string;
+}
+
+export interface ApprovalRequest {
+  toolName: string;
+  title: string;
+  summary: string;
+  riskDescription?: string;
+  targetPath?: string;
+  preview?: string;
+  fullContent?: string;
+  previewLabel?: string;
+  previewLanguage?: string;
+  previewTruncated?: boolean;
+  details?: ApprovalRequestDetail[];
+  cacheScopeSummary?: string;
+  decisionOptions?: ApprovalDecisionOption[];
+}
+
+export interface DialogExecutionPlanEdge {
+  fromActorId: string;
+  toActorId: string;
+}
+
+export interface DialogExecutionPlan {
+  id: string;
+  routingMode: "direct" | "coordinator" | "smart" | "broadcast";
+  summary: string;
+  approvedAt: number;
+  initialRecipientActorIds: string[];
+  participantActorIds: string[];
+  coordinatorActorId?: string;
+  allowedMessagePairs: DialogExecutionPlanEdge[];
+  allowedSpawnPairs: DialogExecutionPlanEdge[];
+  state: "armed" | "active";
+  activatedAt?: number;
+  sourceMessageId?: string;
+}
 
 export interface DialogMessage extends InboxMessage {
   /** 接收方 actor id（undefined = 广播） */
   to?: string;
   /** UI 显示用的简短内容（附件摘要），完整上下文仍在 content 中发送给 Agent */
   _briefContent?: string;
+  /** 对话协议中的消息类型 */
+  kind?: DialogMessageKind;
+  /** 与用户交互时的交互类型 */
+  interactionType?: PendingInteractionType;
+  /** 当前交互消息的状态 */
+  interactionStatus?: PendingInteractionStatus;
+  /** 可选项列表（用于澄清/审批） */
+  options?: string[];
+  /** 所属交互 ID */
+  interactionId?: string;
+  /** 审批请求的结构化摘要（供 UI 卡片渲染） */
+  approvalRequest?: ApprovalRequest;
+  /** 关联的子会话 runId（用于 thread-bound child session 聚焦） */
+  relatedRunId?: string;
+}
+
+export type DialogArtifactSource =
+  | "approval"
+  | "message"
+  | "tool_write"
+  | "tool_edit"
+  | "upload";
+
+export interface DialogArtifactRecord {
+  id: string;
+  actorId: string;
+  path: string;
+  fileName: string;
+  directory: string;
+  source: DialogArtifactSource;
+  toolName?: string;
+  summary: string;
+  preview?: string;
+  fullContent?: string;
+  language?: string;
+  timestamp: number;
+  relatedRunId?: string;
+}
+
+export type SessionUploadType = "image" | "text_file" | "document" | "folder";
+
+export interface SessionUploadRecord {
+  id: string;
+  type: SessionUploadType;
+  name: string;
+  path?: string;
+  size: number;
+  addedAt: number;
+  originalExt?: string;
+  preview?: string;
+  excerpt?: string;
 }
 
 // ── Agent Configuration ──
@@ -138,6 +256,9 @@ export interface SpawnTaskOverrides {
   temperature?: number;
 }
 
+/** 单次运行级别的覆盖配置，避免污染 Actor 常驻实例状态 */
+export interface ActorRunOverrides extends SpawnTaskOverrides {}
+
 // ── Actor Events ──
 
 export type ActorEventType =
@@ -178,6 +299,10 @@ export interface SpawnedTaskEventDetail {
   status: SpawnedTaskStatus;
   /** Elapsed time in ms since spawn */
   elapsed?: number;
+  /** Latest progress message (for running events) */
+  message?: string;
+  /** Latest step type (for running events) */
+  stepType?: AgentStep["type"];
   /** Result content (only for completed) */
   result?: string;
   /** Error message (only for failed/timeout) */
@@ -203,6 +328,30 @@ export interface PendingReply {
   fromActorId: string;
   messageId: string;
   resolve: (reply: InboxMessage) => void;
+  timeoutId?: ReturnType<typeof setTimeout>;
+}
+
+export interface PendingInteractionResult {
+  interactionId: string;
+  interactionType: PendingInteractionType;
+  status: "answered" | "timed_out" | "cancelled";
+  content: string;
+  message?: InboxMessage;
+}
+
+export interface PendingInteraction {
+  id: string;
+  fromActorId: string;
+  messageId: string;
+  question: string;
+  type: PendingInteractionType;
+  replyMode: PendingInteractionReplyMode;
+  status: PendingInteractionStatus;
+  createdAt: number;
+  expiresAt?: number;
+  options?: string[];
+  approvalRequest?: ApprovalRequest;
+  resolve: (result: PendingInteractionResult) => void;
   timeoutId?: ReturnType<typeof setTimeout>;
 }
 
@@ -233,4 +382,14 @@ export interface SpawnedTaskRecord {
   expectsCompletionMessage: boolean;
   /** 清理策略：delete=完成后删除，keep=保持 */
   cleanup: "delete" | "keep";
+  /** 目标 Agent 会话历史切片起点（用于 UI 聚焦子任务） */
+  sessionHistoryStartIndex?: number;
+  /** 目标 Agent 会话历史切片终点（任务结束后写入） */
+  sessionHistoryEndIndex?: number;
+  /** session 模式下该子会话是否仍处于可继续交互的打开状态 */
+  sessionOpen?: boolean;
+  /** 最近一次收到会话输入或产生会话输出的时间 */
+  lastActiveAt?: number;
+  /** 子会话关闭时间（手动关闭 / reset / actor 销毁） */
+  sessionClosedAt?: number;
 }

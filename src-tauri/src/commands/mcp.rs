@@ -1,10 +1,10 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use tauri::{Manager, State};
-use serde::{Deserialize, Serialize};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -92,8 +92,8 @@ pub async fn mcp_save_config(
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     let path = config_path(&app)?;
-    let json = serde_json::to_string_pretty(&configs)
-        .map_err(|e| format!("Serialize error: {}", e))?;
+    let json =
+        serde_json::to_string_pretty(&configs).map_err(|e| format!("Serialize error: {}", e))?;
     std::fs::write(&path, json).map_err(|e| format!("Write error: {}", e))?;
     Ok(())
 }
@@ -178,7 +178,11 @@ fn find_npx_path() -> Option<String> {
     ];
 
     if let Ok(path_var) = std::env::var("PATH") {
-        let separator = if cfg!(target_os = "windows") { ';' } else { ':' };
+        let separator = if cfg!(target_os = "windows") {
+            ';'
+        } else {
+            ':'
+        };
 
         if cfg!(target_os = "windows") {
             for path in path_var.split(separator) {

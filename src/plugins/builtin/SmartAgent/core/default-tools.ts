@@ -70,6 +70,13 @@ async function invokeTauri<T = unknown>(
   return invoke<T>(command, args);
 }
 
+function decodeBase64Utf8(input: string): string {
+  const normalized = input.replace(/\s+/g, "");
+  const binary = globalThis.atob(normalized);
+  const bytes = Uint8Array.from(binary, (ch) => ch.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
 function createLocalDevTools(
   confirmHostFallback: (context: RuntimeFallbackContext) => Promise<boolean>,
 ): AgentTool[] {
@@ -183,16 +190,18 @@ function createLocalDevTools(
     },
     {
       name: "write_file",
-      description: "写入本地文本文件（会覆盖目标文件）。注意：对于已有文件的局部修改，优先使用 str_replace_edit 工具（更精确、更安全）。write_file 仅适合创建全新文件或需要完全重写的场景。",
+      description: "写入本地文本文件（会覆盖目标文件）。注意：对于已有文件的局部修改，优先使用 str_replace_edit 工具（更精确、更安全）。write_file 仅适合创建全新文件或需要完全重写的场景。严禁在生成网页或代码时将图片转为 base64 嵌入！请务必优先使用外部占位符图片（如 https://placehold.co/600x400）或假文件路径，确保只输出纯文本代码。",
       parameters: {
         path: { type: "string", description: "文件路径（建议绝对路径）" },
-        content: { type: "string", description: "要写入的文本内容" },
+        content: { type: "string", description: "要写入的纯文本内容，禁止使用 base64", required: true },
       },
       dangerous: true,
       execute: async (params) => {
         const path = String(params.path || "");
         if (!path.trim()) return { error: "path 不能为空" };
         const content = String(params.content || "");
+        
+        if (!content) return { error: "content 不能为空" };
         return agentRuntimeManager.writeTextFile(path, content, {
           confirmHostFallback,
           allowInteractiveHostWriteWhenNoPolicyRoots: true,
@@ -917,7 +926,7 @@ export function createBuiltinAgentTools(
     {
       name: "get_system_info",
       description:
-        "获取系统与常用目录信息（home/desktop/downloads），用于构造绝对路径并避免 ~ 路径错误",
+        "按需获取系统与常用目录信息（home/desktop/downloads），用于构造绝对路径并避免 ~ 路径错误。仅在无法从上下文直接确定路径时使用，不要把它当作默认第一步。",
       readonly: true,
       execute: async () => {
         const { homeDir, desktopDir, downloadDir } = await import("@tauri-apps/api/path");

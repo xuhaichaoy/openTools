@@ -3,6 +3,7 @@ import { ChevronDown, Check, Sparkles, Cpu } from "lucide-react";
 import { useAIStore } from "@/store/ai-store";
 import { useTeamStore } from "@/store/team-store";
 import { api } from "@/core/api/client";
+import { primeTeamModelCache } from "@/core/ai/router";
 
 interface TeamModelInfo {
   config_id: string;
@@ -75,6 +76,7 @@ export function ModelSelector() {
         )
         .then((res) => {
           if (!cancelled) {
+            primeTeamModelCache(config.team_id!, res.models || []);
             setTeamModels(res.models || []);
           }
         })

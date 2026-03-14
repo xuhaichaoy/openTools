@@ -1,9 +1,19 @@
+import type {
+  MiddlewareOverrides,
+  ThinkingLevel,
+  ToolPolicy,
+} from "./types";
+
+export type DialogRoutingMode = "coordinator" | "smart" | "broadcast";
+
 export interface DialogPreset {
   id: string;
   name: string;
   description: string;
   participants: DialogPresetParticipant[];
   suggestedTopic?: string;
+  defaultRoutingMode?: DialogRoutingMode;
+  requirePlanApproval?: boolean;
 }
 
 export interface DialogPresetParticipant {
@@ -11,7 +21,39 @@ export interface DialogPresetParticipant {
   suggestedModel?: string;
   suggestedCapabilities?: string[];
   systemPromptOverride?: string;
+  workspace?: string;
+  toolPolicy?: ToolPolicy;
+  middlewareOverrides?: MiddlewareOverrides;
+  timeoutSeconds?: number;
+  contextTokens?: number;
+  thinkingLevel?: ThinkingLevel;
 }
+
+const READ_ONLY_POLICY: ToolPolicy = {
+  deny: [
+    "write_file",
+    "str_replace_edit",
+    "json_edit",
+    "delete_file",
+    "run_shell_command",
+    "persistent_shell",
+    "native_*",
+    "database_execute",
+    "ssh_*",
+  ],
+};
+
+const CODER_POLICY: ToolPolicy = {
+  deny: ["delete_file", "native_*", "ssh_*"],
+};
+
+const SAFE_APPROVALS: MiddlewareOverrides = {
+  approvalLevel: "permissive",
+};
+
+const NORMAL_APPROVALS: MiddlewareOverrides = {
+  approvalLevel: "normal",
+};
 
 // ── Preset: Code Review Discussion ──
 
@@ -19,6 +61,10 @@ const CODE_REVIEW_PARTICIPANTS: DialogPresetParticipant[] = [
   {
     customName: "Code Reviewer",
     suggestedCapabilities: ["coordinator", "code_review", "code_analysis"],
+    toolPolicy: READ_ONLY_POLICY,
+    middlewareOverrides: SAFE_APPROVALS,
+    contextTokens: 12000,
+    thinkingLevel: "medium",
     systemPromptOverride: `你是一位严谨的代码审查专家，担任此次 Review 的协调者。
 
 职责：
@@ -31,6 +77,10 @@ const CODE_REVIEW_PARTICIPANTS: DialogPresetParticipant[] = [
   {
     customName: "Senior Developer",
     suggestedCapabilities: ["code_write", "code_analysis"],
+    toolPolicy: CODER_POLICY,
+    middlewareOverrides: NORMAL_APPROVALS,
+    contextTokens: 12000,
+    thinkingLevel: "medium",
     systemPromptOverride: `你是一位资深开发者。
 
 职责：接收 spawn_task 派发的任务后，从开发者角度分析代码设计意图和实现选择。结果会自动回送给委派方。
@@ -46,6 +96,10 @@ const ARCHITECTURE_REVIEW_PARTICIPANTS: DialogPresetParticipant[] = [
   {
     customName: "Architect",
     suggestedCapabilities: ["coordinator", "architecture"],
+    toolPolicy: READ_ONLY_POLICY,
+    middlewareOverrides: SAFE_APPROVALS,
+    contextTokens: 14000,
+    thinkingLevel: "high",
     systemPromptOverride: `你是一位软件架构师，担任此次评审的协调者。
 
 职责：
@@ -58,6 +112,9 @@ const ARCHITECTURE_REVIEW_PARTICIPANTS: DialogPresetParticipant[] = [
   {
     customName: "Security Expert",
     suggestedCapabilities: ["security"],
+    toolPolicy: READ_ONLY_POLICY,
+    middlewareOverrides: SAFE_APPROVALS,
+    contextTokens: 10000,
     systemPromptOverride: `你是一位安全专家。
 
 职责：接收 spawn_task 派发的安全评估任务，直接执行。结果会自动回送给委派方。
@@ -68,6 +125,9 @@ const ARCHITECTURE_REVIEW_PARTICIPANTS: DialogPresetParticipant[] = [
   {
     customName: "Performance Engineer",
     suggestedCapabilities: ["performance"],
+    toolPolicy: READ_ONLY_POLICY,
+    middlewareOverrides: SAFE_APPROVALS,
+    contextTokens: 10000,
     systemPromptOverride: `你是一位性能工程师。
 
 职责：接收 spawn_task 派发的性能评估任务，直接执行。结果会自动回送给委派方。
@@ -83,6 +143,9 @@ const BRAINSTORMING_PARTICIPANTS: DialogPresetParticipant[] = [
   {
     customName: "Creative Thinker",
     suggestedCapabilities: ["coordinator", "creative"],
+    toolPolicy: READ_ONLY_POLICY,
+    middlewareOverrides: SAFE_APPROVALS,
+    thinkingLevel: "high",
     systemPromptOverride: `你是一位富有创造力的思考者，担任此次头脑风暴的协调者。
 
 职责：
@@ -95,6 +158,9 @@ const BRAINSTORMING_PARTICIPANTS: DialogPresetParticipant[] = [
   {
     customName: "Devil's Advocate",
     suggestedCapabilities: ["creative", "code_analysis"],
+    toolPolicy: READ_ONLY_POLICY,
+    middlewareOverrides: SAFE_APPROVALS,
+    thinkingLevel: "medium",
     systemPromptOverride: `你是一位"魔鬼代言人"。
 
 职责：接收 spawn_task 派发的任务后，对讨论中的想法提出质疑、反面论点和边缘情况。结果会自动回送。
@@ -105,6 +171,9 @@ const BRAINSTORMING_PARTICIPANTS: DialogPresetParticipant[] = [
   {
     customName: "Synthesizer",
     suggestedCapabilities: ["synthesis"],
+    toolPolicy: READ_ONLY_POLICY,
+    middlewareOverrides: SAFE_APPROVALS,
+    contextTokens: 12000,
     systemPromptOverride: `你是一位综合分析者。
 
 职责：接收 spawn_task 派发的任务后，整合所有观点，找出共性和互补点，输出结构化的可执行方案。结果会自动回送。
@@ -119,6 +188,10 @@ const DEBUG_SESSION_PARTICIPANTS: DialogPresetParticipant[] = [
   {
     customName: "Debugger",
     suggestedCapabilities: ["coordinator", "debugging", "code_analysis"],
+    toolPolicy: READ_ONLY_POLICY,
+    middlewareOverrides: SAFE_APPROVALS,
+    contextTokens: 12000,
+    thinkingLevel: "high",
     systemPromptOverride: `你是一位调试专家，担任此次调试的协调者。
 
 职责：
@@ -131,6 +204,10 @@ const DEBUG_SESSION_PARTICIPANTS: DialogPresetParticipant[] = [
   {
     customName: "Fixer",
     suggestedCapabilities: ["code_write", "testing"],
+    toolPolicy: CODER_POLICY,
+    middlewareOverrides: NORMAL_APPROVALS,
+    timeoutSeconds: 600,
+    contextTokens: 12000,
     systemPromptOverride: `你是一位修复专家。
 
 职责：接收 spawn_task 派发的修复任务，编写修复代码并验证（lint、测试等）。结果会自动回送给委派方。
@@ -148,6 +225,8 @@ export const DIALOG_PRESETS: DialogPreset[] = [
     description: "Reviewer + Senior Dev 互相讨论代码质量",
     participants: CODE_REVIEW_PARTICIPANTS,
     suggestedTopic: "请 review 以下代码：",
+    defaultRoutingMode: "coordinator",
+    requirePlanApproval: true,
   },
   {
     id: "architecture_review",
@@ -155,6 +234,8 @@ export const DIALOG_PRESETS: DialogPreset[] = [
     description: "Architect + Security Expert + Performance Engineer 三方评审",
     participants: ARCHITECTURE_REVIEW_PARTICIPANTS,
     suggestedTopic: "请评审以下模块的架构设计：",
+    defaultRoutingMode: "coordinator",
+    requirePlanApproval: true,
   },
   {
     id: "brainstorming",
@@ -162,6 +243,7 @@ export const DIALOG_PRESETS: DialogPreset[] = [
     description: "Creative Thinker + Devil's Advocate + Synthesizer",
     participants: BRAINSTORMING_PARTICIPANTS,
     suggestedTopic: "让我们讨论一下：",
+    defaultRoutingMode: "coordinator",
   },
   {
     id: "debug_session",
@@ -169,6 +251,8 @@ export const DIALOG_PRESETS: DialogPreset[] = [
     description: "Debugger + Fixer 协作调试",
     participants: DEBUG_SESSION_PARTICIPANTS,
     suggestedTopic: "请帮我调试以下问题：",
+    defaultRoutingMode: "coordinator",
+    requirePlanApproval: true,
   },
 ];
 

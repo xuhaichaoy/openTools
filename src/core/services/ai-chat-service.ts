@@ -17,6 +17,7 @@ import {
 import { createDebouncedPersister } from "@/core/storage";
 import { useAuthStore } from "@/store/auth-store";
 import { routeAIRequest } from "@/core/ai/router";
+import { AssistantReasoningStreamNormalizer } from "@/core/ai/reasoning-tag-stream";
 import { handleError } from "@/core/errors";
 import type {
   ToolCallInfo,
@@ -155,68 +156,12 @@ export function prepareEditMessages(
   return messages.slice(0, msgIndex);
 }
 
-// ── <think> 标签过滤器 ──
+// ── reasoning 标签过滤器 ──
 
 /**
- * 流式 chunk 中剥离 `<think>...</think>` 标签及其内容。
- * 支持跨 chunk 边界的标签匹配。
+ * 流式 chunk 中拆分 `<think> / <thinking> / <final>` 等标签内容，
+ * 支持跨 chunk 边界的增量解析。
  */
-export class ThinkTagFilter {
-  private inThink = false;
-  private buffer = "";
-
-  /** 处理一个 chunk，返回过滤后的可展示文本 */
-  process(chunk: string): string {
-    this.buffer += chunk;
-    let output = "";
-
-    while (this.buffer.length > 0) {
-      if (this.inThink) {
-        const endIdx = this.buffer.indexOf("</think>");
-        if (endIdx !== -1) {
-          this.inThink = false;
-          this.buffer = this.buffer.slice(endIdx + 8); // skip "</think>"
-        } else {
-          // 仍在 think 块内，保留可能的 partial "</think>" 尾部
-          if (this.buffer.length > 8) {
-            this.buffer = this.buffer.slice(-8);
-          }
-          break;
-        }
-      } else {
-        const startIdx = this.buffer.indexOf("<think>");
-        if (startIdx !== -1) {
-          output += this.buffer.slice(0, startIdx);
-          this.inThink = true;
-          this.buffer = this.buffer.slice(startIdx + 7); // skip "<think>"
-        } else {
-          // 检查尾部是否有不完整的 "<think>" 开头
-          let safeEnd = this.buffer.length;
-          for (let i = 1; i < Math.min(7, this.buffer.length + 1); i++) {
-            if ("<think>".startsWith(this.buffer.slice(-i))) {
-              safeEnd = this.buffer.length - i;
-              break;
-            }
-          }
-          output += this.buffer.slice(0, safeEnd);
-          this.buffer = this.buffer.slice(safeEnd);
-          break;
-        }
-      }
-    }
-
-    return output;
-  }
-
-  /** 流结束时刷出剩余缓冲 */
-  flush(): string {
-    const remaining = this.inThink ? "" : this.buffer;
-    this.buffer = "";
-    this.inThink = false;
-    return remaining;
-  }
-}
-
 // ── 流式监听 ──
 
 /**
@@ -235,12 +180,15 @@ export async function startStreamingChat(opts: {
   const { conversationId, assistantMessageId, apiMessages, config, callbacks, extraTools, onFrontendToolCall } = opts;
   const { updateAssistant, setState, onPersist } = callbacks;
 
-  // <think> 标签过滤器（DeepSeek 等模型的思考过程）
-  const thinkFilter = new ThinkTagFilter();
+  // OpenClaw 风格的统一 reasoning 规范化层：
+  // 原生 thinking 事件和 <think>/<final> 标签都先汇总到这里。
+  const reasoningStream = new AssistantReasoningStreamNormalizer();
 
   // chunk 缓冲：累积多个 chunk 后批量刷新到 React state，减少 re-render 次数
   let _chunkBuffer = "";
   let _chunkRafId: number | null = null;
+  let _thinkingBuffer = "";
+  let _thinkingRafId: number | null = null;
 
   function flushChunkBuffer() {
     _chunkRafId = null;
@@ -253,12 +201,25 @@ export async function startStreamingChat(opts: {
     }));
   }
 
+  function flushThinkingBuffer() {
+    _thinkingRafId = null;
+    if (!_thinkingBuffer) return;
+    const flushed = _thinkingBuffer;
+    _thinkingBuffer = "";
+    updateAssistant((m) => ({
+      ...m,
+      thinkingContent: (m.thinkingContent || "") + flushed,
+      thinkingStreaming: true,
+    }));
+  }
+
   // 并行注册所有事件监听器（减少 IPC 串行等待）
   const [
     unlisten,
     unlistenToolCalls,
     unlistenToolResult,
     unlistenToolConfirm,
+    unlistenThinking,
     unlistenDone,
     unlistenError,
     unlistenFrontendTool,
@@ -267,11 +228,19 @@ export async function startStreamingChat(opts: {
       "ai-stream-chunk",
       (event) => {
         if (event.payload.conversation_id === conversationId) {
-          const filtered = thinkFilter.process(event.payload.content);
-          if (filtered) {
-            _chunkBuffer += filtered;
+          const filtered = reasoningStream.processTextChunk(
+            event.payload.content,
+          );
+          if (filtered.visible) {
+            _chunkBuffer += filtered.visible;
             if (_chunkRafId === null) {
               _chunkRafId = requestAnimationFrame(flushChunkBuffer);
+            }
+          }
+          if (filtered.thinking) {
+            _thinkingBuffer += filtered.thinking;
+            if (_thinkingRafId === null) {
+              _thinkingRafId = requestAnimationFrame(flushThinkingBuffer);
             }
           }
         }
@@ -320,6 +289,21 @@ export async function startStreamingChat(opts: {
         setState({ pendingToolConfirm: event.payload });
       },
     ),
+    listen<{ conversation_id: string; content: string }>(
+      "ai-stream-thinking",
+      (event) => {
+        if (event.payload.conversation_id === conversationId) {
+          const filtered = reasoningStream.processThinkingChunk(
+            event.payload.content || "",
+          );
+          if (!filtered.thinking) return;
+          _thinkingBuffer += filtered.thinking;
+          if (_thinkingRafId === null) {
+            _thinkingRafId = requestAnimationFrame(flushThinkingBuffer);
+          }
+        }
+      },
+    ),
     listen<{ conversation_id: string }>(
       "ai-stream-done",
       (event) => {
@@ -328,14 +312,25 @@ export async function startStreamingChat(opts: {
             cancelAnimationFrame(_chunkRafId);
             _chunkRafId = null;
           }
-          const remaining = (_chunkBuffer || "") + thinkFilter.flush();
+          const remaining = reasoningStream.flush();
+          const remainingVisible = (_chunkBuffer || "") + remaining.visible;
           _chunkBuffer = "";
+          if (_thinkingRafId !== null) {
+            cancelAnimationFrame(_thinkingRafId);
+            _thinkingRafId = null;
+          }
+          const thinkingRemaining = _thinkingBuffer + remaining.thinking;
+          _thinkingBuffer = "";
           updateAssistant((m) => {
             const shouldSuggestUpgrade = (m.toolCalls?.length ?? 0) >= 2;
             return {
               ...m,
-              content: remaining ? m.content + remaining : m.content,
+              content: remainingVisible ? m.content + remainingVisible : m.content,
               streaming: false,
+              thinkingContent: thinkingRemaining
+                ? (m.thinkingContent || "") + thinkingRemaining
+                : m.thinkingContent,
+              thinkingStreaming: false,
               ...(shouldSuggestUpgrade ? { suggestAgentUpgrade: true } : {}),
             };
           });
@@ -349,10 +344,21 @@ export async function startStreamingChat(opts: {
       "ai-stream-error",
       (event) => {
         if (event.payload.conversation_id === conversationId) {
+          const remaining = reasoningStream.flush();
+          if (_thinkingRafId !== null) {
+            cancelAnimationFrame(_thinkingRafId);
+            _thinkingRafId = null;
+          }
+          const thinkingRemaining = _thinkingBuffer + remaining.thinking;
+          _thinkingBuffer = "";
           updateAssistant((m) => ({
             ...m,
             content: `❌ ${event.payload.error}`,
             streaming: false,
+            thinkingContent: thinkingRemaining
+              ? (m.thinkingContent || "") + thinkingRemaining
+              : m.thinkingContent,
+            thinkingStreaming: false,
           }));
           setState({ isStreaming: false });
           cleanup();
@@ -388,11 +394,17 @@ export async function startStreamingChat(opts: {
       cancelAnimationFrame(_chunkRafId);
       _chunkRafId = null;
     }
+    if (_thinkingRafId !== null) {
+      cancelAnimationFrame(_thinkingRafId);
+      _thinkingRafId = null;
+    }
     if (_chunkBuffer) flushChunkBuffer();
+    if (_thinkingBuffer) flushThinkingBuffer();
     unlisten();
     unlistenToolCalls();
     unlistenToolResult();
     unlistenToolConfirm();
+    unlistenThinking();
     unlistenDone();
     unlistenError();
     unlistenFrontendTool();

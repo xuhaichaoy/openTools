@@ -106,7 +106,11 @@ fn resolve_helper_path(app: &AppHandle) -> PathBuf {
             }
             // cwd 可能是 .../target/debug 或 .../target/release，则 src_tauri = cwd.parent().parent()
             if let Some(target_dir) = cwd.parent() {
-                if target_dir.file_name().map(|n| n == "target").unwrap_or(false) {
+                if target_dir
+                    .file_name()
+                    .map(|n| n == "target")
+                    .unwrap_or(false)
+                {
                     if let Some(src_tauri) = target_dir.parent() {
                         if let Some(bin_helper) = try_bin_helper(src_tauri) {
                             return try_copy_and_return(bin_helper);

@@ -27,7 +27,7 @@ export class PromptBuildMiddleware implements ActorMiddleware {
     const system = ctx.actorSystem!;
     const otherAgents = system.getAll().filter((a) => a.id !== ctx.actorId);
     const agentNames = otherAgents.map((a) => a.role.name).join("、");
-    const coordinator = system.getFirstActor();
+    const coordinator = system.getCoordinator();
     const isCoordinator = coordinator?.id === ctx.actorId;
 
     let section = `\n\n## 多 Agent 协作（重要！）

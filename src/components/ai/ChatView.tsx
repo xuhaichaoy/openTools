@@ -24,6 +24,7 @@ import { writeTextFile } from "@tauri-apps/plugin-fs";
 import { useAIStore } from "@/store/ai-store";
 import { useToast } from "@/components/ui/Toast";
 import { handleError } from "@/core/errors";
+import { modelSupportsImageInput } from "@/core/ai/model-capabilities";
 import { useInputAttachments } from "@/hooks/use-input-attachments";
 import { ModelSelector } from "./ModelSelector";
 import { MessageBubble } from "./MessageBubble";
@@ -368,6 +369,16 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
     }
 
     const imagesToSend = imagePaths.length > 0 ? [...imagePaths] : undefined;
+    if (
+      imagesToSend
+      && imagesToSend.length > 0
+      && !modelSupportsImageInput(config.model, config.protocol)
+    ) {
+      toast(
+        "warning",
+        "当前模型不支持图片识别，本次会自动降级为文本提示；如需看图，请切换到支持视觉输入的模型。",
+      );
+    }
     const defaultPrompt = fileContextBlock
       ? "请阅读以上文件内容，等待我的下一步指令。"
       : "请描述这张图片";

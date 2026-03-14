@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type { AIConfig, AIRequestMessage } from "@/core/ai/types";
 import { handleError } from "@/core/errors";
-import { getRoutedConfig } from "@/core/ai/router";
+import { resolveRoutedConfig } from "@/core/ai/router";
 import {
   appendMemoryCandidates,
   buildMemoryPromptBlock,
@@ -71,7 +71,7 @@ Continuation:`;
 
       const result = await invoke<string>("ai_chat", {
         messages: enrichedMessages,
-        config: getRoutedConfig(completionConfig),
+        config: await resolveRoutedConfig(completionConfig),
       });
 
       if (!controller.signal.aborted && result) {

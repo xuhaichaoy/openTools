@@ -16,16 +16,30 @@ import { createLogger } from "@/core/logger";
 
 const log = createLogger("Clarification");
 
+export interface ClarificationResolution {
+  status: "answered" | "timed_out" | "cancelled";
+  answer: string;
+  rawInput?: string;
+  wasOptionSelection?: boolean;
+  images?: string[];
+}
+
 /** 抛出此错误将中断 ReAct 循环，结果回传给用户 */
 export class ClarificationInterrupt extends Error {
   readonly question: string;
   readonly options?: string[];
+  readonly waitForReply?: () => Promise<ClarificationResolution>;
 
-  constructor(question: string, options?: string[]) {
+  constructor(
+    question: string,
+    options?: string[],
+    waitForReply?: () => Promise<ClarificationResolution>,
+  ) {
     super(`[CLARIFICATION_NEEDED] ${question}`);
     this.name = "ClarificationInterrupt";
     this.question = question;
     this.options = options;
+    this.waitForReply = waitForReply;
   }
 }
 
@@ -99,15 +113,44 @@ export class ClarificationMiddleware implements ActorMiddleware {
             return { answer: reply, was_option_selection: false };
           };
 
-          // 优先通过 actorSystem 的聊天机制（Dialog 模式）
+          // Dialog 模式：发出中断，等待 AgentActor 在外层恢复任务。
           if (actorSystem) {
-            try {
-              const reply = await actorSystem.askUserInChat(actorId, displayMessage, 300_000);
-              log.info(`Clarification answered: "${reply.slice(0, 80)}"`);
-              return parseOptionSelection(reply);
-            } catch {
-              return { error: "用户未在规定时间内回答，请根据已有信息继续执行。" };
-            }
+            const interactionPromise = actorSystem.askUserInChat(actorId, displayMessage, {
+              timeoutMs: 300_000,
+              interactionType: "clarification",
+              options,
+            });
+
+            throw new ClarificationInterrupt(
+              question,
+              options,
+              async () => {
+                try {
+                  const interaction = await interactionPromise;
+                  if (interaction.status !== "answered") {
+                    return {
+                      status: interaction.status,
+                      answer: "",
+                    };
+                  }
+
+                  log.info(`Clarification answered: "${interaction.content.slice(0, 80)}"`);
+                  const parsed = parseOptionSelection(interaction.content);
+                  return {
+                    status: "answered",
+                    answer: parsed.answer,
+                    rawInput: "raw_input" in parsed ? parsed.raw_input : interaction.content,
+                    wasOptionSelection: parsed.was_option_selection,
+                    images: interaction.message?.images,
+                  };
+                } catch {
+                  return {
+                    status: "timed_out",
+                    answer: "",
+                  };
+                }
+              },
+            );
           }
 
           // 回退到 askUser 回调（非 Dialog 模式）

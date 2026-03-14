@@ -54,10 +54,7 @@ pub async fn ocr_detect_advanced(
         }
     }
 
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| format!("OCR 请求失败: {e}"))?;
+    let resp = req.send().await.map_err(|e| format!("OCR 请求失败: {e}"))?;
 
     if !resp.status().is_success() {
         let status = resp.status();

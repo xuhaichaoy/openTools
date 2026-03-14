@@ -51,7 +51,11 @@ enum DbConnection {
     Sqlite(rusqlite::Connection),
     // Postgres/MySQL/MongoDB will use async connections via sqlx/mongodb
     // For now, we support SQLite natively and other types via connection strings
-    ConnectionString { db_type: String, #[allow(dead_code)] conn_str: String },
+    ConnectionString {
+        db_type: String,
+        #[allow(dead_code)]
+        conn_str: String,
+    },
 }
 
 pub struct DatabaseManager {
@@ -84,8 +88,8 @@ pub async fn db_save_connections(
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     let path = config_path(&app)?;
-    let json =
-        serde_json::to_string_pretty(&connections).map_err(|e| format!("Serialize error: {}", e))?;
+    let json = serde_json::to_string_pretty(&connections)
+        .map_err(|e| format!("Serialize error: {}", e))?;
     std::fs::write(&path, json).map_err(|e| format!("Write error: {}", e))?;
     Ok(())
 }
@@ -181,8 +185,7 @@ pub async fn db_test_connection(config: DatabaseConfig) -> Result<bool, String> 
                 .as_ref()
                 .or(config.database.as_ref())
                 .ok_or("SQLite requires a file path")?;
-            rusqlite::Connection::open(path)
-                .map_err(|e| format!("SQLite test failed: {}", e))?;
+            rusqlite::Connection::open(path).map_err(|e| format!("SQLite test failed: {}", e))?;
             Ok(true)
         }
         "postgres" | "mysql" | "mongodb" => {
@@ -282,12 +285,10 @@ pub async fn db_execute_query(
                 })
             }
         }
-        DbConnection::ConnectionString { db_type, .. } => {
-            Err(format!(
-                "{} queries require async connection pool (coming soon). Use SQLite for now.",
-                db_type
-            ))
-        }
+        DbConnection::ConnectionString { db_type, .. } => Err(format!(
+            "{} queries require async connection pool (coming soon). Use SQLite for now.",
+            db_type
+        )),
     }
 }
 

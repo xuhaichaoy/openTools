@@ -679,7 +679,10 @@ pub async fn native_app_list_interactive() -> Result<NativeAppResult, String> {
             {"name": "系统设置", "tool": "win_open_settings", "capabilities": ["打开设置首页", "显示/网络/蓝牙/通知/声音/存储/应用/隐私/更新等页面"], "example_page": "display"},
             {"name": "打开应用", "tool": "native_app_open", "capabilities": ["记事本(notepad)", "计算器(calc)", "资源管理器(explorer)", "cmd", "PowerShell(powershell)", "Edge(msedge)", "Chrome(chrome) 等"]},
         ]);
-        Ok(NativeAppResult::ok_with_data("Windows 上可供 AI 调用的原生能力", apps))
+        Ok(NativeAppResult::ok_with_data(
+            "Windows 上可供 AI 调用的原生能力",
+            apps,
+        ))
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     Ok(NativeAppResult::err("当前系统暂无原生应用列表"))

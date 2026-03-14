@@ -34,7 +34,7 @@ export async function quickChat(
   messages: Array<{ role: string; content: string }>,
   options?: { config?: AIConfig },
 ): Promise<string> {
-  const { getRoutedConfig } = await import('./router')
+  const { resolveRoutedConfig } = await import('./router')
   const {
     appendMemoryCandidates,
     buildMemoryPromptBlock,
@@ -43,7 +43,7 @@ export async function quickChat(
   } = await import('./memory-store')
 
   const config = options?.config ?? (await getAIConfig())
-  const routedConfig = getRoutedConfig(config)
+  const routedConfig = await resolveRoutedConfig(config)
 
   let enriched = [...messages]
 

@@ -42,20 +42,29 @@ export class ChannelManager {
   private _actorSystemUnsubscribe: (() => void) | null = null;
 
   /**
+   * IM 会话路由表：将 IM conversationId 映射到来源通道，
+   * 使回复能精准送回触发消息的 IM 会话。
+   */
+  private _conversationRoutes = new Map<
+    string, // conversationId
+    { channelId: string; lastActiveAt: number }
+  >();
+
+  /** 路由表条目超时清理时间（30 分钟） */
+  private static readonly ROUTE_TTL_MS = 30 * 60 * 1000;
+
+  /**
    * 将 ChannelManager 连接到 ActorSystem，实现 IM 消息自动路由到 Agent。
    * 入站：IM 消息 → broadcastAndResolve → Agent 处理
-   * 出站：task_completed 事件 → 回发到来源通道的对应会话
+   * 出站：agent_result 事件 → 回发到来源通道的对应会话
    */
   connectToActorSystem(
     actorSystem: {
-      broadcastAndResolve: (from: string, content: string, opts?: { _briefContent?: string }) => void;
+      broadcastAndResolve: (from: string, content: string, opts?: { _briefContent?: string; _imConversationId?: string }) => void;
       getAll: () => Array<{ id: string }>;
       onEvent: (handler: (event: Record<string, unknown>) => void) => () => void;
     },
   ): () => void {
-    // 记录最后一条 IM 消息的来源通道和会话，用于 Agent 回复时精准回发
-    let lastSource: { channelId: string; conversationId: string } | null = null;
-
     const unsub = this.onMessage(async (msg) => {
       const actors = actorSystem.getAll();
       if (actors.length === 0) {
@@ -63,37 +72,65 @@ export class ChannelManager {
         return;
       }
 
-      // 找到消息来源的通道 ID
+      // 找到消息来源的通道 ID 并注册路由
       const sourceChannelId = this._findChannelIdForMessage(msg);
       if (sourceChannelId) {
-        lastSource = { channelId: sourceChannelId, conversationId: msg.conversationId };
+        this._conversationRoutes.set(msg.conversationId, {
+          channelId: sourceChannelId,
+          lastActiveAt: Date.now(),
+        });
       }
 
-      log.info(`Routing IM message to ActorSystem: "${msg.text.slice(0, 60)}"`);
+      log.info(`Routing IM message to ActorSystem: "${msg.text.slice(0, 60)}" (conv=${msg.conversationId})`);
       actorSystem.broadcastAndResolve("user", msg.text, {
         _briefContent: `[IM:${msg.senderName}] ${msg.text.slice(0, 40)}`,
+        _imConversationId: msg.conversationId,
       });
     });
 
     const eventUnsub = actorSystem.onEvent((event) => {
-      if (!("type" in event) || event.type !== "task_completed") return;
-      const detail = (event as { detail?: unknown }).detail as { result?: string } | undefined;
+      // 只回发"面向用户的最终回复"，而不是所有内部 task_completed
+      const eventType = (event as { type?: string }).type;
+      if (eventType !== "agent_result" && eventType !== "task_completed") return;
+
+      const detail = (event as { detail?: unknown }).detail as {
+        result?: string;
+        _imConversationId?: string;
+      } | undefined;
       if (!detail?.result) return;
 
       const text = detail.result.slice(0, 2000);
 
-      if (lastSource) {
-        const entry = this.channels.get(lastSource.channelId);
+      // 1. 优先通过 conversationId 精确路由
+      if (detail._imConversationId) {
+        const route = this._conversationRoutes.get(detail._imConversationId);
+        if (route) {
+          const entry = this.channels.get(route.channelId);
+          if (entry?.channel.status === "connected") {
+            entry.channel.send({
+              conversationId: detail._imConversationId,
+              text,
+            }).catch((err) => log.error("Failed to forward reply to source IM channel", err));
+            route.lastActiveAt = Date.now();
+            return;
+          }
+        }
+      }
+
+      // 2. 回退：查找最近活跃的路由
+      const recentRoute = this._findMostRecentRoute();
+      if (recentRoute) {
+        const entry = this.channels.get(recentRoute.channelId);
         if (entry?.channel.status === "connected") {
           entry.channel.send({
-            conversationId: lastSource.conversationId,
+            conversationId: recentRoute.conversationId,
             text,
-          }).catch((err) => log.error("Failed to forward reply to source IM channel", err));
+          }).catch((err) => log.error("Failed to forward reply to IM (fallback)", err));
           return;
         }
       }
 
-      // 回退：发送到所有已连接通道
+      // 3. 最终回退：广播到所有已连接通道
       for (const entry of this.channels.values()) {
         if (entry.channel.status === "connected") {
           entry.channel.send({ conversationId: "default", text })
@@ -103,7 +140,37 @@ export class ChannelManager {
     });
 
     this._actorSystemUnsubscribe = () => { unsub(); eventUnsub(); };
+
+    // 定期清理过期路由条目
+    const cleanupInterval = setInterval(() => this._cleanupStaleRoutes(), ChannelManager.ROUTE_TTL_MS);
+    const originalUnsub = this._actorSystemUnsubscribe;
+    this._actorSystemUnsubscribe = () => {
+      originalUnsub();
+      clearInterval(cleanupInterval);
+    };
+
     return this._actorSystemUnsubscribe;
+  }
+
+  /** 查找最近活跃的路由条目 */
+  private _findMostRecentRoute(): { channelId: string; conversationId: string } | null {
+    let best: { channelId: string; conversationId: string; lastActiveAt: number } | null = null;
+    for (const [conversationId, route] of this._conversationRoutes) {
+      if (!best || route.lastActiveAt > best.lastActiveAt) {
+        best = { ...route, conversationId };
+      }
+    }
+    return best;
+  }
+
+  /** 清理超时的路由条目 */
+  private _cleanupStaleRoutes(): void {
+    const now = Date.now();
+    for (const [conversationId, route] of this._conversationRoutes) {
+      if (now - route.lastActiveAt > ChannelManager.ROUTE_TTL_MS) {
+        this._conversationRoutes.delete(conversationId);
+      }
+    }
   }
 
   /** 注册一个 IM 通道 */
@@ -240,14 +307,29 @@ export class ChannelManager {
 
   // ── Private ──
 
-  /** 根据 incoming message 的 conversationId 查找来源 channel ID */
+  /** 根据 incoming message 查找来源 channel ID */
   private _findChannelIdForMessage(msg: ChannelIncomingMessage): string | null {
+    // 优先：检查路由表是否已有此 conversationId 的记录
+    const existing = this._conversationRoutes.get(msg.conversationId);
+    if (existing && this.channels.has(existing.channelId)) {
+      return existing.channelId;
+    }
+
+    // 回退：从已连接通道中查找（单通道场景直接返回）
+    const connectedChannels: string[] = [];
     for (const [id, entry] of this.channels) {
       if (entry.channel.status === "connected") {
-        // 优先匹配：如果只有一个已连接通道，直接返回
-        // 多通道场景下依赖 conversationId 追踪
-        return id;
+        connectedChannels.push(id);
       }
+    }
+
+    if (connectedChannels.length === 1) {
+      return connectedChannels[0];
+    }
+
+    // 多通道场景：无法确定来源时返回 null
+    if (connectedChannels.length > 1) {
+      log.warn(`Multiple connected channels, cannot determine source for conversation ${msg.conversationId}`);
     }
     return null;
   }

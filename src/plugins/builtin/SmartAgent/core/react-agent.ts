@@ -10,6 +10,7 @@
  */
 
 import { handleError, ErrorLevel } from "@/core/errors";
+import { ClarificationInterrupt } from "@/core/agent/actor/middlewares/clarification-middleware";
 import type {
   MToolsAI,
   AIToolDefinition,
@@ -57,7 +58,7 @@ export interface AgentTool {
 }
 
 export interface AgentStep {
-  type: "thought" | "action" | "observation" | "answer" | "error";
+  type: "thought" | "action" | "observation" | "answer" | "error" | "thinking" | "tool_streaming";
   content: string;
   toolName?: string;
   toolInput?: Record<string, unknown>;
@@ -150,6 +151,141 @@ function isFCCacheValid(key: string): boolean {
 function normalizeFCCompatibilityKey(key?: string): string | null {
   const normalized = (key || "").trim().toLowerCase();
   return normalized || null;
+}
+
+function escapeRawControlCharsInJsonStrings(input: string): string {
+  let result = "";
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+    if (escaped) {
+      result += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      result += ch;
+      escaped = true;
+      continue;
+    }
+    if (ch === "\"") {
+      result += ch;
+      inString = !inString;
+      continue;
+    }
+    if (inString) {
+      if (ch === "\n") {
+        result += "\\n";
+        continue;
+      }
+      if (ch === "\r") {
+        result += "\\r";
+        continue;
+      }
+      if (ch === "\t") {
+        result += "\\t";
+        continue;
+      }
+    }
+    result += ch;
+  }
+
+  return result;
+}
+
+function decodeJsonLikeString(value: string): string {
+  return value
+    .replace(/\\r/g, "\r")
+    .replace(/\\n/g, "\n")
+    .replace(/\\t/g, "\t")
+    .replace(/\\"/g, "\"")
+    .replace(/\\'/g, "'")
+    .replace(/\\\\/g, "\\");
+}
+
+function extractLooseStringValue(input: string, key: string): string | null {
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const regex = new RegExp(`["']${escapedKey}["']\\s*:\\s*(["'])([\\s\\S]*?)\\1(?=\\s*(?:,|\\}))`);
+  const match = input.match(regex);
+  if (!match) return null;
+  return decodeJsonLikeString(match[2]);
+}
+
+function extractTrailingLooseStringValue(input: string, key: string): string | null {
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const regex = new RegExp(`["']${escapedKey}["']\\s*:\\s*(["'])`);
+  const match = regex.exec(input);
+  if (!match) return null;
+
+  const quote = match[1];
+  const start = match.index + match[0].length;
+  let end = input.length - 1;
+
+  while (end >= start && /\s/.test(input[end])) end--;
+  if (end >= start && input[end] === "}") end--;
+  while (end >= start && /\s/.test(input[end])) end--;
+  if (end < start || input[end] !== quote) return null;
+
+  return decodeJsonLikeString(input.slice(start, end));
+}
+
+function recoverLooseToolArguments(input: string): Record<string, unknown> | null {
+  const writePath = extractLooseStringValue(input, "path");
+  const writeContent = extractTrailingLooseStringValue(input, "content");
+  if (writePath && writeContent !== null) {
+    return { path: writePath, content: writeContent };
+  }
+
+  const command = extractLooseStringValue(input, "command");
+  const editPath = extractLooseStringValue(input, "path");
+  const newStr = extractTrailingLooseStringValue(input, "new_str");
+  if (command === "create" && editPath && newStr !== null) {
+    return { command, path: editPath, new_str: newStr };
+  }
+
+  return null;
+}
+
+function parseToolCallArguments(rawArguments: string): {
+  params: Record<string, unknown>;
+  parseError?: string;
+} {
+  const raw = (rawArguments || "").trim();
+  if (!raw) return { params: {} };
+
+  const tryParseObject = (candidate: string): Record<string, unknown> | null => {
+    try {
+      const parsed = JSON.parse(candidate);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const direct = tryParseObject(raw);
+  if (direct) return { params: direct };
+
+  const normalizedQuotes = raw
+    .replace(/[\u201C\u201D]/g, "\"")
+    .replace(/[\u2018\u2019]/g, "'");
+  const normalized = tryParseObject(normalizedQuotes);
+  if (normalized) return { params: normalized };
+
+  const escapedControls = tryParseObject(escapeRawControlCharsInJsonStrings(normalizedQuotes));
+  if (escapedControls) return { params: escapedControls };
+
+  const recovered = recoverLooseToolArguments(normalizedQuotes);
+  if (recovered) return { params: recovered };
+
+  const snippet = raw.length > 400 ? `${raw.slice(0, 400)}...` : raw;
+  return {
+    params: {},
+    parseError: `工具参数不是有效 JSON。请严格返回合法 JSON，并确保多行文本中的换行和双引号被正确转义。原始参数片段: ${snippet}`,
+  };
 }
 
 // ── Context 管理 ──
@@ -1049,6 +1185,7 @@ export class ReActAgent {
       return { outputStr };
     } catch (e) {
       if ((e as Error).message === "Aborted") throw e;
+      if (e instanceof ClarificationInterrupt) throw e;
       const isTimeout = e instanceof ToolTimeoutError;
       const errorType = isTimeout ? ToolErrorType.Timeout : ToolErrorType.RuntimeError;
       const errorStr = isTimeout ? (e as ToolTimeoutError).message : `工具执行失败: ${e}`;
@@ -1212,11 +1349,7 @@ ${s.taskStrategy}
     // 提取 Action Input
     const inputMatch = response.match(/Action Input:\s*(\{[\s\S]*?\})/);
     if (inputMatch) {
-      try {
-        result.actionInput = JSON.parse(inputMatch[1]);
-      } catch {
-        result.actionInput = {};
-      }
+      result.actionInput = parseToolCallArguments(inputMatch[1]).params;
     }
 
     return result;
@@ -1444,34 +1577,89 @@ ${s.taskStrategy}
     const toolDefs = availableTools.map(toolToFunctionDef);
     let lastPushedLen = 0;
     let accumulated = "";
+    let thinkingAccum = "";
+    let thinkingStartedAt = 0;
+    let toolArgsAccum = "";
+    let toolArgsStartedAt = 0;
+    let lastToolArgsPushedLen = 0;
 
-    const result = await this.ai.streamWithTools!({
-      messages,
-      tools: toolDefs,
-      signal,
-      modelOverride: this.config.modelOverride,
-      onChunk: (chunk) => {
-        if (signal?.aborted) return;
-        accumulated += chunk;
-        const current = accumulated.trim();
-        if (current && current.length > lastPushedLen + 10) {
+    try {
+      const result = await this.ai.streamWithTools!({
+        messages,
+        tools: toolDefs,
+        signal,
+        modelOverride: this.config.modelOverride,
+        onChunk: (chunk) => {
+          if (signal?.aborted) return;
+          accumulated += chunk;
+          const current = accumulated.trim();
+          if (current && current.length > lastPushedLen + 10) {
+            this.onStep?.({
+              type: "answer",
+              content: current,
+              timestamp: Date.now(),
+              streaming: true,
+            });
+            this.lastStreamingAnswer = current;
+            lastPushedLen = current.length;
+          }
+        },
+        onDone: (full) => {
+          accumulated = full;
+        },
+        onThinking: (chunk) => {
+          if (signal?.aborted) return;
+          if (!thinkingStartedAt) thinkingStartedAt = Date.now();
+          thinkingAccum += chunk;
           this.onStep?.({
-            type: "answer",
-            content: current,
-            timestamp: Date.now(),
+            type: "thinking",
+            content: thinkingAccum || " ",
+            timestamp: thinkingStartedAt,
             streaming: true,
           });
-          this.lastStreamingAnswer = current;
-          lastPushedLen = current.length;
-        }
-      },
-      onDone: (full) => {
-        accumulated = full;
-      },
-    });
+        },
+        onToolArgs: (chunk) => {
+          if (signal?.aborted) return;
+          if (!toolArgsStartedAt) toolArgsStartedAt = Date.now();
+          toolArgsAccum += chunk;
 
-    if (signal?.aborted) throw new Error("Aborted");
-    return result;
+          if (toolArgsAccum.length < 100) {
+             console.log("[react-agent] receiving tool args:", chunk);
+          }
+
+          if (toolArgsAccum && toolArgsAccum.length > lastToolArgsPushedLen + 5) {
+            this.onStep?.({
+              type: "tool_streaming",
+              content: toolArgsAccum || " ",
+              timestamp: toolArgsStartedAt,
+              streaming: true,
+            });
+            lastToolArgsPushedLen = toolArgsAccum.length;
+          }
+        },
+      });
+
+      if (signal?.aborted) throw new Error("Aborted");
+      if (thinkingAccum) {
+        this.onStep?.({
+          type: "thinking",
+          content: thinkingAccum,
+          timestamp: thinkingStartedAt || Date.now(),
+          streaming: false,
+        });
+      }
+      if (toolArgsAccum) {
+        this.onStep?.({
+          type: "tool_streaming",
+          content: toolArgsAccum,
+          timestamp: toolArgsStartedAt || Date.now(),
+          streaming: false,
+        });
+      }
+      return result;
+    } catch (e) {
+      throw e;
+    }
   }
 
   private isComplexQuery(input: string): boolean {
@@ -1554,6 +1742,8 @@ ${s.taskStrategy}
 
     let iterationWarningIdx = -1;
     let fcEmptyCount = 0;
+    let lastDisabledKey = this.loopDetector.getDisabledTools().join(",");
+    let lastMode = this.mode;
 
     for (let i = 0; i < this.config.maxIterations; i++) {
       if (signal?.aborted) throw new Error("Aborted");
@@ -1579,8 +1769,17 @@ ${s.taskStrategy}
         }
       }
 
-      // 每轮刷新 system prompt（模式切换或 doom loop 禁用工具后需要更新）
-      messages[0] = { role: "system", content: this.buildFCSystemPrompt(userInput) };
+      // 仅在模式切换或 doom loop 禁用工具后才重建 system prompt
+      if (i > 0) {
+        const currentDisabled = this.loopDetector.getDisabledTools().join(",");
+        const disabledChanged = currentDisabled !== (lastDisabledKey ?? "");
+        const modeChanged = this.mode !== lastMode;
+        if (disabledChanged || modeChanged) {
+          messages[0] = { role: "system", content: this.buildFCSystemPrompt(userInput) };
+          lastDisabledKey = currentDisabled;
+          lastMode = this.mode;
+        }
+      }
 
       const remaining = this.config.maxIterations - i;
       const isFinalWarningTurn = remaining === 1;
@@ -1646,9 +1845,8 @@ ${s.taskStrategy}
       }
 
       const parsedCalls = validToolCalls.map((tc) => {
-        let toolParams: Record<string, unknown> = {};
-        try { toolParams = JSON.parse(tc.function.arguments || "{}"); } catch { toolParams = {}; }
-        return { tc, toolName: tc.function.name, toolParams };
+        const { params: toolParams, parseError } = parseToolCallArguments(tc.function.arguments || "{}");
+        return { tc, toolName: tc.function.name, toolParams, parseError };
       });
 
       for (const { tc, toolName } of parsedCalls) {
@@ -1665,6 +1863,7 @@ ${s.taskStrategy}
       const canParallel = parsedCalls.length > 1 && parsedCalls.every(({ toolName }) => {
         const tool = this.tools.find((t) => t.name === toolName);
         if (!tool) return false;
+        if (toolName === "ask_clarification") return false;
         if (tool.readonly) return true;
         return !tool.dangerous && !this.config.dangerousToolPatterns?.some(
           (p) => toolName.toLowerCase().includes(p.toLowerCase()),
@@ -1677,14 +1876,42 @@ ${s.taskStrategy}
       let callResults: CallResult[];
       if (canParallel) {
         callResults = await Promise.all(
-          parsedCalls.map(async ({ tc, toolName, toolParams }): Promise<CallResult> => ({
-            tc, toolName, result: await this.executeToolPipeline(toolName, toolParams, userInput, signal),
+          parsedCalls.map(async ({ tc, toolName, toolParams, parseError }): Promise<CallResult> => ({
+            tc,
+            toolName,
+            result: parseError
+              ? {
+                  outputStr: parseError,
+                  error: parseError,
+                  errorResult: {
+                    type: ToolErrorType.ParseError,
+                    tool: toolName,
+                    message: parseError,
+                    recoverable: true,
+                  },
+                }
+              : await this.executeToolPipeline(toolName, toolParams, userInput, signal),
           })),
         );
       } else {
         callResults = [];
-        for (const { tc, toolName, toolParams } of parsedCalls) {
-          callResults.push({ tc, toolName, result: await this.executeToolPipeline(toolName, toolParams, userInput, signal) });
+        for (const { tc, toolName, toolParams, parseError } of parsedCalls) {
+          callResults.push({
+            tc,
+            toolName,
+            result: parseError
+              ? {
+                  outputStr: parseError,
+                  error: parseError,
+                  errorResult: {
+                    type: ToolErrorType.ParseError,
+                    tool: toolName,
+                    message: parseError,
+                    recoverable: true,
+                  },
+                }
+              : await this.executeToolPipeline(toolName, toolParams, userInput, signal),
+          });
         }
       }
       let quickAnswerFound: string | undefined;
@@ -1705,7 +1932,7 @@ ${s.taskStrategy}
           taskDoneResult = pipelineResult.outputStr || "任务已完成。";
           // 尝试从工具调用参数中提取 summary 文本（人类可读，非 JSON）
           try {
-            const doneParams = JSON.parse(tc.function.arguments || "{}") as { summary?: string };
+            const doneParams = parseToolCallArguments(tc.function.arguments || "{}").params as { summary?: string };
             if (doneParams.summary) taskDoneSummary = doneParams.summary.trim();
           } catch { /* ignore */ }
         }
@@ -1933,7 +2160,9 @@ ${s.taskStrategy}
 
         const errMsg = (e as Error).message || "";
         const isFCIncompatible = errMsg.startsWith("FC_INCOMPATIBLE");
-        const shouldDowngrade = this.fcAvailable === null || isFCIncompatible;
+        const isTransportOrTimeoutError = /(timeout|timed out|超时|卡住|请求失败|网络|network|econn|api 错误|流读取错误)/i
+          .test(errMsg);
+        const shouldDowngrade = isFCIncompatible || (!isTransportOrTimeoutError && this.fcAvailable === null);
 
         if (isFCIncompatible) {
           this.fcAvailable = false;
@@ -1958,7 +2187,13 @@ ${s.taskStrategy}
             content: "Function Calling 模式不可用，已自动切换至文本 ReAct 模式。",
             timestamp: Date.now(),
           });
-          return this.runText(userInput, signal, images);
+          const prevMaxIterations = this.config.maxIterations;
+          this.config.maxIterations = Math.min(prevMaxIterations, 6);
+          try {
+            return await this.runText(userInput, signal, images);
+          } finally {
+            this.config.maxIterations = prevMaxIterations;
+          }
         }
         throw e;
       }

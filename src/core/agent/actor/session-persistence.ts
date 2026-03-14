@@ -158,15 +158,17 @@ async function acquireLock(sessionId: string, timeoutMs = 5000): Promise<boolean
   // 检查是否已有锁
   const existing = activeLocks.get(sessionId);
   if (existing && now < existing.expiresAt) {
-    // 加入等待队列
     return new Promise((resolve) => {
+      let settled = false;
       const queue = lockWaitQueue.get(sessionId) ?? [];
-      queue.push(() => resolve(true));
+      const callback = () => { if (!settled) { settled = true; resolve(true); } };
+      queue.push(callback);
       lockWaitQueue.set(sessionId, queue);
       
-      // 超时后自动拒绝
       setTimeout(() => {
-        const idx = queue.indexOf(() => resolve(true));
+        if (settled) return;
+        settled = true;
+        const idx = queue.indexOf(callback);
         if (idx >= 0) queue.splice(idx, 1);
         resolve(false);
       }, timeoutMs);
@@ -419,6 +421,7 @@ export interface TranscriptSession {
   updatedAt: number;
   entries: TranscriptEntry[];
   actorConfigs: Array<{ id: string; name: string; model?: string }>;
+  snapshot?: Record<string, unknown>;
 }
 
 export interface ArchivedSession {
@@ -520,6 +523,14 @@ export async function deleteSession(sessionId: string): Promise<void> {
 export async function listAllSessions(): Promise<string[]> {
   const index = await loadIndex();
   return Object.keys(index.sessions);
+}
+
+export async function getLatestActiveSessionId(): Promise<string | null> {
+  const index = await loadIndex();
+  const latest = Object.values(index.sessions)
+    .filter((session) => !session.archived)
+    .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+  return latest?.sessionId ?? null;
 }
 
 export async function archiveSession(
