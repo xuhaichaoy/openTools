@@ -15,6 +15,7 @@ import {
   ArrowRightCircle,
   FileText,
   X,
+  Users,
 } from "lucide-react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
@@ -24,6 +25,11 @@ import { AttachDropdown } from "@/components/ui/AttachDropdown";
 import { useClusterStore, type ClusterSession } from "@/store/cluster-store";
 import { ChatImage } from "@/components/ai/MessageBubble";
 import { useAIStore } from "@/store/ai-store";
+import { useAppStore, type AICenterHandoff } from "@/store/app-store";
+import {
+  AI_CENTER_MODE_META,
+  describeAICenterSource,
+} from "@/core/ai/ai-center-mode-meta";
 import { ClusterOrchestrator } from "@/core/agent/cluster/cluster-orchestrator";
 import {
   setActiveOrchestrator,
@@ -222,7 +228,34 @@ function SessionCard({
     routeToAICenter({
       mode: "agent",
       source: "cluster_continue_to_agent",
-      agentHandoff: { query: prefilled },
+      handoff: {
+        query: prefilled,
+        sourceMode: "cluster",
+        sourceSessionId: session.id,
+        sourceLabel: "Cluster 报告",
+        summary: "已带入 Cluster 最终报告，适合继续修改和落地执行",
+      },
+      taskId: session.id,
+      navigate: false,
+    });
+  };
+
+  const handleContinueWithDialog = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!session.result) return;
+    const report = session.result.finalAnswer;
+    const truncated = report.length > 2000 ? report.slice(0, 2000) + "\n\n...（完整内容见上方 Cluster 报告）" : report;
+    const prefilled = `这是当前 Cluster 的分析报告。请让多个 Agent 基于它继续 review、争论方案、拆补细节或形成下一步执行共识：\n\n${truncated}`;
+    routeToAICenter({
+      mode: "dialog",
+      source: "cluster_continue_to_dialog",
+      handoff: {
+        query: prefilled,
+        sourceMode: "cluster",
+        sourceSessionId: session.id,
+        sourceLabel: "Cluster 报告",
+        summary: "已带入 Cluster 最终报告，适合继续多 Agent 讨论和评审",
+      },
       taskId: session.id,
       navigate: false,
     });
@@ -281,6 +314,11 @@ function SessionCard({
               : "bg-purple-500/10 text-purple-500"
           }`}>
             {session.mode === "parallel_split" ? "并行" : "协作"}
+          </span>
+        )}
+        {session.sourceHandoff?.sourceMode && (
+          <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)] max-w-[110px] truncate" title={describeAICenterSource(session.sourceHandoff)}>
+            来自 {describeAICenterSource(session.sourceHandoff)}
           </span>
         )}
         {session.model && (
@@ -361,6 +399,15 @@ function SessionCard({
                     <ArrowRightCircle className="w-3 h-3" />
                     用 Agent 继续
                   </button>
+                  <button
+                    type="button"
+                    className="flex items-center gap-1 px-2 py-1 text-[10px] rounded text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-cyan-600 transition-colors"
+                    onClick={handleContinueWithDialog}
+                    title="跳转到 Dialog 并带入报告，便于多 Agent 继续讨论"
+                  >
+                    <Users className="w-3 h-3" />
+                    用 Dialog 继续
+                  </button>
                 </div>
               </div>
               <div className="prose prose-sm dark:prose-invert max-w-none text-[13px] leading-relaxed bg-[var(--color-bg-secondary)] rounded-lg p-4 prose-p:my-2 prose-headings:mt-4 prose-headings:mb-2 prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 prose-table:my-3 prose-td:py-1.5 prose-th:py-1.5">
@@ -399,6 +446,7 @@ function SessionCard({
 }
 
 export function ClusterPanel({ active = true }: { active?: boolean }) {
+  const clusterMeta = AI_CENTER_MODE_META.cluster;
   const savedSettings = loadSettings();
   const [input, setInput] = useState("");
   const [mode, setMode] = useState<ClusterMode>("parallel_split");
@@ -411,6 +459,7 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
     savedSettings.largeProjectMode,
   );
   const [openClawMode, setOpenClawMode] = useState(savedSettings.openClawMode);
+  const [incomingHandoff, setIncomingHandoff] = useState<AICenterHandoff | null>(null);
   const unmountedRef = useRef(false);
   const { toast } = useToast();
   const openConfirmDialog = useConfirmDialogStore((s) => s.open);
@@ -427,9 +476,11 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
     handleFolderSelect,
     removeAttachment,
     clearAttachments,
+    addAttachmentFromPath,
   } = useInputAttachments();
 
   const aiConfig = useAIStore((s) => s.config);
+  const pendingAICenterHandoff = useAppStore((s) => s.pendingAICenterHandoff);
   const sessions = useClusterStore((s) => s.sessions);
   const currentSessionId = useClusterStore((s) => s.currentSessionId);
   const createSession = useClusterStore((s) => s.createSession);
@@ -441,6 +492,35 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
   useEffect(() => {
     saveSettings({ autoReview, humanApproval, codingMode, largeProjectMode, openClawMode });
   }, [autoReview, humanApproval, codingMode, largeProjectMode, openClawMode]);
+
+  useEffect(() => {
+    if (!pendingAICenterHandoff || pendingAICenterHandoff.mode !== "cluster") return;
+    let cancelled = false;
+
+    const applyHandoff = async () => {
+      const payload = pendingAICenterHandoff.payload;
+      setInput(payload.query);
+      clearAttachments();
+      setIncomingHandoff(payload);
+
+      if (payload.attachmentPaths?.length) {
+        for (const path of payload.attachmentPaths) {
+          if (cancelled) return;
+          await addAttachmentFromPath(path);
+        }
+      }
+    };
+
+    void applyHandoff().finally(() => {
+      if (!cancelled) {
+        useAppStore.getState().setPendingAICenterHandoff(null);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [pendingAICenterHandoff, addAttachmentFromPath, clearAttachments]);
 
   useEffect(() => {
     unmountedRef.current = false;
@@ -519,7 +599,20 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
     const fullQuery = fileContextBlock.trim()
       ? `${fileContextBlock}\n\n---\n\n${userText}`
       : userText;
-    const sessionId = createSession(displayQuery, mode, aiConfig.model, imagePaths.length > 0 ? imagePaths : undefined);
+    const sessionId = createSession(
+      displayQuery,
+      mode,
+      aiConfig.model,
+      imagePaths.length > 0 ? imagePaths : undefined,
+      incomingHandoff?.sourceMode
+        ? {
+            sourceMode: incomingHandoff.sourceMode,
+            sourceSessionId: incomingHandoff.sourceSessionId,
+            sourceLabel: incomingHandoff.sourceLabel,
+            summary: incomingHandoff.summary,
+          }
+        : undefined,
+    );
     recordAIRouteEvent({
       mode: "cluster",
       source: "cluster_run",
@@ -528,6 +621,7 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
     });
     setInput("");
     clearAttachments();
+    setIncomingHandoff(null);
 
     const abortController = new AbortController();
 
@@ -588,7 +682,7 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
         setRunningCount(getActiveOrchestratorCount());
       }
     }
-  }, [input, attachments, fileContextBlock, attachmentSummary, imagePaths, mode, autoReview, humanApproval, codingMode, largeProjectMode, openClawMode, createSession, clearAttachments, aiConfig.model, handlePlanApproval, confirmDangerousAction, askUser, toast]);
+  }, [input, attachments, fileContextBlock, attachmentSummary, imagePaths, mode, autoReview, humanApproval, codingMode, largeProjectMode, openClawMode, createSession, clearAttachments, incomingHandoff, aiConfig.model, handlePlanApproval, confirmDangerousAction, askUser, toast]);
 
   const handleAbort = useCallback(() => {
     const targetSessionId =
@@ -613,17 +707,29 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center justify-between px-4 py-2.5 border-b border-[var(--color-border)]">
-        <div className="flex items-center gap-2">
-          <Network className="w-4 h-4 text-[var(--color-accent)]" />
-          <span className="text-sm font-medium">Agent Cluster</span>
-          <span className="text-xs text-[var(--color-text-tertiary)]">
-            ({sessions.length})
-          </span>
-          {hasAnyRunning && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-500">
-              运行中 {runningCount}
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <Network className="w-4 h-4 text-[var(--color-accent)]" />
+            <span className="text-sm font-medium">Cluster · 规划与并行执行</span>
+            <span className="text-xs text-[var(--color-text-tertiary)]">
+              ({sessions.length})
             </span>
-          )}
+            {hasAnyRunning && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-500">
+                运行中 {runningCount}
+              </span>
+            )}
+          </div>
+          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] text-[var(--color-text-secondary)]">
+            <span>{clusterMeta.boundaryHeadline}</span>
+            <span className="opacity-70">{clusterMeta.boundaryDetail}</span>
+            <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2 py-0.5" title={clusterMeta.modelScope}>
+              模型：{clusterMeta.modelScopeShort}
+            </span>
+            <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2 py-0.5" title={clusterMeta.skillScope}>
+              技能：{clusterMeta.skillScopeShort}
+            </span>
+          </div>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -729,6 +835,19 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
       )}
 
       <div className="px-4 py-3 border-b border-[var(--color-border)] space-y-2">
+        {incomingHandoff?.sourceMode && (
+          <div className="flex flex-wrap items-center gap-2 rounded-xl border border-cyan-500/15 bg-cyan-500/10 px-3 py-2 text-[10px] text-cyan-700">
+            <span>已接力自 {describeAICenterSource(incomingHandoff)}</span>
+            {incomingHandoff.summary && <span className="opacity-80">{incomingHandoff.summary}</span>}
+            <button
+              type="button"
+              onClick={() => setIncomingHandoff(null)}
+              className="ml-auto rounded-full border border-cyan-500/20 px-2 py-0.5 hover:border-cyan-500/40 transition-colors"
+            >
+              仅隐藏提示
+            </button>
+          </div>
+        )}
         <div className="flex gap-2">
           <div className="flex flex-col gap-1 shrink-0">
             <AttachDropdown
@@ -886,9 +1005,9 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
         {sessions.length === 0 && (
           <div className="text-center text-[var(--color-text-secondary)] py-12">
             <Network className="w-12 h-12 mx-auto mb-3 opacity-20" />
-            <p className="text-sm">Agent Cluster 多智能体协作</p>
+            <p className="text-sm">Cluster 适合先拆任务，再并行分析/执行与汇总</p>
             <p className="text-xs mt-1 opacity-60">
-              输入复杂任务，多个 Agent 将并行/协作完成
+              如果你想和多个 Agent 持续来回讨论，请改用 Dialog；如果只是直接改代码，优先 Agent。
             </p>
           </div>
         )}

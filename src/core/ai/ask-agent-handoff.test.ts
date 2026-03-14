@@ -54,6 +54,8 @@ describe("buildAskAgentHandoff", () => {
       attachmentPaths: ["/tmp/demo.ts", "/tmp/project", "/tmp/diagram.png"],
       sourceMode: "ask",
       sourceSessionId: "conv-1",
+      sourceLabel: "Ask 对话",
+      summary: "Ask 对话上下文，附带 3 个文件/图片/目录",
     });
   });
 

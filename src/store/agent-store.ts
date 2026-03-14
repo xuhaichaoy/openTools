@@ -11,6 +11,7 @@ import type {
 import { handleError } from "@/core/errors";
 import { MAX_CONVERSATIONS } from "@/core/constants";
 import { createDebouncedPersister } from "@/core/storage";
+import type { AICenterSourceRef } from "@/store/app-store";
 
 /** 单个任务（一次用户提问 + Agent 执行流程） */
 export interface AgentTask {
@@ -38,10 +39,7 @@ export interface AgentSession {
   tasks: AgentTask[];
   createdAt: number;
   /** 跨模式 handoff 来源信息（如从 Ask 切换到 Agent） */
-  sourceHandoff?: {
-    sourceMode: string;
-    sourceSessionId: string;
-  };
+  sourceHandoff?: AICenterSourceRef;
 }
 
 interface AgentState {
@@ -120,6 +118,7 @@ function migrateSession(raw: Record<string, unknown>): AgentSession {
       title: r.title,
       tasks,
       createdAt: r.createdAt,
+      ...(r.sourceHandoff ? { sourceHandoff: r.sourceHandoff } : {}),
     };
   }
   // Legacy: query / steps / answer 作为唯一一个 task
@@ -140,6 +139,7 @@ function migrateSession(raw: Record<string, unknown>): AgentSession {
         ]
       : [],
     createdAt: r.createdAt ?? Date.now(),
+    ...(r.sourceHandoff ? { sourceHandoff: r.sourceHandoff } : {}),
   };
 }
 

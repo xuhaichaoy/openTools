@@ -22,6 +22,14 @@ import { useAgentStore } from "@/store/agent-store";
 import { useClusterStore } from "@/store/cluster-store";
 import { useAppStore } from "@/store/app-store";
 import { isClusterRunning } from "@/core/agent/cluster/active-orchestrator";
+import { AI_CENTER_MODE_META } from "@/core/ai/ai-center-mode-meta";
+import {
+  applyAICenterModelScope,
+  buildAICenterModelScope,
+  getAICenterModelScopeSource,
+  isAICenterModelScopeCompatible,
+  matchesAICenterModelScope,
+} from "@/core/ai/ai-center-model-scope";
 import { SkillsManager } from "@/components/ai/SkillsManager";
 import type { PluginContext } from "@/core/plugin-system/context";
 import type { ChatViewHandle } from "@/components/ai/ChatView";
@@ -56,6 +64,13 @@ export function AICenter({
 
   const mode = useAppStore((s) => s.aiCenterMode);
   const setMode = useAppStore((s) => s.setAiCenterMode);
+  const aiCenterModelScopes = useAppStore((s) => s.aiCenterModelScopes);
+  const setAICenterModelScope = useAppStore((s) => s.setAICenterModelScope);
+  const modeMeta = AI_CENTER_MODE_META[mode];
+  const aiConfig = useAIStore((s) => s.config);
+  const ownKeys = useAIStore((s) => s.ownKeys);
+  const saveConfig = useAIStore((s) => s.saveConfig);
+  const selectOwnKeyModel = useAIStore((s) => s.selectOwnKeyModel);
 
   useEffect(() => {
     const oneshot = useAppStore.getState().consumeAiInitialMode();
@@ -82,6 +97,55 @@ export function AICenter({
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    const scope = aiCenterModelScopes[mode];
+    if (!scope) {
+      setAICenterModelScope(mode, buildAICenterModelScope(aiConfig));
+      return;
+    }
+    if (matchesAICenterModelScope(aiConfig, scope)) return;
+
+    const currentSource = aiConfig.source || "own_key";
+    const targetSource = getAICenterModelScopeSource(scope);
+    if (!targetSource) {
+      setAICenterModelScope(mode, buildAICenterModelScope(aiConfig));
+      return;
+    }
+    if (
+      targetSource === "own_key"
+      && scope.activeOwnKeyId
+      && (
+        currentSource !== "own_key"
+        || aiConfig.active_own_key_id !== scope.activeOwnKeyId
+      )
+    ) {
+      if (ownKeys.length === 0) return;
+      if (ownKeys.some((key) => key.id === scope.activeOwnKeyId)) {
+        selectOwnKeyModel(scope.activeOwnKeyId);
+        return;
+      }
+      return;
+    }
+
+    const nextConfig = applyAICenterModelScope(aiConfig, scope);
+    if (
+      !isAICenterModelScopeCompatible(nextConfig, scope)
+      || !matchesAICenterModelScope(nextConfig, scope)
+    ) {
+      setAICenterModelScope(mode, buildAICenterModelScope(aiConfig));
+      return;
+    }
+    void saveConfig(nextConfig);
+  }, [
+    mode,
+    aiConfig,
+    ownKeys,
+    aiCenterModelScopes,
+    saveConfig,
+    selectOwnKeyModel,
+    setAICenterModelScope,
+  ]);
 
   const [mounted, setMounted] = useState({ agent: mode === "agent", cluster: mode === "cluster", dialog: mode === "dialog" });
   useEffect(() => {
@@ -199,6 +263,20 @@ export function AICenter({
             >
               <ArrowRightCircle className="w-4 h-4" />
             </button>
+            <button
+              onClick={() => chatRef.current?.continueInCluster()}
+              className={iconBtn}
+              title="在 Cluster 中继续（拆解并并行执行）"
+            >
+              <Network className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => chatRef.current?.continueInDialog()}
+              className={iconBtn}
+              title="在 Dialog 中继续（多 Agent 持续协作）"
+            >
+              <Users className="w-4 h-4" />
+            </button>
           </>
         )}
 
@@ -258,7 +336,7 @@ export function AICenter({
         {/* Dialog 模式操作按钮 */}
         {mode === "dialog" && (
           <span className="text-[11px] text-[var(--color-text-secondary)]">
-            多 Agent 自由对话
+            优先从预设房间开始
           </span>
         )}
 
@@ -272,7 +350,28 @@ export function AICenter({
           <Sparkles className="w-3.5 h-3.5" />
         </button>
 
-        <ModelSelector />
+        <ModelSelector scopeMode={mode} />
+      </div>
+
+      <div className="shrink-0 border-b border-[var(--color-border)] bg-[var(--color-bg-secondary)]/45">
+        <div className="flex flex-wrap items-center gap-1.5 px-3 py-1.5 text-[10px] text-[var(--color-text-secondary)]">
+          <span className="font-medium text-[var(--color-text)]">{modeMeta.boundaryHeadline}</span>
+          <span className="opacity-75">{modeMeta.boundaryDetail}</span>
+          <div className="ml-auto flex flex-wrap items-center gap-1.5">
+            <span
+              className="rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-0.5"
+              title={modeMeta.modelScope}
+            >
+              模型：{modeMeta.modelScopeShort}
+            </span>
+            <span
+              className="rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-0.5"
+              title={modeMeta.skillScope}
+            >
+              技能：{modeMeta.skillScopeShort}
+            </span>
+          </div>
+        </div>
       </div>
 
       {/* ====== 内容区 ====== */}

@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { tauriPersistStorage } from '@/core/storage'
+import type { AICenterModelScope } from '@/core/ai/ai-center-model-scope'
 import {
   MAIN_VIEW_ID,
   createRootViewStack,
@@ -18,14 +19,32 @@ const MAX_RECENT_TOOLS = 20
 export type AIInitialMode = 'ask' | 'agent' | 'cluster' | 'dialog'
 export type AICenterMode = 'ask' | 'agent' | 'cluster' | 'dialog'
 
-export interface AgentHandoff {
+export type AICenterModelScopeMap = Partial<Record<AICenterMode, AICenterModelScope>>
+
+export interface AICenterSourceRef {
+  /** 来源模式标识，用于跨模式会话追溯 */
+  sourceMode: AICenterMode
+  /** 来源会话/对话 ID，用于跨模式加载历史 */
+  sourceSessionId?: string
+  /** 对来源的用户可读说明，如“Ask 对话”“Cluster 报告” */
+  sourceLabel?: string
+  /** 附加摘要，用于在目标模式提示用户当前带入了什么 */
+  summary?: string
+}
+
+export interface AICenterHandoff extends Partial<AICenterSourceRef> {
   query: string
   /** 传递的文件/文件夹附件绝对路径 */
   attachmentPaths?: string[]
-  /** 来源模式标识，用于跨模式会话追溯 */
-  sourceMode?: AICenterMode
-  /** 来源会话/对话 ID，用于跨模式加载历史 */
-  sourceSessionId?: string
+}
+
+/** @deprecated 保留旧类型名，统一使用 AICenterHandoff */
+export type AgentHandoff = AICenterHandoff
+
+export interface PendingAICenterHandoff {
+  mode: AICenterMode
+  payload: AICenterHandoff
+  createdAt: number
 }
 
 export interface EmbedRequest {
@@ -49,8 +68,10 @@ export interface AppState {
   pendingEmbed: EmbedRequest | null
   /** 待处理的视图导航请求（一次性消费） */
   pendingNavigate: string | null
-  /** 从 Ask/Cluster 切到 Agent 时待注入的初始输入（一次性消费，不持久化） */
-  pendingAgentHandoff: AgentHandoff | null
+  /** 跨模式接力的待注入输入（一次性消费，不持久化） */
+  pendingAICenterHandoff: PendingAICenterHandoff | null
+  /** 各模式记住自己的默认模型选择 */
+  aiCenterModelScopes: AICenterModelScopeMap
 
   /** 视图栈（支持多层返回） */
   viewStack: ViewEntry[]
@@ -75,10 +96,12 @@ export interface AppState {
   requestNavigate: (viewId: string) => void
   /** 消费导航请求 */
   consumeNavigate: () => string | null
-  /** 设置待注入 Agent 的初始输入（如 Ask/Cluster「用 Agent 继续」） */
-  setPendingAgentHandoff: (h: AgentHandoff | null) => void
-  /** 消费并清空 pendingAgentHandoff，返回当前值 */
-  consumePendingAgentHandoff: () => AgentHandoff | null
+  /** 设置跨模式 handoff（如 Ask/Cluster/Dialog「继续到其他模式」） */
+  setPendingAICenterHandoff: (handoff: PendingAICenterHandoff | null) => void
+  /** 消费并清空 pendingAICenterHandoff，返回当前值 */
+  consumePendingAICenterHandoff: () => PendingAICenterHandoff | null
+  /** 记住某个模式的模型选择 */
+  setAICenterModelScope: (mode: AICenterMode, scope: AICenterModelScope) => void
   /** 仅重置搜索态，不修改视图栈 */
   resetSearchState: () => void
   reset: () => void
@@ -110,7 +133,8 @@ export const useAppStore = create<AppState>()(
       aiCenterMode: 'ask' as AICenterMode,
       pendingEmbed: null as EmbedRequest | null,
       pendingNavigate: null as string | null,
-      pendingAgentHandoff: null as AgentHandoff | null,
+      pendingAICenterHandoff: null as PendingAICenterHandoff | null,
+      aiCenterModelScopes: {} as AICenterModelScopeMap,
       viewStack: createRootViewStack(),
 
       setMode: (mode) => set({ mode }),
@@ -148,12 +172,19 @@ export const useAppStore = create<AppState>()(
         if (current) set({ pendingNavigate: null })
         return current
       },
-      setPendingAgentHandoff: (h) => set({ pendingAgentHandoff: h }),
-      consumePendingAgentHandoff: () => {
-        const current = get().pendingAgentHandoff
-        if (current != null) set({ pendingAgentHandoff: null })
+      setPendingAICenterHandoff: (handoff) => set({ pendingAICenterHandoff: handoff }),
+      consumePendingAICenterHandoff: () => {
+        const current = get().pendingAICenterHandoff
+        if (current != null) set({ pendingAICenterHandoff: null })
         return current ?? null
       },
+      setAICenterModelScope: (mode, scope) =>
+        set((state) => ({
+          aiCenterModelScopes: {
+            ...state.aiCenterModelScopes,
+            [mode]: scope,
+          },
+        })),
       resetSearchState: () =>
         set({ mode: 'search', searchValue: '', selectedIndex: 0, windowExpanded: false }),
       reset: () =>
@@ -185,6 +216,7 @@ export const useAppStore = create<AppState>()(
       storage: tauriPersistStorage("app-settings.json", "应用设置"),
       partialize: (state) => ({
         recentTools: state.recentTools,
+        aiCenterModelScopes: state.aiCenterModelScopes,
       }),
     },
   ),

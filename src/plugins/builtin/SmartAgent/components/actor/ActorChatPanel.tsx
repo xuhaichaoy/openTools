@@ -21,6 +21,7 @@ import {
   Network,
   Brain,
   ShieldCheck,
+  ArrowRightCircle,
   type LucideIcon,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
@@ -28,9 +29,15 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useActorSystemStore, type ActorSnapshot } from "@/store/actor-system-store";
 import { useAIStore } from "@/store/ai-store";
+import { useAppStore, type AICenterHandoff } from "@/store/app-store";
 import { useTeamStore } from "@/store/team-store";
 import { useClusterPlanApprovalStore } from "@/store/cluster-plan-approval-store";
 import { api } from "@/core/api/client";
+import {
+  AI_CENTER_MODE_META,
+  describeAICenterSource,
+} from "@/core/ai/ai-center-mode-meta";
+import { routeToAICenter } from "@/core/ai/ai-center-routing";
 import { primeTeamModelCache } from "@/core/ai/router";
 import { DIALOG_FULL_ROLE } from "@/core/agent/actor/agent-actor";
 import type {
@@ -644,6 +651,73 @@ function buildSessionUploadRecords(attachments: InputAttachment[]): SessionUploa
     canReadFromPath: Boolean(attachment.path),
     multimodalEligible: attachment.type === "image",
   }));
+}
+
+function buildDialogAgentHandoff(params: {
+  dialogHistory: DialogMessage[];
+  actorById: Map<string, ActorSnapshot>;
+  sessionUploads: SessionUploadRecord[];
+  sourceSessionId?: string;
+  maxMessages?: number;
+  maxCharsPerMessage?: number;
+}): AICenterHandoff | null {
+  const {
+    dialogHistory,
+    actorById,
+    sessionUploads,
+    sourceSessionId,
+    maxMessages = 10,
+    maxCharsPerMessage = 500,
+  } = params;
+  const recentMessages = dialogHistory.slice(-maxMessages);
+  if (recentMessages.length === 0) return null;
+
+  const transcript = recentMessages.map((message) => {
+    const fromLabel = message.from === "user"
+      ? "你"
+      : (actorById.get(message.from)?.roleName ?? message.from);
+    const toLabel = message.to
+      ? (message.to === "user" ? "你" : (actorById.get(message.to)?.roleName ?? message.to))
+      : "房间";
+    const rawContent = (message._briefContent || message.content || "").trim();
+    const clipped = rawContent.length > maxCharsPerMessage
+      ? `${rawContent.slice(0, maxCharsPerMessage)}…`
+      : rawContent;
+    const parts = [`[${fromLabel} -> ${toLabel}]: ${clipped || "（空）"}`];
+    if (message.kind) parts.push(`  [类型]: ${message.kind}`);
+    if (message.images?.length) parts.push(`  [图片]: ${message.images.length} 张`);
+    return parts.join("\n");
+  }).join("\n");
+
+  const attachmentPaths = Array.from(
+    new Set(
+      [
+        ...sessionUploads.map((upload) => upload.path),
+        ...recentMessages.flatMap((message) => message.images || []),
+      ].filter((path): path is string => typeof path === "string" && path.trim().length > 0),
+    ),
+  );
+
+  const intro = attachmentPaths.length > 0
+    ? "以下是之前 Dialog 协作房间的最近上下文，并已附带相关图片/文件，请继续落地执行："
+    : "以下是之前 Dialog 协作房间的最近上下文，请继续落地执行：";
+  const uploadSummary = sessionUploads.length > 0
+    ? `当前房间登记了 ${sessionUploads.length} 份上传/上下文附件，可按需继续使用。`
+    : "";
+  const query = [intro, "", transcript, uploadSummary ? `---\n\n${uploadSummary}` : ""]
+    .filter(Boolean)
+    .join("\n");
+
+  return {
+    query,
+    ...(attachmentPaths.length > 0 ? { attachmentPaths } : {}),
+    sourceMode: "dialog",
+    ...(sourceSessionId ? { sourceSessionId } : {}),
+    sourceLabel: "Dialog 房间",
+    summary: attachmentPaths.length > 0
+      ? `Dialog 协作上下文，附带 ${attachmentPaths.length} 个文件/图片`
+      : "Dialog 协作上下文",
+  };
 }
 
 function buildDialogDispatchPlanBundle(params: {
@@ -2452,10 +2526,12 @@ function DialogWorkspaceDock({
 // ── Main Panel ──
 
 export function ActorChatPanel({ active = true }: { active?: boolean }) {
+  const dialogMeta = AI_CENTER_MODE_META.dialog;
   const [showConfig, setShowConfig] = useState(false);
   const [overlay, setOverlay] = useState<DialogOverlay>(null);
   const [workspacePanel, setWorkspacePanel] = useState<WorkspacePanel>(null);
   const [input, setInput] = useState("");
+  const [incomingHandoff, setIncomingHandoff] = useState<AICenterHandoff | null>(null);
   const [showMention, setShowMention] = useState(false);
   const [mentionFilter, setMentionFilter] = useState("");
   const [customPresets, setCustomPresets] = useState<DialogPreset[]>([]);
@@ -2505,7 +2581,9 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     handleFolderSelect,
     removeAttachment,
     clearAttachments,
+    addAttachmentFromPath,
   } = useInputAttachments();
+  const pendingAICenterHandoff = useAppStore((s) => s.pendingAICenterHandoff);
 
   const runningActors = useMemo(() => actors.filter((a) => a.status === "running"), [actors]);
   const hasRunningActors = runningActors.length > 0;
@@ -2525,6 +2603,36 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       ensureSystem();
     }
   }, [active, ensureSystem]);
+
+  useEffect(() => {
+    if (!pendingAICenterHandoff || pendingAICenterHandoff.mode !== "dialog") return;
+    let cancelled = false;
+
+    const applyHandoff = async () => {
+      const payload = pendingAICenterHandoff.payload;
+      ensureSystem();
+      setInput(payload.query);
+      clearAttachments();
+      setIncomingHandoff(payload);
+
+      if (payload.attachmentPaths?.length) {
+        for (const path of payload.attachmentPaths) {
+          if (cancelled) return;
+          await addAttachmentFromPath(path);
+        }
+      }
+    };
+
+    void applyHandoff().finally(() => {
+      if (!cancelled) {
+        useAppStore.getState().setPendingAICenterHandoff(null);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [pendingAICenterHandoff, ensureSystem, clearAttachments, addAttachmentFromPath]);
 
   // 加载自定义预设
   useEffect(() => {
@@ -2763,12 +2871,29 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   }, [actors, routingMode, requirePlanApproval]);
 
   const handleStop = useCallback(() => { abortAll(); }, [abortAll]);
+  const handleContinueWithAgent = useCallback(() => {
+    const handoff = buildDialogAgentHandoff({
+      dialogHistory,
+      actorById,
+      sessionUploads,
+      sourceSessionId: getSystem()?.sessionId,
+    });
+    if (!handoff) return;
+    routeToAICenter({
+      mode: "agent",
+      source: "dialog_continue_to_agent",
+      handoff,
+      navigate: false,
+    });
+  }, [actorById, dialogHistory, getSystem, sessionUploads]);
   const handleNewTopic = useCallback(() => {
     resetSession();
+    setIncomingHandoff(null);
   }, [resetSession]);
   const handleFullReset = useCallback(() => {
     destroyAll();
     initRef.current = false;
+    setIncomingHandoff(null);
   }, [destroyAll]);
 
   const parseMention = useCallback((text: string): { targetId: string | null; cleanContent: string } => {
@@ -2842,6 +2967,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       setInputNotice(null);
       setShowMention(false);
       clearAttachments();
+      setIncomingHandoff(null);
       inputRef.current?.focus();
       return;
     }
@@ -2933,6 +3059,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
             setInput("");
             setShowMention(false);
             clearAttachments();
+            setIncomingHandoff(null);
             inputRef.current?.focus();
             return;
           }
@@ -2961,6 +3088,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     setInputNotice(null);
     setShowMention(false);
     clearAttachments();
+    setIncomingHandoff(null);
     inputRef.current?.focus();
   }, [input, hasAttachments, imagePaths, attachments, fileContextBlock, attachmentSummary, ensureSystem, pendingUserInteractions, pendingInteractionByMessageId, selectedPendingMessageId, parseMention, actors, sendMessage, broadcastMessage, broadcastAndResolve, steer, replyToMessage, routingMode, routeTask, clearAttachments, requirePlanApproval, openPlanApprovalDialog, getSystem, coordinatorActorId, focusedSessionTask, messageById]);
 
@@ -3152,7 +3280,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
           <div className="flex flex-wrap items-center gap-1.5">
             <div className="flex min-w-0 items-center gap-1.5">
               <Users className="h-4 w-4 text-[var(--color-accent)]" />
-              <span className="text-[13px] font-semibold text-[var(--color-text)]">Agent Dialog</span>
+              <span className="text-[13px] font-semibold text-[var(--color-text)]">Dialog · 多 Agent 持续协作</span>
             </div>
             <span className={`rounded-full px-2 py-0.5 text-[10px] ${
               actors.length > 0
@@ -3230,6 +3358,16 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                   停止
                 </button>
               )}
+              {dialogHistory.length > 0 && (
+                <button
+                  onClick={handleContinueWithAgent}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-cyan-500/20 bg-cyan-500/5 px-2.5 py-1 text-[10px] text-cyan-700 hover:border-cyan-500/35 hover:bg-cyan-500/10 transition-colors"
+                  title="把当前多 Agent 协作上下文带到 Agent，继续落地执行"
+                >
+                  <ArrowRightCircle className="w-3 h-3" />
+                  转 Agent
+                </button>
+              )}
               <button
                 onClick={handleNewTopic}
                 className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1 text-[10px] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/25 hover:text-[var(--color-accent)] transition-colors"
@@ -3247,6 +3385,17 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                 重置
               </button>
             </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-[var(--color-text-secondary)]">
+            <span>{dialogMeta.boundaryHeadline}</span>
+            <span className="opacity-70">{dialogMeta.boundaryDetail}</span>
+            <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2 py-0.5" title={dialogMeta.modelScope}>
+              模型：{dialogMeta.modelScopeShort}
+            </span>
+            <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2 py-0.5" title={dialogMeta.skillScope}>
+              技能：{dialogMeta.skillScopeShort}
+            </span>
           </div>
 
           {actors.length > 0 && (
@@ -3288,10 +3437,28 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                 </div>
                 <div className="text-[11px] text-[var(--color-text-secondary)]">
                   {actors.length > 0
-                    ? "任务中心、工作台和图谱都在顶部工具条里按需打开。"
+                    ? "适合 review、debug、brainstorm 这类持续协作；如果目标是直接改代码，优先切到 Agent。"
                     : "建议先保留一个协调者，再按分析、编写或审查角色继续补充。"}
                 </div>
                 <div className="mt-1 flex flex-wrap justify-center gap-2">
+                  <button
+                    onClick={() => handleApplyPreset("code_review")}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[11px] text-[var(--color-text-secondary)] hover:border-cyan-500/25 hover:text-cyan-600 transition-colors"
+                  >
+                    快速建 Review 房间
+                  </button>
+                  <button
+                    onClick={() => handleApplyPreset("debug_session")}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[11px] text-[var(--color-text-secondary)] hover:border-amber-500/25 hover:text-amber-600 transition-colors"
+                  >
+                    快速建 Debug 房间
+                  </button>
+                  <button
+                    onClick={() => handleApplyPreset("brainstorming")}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[11px] text-[var(--color-text-secondary)] hover:border-emerald-500/25 hover:text-emerald-600 transition-colors"
+                  >
+                    快速建 Brainstorm 房间
+                  </button>
                   <button
                     onClick={() => {
                       setOverlay(null);
@@ -3455,8 +3622,21 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
           />
 
           <div className="overflow-visible rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-[0_12px_32px_-24px_rgba(15,23,42,0.35)]">
-            {(focusedSessionTask || pendingUserInteractions.length > 0 || attachments.length > 0 || inputNotice) && (
+            {(incomingHandoff || focusedSessionTask || pendingUserInteractions.length > 0 || attachments.length > 0 || inputNotice) && (
               <div className="space-y-2 border-b border-[var(--color-border)] bg-[linear-gradient(135deg,rgba(15,23,42,0.02),transparent_45%)] px-3 py-3">
+                {incomingHandoff?.sourceMode && (
+                  <div className="flex flex-wrap items-center gap-2 rounded-xl border border-cyan-500/15 bg-cyan-500/10 px-3 py-1.5 text-[10px] text-cyan-700">
+                    <span>已接力自 {describeAICenterSource(incomingHandoff)}</span>
+                    {incomingHandoff.summary && <span className="opacity-80">{incomingHandoff.summary}</span>}
+                    <button
+                      onClick={() => setIncomingHandoff(null)}
+                      className="ml-auto rounded-full border border-cyan-500/20 px-2.5 py-1 text-[10px] hover:border-cyan-500/40 transition-colors"
+                    >
+                      仅隐藏提示
+                    </button>
+                  </div>
+                )}
+
                 {focusedSessionTask && (
                   <div className="flex flex-wrap items-center gap-2 rounded-xl border border-blue-500/15 bg-blue-500/10 px-3 py-1.5 text-[10px] text-blue-700">
                     <Network className="w-3 h-3" />

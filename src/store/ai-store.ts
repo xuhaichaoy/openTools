@@ -157,6 +157,9 @@ function normalizeConfig(config: AIConfig): AIConfig {
   } else if (!normalized.team_id) {
     normalized.team_config_id = undefined;
   }
+  if (source !== "own_key") {
+    normalized.active_own_key_id = undefined;
+  }
   if (!nativeToolsSupportedOnCurrentPlatform()) {
     normalized.enable_native_tools = false;
   }

@@ -1,5 +1,9 @@
 import { useAIStore } from "@/store/ai-store";
-import { useAppStore, type AICenterMode, type AgentHandoff } from "@/store/app-store";
+import {
+  useAppStore,
+  type AICenterMode,
+  type AICenterHandoff,
+} from "@/store/app-store";
 import {
   recordAIRouteEvent,
   type AIRouteSource,
@@ -10,9 +14,12 @@ interface RouteToAICenterParams {
   source: AIRouteSource;
   query?: string;
   images?: string[];
-  /** @deprecated 用 agentHandoff 代替 */
+  /** @deprecated 用 handoff 代替 */
   agentInitialQuery?: string;
-  agentHandoff?: AgentHandoff;
+  /** 通用跨模式接力载荷 */
+  handoff?: AICenterHandoff;
+  /** @deprecated 使用 handoff */
+  agentHandoff?: AICenterHandoff;
   taskId?: string;
   note?: string;
   navigate?: boolean;
@@ -32,6 +39,7 @@ export function routeToAICenter(params: RouteToAICenterParams): void {
     query,
     images,
     agentInitialQuery,
+    handoff,
     agentHandoff,
     taskId,
     note,
@@ -47,19 +55,26 @@ export function routeToAICenter(params: RouteToAICenterParams): void {
     void useAIStore.getState().sendMessage(query, images);
   }
 
-  if (mode === "agent") {
-    if (agentHandoff) {
-      appStore.setPendingAgentHandoff(agentHandoff);
-    } else if (agentInitialQuery?.trim()) {
-      appStore.setPendingAgentHandoff({ query: agentInitialQuery });
-    }
+  const normalizedHandoff = handoff ?? agentHandoff;
+  if (normalizedHandoff) {
+    appStore.setPendingAICenterHandoff({
+      mode,
+      payload: normalizedHandoff,
+      createdAt: Date.now(),
+    });
+  } else if (mode === "agent" && agentInitialQuery?.trim()) {
+    appStore.setPendingAICenterHandoff({
+      mode,
+      payload: { query: agentInitialQuery },
+      createdAt: Date.now(),
+    });
   }
 
   recordAIRouteEvent({
     mode,
     source,
     taskId,
-    queryPreview: preview(query ?? agentHandoff?.query ?? agentInitialQuery),
+    queryPreview: preview(query ?? normalizedHandoff?.query ?? agentInitialQuery),
     note,
   });
 

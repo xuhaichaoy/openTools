@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { tauriPersistStorage } from "@/core/storage";
 import type { AgentStep } from "@/plugins/builtin/SmartAgent/core/react-agent";
+import type { AICenterSourceRef } from "@/store/app-store";
 import type {
   AgentInstance,
   AgentMessage,
@@ -19,6 +20,8 @@ export interface ClusterSession {
   model?: string;
   /** 用户附带的图片路径 */
   images?: string[];
+  /** 跨模式 handoff 来源信息 */
+  sourceHandoff?: AICenterSourceRef;
   status: ClusterSessionStatus;
   plan?: ClusterPlan;
   instances: AgentInstance[];
@@ -34,7 +37,13 @@ interface ClusterState {
   sessions: ClusterSession[];
   currentSessionId: string | null;
 
-  createSession: (query: string, mode?: ClusterMode, model?: string, images?: string[]) => string;
+  createSession: (
+    query: string,
+    mode?: ClusterMode,
+    model?: string,
+    images?: string[],
+    sourceHandoff?: AICenterSourceRef,
+  ) => string;
   getCurrentSession: () => ClusterSession | null;
   setCurrentSession: (id: string) => void;
   updateSession: (id: string, patch: Partial<ClusterSession>) => void;
@@ -54,7 +63,7 @@ export const useClusterStore = create<ClusterState>()(
       sessions: [],
       currentSessionId: null,
 
-      createSession: (query, mode, model, images) => {
+      createSession: (query, mode, model, images, sourceHandoff) => {
         const id = generateId();
         const session: ClusterSession = {
           id,
@@ -62,6 +71,7 @@ export const useClusterStore = create<ClusterState>()(
           mode,
           model,
           images,
+          ...(sourceHandoff ? { sourceHandoff } : {}),
           status: "idle",
           instances: [],
           messages: [],

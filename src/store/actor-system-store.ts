@@ -366,11 +366,20 @@ function spawnDefaultActors(system: ActorSystem): void {
   const makeId = () => Math.random().toString(36).substring(2, 8);
   system.spawn({
     id: `agent-${makeId()}`,
-    role: { ...DIALOG_FULL_ROLE, name: "Agent 1" },
+    role: { ...DIALOG_FULL_ROLE, name: "Coordinator" },
+    capabilities: {
+      tags: ["coordinator", "synthesis", "code_analysis"],
+      description: "默认协调者，负责理解任务、分配讨论方向并收束结论。",
+    },
+    middlewareOverrides: { approvalLevel: "permissive" },
   });
   system.spawn({
     id: `agent-${makeId()}`,
-    role: { ...DIALOG_FULL_ROLE, name: "Agent 2" },
+    role: { ...DIALOG_FULL_ROLE, name: "Specialist" },
+    capabilities: {
+      tags: ["code_analysis", "code_write", "debugging"],
+      description: "默认执行者，负责深入分析、修复建议和具体实现细节。",
+    },
   });
 }
 

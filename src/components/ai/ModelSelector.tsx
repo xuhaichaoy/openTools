@@ -1,9 +1,11 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { ChevronDown, Check, Sparkles, Cpu } from "lucide-react";
 import { useAIStore } from "@/store/ai-store";
+import { useAppStore, type AICenterMode } from "@/store/app-store";
 import { useTeamStore } from "@/store/team-store";
 import { api } from "@/core/api/client";
 import { primeTeamModelCache } from "@/core/ai/router";
+import { buildAICenterModelScope } from "@/core/ai/ai-center-model-scope";
 
 interface TeamModelInfo {
   config_id: string;
@@ -19,9 +21,11 @@ interface TeamModelsState {
   status: "idle" | "loading" | "ready" | "error";
 }
 
-export function ModelSelector() {
+export function ModelSelector({ scopeMode }: { scopeMode?: AICenterMode }) {
   const { config, saveConfig, ownKeys, selectOwnKeyModel } =
     useAIStore();
+  const currentMode = useAppStore((s) => s.aiCenterMode);
+  const setAICenterModelScope = useAppStore((s) => s.setAICenterModelScope);
   const [open, setOpen] = useState(false);
   const [teamModelsState, setTeamModelsState] = useState<TeamModelsState>({
     teamId: null,
@@ -32,14 +36,25 @@ export function ModelSelector() {
   const ref = useRef<HTMLDivElement>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
 
+  const effectiveMode = scopeMode ?? currentMode;
+
+  const rememberScope = useCallback(
+    (nextConfig: typeof config) => {
+      setAICenterModelScope(effectiveMode, buildAICenterModelScope(nextConfig));
+    },
+    [effectiveMode, setAICenterModelScope],
+  );
+
   const applyConfigPatch = useCallback(
     (patch: Partial<typeof config>) => {
-      void saveConfig({
+      const nextConfig = {
         ...useAIStore.getState().config,
         ...patch,
-      });
+      };
+      rememberScope(nextConfig);
+      void saveConfig(nextConfig);
     },
-    [saveConfig],
+    [rememberScope, saveConfig],
   );
 
   const { teams, loaded: teamsLoaded, loadTeams } = useTeamStore();
@@ -206,6 +221,9 @@ export function ModelSelector() {
 
   const handleSelectOwnKey = (id: string) => {
     selectOwnKeyModel(id);
+    queueMicrotask(() => {
+      rememberScope(useAIStore.getState().config);
+    });
     setOpen(false);
   };
 

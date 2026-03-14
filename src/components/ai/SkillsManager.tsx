@@ -188,7 +188,7 @@ export function SkillsManager({ compact = false }: { compact?: boolean }) {
       )}
 
       <p className="text-[10px] text-[var(--color-text-secondary)] leading-relaxed">
-        技能根据输入内容自动激活，为 AI 注入领域知识和行为约束。适用于 Ask / Agent / Cluster 三个模式。
+        技能根据输入内容自动激活，为 AI 注入领域知识和行为约束。适用于 Ask / Agent / Cluster / Dialog 四个模式。
         支持导入 <code className="text-[9px]">.skill.json</code> 文件安装技能。
       </p>
 

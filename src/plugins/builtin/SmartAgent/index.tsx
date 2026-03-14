@@ -10,6 +10,7 @@ import type { AgentTool } from "./core/react-agent";
 import type { MToolsAI } from "@/core/plugin-system/plugin-interface";
 import { useAgentStore, type AgentTask } from "@/store/agent-store";
 import { useAppStore } from "@/store/app-store";
+import { describeAICenterSource } from "@/core/ai/ai-center-mode-meta";
 import type { RuntimeFallbackContext } from "@/core/agent/runtime";
 
 import { AgentInputBar } from "./components/AgentInputBar";
@@ -299,34 +300,37 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       import("@/store/agent-store").AgentSession["sourceHandoff"] | null
     >(null);
 
-    const pendingHandoff = useAppStore((s) => s.pendingAgentHandoff);
+    const pendingHandoff = useAppStore((s) => s.pendingAICenterHandoff);
     useEffect(() => {
-      if (!pendingHandoff) return;
+      if (!pendingHandoff || pendingHandoff.mode !== "agent") return;
       let cancelled = false;
 
       const applyHandoff = async () => {
-        setInput(pendingHandoff.query);
+        const payload = pendingHandoff.payload;
+        setInput(payload.query);
         clearAttachments();
         setPendingSourceHandoff(null);
 
-        if (pendingHandoff.attachmentPaths?.length) {
-          for (const path of pendingHandoff.attachmentPaths) {
+        if (payload.attachmentPaths?.length) {
+          for (const path of payload.attachmentPaths) {
             if (cancelled) return;
             await addAttachmentFromPath(path);
           }
         }
 
-        if (!cancelled && pendingHandoff.sourceMode && pendingHandoff.sourceSessionId) {
+        if (!cancelled && payload.sourceMode) {
           setPendingSourceHandoff({
-            sourceMode: pendingHandoff.sourceMode,
-            sourceSessionId: pendingHandoff.sourceSessionId,
+            sourceMode: payload.sourceMode,
+            sourceSessionId: payload.sourceSessionId,
+            sourceLabel: payload.sourceLabel,
+            summary: payload.summary,
           });
         }
       };
 
       void applyHandoff().finally(() => {
         if (!cancelled) {
-          useAppStore.getState().setPendingAgentHandoff(null);
+          useAppStore.getState().setPendingAICenterHandoff(null);
         }
       });
 
@@ -498,7 +502,20 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
                 <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
               </svg>
               <span>
-                从 {currentSession.sourceHandoff.sourceMode === "ask" ? "Ask" : currentSession.sourceHandoff.sourceMode === "cluster" ? "Cluster" : currentSession.sourceHandoff.sourceMode} 对话延续
+                从 {describeAICenterSource(currentSession.sourceHandoff)} 接力
+                {currentSession.sourceHandoff.summary ? ` · ${currentSession.sourceHandoff.summary}` : ""}
+              </span>
+            </div>
+          )}
+
+          {!currentSession?.sourceHandoff && pendingSourceHandoff && input.trim() && !running && (
+            <div className="mx-4 mt-2 mb-1 flex items-center gap-1.5 text-xs text-cyan-500/85">
+              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+              </svg>
+              <span>
+                已带入来自 {describeAICenterSource(pendingSourceHandoff)} 的上下文
+                {pendingSourceHandoff.summary ? ` · ${pendingSourceHandoff.summary}` : ""}
               </span>
             </div>
           )}

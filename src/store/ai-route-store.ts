@@ -9,7 +9,11 @@ export type AIRouteSource =
   | "command_palette_ai"
   | "command_palette_shell"
   | "ask_continue_to_agent"
+  | "ask_continue_to_cluster"
+  | "ask_continue_to_dialog"
   | "cluster_continue_to_agent"
+  | "cluster_continue_to_dialog"
+  | "dialog_continue_to_agent"
   | "cluster_run"
   | "agent_run"
   | "floating_indicator";

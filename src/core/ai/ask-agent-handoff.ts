@@ -53,6 +53,8 @@ export function buildAskAgentHandoff(
   attachmentPaths?: string[];
   sourceMode: "ask";
   sourceSessionId: string;
+  sourceLabel: string;
+  summary: string;
 } | null {
   if (!conversation || conversation.messages.length === 0) return null;
 
@@ -65,7 +67,7 @@ export function buildAskAgentHandoff(
     .slice(-maxMessages);
   if (recentMessages.length === 0) return null;
 
-  const summary = recentMessages
+  const transcriptSummary = recentMessages
     .map((message) => summarizeMessage(message, maxCharsPerMessage))
     .join("\n");
   const attachmentPaths = Array.from(
@@ -90,15 +92,21 @@ export function buildAskAgentHandoff(
   const intro = attachmentPaths.length > 0
     ? "以下是之前的对话上下文，并已附带相关图片、文件或目录，请基于此继续执行任务："
     : "以下是之前的对话上下文，请基于此继续执行任务：";
-  const querySections = [`${intro}\n\n${summary}`];
+  const querySections = [`${intro}\n\n${transcriptSummary}`];
   if (contextBlocks.length > 0) {
     querySections.push(`以下是最近一次对话里携带的原始附件/目录上下文摘录：\n\n${contextBlocks.join("\n\n")}`);
   }
+
+  const summary = attachmentPaths.length > 0
+    ? `Ask 对话上下文，附带 ${attachmentPaths.length} 个文件/图片/目录`
+    : "Ask 对话上下文";
 
   return {
     query: querySections.join("\n\n---\n\n"),
     ...(attachmentPaths.length > 0 ? { attachmentPaths } : {}),
     sourceMode: "ask",
     sourceSessionId: conversation.id,
+    sourceLabel: "Ask 对话",
+    summary,
   };
 }

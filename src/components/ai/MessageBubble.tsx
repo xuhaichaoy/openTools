@@ -8,6 +8,8 @@ import {
   Pencil,
   X,
   ArrowRight,
+  Network,
+  Users,
   ChevronUp,
   ChevronDown,
 } from "lucide-react";
@@ -333,10 +335,12 @@ export const MessageBubble = memo(function MessageBubble({
   msg,
   isLastAssistant = false,
   searchQuery,
+  onContinueAskMode,
 }: {
   msg: ChatMessage;
   isLastAssistant?: boolean;
   searchQuery?: string;
+  onContinueAskMode?: (mode: "agent" | "cluster" | "dialog") => void;
 }) {
   const isUser = msg.role === "user";
   const [editing, setEditing] = useState(false);
@@ -504,29 +508,86 @@ export const MessageBubble = memo(function MessageBubble({
                 )}
               </div>
               {msg.suggestAgentUpgrade && !msg.streaming && (
-                <button
-                  onClick={() => {
-                    const aiState = useAIStore.getState();
-                    const currentConversation = aiState.conversations.find(
-                      (conversation) => conversation.id === aiState.currentConversationId,
-                    ) || null;
-                    const handoff = buildAskAgentHandoff(currentConversation, {
-                      maxMessages: 6,
-                      maxCharsPerMessage: 400,
-                    });
-                    if (!handoff) return;
-                    routeToAICenter({
-                      mode: "agent",
-                      source: "ask_continue_to_agent",
-                      agentHandoff: handoff,
-                      navigate: false,
-                    });
-                  }}
-                  className="mt-2 flex items-center gap-1 text-xs text-indigo-400 hover:text-indigo-300 transition-colors"
-                >
-                  <ArrowRight className="w-3 h-3" />
-                  此任务涉及多步工具调用，建议在 Agent 模式中继续
-                </button>
+                <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                  <button
+                    onClick={() => {
+                      if (onContinueAskMode) {
+                        onContinueAskMode("agent");
+                        return;
+                      }
+                      const aiState = useAIStore.getState();
+                      const currentConversation = aiState.conversations.find(
+                        (conversation) => conversation.id === aiState.currentConversationId,
+                      ) || null;
+                      const handoff = buildAskAgentHandoff(currentConversation, {
+                        maxMessages: 6,
+                        maxCharsPerMessage: 400,
+                      });
+                      routeToAICenter({
+                        mode: "agent",
+                        source: "ask_continue_to_agent",
+                        ...(handoff ? { handoff } : {}),
+                        navigate: false,
+                      });
+                    }}
+                    className="flex items-center gap-1 text-indigo-400 hover:text-indigo-300 transition-colors"
+                  >
+                    <ArrowRight className="w-3 h-3" />
+                    转 Agent 落地
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (onContinueAskMode) {
+                        onContinueAskMode("cluster");
+                        return;
+                      }
+                      const aiState = useAIStore.getState();
+                      const currentConversation = aiState.conversations.find(
+                        (conversation) => conversation.id === aiState.currentConversationId,
+                      ) || null;
+                      const handoff = buildAskAgentHandoff(currentConversation, {
+                        maxMessages: 6,
+                        maxCharsPerMessage: 400,
+                      });
+                      routeToAICenter({
+                        mode: "cluster",
+                        source: "ask_continue_to_cluster",
+                        ...(handoff ? { handoff } : {}),
+                        navigate: false,
+                      });
+                    }}
+                    className="flex items-center gap-1 text-cyan-500 hover:text-cyan-400 transition-colors"
+                  >
+                    <Network className="w-3 h-3" />
+                    转 Cluster 拆解
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (onContinueAskMode) {
+                        onContinueAskMode("dialog");
+                        return;
+                      }
+                      const aiState = useAIStore.getState();
+                      const currentConversation = aiState.conversations.find(
+                        (conversation) => conversation.id === aiState.currentConversationId,
+                      ) || null;
+                      const handoff = buildAskAgentHandoff(currentConversation, {
+                        maxMessages: 6,
+                        maxCharsPerMessage: 400,
+                      });
+                      routeToAICenter({
+                        mode: "dialog",
+                        source: "ask_continue_to_dialog",
+                        ...(handoff ? { handoff } : {}),
+                        navigate: false,
+                      });
+                    }}
+                    className="flex items-center gap-1 text-amber-500 hover:text-amber-400 transition-colors"
+                  >
+                    <Users className="w-3 h-3" />
+                    转 Dialog 协作
+                  </button>
+                </div>
               )}
             </div>
           ) : editing ? (

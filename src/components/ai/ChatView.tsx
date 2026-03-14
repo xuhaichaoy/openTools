@@ -44,6 +44,10 @@ export interface ChatViewHandle {
   hasMessages: () => boolean;
   /** 将当前 Ask 对话上下文传递到 Agent 模式继续 */
   continueInAgent: () => void;
+  /** 将当前 Ask 对话上下文传递到 Cluster 模式继续 */
+  continueInCluster: () => void;
+  /** 将当前 Ask 对话上下文传递到 Dialog 模式继续 */
+  continueInDialog: () => void;
 }
 
 export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideModelSelector?: boolean; headless?: boolean }>(function ChatView({ onBack, hideModelSelector, headless }, ref) {
@@ -151,6 +155,79 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
     return -1;
   }, [messages]);
 
+  const buildAskModeHandoff = useCallback((options?: { maxMessages?: number; maxCharsPerMessage?: number }) => {
+    const conversationHandoff = buildAskAgentHandoff(conversation, options);
+    const draftText = input.trim();
+    const draftAttachmentPaths = Array.from(
+      new Set(
+        attachments
+          .map((attachment) => attachment.path)
+          .filter((path): path is string => typeof path === "string" && path.trim().length > 0),
+      ),
+    );
+    const hasDraft = !!draftText || draftAttachmentPaths.length > 0;
+    if (!conversationHandoff && !hasDraft) return null;
+
+    const fallbackText = fileContextBlock.trim()
+      ? "请先阅读我从 Ask 带入的附件/目录，再继续处理。"
+      : imagePaths.length > 0
+        ? "请先查看我从 Ask 带入的图片，再继续处理。"
+        : "请继续处理我在 Ask 中准备的草稿。";
+    const draftQuery = attachmentSummary
+      ? `${attachmentSummary}\n${draftText || fallbackText}`
+      : (draftText || fallbackText);
+
+    if (!conversationHandoff) {
+      return {
+        query: draftQuery,
+        ...(draftAttachmentPaths.length > 0 ? { attachmentPaths: draftAttachmentPaths } : {}),
+        sourceMode: "ask" as const,
+        ...(conversation?.id ? { sourceSessionId: conversation.id } : {}),
+        sourceLabel: "Ask 草稿",
+        summary: draftAttachmentPaths.length > 0
+          ? `Ask 草稿，附带 ${draftAttachmentPaths.length} 个文件/图片/目录`
+          : "Ask 草稿",
+      };
+    }
+
+    if (!hasDraft) return conversationHandoff;
+
+    const attachmentPaths = Array.from(
+      new Set([
+        ...(conversationHandoff.attachmentPaths || []),
+        ...draftAttachmentPaths,
+      ]),
+    );
+    const draftBlock = [
+      "以下是我在 Ask 中尚未发送、但希望一起带过去的当前草稿/附件：",
+      "",
+      draftQuery,
+    ].join("\n");
+
+    return {
+      ...conversationHandoff,
+      query: `${conversationHandoff.query}\n\n---\n\n${draftBlock}`,
+      ...(attachmentPaths.length > 0 ? { attachmentPaths } : {}),
+      summary: attachmentPaths.length > 0
+        ? `Ask 对话上下文 + 当前草稿，附带 ${attachmentPaths.length} 个文件/图片/目录`
+        : "Ask 对话上下文 + 当前草稿",
+    };
+  }, [attachmentSummary, attachments, conversation, fileContextBlock, imagePaths.length, input]);
+
+  const continueAskInMode = useCallback((mode: "agent" | "cluster" | "dialog") => {
+    const handoff = buildAskModeHandoff();
+    routeToAICenter({
+      mode,
+      source: mode === "agent"
+        ? "ask_continue_to_agent"
+        : mode === "cluster"
+          ? "ask_continue_to_cluster"
+          : "ask_continue_to_dialog",
+      ...(handoff ? { handoff } : {}),
+      navigate: false,
+    });
+  }, [buildAskModeHandoff]);
+
   // 暴露控制接口给父组件
   useImperativeHandle(ref, () => ({
     toggleHistory: () => setShowHistory((v) => !v),
@@ -169,17 +246,10 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
       inputRef.current?.focus();
     },
     hasMessages: () => messages.length > 0,
-    continueInAgent: () => {
-      const handoff = buildAskAgentHandoff(conversation);
-      if (!handoff) return;
-      routeToAICenter({
-        mode: "agent",
-        source: "ask_continue_to_agent",
-        agentHandoff: handoff,
-        navigate: false,
-      });
-    },
-  }));
+    continueInAgent: () => continueAskInMode("agent"),
+    continueInCluster: () => continueAskInMode("cluster"),
+    continueInDialog: () => continueAskInMode("dialog"),
+  }), [continueAskInMode, createConversation, messages.length]);
 
   // 初次进入自动聚焦输入框
   useEffect(() => {
@@ -429,7 +499,7 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
           </div>
 
           <div className="flex-1 flex justify-end items-center gap-1">
-            {!hideModelSelector && <ModelSelector />}
+            {!hideModelSelector && <ModelSelector scopeMode="ask" />}
             {messages.length > 0 && (
               <>
                 <button
@@ -596,6 +666,7 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
                   msg={msg}
                   isLastAssistant={isLastAssistant}
                   searchQuery={searchQuery}
+                  onContinueAskMode={continueAskInMode}
                 />
               </div>
             );
