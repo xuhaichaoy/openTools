@@ -200,7 +200,9 @@ export class LocalAgentBridge implements AgentBridge {
         },
       );
       if (shouldAutoSaveAssistantMemory(aiConfig)) {
-        void autoExtractMemories(`${task}\n${answer}`, this.id).catch(() => undefined);
+        void autoExtractMemories(`${task}\n${answer}`, this.id, {
+          sourceMode: "cluster",
+        }).catch(() => undefined);
       }
       return { answer, steps: collectedSteps };
     } catch (e) {

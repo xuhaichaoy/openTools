@@ -5,11 +5,13 @@ import {
   recallMemories,
   semanticRecall,
   type AIMemoryCandidate,
+  type AIMemoryCandidateMode,
   type AIMemoryItem,
 } from "./memory-store";
 
 export interface AssistantMemoryRecallOptions {
   conversationId?: string;
+  workspaceId?: string;
   topK?: number;
   timeoutMs?: number;
   preferSemantic?: boolean;
@@ -39,13 +41,17 @@ export async function appendAssistantMemoryCandidates(
 
 export async function queueAssistantMemoryCandidates(
   text: string,
-  opts?: { conversationId?: string },
+  opts?: { conversationId?: string; workspaceId?: string; sourceMode?: AIMemoryCandidateMode },
 ): Promise<number> {
   const normalized = String(text || "").trim();
   if (!normalized) return 0;
 
   const candidates = extractMemoryCandidates(normalized, {
     conversationId: opts?.conversationId,
+    workspaceId: opts?.workspaceId,
+    source: "user",
+    sourceMode: opts?.sourceMode ?? "ask",
+    evidence: normalized,
   });
   if (candidates.length === 0) return 0;
 
@@ -59,6 +65,7 @@ async function recallAssistantMemoriesInternal(
   const topK = opts?.topK ?? 6;
   const recallOpts = {
     conversationId: opts?.conversationId,
+    workspaceId: opts?.workspaceId,
     topK,
   };
 

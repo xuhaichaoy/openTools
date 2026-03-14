@@ -20,6 +20,7 @@ import {
   dismissMemoryCandidate,
   listMemoryCandidates,
   listConfirmedMemories,
+  listArchivedMemories,
   deleteMemory,
   updateMemoryContent,
   getMemoryStats,
@@ -28,6 +29,7 @@ import {
   type AIMemoryCandidate,
   type AIMemoryItem,
   type AIMemoryKind,
+  type AIMemoryScope,
   type AIMemorySource,
 } from "@/core/ai/memory-store";
 import { useAIStore } from "@/store/ai-store";
@@ -54,6 +56,26 @@ const SOURCE_LABELS: Record<AIMemorySource, string> = {
   agent: "Agent / 工具保存",
 };
 
+const SCOPE_LABELS: Record<"global" | "conversation" | "workspace", string> = {
+  global: "全局",
+  conversation: "会话",
+  workspace: "工作区",
+};
+
+const MODE_LABELS: Record<"ask" | "agent" | "cluster" | "dialog" | "system", string> = {
+  ask: "Ask",
+  agent: "Agent",
+  cluster: "Cluster",
+  dialog: "Dialog",
+  system: "System",
+};
+
+const ARCHIVE_REASON_LABELS: Record<"deleted" | "replaced" | "limit_trimmed", string> = {
+  deleted: "手动删除",
+  replaced: "被新记忆替换",
+  limit_trimmed: "超过上限被归档",
+};
+
 const KIND_OPTIONS = Object.entries(KIND_LABELS) as Array<
   [AIMemoryKind, { label: string; color: string }]
 >;
@@ -69,6 +91,38 @@ function formatRelativeTime(timestamp?: number | null): string {
   if (diff < 86_400_000) return `${Math.max(1, Math.floor(diff / 3_600_000))} 小时前`;
   if (diff < 2_592_000_000) return `${Math.max(1, Math.floor(diff / 86_400_000))} 天前`;
   return new Date(timestamp).toLocaleDateString("zh-CN");
+}
+
+function collectRecentTargets(
+  entries: Array<{ value?: string | null; timestamp?: number | null }>,
+): string[] {
+  const latestByValue = new Map<string, number>();
+  for (const entry of entries) {
+    const value = String(entry.value || "").trim();
+    if (!value) continue;
+    const timestamp = typeof entry.timestamp === "number" ? entry.timestamp : 0;
+    const previous = latestByValue.get(value) ?? 0;
+    if (timestamp >= previous) {
+      latestByValue.set(value, timestamp);
+    }
+  }
+
+  return [...latestByValue.entries()]
+    .sort((a, b) => {
+      if (b[1] !== a[1]) return b[1] - a[1];
+      return a[0].localeCompare(b[0]);
+    })
+    .map(([value]) => value)
+    .slice(0, 8);
+}
+
+function formatScopeTarget(scope: AIMemoryScope, target?: string | null): string | null {
+  const value = String(target || "").trim();
+  if (!value) return null;
+  if (scope === "workspace") {
+    return value.split("/").filter(Boolean).pop() || value;
+  }
+  return value;
 }
 
 function SummaryCard({
@@ -102,6 +156,7 @@ export function MemoryTab() {
   const syncMemoryCandidatesToStore = useAIStore((s) => s.loadMemoryCandidates);
   const { toast } = useToast();
   const [memories, setMemories] = useState<AIMemoryItem[]>([]);
+  const [archivedMemories, setArchivedMemories] = useState<AIMemoryItem[]>([]);
   const [candidates, setCandidates] = useState<AIMemoryCandidate[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -116,6 +171,9 @@ export function MemoryTab() {
   const [creatingMemory, setCreatingMemory] = useState(false);
   const [draftContent, setDraftContent] = useState("");
   const [draftKind, setDraftKind] = useState<AIMemoryKind>("preference");
+  const [draftScope, setDraftScope] = useState<AIMemoryScope>("global");
+  const [draftScopeTarget, setDraftScopeTarget] = useState("");
+  const [showAllArchived, setShowAllArchived] = useState(false);
   const [stats, setStats] = useState<{
     total: number;
     byKind: Record<string, number>;
@@ -127,12 +185,14 @@ export function MemoryTab() {
     const silent = options?.silent ?? false;
     if (!silent) setIsLoading(true);
     try {
-      const [items, candidateItems, nextStats] = await Promise.all([
+      const [items, archivedItems, candidateItems, nextStats] = await Promise.all([
         listConfirmedMemories(),
+        listArchivedMemories(),
         listMemoryCandidates(),
         getMemoryStats(),
       ]);
       setMemories(items);
+      setArchivedMemories(archivedItems);
       setCandidates(candidateItems);
       setStats(nextStats);
       await syncMemoryCandidatesToStore().catch(() => undefined);
@@ -208,12 +268,15 @@ export function MemoryTab() {
     setIsRefreshing(false);
   };
 
-  const handleConfirmCandidate = async (candidateId: string) => {
+  const handleConfirmCandidate = async (
+    candidateId: string,
+    options?: { replaceConflicts?: boolean },
+  ) => {
     setCandidateActionId(`confirm:${candidateId}`);
     try {
-      const saved = await confirmMemoryCandidate(candidateId);
+      const saved = await confirmMemoryCandidate(candidateId, options);
       if (saved) {
-        toast("success", "候选已转为正式记忆");
+        toast("success", options?.replaceConflicts ? "已替换旧记忆并保存新记忆" : "候选已转为正式记忆");
       } else {
         toast("warning", "候选无效、重复或已失效");
       }
@@ -259,9 +322,21 @@ export function MemoryTab() {
     }
     setCreatingMemory(true);
     try {
+      const trimmedScopeTarget = draftScopeTarget.trim();
+      if (draftScope === "workspace" && !trimmedScopeTarget) {
+        toast("warning", "工作区记忆需要填写工作区路径或标识");
+        return;
+      }
+      if (draftScope === "conversation" && !trimmedScopeTarget) {
+        toast("warning", "会话记忆需要填写会话 ID");
+        return;
+      }
       const saved = await saveConfirmedMemory(draftContent, {
         kind: draftKind,
         source: "user",
+        scope: draftScope,
+        workspaceId: draftScope === "workspace" ? trimmedScopeTarget : undefined,
+        conversationId: draftScope === "conversation" ? trimmedScopeTarget : undefined,
       });
       if (!saved) {
         toast("warning", "内容无效、重复、过短或包含敏感信息");
@@ -269,6 +344,8 @@ export function MemoryTab() {
       }
       setDraftContent("");
       setDraftKind("preference");
+      setDraftScope("global");
+      setDraftScopeTarget("");
       toast("success", "已手动添加正式记忆");
       await loadMemories({ silent: true });
     } catch (e) {
@@ -288,8 +365,58 @@ export function MemoryTab() {
       || m.tags.some((t) => t.toLowerCase().includes(q))
       || (SOURCE_LABELS[m.source] ?? m.source).toLowerCase().includes(q)
       || (KIND_LABELS[m.kind]?.label ?? m.kind).toLowerCase().includes(q)
+      || (m.workspace_id || "").toLowerCase().includes(q)
+      || (m.replaced_by_memory_id || "").toLowerCase().includes(q)
     );
   }), [filterKind, filterSource, memories, searchQuery]);
+  const activeMemoryMap = useMemo(
+    () => new Map(memories.map((memory) => [memory.id, memory])),
+    [memories],
+  );
+  const memoryEnabled = config.enable_long_term_memory !== false;
+  const autoCandidateEnabled = memoryEnabled && config.enable_memory_auto_save !== false;
+  const autoRecallEnabled = memoryEnabled && config.enable_memory_auto_recall !== false;
+  const memorySyncEnabled = memoryEnabled && config.enable_memory_sync !== false;
+  const workspaceSuggestions = useMemo(
+    () => collectRecentTargets([
+      ...memories.map((memory) => ({
+        value: memory.workspace_id,
+        timestamp: memory.updated_at,
+      })),
+      ...archivedMemories.map((memory) => ({
+        value: memory.workspace_id,
+        timestamp: memory.archived_at ?? memory.updated_at,
+      })),
+      ...candidates.map((candidate) => ({
+        value: candidate.workspace_id,
+        timestamp: candidate.created_at,
+      })),
+    ]),
+    [archivedMemories, candidates, memories],
+  );
+  const conversationSuggestions = useMemo(
+    () => collectRecentTargets([
+      ...memories.map((memory) => ({
+        value: memory.conversation_id,
+        timestamp: memory.updated_at,
+      })),
+      ...archivedMemories.map((memory) => ({
+        value: memory.conversation_id,
+        timestamp: memory.archived_at ?? memory.updated_at,
+      })),
+      ...candidates.map((candidate) => ({
+        value: candidate.conversation_id,
+        timestamp: candidate.created_at,
+      })),
+    ]),
+    [archivedMemories, candidates, memories],
+  );
+  const scopeTargetSuggestions = useMemo(() => {
+    if (draftScope === "workspace") return workspaceSuggestions;
+    if (draftScope === "conversation") return conversationSuggestions;
+    return [];
+  }, [conversationSuggestions, draftScope, workspaceSuggestions]);
+  const archivedPreview = showAllArchived ? archivedMemories : archivedMemories.slice(0, 6);
 
   if (isLoading) {
     return (
@@ -353,15 +480,15 @@ export function MemoryTab() {
         />
         <SummaryCard
           icon={ShieldCheck}
-          label="自动召回"
-          value={config.enable_memory_auto_recall ? "开启" : "关闭"}
-          detail="发送消息前按当前问题相关性注入"
+          label="自动提取候选"
+          value={autoCandidateEnabled ? "开启" : (memoryEnabled ? "关闭" : "停用")}
+          detail={memoryEnabled ? "只生成候选，不直接写入正式记忆" : "长期记忆总开关关闭"}
         />
         <SummaryCard
           icon={Clock3}
-          label="云同步"
-          value={config.enable_memory_sync ? "参与" : "本地"}
-          detail={config.enable_long_term_memory ? "只同步正式记忆，不同步候选" : "长期记忆总开关当前关闭"}
+          label="自动召回"
+          value={autoRecallEnabled ? "开启" : (memoryEnabled ? "关闭" : "停用")}
+          detail={memoryEnabled ? "发送消息前按相关性注入正式记忆" : "当前不会参与召回"}
         />
       </div>
 
@@ -410,9 +537,20 @@ export function MemoryTab() {
         </div>
       )}
 
-      <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-3 text-[10px] text-[var(--color-text-secondary)]">
-        当前流程是“自动提取候选 → 人工确认 → 正式记忆召回 → 可选云同步”。
-        `memory-graph` 这一类图谱数据目前不参与主召回链路，现阶段重点仍是这套稳定的候选/正式记忆体系。
+      <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-3 text-[10px] text-[var(--color-text-secondary)] space-y-1.5">
+        <div>
+          当前流程是“自动提取候选 → 人工确认 → 正式记忆召回 → 可选云同步”。
+          也就是说，现在的记忆是自动提取、半自动入库，不是自动直接写进长期记忆。
+        </div>
+        <div>
+          总开关：{memoryEnabled ? "已开启" : "已关闭"}；云同步：{memorySyncEnabled ? "开启，仅同步正式记忆" : "关闭，仅保留本地正式记忆"}。
+        </div>
+        <div>
+          例外项会直接写入正式记忆：系统生成的项目上下文、会话摘要，以及你在本页手动添加的正式记忆。
+        </div>
+        <div>
+          `memory-graph` 这一类图谱数据目前不参与主召回链路，现阶段重点仍是这套稳定的候选/正式记忆体系。
+        </div>
       </div>
 
       <div className="grid gap-3 lg:grid-cols-2">
@@ -445,6 +583,18 @@ export function MemoryTab() {
                 </option>
               ))}
             </select>
+            <select
+              value={draftScope}
+              onChange={(e) => {
+                setDraftScope(e.target.value as AIMemoryScope);
+                setDraftScopeTarget("");
+              }}
+              className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2.5 py-2 text-xs text-[var(--color-text)] outline-none"
+            >
+              <option value="global">全局记忆</option>
+              <option value="workspace">工作区记忆</option>
+              <option value="conversation">会话记忆</option>
+            </select>
             <button
               onClick={() => void handleCreateMemory()}
               disabled={creatingMemory}
@@ -453,6 +603,57 @@ export function MemoryTab() {
               {creatingMemory ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
               保存为正式记忆
             </button>
+          </div>
+          {draftScope !== "global" && (
+            <div className="space-y-2">
+              <input
+                value={draftScopeTarget}
+                onChange={(e) => setDraftScopeTarget(e.target.value)}
+                list={draftScope === "workspace" ? "memory-workspace-targets" : "memory-conversation-targets"}
+                placeholder={draftScope === "workspace" ? "输入工作区路径或项目标识，如 /Users/demo/project" : "输入会话 ID"}
+                className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-3 py-2 text-xs text-[var(--color-text)] outline-none"
+              />
+              {draftScope === "workspace" && (
+                <datalist id="memory-workspace-targets">
+                  {workspaceSuggestions.map((target) => (
+                    <option key={target} value={target} />
+                  ))}
+                </datalist>
+              )}
+              {draftScope === "conversation" && (
+                <datalist id="memory-conversation-targets">
+                  {conversationSuggestions.map((target) => (
+                    <option key={target} value={target} />
+                  ))}
+                </datalist>
+              )}
+              {scopeTargetSuggestions.length > 0 && (
+                <div className="flex flex-wrap gap-1.5">
+                  {scopeTargetSuggestions.slice(0, 6).map((target) => (
+                    <button
+                      key={target}
+                      type="button"
+                      onClick={() => setDraftScopeTarget(target)}
+                      className={`rounded-full border px-2 py-1 text-[10px] transition-colors ${
+                        draftScopeTarget === target
+                          ? "border-[#F28F36] bg-[#F28F36]/10 text-[#F28F36]"
+                          : "border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)]"
+                      }`}
+                      title={target}
+                    >
+                      {formatScopeTarget(draftScope, target)}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          <div className="text-[10px] text-[var(--color-text-secondary)]">
+            {draftScope === "global"
+              ? "全局记忆会在所有模式下按相关性参与召回。"
+              : draftScope === "workspace"
+                ? "工作区记忆适合项目结构、项目偏好和仓库上下文，只会在同一工作区内优先召回。"
+                : "会话记忆适合单个房间/任务的长期上下文，只会在对应会话中参与召回。"}
           </div>
         </div>
 
@@ -484,6 +685,7 @@ export function MemoryTab() {
               {candidates.map((candidate) => {
                 const confirmBusy = candidateActionId === `confirm:${candidate.id}`;
                 const dismissBusy = candidateActionId === `dismiss:${candidate.id}`;
+                const kindMeta = candidate.kind ? KIND_LABELS[candidate.kind] : null;
                 return (
                   <div
                     key={candidate.id}
@@ -495,13 +697,65 @@ export function MemoryTab() {
                     <div className="mt-1 text-[10px] text-[var(--color-text-secondary)]">
                       {candidate.reason}
                     </div>
+                    {candidate.evidence && candidate.evidence !== candidate.content && (
+                      <div className="mt-1 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1 text-[10px] text-[var(--color-text-secondary)]">
+                        证据：{candidate.evidence}
+                      </div>
+                    )}
+                    {candidate.conflict_summary && (
+                      <div className="mt-1 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] text-amber-700 dark:text-amber-300">
+                        {candidate.conflict_summary}
+                      </div>
+                    )}
                     <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-[var(--color-text-secondary)]">
+                      {kindMeta && (
+                        <span
+                          className="rounded-full px-1.5 py-0.5"
+                          style={{
+                            background: `${kindMeta.color}20`,
+                            color: kindMeta.color,
+                          }}
+                        >
+                          {kindMeta.label}
+                        </span>
+                      )}
                       <span className="rounded-full bg-[var(--color-bg)] px-1.5 py-0.5">
                         置信度 {Math.round(candidate.confidence * 100)}%
                       </span>
                       <span className="rounded-full bg-[var(--color-bg)] px-1.5 py-0.5">
-                        {candidate.conversation_id ? "会话候选" : "全局候选"}
+                        {(candidate.scope && SCOPE_LABELS[candidate.scope]) || (candidate.conversation_id ? "会话" : "全局")}
                       </span>
+                      {candidate.scope === "workspace" && candidate.workspace_id && (
+                        <span
+                          className="rounded-full bg-[var(--color-bg)] px-1.5 py-0.5"
+                          title={candidate.workspace_id}
+                        >
+                          {formatScopeTarget("workspace", candidate.workspace_id)}
+                        </span>
+                      )}
+                      {candidate.scope === "conversation" && candidate.conversation_id && (
+                        <span
+                          className="rounded-full bg-[var(--color-bg)] px-1.5 py-0.5"
+                          title={candidate.conversation_id}
+                        >
+                          {formatScopeTarget("conversation", candidate.conversation_id)}
+                        </span>
+                      )}
+                      {candidate.source && (
+                        <span className="rounded-full bg-[var(--color-bg)] px-1.5 py-0.5">
+                          {SOURCE_LABELS[candidate.source] ?? candidate.source}
+                        </span>
+                      )}
+                      {candidate.source_mode && (
+                        <span className="rounded-full bg-[var(--color-bg)] px-1.5 py-0.5">
+                          {MODE_LABELS[candidate.source_mode] ?? candidate.source_mode}
+                        </span>
+                      )}
+                      {!!candidate.conflict_memory_ids?.length && (
+                        <span className="rounded-full bg-amber-500/10 px-1.5 py-0.5 text-amber-700 dark:text-amber-300">
+                          冲突 {candidate.conflict_memory_ids.length}
+                        </span>
+                      )}
                       <span>{formatRelativeTime(candidate.created_at)}</span>
                     </div>
                     <div className="mt-2 flex justify-end gap-2">
@@ -512,12 +766,21 @@ export function MemoryTab() {
                       >
                         {dismissBusy ? "忽略中..." : "忽略"}
                       </button>
+                      {!!candidate.conflict_memory_ids?.length && (
+                        <button
+                          onClick={() => void handleConfirmCandidate(candidate.id, { replaceConflicts: true })}
+                          disabled={confirmBusy || dismissBusy}
+                          className="rounded-md bg-amber-500 px-2 py-1 text-[10px] text-white hover:bg-amber-600 disabled:opacity-50"
+                        >
+                          {confirmBusy ? "替换中..." : "替换旧项"}
+                        </button>
+                      )}
                       <button
                         onClick={() => void handleConfirmCandidate(candidate.id)}
                         disabled={confirmBusy || dismissBusy}
                         className="rounded-md bg-[#F28F36] px-2 py-1 text-[10px] text-white hover:bg-[#e07d25] disabled:opacity-50"
                       >
-                        {confirmBusy ? "记住中..." : "记住"}
+                        {confirmBusy ? "记住中..." : (!!candidate.conflict_memory_ids?.length ? "保留并记住" : "记住")}
                       </button>
                     </div>
                   </div>
@@ -657,11 +920,20 @@ export function MemoryTab() {
                           {SOURCE_LABELS[memory.source] ?? memory.source}
                         </span>
                         <span className="text-[9px] text-[var(--color-text-secondary)]">
-                          {memory.scope === "conversation" ? "会话记忆" : "全局记忆"}
+                          {memory.scope === "workspace"
+                            ? `工作区记忆${memory.workspace_id ? ` · ${formatScopeTarget("workspace", memory.workspace_id)}` : ""}`
+                            : memory.scope === "conversation"
+                              ? `会话记忆${memory.conversation_id ? ` · ${formatScopeTarget("conversation", memory.conversation_id)}` : ""}`
+                              : "全局记忆"}
                         </span>
                         <span className="text-[9px] text-[var(--color-text-secondary)]">
                           使用 {memory.use_count} 次
                         </span>
+                        {!!memory.supersedes_memory_ids?.length && (
+                          <span className="text-[9px] text-amber-700 dark:text-amber-300">
+                            替换了 {memory.supersedes_memory_ids.length} 条旧记忆
+                          </span>
+                        )}
                         <span className="text-[9px] text-[var(--color-text-secondary)]">
                           更新于 {formatRelativeTime(memory.updated_at)}
                         </span>
@@ -711,6 +983,56 @@ export function MemoryTab() {
           </div>
         )}
       </div>
+
+      {archivedMemories.length > 0 && (
+        <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-3 space-y-2">
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <div className="text-xs font-semibold text-[var(--color-text)]">最近归档 / 替换记录</div>
+              <div className="text-[10px] text-[var(--color-text-secondary)]">
+                这里保留最近被替换、手动删除或超上限归档的正式记忆，方便追溯。
+              </div>
+            </div>
+            {archivedMemories.length > 6 && (
+              <button
+                type="button"
+                onClick={() => setShowAllArchived((value) => !value)}
+                className="rounded-lg border border-[var(--color-border)] px-2 py-1 text-[10px] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)]"
+              >
+                {showAllArchived ? "收起" : `查看全部 ${archivedMemories.length} 条`}
+              </button>
+            )}
+          </div>
+          <div className="space-y-2">
+            {archivedPreview.map((memory) => {
+              const replacement = memory.replaced_by_memory_id
+                ? activeMemoryMap.get(memory.replaced_by_memory_id)
+                : null;
+              return (
+                <div
+                  key={memory.id}
+                  className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-3 py-2"
+                >
+                  <div className="text-xs text-[var(--color-text)]/80 break-words">
+                    {memory.content}
+                  </div>
+                  <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] text-[var(--color-text-secondary)]">
+                    <span className="rounded-full bg-[var(--color-bg)] px-1.5 py-0.5">
+                      {ARCHIVE_REASON_LABELS[memory.archived_reason ?? "deleted"] ?? "已归档"}
+                    </span>
+                    <span>{formatRelativeTime(memory.archived_at ?? memory.updated_at)}</span>
+                  </div>
+                  {replacement && (
+                    <div className="mt-1 text-[10px] text-amber-700 dark:text-amber-300 break-words">
+                      替换为：{replacement.content}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

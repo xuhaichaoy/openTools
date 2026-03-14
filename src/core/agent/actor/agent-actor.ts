@@ -545,7 +545,10 @@ export class AgentActor {
 
       // 自动提取记忆（对标 OpenClaw session-memory hook）
       const memContent = `${query}\n${result ?? ""}`;
-      autoExtractMemories(memContent, task.id).catch((err) => {
+      autoExtractMemories(memContent, task.id, {
+        sourceMode: "dialog",
+        workspaceId: this._workspace,
+      }).catch((err) => {
         actorLog(this.role.name, `autoExtractMemories failed (non-blocking):`, err instanceof Error ? err.message : err);
       });
       if (this.actorSystem && opts?.publishResult !== false) {

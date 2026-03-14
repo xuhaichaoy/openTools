@@ -98,7 +98,10 @@ interface AIState {
   stopStreaming: () => void;
   confirmTool: (approved: boolean) => Promise<void>;
   loadMemoryCandidates: () => Promise<void>;
-  confirmMemoryCandidate: (id: string) => Promise<void>;
+  confirmMemoryCandidate: (
+    id: string,
+    options?: { replaceConflicts?: boolean },
+  ) => Promise<void>;
   dismissMemoryCandidate: (id: string) => Promise<void>;
   loadHistory: () => Promise<void>;
   persistHistory: () => Promise<void>;
@@ -401,9 +404,9 @@ export const useAIStore = create<AIState>((set, get) => ({
     }
   },
 
-  confirmMemoryCandidate: async (id: string) => {
+  confirmMemoryCandidate: async (id: string, options) => {
     try {
-      await confirmAIMemoryCandidate(id);
+      await confirmAIMemoryCandidate(id, options);
       const candidates = await listMemoryCandidates();
       set({ memoryCandidates: candidates });
     } catch (e) {

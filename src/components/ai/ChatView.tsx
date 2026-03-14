@@ -50,6 +50,23 @@ export interface ChatViewHandle {
   continueInDialog: () => void;
 }
 
+const MEMORY_KIND_META: Record<string, { label: string; className: string }> = {
+  preference: { label: "偏好", className: "bg-blue-500/10 text-blue-600 dark:text-blue-300" },
+  fact: { label: "事实", className: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-300" },
+  goal: { label: "目标", className: "bg-amber-500/10 text-amber-600 dark:text-amber-300" },
+  constraint: { label: "约束", className: "bg-red-500/10 text-red-600 dark:text-red-300" },
+  project_context: { label: "项目", className: "bg-violet-500/10 text-violet-600 dark:text-violet-300" },
+  conversation_summary: { label: "摘要", className: "bg-cyan-500/10 text-cyan-600 dark:text-cyan-300" },
+  knowledge: { label: "知识", className: "bg-teal-500/10 text-teal-600 dark:text-teal-300" },
+  behavior: { label: "行为", className: "bg-orange-500/10 text-orange-600 dark:text-orange-300" },
+};
+
+const MEMORY_SCOPE_LABELS: Record<string, string> = {
+  global: "全局",
+  conversation: "会话",
+  workspace: "工作区",
+};
+
 export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideModelSelector?: boolean; headless?: boolean }>(function ChatView({ onBack, hideModelSelector, headless }, ref) {
   const [input, setInput] = useState("");
   const [previewImage, setPreviewImage] = useState<string | null>(null);
@@ -142,8 +159,11 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
   const visibleMemoryCandidates = useMemo(() => {
     const filtered = memoryCandidates.filter(
       (candidate) =>
-        !candidate.conversation_id ||
-        candidate.conversation_id === currentConversationId,
+        candidate.scope !== "workspace"
+        && (
+          !candidate.conversation_id
+          || candidate.conversation_id === currentConversationId
+        )
     );
     return filtered.slice(0, 3);
   }, [currentConversationId, memoryCandidates]);
@@ -701,6 +721,26 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
                   <div className="text-xs text-[var(--color-text)] break-words">
                     {candidate.content}
                   </div>
+                  <div className="mt-1 flex flex-wrap items-center gap-1">
+                    {candidate.kind && MEMORY_KIND_META[candidate.kind] && (
+                      <span className={`rounded-full px-1.5 py-0.5 text-[10px] ${MEMORY_KIND_META[candidate.kind].className}`}>
+                        {MEMORY_KIND_META[candidate.kind].label}
+                      </span>
+                    )}
+                    <span className="rounded-full bg-[var(--color-bg-secondary)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
+                      {(candidate.scope && MEMORY_SCOPE_LABELS[candidate.scope]) || (candidate.conversation_id ? "会话" : "全局")}
+                    </span>
+                    {candidate.conflict_memory_ids && candidate.conflict_memory_ids.length > 0 && (
+                      <span className="rounded-full bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-700 dark:text-amber-300">
+                        有冲突
+                      </span>
+                    )}
+                  </div>
+                  {candidate.conflict_summary && (
+                    <div className="mt-1 text-[10px] text-amber-700 dark:text-amber-300">
+                      {candidate.conflict_summary}
+                    </div>
+                  )}
                   <div className="flex justify-end gap-2 mt-1">
                     <button
                       onClick={async () => {
@@ -710,6 +750,17 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
                     >
                       忽略
                     </button>
+                    {!!candidate.conflict_memory_ids?.length && (
+                      <button
+                        onClick={async () => {
+                          await confirmMemoryCandidate(candidate.id, { replaceConflicts: true });
+                          toast("success", "已替换旧记忆并保存新记忆");
+                        }}
+                        className="text-[10px] px-2 py-0.5 rounded-md bg-amber-500 text-white hover:bg-amber-600"
+                      >
+                        替换旧项
+                      </button>
+                    )}
                     <button
                       onClick={async () => {
                         await confirmMemoryCandidate(candidate.id);
@@ -717,7 +768,7 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
                       }}
                       className="text-[10px] px-2 py-0.5 rounded-md bg-indigo-500 text-white hover:bg-indigo-600"
                     >
-                      记住
+                      {!!candidate.conflict_memory_ids?.length ? "保留并记住" : "记住"}
                     </button>
                   </div>
                 </div>

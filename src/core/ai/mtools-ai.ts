@@ -449,21 +449,24 @@ export function createMToolsAI(): MToolsAI {
             return;
           }
 
-          const enrichedMessages = await injectMemoryForMessages(
-            options.messages.map((m) => ({
-              role: m.role,
-              content: m.content,
-              ...(m.images?.length ? { images: m.images } : {}),
-            })),
-            effectiveConfig,
-            conversationId,
-          );
+          const baseMessages = options.messages.map((m) => ({
+            role: m.role,
+            content: m.content,
+            ...(m.images?.length ? { images: m.images } : {}),
+          }));
+          const requestMessages = options.skipMemory
+            ? baseMessages
+            : await injectMemoryForMessages(
+                baseMessages,
+                effectiveConfig,
+                conversationId,
+              );
           const routed = await resolveRoutedConfig(effectiveConfig);
 
           kickWatchdog("invoke_start");
           aiLog.info("[chat] invoke ai_chat_stream", { conversationId });
           await invoke("ai_chat_stream", {
-            messages: enrichedMessages,
+            messages: requestMessages,
             config: routed,
             conversationId,
             skipTools: !!options.skipTools,

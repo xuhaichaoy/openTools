@@ -455,7 +455,9 @@ export class AgentRunnerService {
 
     const result = await agent.run(task.query);
     if (shouldAutoSaveAssistantMemory(aiConfig)) {
-      void autoExtractMemories(`${task.query}\n${result}`, task.id).catch(() => undefined);
+      void autoExtractMemories(`${task.query}\n${result}`, task.id, {
+        sourceMode: "agent",
+      }).catch(() => undefined);
     }
 
     const finishedAt = Date.now();

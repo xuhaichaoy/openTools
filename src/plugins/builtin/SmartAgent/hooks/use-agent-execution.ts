@@ -473,7 +473,9 @@ export function useAgentExecution({
             const result = await agent.run(effectiveQuery, abortController.signal, opts?.images);
             updateTask(sessionId, taskId, { answer: result, status: "success" });
             if (shouldAutoSaveAssistantMemory(aiConfig)) {
-              void autoExtractMemories(`${query}\n${result}`, taskId).catch(() => undefined);
+              void autoExtractMemories(`${query}\n${result}`, taskId, {
+                sourceMode: "agent",
+              }).catch(() => undefined);
             }
             lastError = null;
             break;

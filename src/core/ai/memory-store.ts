@@ -3,8 +3,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { estimateTokens } from "./token-utils";
 
 export type AIMemoryKind = "preference" | "fact" | "goal" | "constraint" | "project_context" | "conversation_summary" | "knowledge" | "behavior";
-export type AIMemoryScope = "global" | "conversation";
+export type AIMemoryScope = "global" | "conversation" | "workspace";
 export type AIMemorySource = "user" | "assistant" | "system" | "agent";
+export type AIMemoryCandidateMode = "ask" | "agent" | "cluster" | "dialog" | "system";
+export type AIMemoryArchiveReason = "deleted" | "replaced" | "limit_trimmed";
 
 export interface AIMemoryItem extends SyncMeta {
   id: string;
@@ -13,6 +15,7 @@ export interface AIMemoryItem extends SyncMeta {
   tags: string[];
   scope: AIMemoryScope;
   conversation_id?: string;
+  workspace_id?: string;
   importance: number;
   confidence: number;
   source: AIMemorySource;
@@ -21,6 +24,10 @@ export interface AIMemoryItem extends SyncMeta {
   last_used_at: number | null;
   use_count: number;
   deleted: boolean;
+  archived_at?: number;
+  archived_reason?: AIMemoryArchiveReason;
+  replaced_by_memory_id?: string;
+  supersedes_memory_ids?: string[];
 }
 
 export interface AIMemoryCandidate {
@@ -30,6 +37,15 @@ export interface AIMemoryCandidate {
   confidence: number;
   created_at: number;
   conversation_id?: string;
+  workspace_id?: string;
+  kind?: AIMemoryKind;
+  scope?: AIMemoryScope;
+  tags?: string[];
+  source?: AIMemorySource;
+  source_mode?: AIMemoryCandidateMode;
+  evidence?: string;
+  conflict_memory_ids?: string[];
+  conflict_summary?: string;
 }
 
 export interface CandidateSanitizeResult {
@@ -40,7 +56,23 @@ export interface CandidateSanitizeResult {
 
 interface RecallOptions {
   conversationId?: string;
+  workspaceId?: string;
   topK?: number;
+}
+
+interface MemoryCandidateBuildOptions {
+  id?: string;
+  reason?: string;
+  confidence?: number;
+  createdAt?: number;
+  conversationId?: string;
+  workspaceId?: string;
+  kind?: AIMemoryKind;
+  scope?: AIMemoryScope;
+  tags?: string[];
+  source?: AIMemorySource;
+  sourceMode?: AIMemoryCandidateMode;
+  evidence?: string;
 }
 
 const DEFAULT_RECALL_TOP_K = 6;
@@ -68,11 +100,24 @@ const EPHEMERAL_PATTERNS: RegExp[] = [
   /短链|临时链接|过期/,
 ];
 
-const CAPTURE_HINTS: RegExp[] = [
+const MEMORY_PROMPT_LEAK_PATTERNS: RegExp[] = [
+  /you are a memory extraction system/i,
+  /extract important facts about the user/i,
+  /respond with valid json only/i,
+  /return only valid json/i,
+  /extract facts in this json format/i,
+  /categories:\s*- preference:/i,
+];
+
+const EXPLICIT_CAPTURE_HINTS: RegExp[] = [
   /记住|记下来|帮我记/,
-  /默认|以后|今后|长期/,
-  /我希望你|请始终|总是|优先/,
-  /我的偏好|我的习惯|我的角色|我的目标/,
+];
+const LONG_TERM_CAPTURE_HINTS: RegExp[] = [
+  /(?:以后|今后|长期|始终|一直|总是|默认).{0,18}(?:回答|回复|输出|使用|采用|遵循|优先|保留|用|按|写|提供|中文|英文|markdown|表格|代码块|简洁|详细|先给结论)/i,
+  /(?:回答|回复|输出|使用|采用|遵循|优先|保留|用|按|写|提供).{0,18}(?:以后|今后|长期|始终|一直|总是|默认)/i,
+  /(?:请始终|请一直|务必|必须|不要|禁止).{0,24}(?:回答|回复|输出|使用|采用|改动|删除|联网|透露|保存|先给结论|中文|英文|markdown|表格|代码)/i,
+  /我的(?:偏好|习惯|角色|目标|长期要求)/,
+  /我(?:更喜欢|习惯|通常会|一般会).{0,18}(?:回答|回复|输出|使用|采用|写|先)/,
 ];
 
 const CONSTRAINT_HINTS = /(不要|不得|必须|禁止|务必|仅限)/;
@@ -80,6 +125,31 @@ const GOAL_HINTS = /(目标|里程碑|计划|推进|交付|上线)/;
 const PREFERENCE_HINTS = /(默认|风格|格式|语气|模板|偏好|习惯|输出)/;
 const KNOWLEDGE_HINTS = /(擅长|精通|熟悉|了解|会用|经验|专家|专长|掌握)/;
 const BEHAVIOR_HINTS = /(习惯|通常|一般|总是|喜欢先|工作流|流程|方式)/;
+const LONG_TERM_HINTS = /(以后|长期|默认|始终|总是|一直)/;
+const CONVERSATION_SCOPE_HINTS = /(本次|这次|当前任务|当前对话|本会话|这一轮)/;
+const LANGUAGE_SLOT_HINTS = /(中文|英文|英语|双语)/;
+const VERBOSITY_SLOT_HINTS = /(简洁|简短|精简|详细|全面|展开)/;
+const FORMAT_SLOT_HINTS = /(markdown|md|表格|代码块|纯文本|json)/i;
+const STRUCTURE_SLOT_HINTS = /(先给结论|先说结论|先给答案|先给结果|先总结)/;
+const CODING_STYLE_SLOT_HINTS = /(代码风格|命名风格|注释风格|测试风格)/;
+const AUTO_EXTRACT_TRANSIENT_PATTERNS: RegExp[] = [
+  /^用户(?:正在|刚刚|当前|本次|这次|这一轮|尝试|想让|希望|要求|询问|请求|计划|打算)/,
+  /当前(?:任务|会话|对话|房间)/,
+  /(?:让|请).{0,16}(?:介绍自己|自我介绍)/,
+  /(?:发送前审批|协作图|工作台|Dialog 房间|协作房间)/,
+];
+const DIALOG_META_PATTERNS: RegExp[] = [
+  /\bCoordinator\b/i,
+  /\bSpecialist\b/i,
+  /多智能体|智能体协作|协作系统|协作房间|房间内|当前会话|Agent 持续协作房间/i,
+];
+const PROJECT_CONTEXT_SIGNAL_PATTERNS: RegExp[] = [
+  /项目|仓库|代码库|repo|repository|技术栈|前端|后端|数据库|框架|目录结构|模块|组件|服务|workspace|工作区|根路径|语言[:：]/i,
+];
+const USER_BACKGROUND_PATTERNS: RegExp[] = [
+  /用户(?:是|担任|从事|负责).{0,24}(?:工程师|开发者|设计师|产品经理|架构师|运维|测试|研究员|老师|学生)/,
+  /我(?:是|担任|从事|负责).{0,24}(?:工程师|开发者|设计师|产品经理|架构师|运维|测试|研究员|老师|学生)/,
+];
 
 export const aiMemoryDb = new SyncableCollection<AIMemoryItem>("ai_memory");
 export const aiMemoryCandidateDb = new JsonCollection<AIMemoryCandidate>(
@@ -152,12 +222,226 @@ function inferImportance(kind: AIMemoryKind, text: string): number {
 }
 
 function shouldCapture(text: string): boolean {
-  return CAPTURE_HINTS.some((pattern) => pattern.test(text));
+  const normalized = normalizeWhitespace(text);
+  if (!normalized) return false;
+  if (EXPLICIT_CAPTURE_HINTS.some((pattern) => pattern.test(normalized))) return true;
+  return LONG_TERM_CAPTURE_HINTS.some((pattern) => pattern.test(normalized));
+}
+
+function inferScope(
+  text: string,
+  kind: AIMemoryKind,
+  conversationId?: string,
+  workspaceId?: string,
+): AIMemoryScope {
+  if (CONVERSATION_SCOPE_HINTS.test(text)) return "conversation";
+  if (kind === "project_context") {
+    return workspaceId ? "workspace" : (conversationId ? "conversation" : "global");
+  }
+  if (kind === "conversation_summary") {
+    return conversationId ? "conversation" : "global";
+  }
+  if (kind === "fact" && conversationId && !LONG_TERM_HINTS.test(text)) {
+    return "conversation";
+  }
+  return "global";
 }
 
 function trimMemoryContent(text: string, max = MAX_MEMORY_TEXT_LENGTH): string {
   if (text.length <= max) return text;
   return `${text.slice(0, max - 3)}...`;
+}
+
+function trimCandidateEvidence(text: string, max = 180): string {
+  const normalized = normalizeWhitespace(text);
+  if (normalized.length <= max) return normalized;
+  return `${normalized.slice(0, max - 3)}...`;
+}
+
+function containsAnyPattern(text: string, patterns: readonly RegExp[]): boolean {
+  return patterns.some((pattern) => pattern.test(text));
+}
+
+function uniqueStrings(values: Array<string | undefined | null>): string[] {
+  return [...new Set(values.filter((value): value is string => !!value && value.trim().length > 0))];
+}
+
+function memoryDisplayScope(scope: AIMemoryScope): string {
+  switch (scope) {
+    case "conversation":
+      return "会话";
+    case "workspace":
+      return "工作区";
+    default:
+      return "全局";
+  }
+}
+
+type MemoryPreferenceSlot =
+  | "language"
+  | "verbosity"
+  | "format"
+  | "structure"
+  | "coding_style";
+
+function inferMemorySlot(
+  text: string,
+  kind: AIMemoryKind,
+): MemoryPreferenceSlot | null {
+  if (kind !== "preference" && kind !== "constraint" && kind !== "behavior") {
+    return null;
+  }
+  if (LANGUAGE_SLOT_HINTS.test(text)) return "language";
+  if (VERBOSITY_SLOT_HINTS.test(text)) return "verbosity";
+  if (FORMAT_SLOT_HINTS.test(text)) return "format";
+  if (STRUCTURE_SLOT_HINTS.test(text)) return "structure";
+  if (CODING_STYLE_SLOT_HINTS.test(text)) return "coding_style";
+  return null;
+}
+
+function describeMemorySlot(slot: MemoryPreferenceSlot): string {
+  switch (slot) {
+    case "language":
+      return "回答语言";
+    case "verbosity":
+      return "回答详略";
+    case "format":
+      return "输出格式";
+    case "structure":
+      return "回答结构";
+    case "coding_style":
+      return "代码风格";
+    default:
+      return "偏好槽位";
+  }
+}
+
+function buildMemoryCandidate(
+  content: string,
+  options: MemoryCandidateBuildOptions = {},
+): AIMemoryCandidate | null {
+  const sanitized = sanitizeCandidateStrict(content);
+  if (!sanitized.ok) return null;
+
+  const text = sanitized.sanitized;
+  const kind = options.kind ?? inferKind(text);
+  const scope = options.scope ?? inferScope(text, kind, options.conversationId, options.workspaceId);
+
+  return {
+    id: options.id ?? createId("memc"),
+    content: text,
+    reason: options.reason ?? "从对话中提取的长期记忆候选",
+    confidence: clamp(options.confidence ?? 0.8, 0.1, 1),
+    created_at: options.createdAt ?? Date.now(),
+    conversation_id: options.conversationId,
+    workspace_id: options.workspaceId,
+    kind,
+    scope,
+    tags: uniqueStrings([...(options.tags || []), ...inferTags(text)]),
+    source: options.source ?? "user",
+    source_mode: options.sourceMode,
+    evidence: trimCandidateEvidence(options.evidence ?? text),
+  };
+}
+
+function detectCandidateConflicts(
+  candidate: AIMemoryCandidate,
+  confirmedMemories: AIMemoryItem[],
+): {
+  ids: string[];
+  summary?: string;
+} {
+  const kind = candidate.kind ?? inferKind(candidate.content);
+  const slot = inferMemorySlot(candidate.content, kind);
+  if (!slot) {
+    return { ids: [] };
+  }
+
+  const normalized = normalizeForCompare(candidate.content);
+  const conflicts = confirmedMemories.filter((memory) => {
+    if (memory.deleted) return false;
+    if (memory.scope !== candidate.scope) {
+      return false;
+    }
+    if (
+      candidate.scope === "conversation"
+      && memory.conversation_id
+      && candidate.conversation_id
+      && memory.conversation_id !== candidate.conversation_id
+    ) {
+      return false;
+    }
+    if (
+      candidate.scope === "workspace"
+      && memory.workspace_id
+      && candidate.workspace_id
+      && memory.workspace_id !== candidate.workspace_id
+    ) {
+      return false;
+    }
+    if (normalizeForCompare(memory.content) === normalized) return false;
+    return inferMemorySlot(memory.content, memory.kind) === slot;
+  });
+
+  if (!conflicts.length) {
+    return { ids: [] };
+  }
+
+  return {
+    ids: conflicts.map((memory) => memory.id),
+    summary: `${describeMemorySlot(slot)} 已有 ${conflicts.length} 条正式记忆，确认前请留意是否需要替换旧偏好。`,
+  };
+}
+
+function enrichMemoryCandidate(
+  candidate: AIMemoryCandidate,
+  confirmedMemories: AIMemoryItem[],
+): AIMemoryCandidate | null {
+  const rebuilt = buildMemoryCandidate(candidate.content, {
+    id: candidate.id,
+    reason: candidate.reason,
+    confidence: candidate.confidence,
+    createdAt: candidate.created_at,
+    conversationId: candidate.conversation_id,
+    workspaceId: candidate.workspace_id,
+    kind: candidate.kind,
+    scope: candidate.scope,
+    tags: candidate.tags,
+    source: candidate.source,
+    sourceMode: candidate.source_mode,
+    evidence: candidate.evidence,
+  });
+  if (!rebuilt) return null;
+
+  const conflicts = detectCandidateConflicts(rebuilt, confirmedMemories);
+  return {
+    ...rebuilt,
+    conflict_memory_ids: uniqueStrings([
+      ...(candidate.conflict_memory_ids || []),
+      ...conflicts.ids,
+    ]),
+    conflict_summary: candidate.conflict_summary ?? conflicts.summary,
+  };
+}
+
+function mergeMemoryCandidates(
+  current: AIMemoryCandidate,
+  incoming: AIMemoryCandidate,
+): AIMemoryCandidate {
+  const newer = incoming.created_at >= current.created_at ? incoming : current;
+  const older = newer === incoming ? current : incoming;
+  return {
+    ...older,
+    ...newer,
+    confidence: Math.max(current.confidence, incoming.confidence),
+    tags: uniqueStrings([...(current.tags || []), ...(incoming.tags || [])]),
+    conflict_memory_ids: uniqueStrings([
+      ...(current.conflict_memory_ids || []),
+      ...(incoming.conflict_memory_ids || []),
+    ]),
+    evidence: newer.evidence || older.evidence,
+    conflict_summary: newer.conflict_summary || older.conflict_summary,
+  };
 }
 
 export function sanitizeCandidateStrict(content: string): CandidateSanitizeResult {
@@ -174,59 +458,64 @@ export function sanitizeCandidateStrict(content: string): CandidateSanitizeResul
   if (EPHEMERAL_PATTERNS.some((pattern) => pattern.test(sanitized))) {
     return { ok: false, sanitized: "", reason: "ephemeral" };
   }
+  if (MEMORY_PROMPT_LEAK_PATTERNS.some((pattern) => pattern.test(sanitized))) {
+    return { ok: false, sanitized: "", reason: "prompt_leak" };
+  }
   return { ok: true, sanitized };
 }
 
 export function extractMemoryCandidates(
   userInput: string,
-  opts?: { conversationId?: string },
+  opts?: {
+    conversationId?: string;
+    workspaceId?: string;
+    kind?: AIMemoryKind;
+    scope?: AIMemoryScope;
+    source?: AIMemorySource;
+    sourceMode?: AIMemoryCandidateMode;
+    reason?: string;
+    evidence?: string;
+  },
 ): AIMemoryCandidate[] {
   if (!shouldCapture(userInput)) return [];
-
-  const sanitized = sanitizeCandidateStrict(userInput);
-  if (!sanitized.ok) return [];
-
-  const text = sanitized.sanitized;
-  const confidence = /记住|请始终|务必|默认/.test(text) ? 0.9 : 0.75;
-
-  return [
-    {
-      id: createId("memc"),
-      content: text,
-      reason: "从用户明确的长期偏好/事实指令中提取",
-      confidence,
-      created_at: Date.now(),
-      conversation_id: opts?.conversationId,
-    },
-  ];
+  const confidence = /记住|请始终|务必|默认/.test(userInput) ? 0.9 : 0.75;
+  const candidate = buildMemoryCandidate(userInput, {
+    conversationId: opts?.conversationId,
+    kind: opts?.kind,
+    scope: opts?.scope,
+    source: opts?.source ?? "user",
+    sourceMode: opts?.sourceMode,
+    reason: opts?.reason ?? "从用户明确的长期偏好/事实指令中提取",
+    confidence,
+    evidence: opts?.evidence ?? userInput,
+    workspaceId: opts?.workspaceId,
+  });
+  return candidate ? [candidate] : [];
 }
 
 export async function appendMemoryCandidates(
   candidates: AIMemoryCandidate[],
 ): Promise<void> {
   if (!candidates.length) return;
-  const confirmed = await aiMemoryDb.getAll();
+  const confirmed = (await aiMemoryDb.getAll()).filter((item) => !item.deleted);
   const confirmedSet = new Set(
-    confirmed
-      .filter((item) => !item.deleted)
-      .map((item) => normalizeForCompare(item.content)),
+    confirmed.map((item) => normalizeForCompare(item.content)),
   );
   const existing = await aiMemoryCandidateDb.getAll();
   const merged = [...candidates, ...existing];
   const dedup = new Map<string, AIMemoryCandidate>();
 
   for (const candidate of merged) {
-    const key = normalizeForCompare(candidate.content);
+    const prepared = enrichMemoryCandidate(candidate, confirmed);
+    if (!prepared) continue;
+    const key = normalizeForCompare(prepared.content);
     if (!key) continue;
     if (confirmedSet.has(key)) continue;
     if (!dedup.has(key)) {
-      dedup.set(key, candidate);
+      dedup.set(key, prepared);
       continue;
     }
-    const current = dedup.get(key)!;
-    if (candidate.created_at > current.created_at) {
-      dedup.set(key, candidate);
-    }
+    dedup.set(key, mergeMemoryCandidates(dedup.get(key)!, prepared));
   }
 
   const next = [...dedup.values()]
@@ -252,17 +541,59 @@ export async function listConfirmedMemories(): Promise<AIMemoryItem[]> {
     .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
 }
 
+export async function listArchivedMemories(): Promise<AIMemoryItem[]> {
+  const all = await aiMemoryDb.getAll();
+  return [...all]
+    .filter((item) => item.deleted)
+    .sort((a, b) => (b.archived_at || b.updated_at || 0) - (a.archived_at || a.updated_at || 0));
+}
+
 export async function deleteMemory(memoryId: string): Promise<void> {
   const now = Date.now();
   await aiMemoryDb.update(memoryId, {
     deleted: true,
     updated_at: now,
+    archived_at: now,
+    archived_reason: "deleted",
   });
   invalidateMemoryVectorIndex();
 }
 
+async function applyReplacementAudit(
+  savedMemoryId: string,
+  replacedMemoryIds: string[],
+): Promise<void> {
+  const ids = uniqueStrings(replacedMemoryIds);
+  if (ids.length === 0) return;
+
+  const now = Date.now();
+  const all = await aiMemoryDb.getAll();
+  const saved = all.find((memory) => memory.id === savedMemoryId);
+  if (saved) {
+    await aiMemoryDb.update(savedMemoryId, {
+      supersedes_memory_ids: uniqueStrings([
+        ...(saved.supersedes_memory_ids || []),
+        ...ids,
+      ]),
+      updated_at: now,
+    });
+  }
+
+  await Promise.all(
+    ids.map((memoryId) =>
+      aiMemoryDb.update(memoryId, {
+        deleted: true,
+        updated_at: now,
+        archived_at: now,
+        archived_reason: "replaced",
+        replaced_by_memory_id: savedMemoryId,
+      })),
+  );
+}
+
 export async function confirmMemoryCandidate(
   candidateId: string,
+  options?: { replaceConflicts?: boolean },
 ): Promise<AIMemoryItem | null> {
   const candidates = await aiMemoryCandidateDb.getAll();
   const candidate = candidates.find((item) => item.id === candidateId);
@@ -274,10 +605,18 @@ export async function confirmMemoryCandidate(
     return null;
   }
   const saved = await saveConfirmedMemory(sanitized.sanitized, {
+    kind: candidate.kind,
     conversationId: candidate.conversation_id,
+    workspaceId: candidate.workspace_id,
+    scope: candidate.scope,
     confidence: candidate.confidence,
-    source: "user",
+    source: candidate.source ?? "user",
+    tags: candidate.tags,
   });
+  if (saved && options?.replaceConflicts && candidate.conflict_memory_ids?.length) {
+    await applyReplacementAudit(saved.id, candidate.conflict_memory_ids);
+    invalidateMemoryVectorIndex();
+  }
   await dismissMemoryCandidate(candidateId);
   return saved;
 }
@@ -288,6 +627,7 @@ export async function saveConfirmedMemory(
     kind?: AIMemoryKind;
     source?: AIMemorySource;
     conversationId?: string;
+    workspaceId?: string;
     scope?: AIMemoryScope;
     confidence?: number;
     importance?: number;
@@ -325,9 +665,19 @@ export async function saveConfirmedMemory(
         source: options?.source ?? existing.source,
         updated_at: now,
         conversation_id: options?.conversationId ?? existing.conversation_id,
+        workspace_id: options?.workspaceId ?? existing.workspace_id,
         scope: options?.scope
-          ?? (options?.conversationId ? "conversation" : existing.scope),
+          ?? (
+            options?.workspaceId
+              ? "workspace"
+              : options?.conversationId
+                ? "conversation"
+                : existing.scope
+        ),
         deleted: false,
+        archived_at: undefined,
+        archived_reason: undefined,
+        replaced_by_memory_id: undefined,
       })) ?? null;
     if (updated) invalidateMemoryVectorIndex();
     return updated;
@@ -338,8 +688,15 @@ export async function saveConfirmedMemory(
     content: trimMemoryContent(text),
     kind,
     tags: mergedTags,
-    scope: options?.scope ?? (options?.conversationId ? "conversation" : "global"),
+    scope: options?.scope ?? (
+      options?.workspaceId
+        ? "workspace"
+        : options?.conversationId
+          ? "conversation"
+          : "global"
+    ),
     conversation_id: options?.conversationId,
+    workspace_id: options?.workspaceId,
     importance,
     confidence,
     source: options?.source ?? "user",
@@ -348,6 +705,10 @@ export async function saveConfirmedMemory(
     last_used_at: null,
     use_count: 0,
     deleted: false,
+    archived_at: undefined,
+    archived_reason: undefined,
+    replaced_by_memory_id: undefined,
+    supersedes_memory_ids: [],
   });
   invalidateMemoryVectorIndex();
   return created;
@@ -358,6 +719,22 @@ function scoreMemory(
   queryTokens: string[],
   options?: RecallOptions,
 ): number {
+  if (
+    memory.scope === "conversation"
+    && options?.conversationId
+    && memory.conversation_id
+    && options.conversationId !== memory.conversation_id
+  ) {
+    return -1;
+  }
+  if (
+    memory.scope === "workspace"
+    && options?.workspaceId
+    && memory.workspace_id
+    && options.workspaceId !== memory.workspace_id
+  ) {
+    return -1;
+  }
   const memoryTokens = tokenize(memory.content);
   const overlapCount = queryTokens.filter((token) => memoryTokens.includes(token)).length;
   const overlapScore =
@@ -379,12 +756,18 @@ function scoreMemory(
     options.conversationId === memory.conversation_id
       ? 0.35
       : 0;
+  const workspaceBoost =
+    options?.workspaceId &&
+    memory.workspace_id &&
+    options.workspaceId === memory.workspace_id
+      ? 0.28
+      : 0;
 
   const kindBoost = memory.kind === "preference" || memory.kind === "constraint" ? 0.08 : 0;
   const usageBoost = Math.min(memory.use_count || 0, 15) * 0.01;
   const importanceBoost = clamp(memory.importance ?? 0.5, 0, 1) * 0.2;
 
-  return overlapScore * 0.45 + tagScore + fullTextMatch + conversationBoost + kindBoost + usageBoost + importanceBoost;
+  return overlapScore * 0.45 + tagScore + fullTextMatch + conversationBoost + workspaceBoost + kindBoost + usageBoost + importanceBoost;
 }
 
 export function rankMemoriesForRecall(
@@ -398,7 +781,7 @@ export function rankMemoriesForRecall(
   const ranked = memories
     .filter((item) => !item.deleted)
     .map((item) => ({ item, score: scoreMemory(item, queryTokens, options) }))
-    .filter(({ score }) => score > 0.08 || queryTokens.length === 0)
+    .filter(({ score }) => score > 0.08 || (queryTokens.length === 0 && score >= 0))
     .sort((a, b) => {
       if (b.score !== a.score) return b.score - a.score;
       return (b.item.updated_at || 0) - (a.item.updated_at || 0);
@@ -448,6 +831,31 @@ const KIND_LABELS: Record<AIMemoryKind, string> = {
   fact: "事实",
 };
 
+const PROMPT_GROUPS: Array<{
+  title: string;
+  match: (memory: AIMemoryItem) => boolean;
+}> = [
+  {
+    title: "必须遵守",
+    match: (memory) => memory.kind === "constraint",
+  },
+  {
+    title: "用户偏好",
+    match: (memory) => memory.kind === "preference" || memory.kind === "behavior",
+  },
+  {
+    title: "当前目标与上下文",
+    match: (memory) =>
+      memory.kind === "goal"
+      || memory.kind === "project_context"
+      || memory.kind === "conversation_summary",
+  },
+  {
+    title: "相关知识与事实",
+    match: () => true,
+  },
+];
+
 export function buildMemoryPromptBlock(
   memories: AIMemoryItem[],
   maxTokens: number = MAX_INJECTION_TOKENS,
@@ -456,16 +864,38 @@ export function buildMemoryPromptBlock(
 
   const header = "以下是用户确认过的长期记忆，请在回答中优先遵循（如与当前明确指令冲突，以当前指令为准）：";
   let tokenBudget = maxTokens - estimateTokens(header);
+  let usedMemoryCount = 0;
   const lines: string[] = [];
+  const seenIds = new Set<string>();
 
-  for (let i = 0; i < Math.min(memories.length, MAX_MEMORIES_IN_PROMPT); i++) {
-    const memory = memories[i];
-    const label = KIND_LABELS[memory.kind] ?? "事实";
-    const line = `${i + 1}. [${label}] ${trimMemoryContent(memory.content, 180)}`;
-    const lineCost = estimateTokens(line);
-    if (lineCost > tokenBudget) break;
-    lines.push(line);
-    tokenBudget -= lineCost;
+  for (const group of PROMPT_GROUPS) {
+    if (usedMemoryCount >= MAX_MEMORIES_IN_PROMPT) break;
+
+    const groupItems = memories.filter((memory) => {
+      if (seenIds.has(memory.id)) return false;
+      return group.match(memory);
+    });
+    if (!groupItems.length) continue;
+
+    const groupLines: string[] = [];
+    for (const memory of groupItems) {
+      if (usedMemoryCount >= MAX_MEMORIES_IN_PROMPT) break;
+      const label = KIND_LABELS[memory.kind] ?? "事实";
+      const line = `- [${label}] ${trimMemoryContent(memory.content, 180)}`;
+      const lineCost = estimateTokens(line);
+      if (lineCost > tokenBudget) break;
+      groupLines.push(line);
+      tokenBudget -= lineCost;
+      usedMemoryCount += 1;
+      seenIds.add(memory.id);
+    }
+
+    if (!groupLines.length) continue;
+    const titleLine = `【${group.title}】`;
+    const titleCost = estimateTokens(titleLine);
+    if (titleCost > tokenBudget) break;
+    tokenBudget -= titleCost;
+    lines.push(titleLine, ...groupLines);
   }
 
   if (!lines.length) return "";
@@ -480,6 +910,8 @@ const AGENT_KIND_MAP: Record<string, AIMemoryKind> = {
   pattern: "preference",
   knowledge: "knowledge",
   context: "project_context",
+  project_context: "project_context",
+  conversation_summary: "conversation_summary",
   behavior: "behavior",
   goal: "goal",
   constraint: "constraint",
@@ -498,6 +930,12 @@ export async function addMemoryFromAgent(
   key: string,
   value: string,
   category: string = "preference",
+  options?: {
+    scope?: AIMemoryScope;
+    conversationId?: string;
+    workspaceId?: string;
+    source?: AIMemorySource;
+  },
 ): Promise<AIMemoryItem | null> {
   const content = composeAgentMemoryContent(key, value);
   const sanitized = sanitizeCandidateStrict(content);
@@ -522,8 +960,22 @@ export async function addMemoryFromAgent(
         kind,
         tags: [...new Set([...(existing.tags || []), ...tags])],
         importance: Math.max(existing.importance ?? 0.5, importance),
+        source: options?.source ?? existing.source,
+        conversation_id: options?.conversationId ?? existing.conversation_id,
+        workspace_id: options?.workspaceId ?? existing.workspace_id,
+        scope: options?.scope ?? (
+          options?.workspaceId
+            ? "workspace"
+            : options?.conversationId
+              ? "conversation"
+              : existing.scope
+        ),
         updated_at: now,
         use_count: (existing.use_count || 0) + 1,
+        deleted: false,
+        archived_at: undefined,
+        archived_reason: undefined,
+        replaced_by_memory_id: undefined,
       })) ?? null
     );
     if (updated) invalidateMemoryVectorIndex();
@@ -535,18 +987,59 @@ export async function addMemoryFromAgent(
     content: trimMemoryContent(text),
     kind,
     tags,
-    scope: "global",
+    scope: options?.scope ?? (
+      options?.workspaceId
+        ? "workspace"
+        : options?.conversationId
+          ? "conversation"
+          : "global"
+    ),
+    conversation_id: options?.conversationId,
+    workspace_id: options?.workspaceId,
     importance,
     confidence: 0.8,
-    source: "agent",
+    source: options?.source ?? "agent",
     created_at: now,
     updated_at: now,
     last_used_at: null,
     use_count: 1,
     deleted: false,
+    archived_at: undefined,
+    archived_reason: undefined,
+    replaced_by_memory_id: undefined,
+    supersedes_memory_ids: [],
   });
   invalidateMemoryVectorIndex();
   return created;
+}
+
+export async function queueMemoryCandidateFromAgent(
+  key: string,
+  value: string,
+  category: string = "preference",
+  opts?: {
+    conversationId?: string;
+    workspaceId?: string;
+    sourceMode?: AIMemoryCandidateMode;
+    reason?: string;
+    evidence?: string;
+  },
+): Promise<AIMemoryCandidate | null> {
+  const content = composeAgentMemoryContent(key, value);
+  const kind = AGENT_KIND_MAP[category] ?? inferKind(content);
+  const candidate = buildMemoryCandidate(content, {
+    conversationId: opts?.conversationId,
+    workspaceId: opts?.workspaceId,
+    kind,
+    source: "agent",
+    sourceMode: opts?.sourceMode ?? "agent",
+    reason: opts?.reason ?? "Agent 建议保存用户长期记忆，等待确认后才会生效",
+    confidence: 0.85,
+    evidence: opts?.evidence ?? content,
+  });
+  if (!candidate) return null;
+  await appendMemoryCandidates([candidate]);
+  return candidate;
 }
 
 // ── Semantic Recall (vector-store based, inspired by cocoindex-code sqlite-vec) ──
@@ -603,7 +1096,7 @@ export async function semanticRecall(
         const found = contentMap.get(normalizeForCompare(r.content));
         if (found) matched.push(found);
       }
-      if (matched.length > 0) return matched;
+      if (matched.length > 0) return rankMemoriesForRecall(matched, query, options);
     }
   } catch {
     // Native RAG not available, try in-memory vector store
@@ -627,7 +1120,7 @@ export async function semanticRecall(
           const found = idMap.get(r.id);
           if (found) matched.push(found);
         }
-        if (matched.length > 0) return matched;
+        if (matched.length > 0) return rankMemoriesForRecall(matched, query, options);
       }
     }
   } catch {
@@ -710,7 +1203,101 @@ interface LLMExtractedFact {
   confidence: number;
 }
 
-const MEMORY_EXTRACTION_PROMPT = `You are a memory extraction system. Analyze this conversation and extract important facts about the user.
+function extractBalancedJsonObject(text: string): string | null {
+  for (let start = 0; start < text.length; start += 1) {
+    if (text[start] !== "{") continue;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+
+    for (let index = start; index < text.length; index += 1) {
+      const char = text[index];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (char === "\\") {
+          escaped = true;
+          continue;
+        }
+        if (char === "\"") {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (char === "\"") {
+        inString = true;
+        continue;
+      }
+      if (char === "{") depth += 1;
+      if (char === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          return text.slice(start, index + 1);
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function parseLLMExtractedFacts(text: string): { facts?: LLMExtractedFact[] } | null {
+  const normalized = String(text || "").trim();
+  if (!normalized) return null;
+
+  const directCandidates = [
+    normalized,
+    normalized.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/i, "").trim(),
+  ];
+
+  const fencedMatch = normalized.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fencedMatch?.[1]) {
+    directCandidates.push(fencedMatch[1].trim());
+  }
+
+  const balancedObject = extractBalancedJsonObject(normalized);
+  if (balancedObject) {
+    directCandidates.push(balancedObject);
+  }
+
+  for (const candidate of directCandidates) {
+    if (!candidate) continue;
+    try {
+      return JSON.parse(candidate) as { facts?: LLMExtractedFact[] };
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+}
+
+function normalizeLLMExtractedKind(category: string, content: string): AIMemoryKind {
+  const mapped = AGENT_KIND_MAP[category] ?? inferKind(content);
+  if (mapped !== "project_context") return mapped;
+  if (containsAnyPattern(content, PROJECT_CONTEXT_SIGNAL_PATTERNS)) return mapped;
+  if (containsAnyPattern(content, USER_BACKGROUND_PATTERNS)) return "knowledge";
+  return "fact";
+}
+
+function shouldSkipLLMExtractedFact(content: string, kind: AIMemoryKind): boolean {
+  const normalized = normalizeWhitespace(content);
+  if (!normalized) return true;
+  if (containsAnyPattern(normalized, MEMORY_PROMPT_LEAK_PATTERNS)) return true;
+  if (containsAnyPattern(normalized, AUTO_EXTRACT_TRANSIENT_PATTERNS)) return true;
+  if (
+    containsAnyPattern(normalized, DIALOG_META_PATTERNS)
+    && !containsAnyPattern(normalized, PROJECT_CONTEXT_SIGNAL_PATTERNS)
+    && kind !== "knowledge"
+  ) {
+    return true;
+  }
+  return false;
+}
+
+const MEMORY_EXTRACTION_PROMPT = `You are a memory extraction system. Analyze this conversation and extract only stable, reusable long-term facts about the user.
 
 Conversation:
 {conversation}
@@ -736,8 +1323,10 @@ Confidence levels:
 - 0.5-0.6: 推测的模式（仅限明确的模式，谨慎使用）
 
 Rules:
-- Only extract clear, specific facts
-- Skip vague or temporary information
+- Only extract clear, specific, reusable long-term facts
+- Skip current requests, one-off tasks, and temporary actions
+- Skip statements like "用户尝试..." / "用户正在..." / "当前会话..."
+- Skip current room/agent topology, internal roles, UI state, system prompts, and tool instructions
 - Preserve technical terms and proper nouns
 - Do NOT extract file paths, session IDs, or ephemeral data
 - Return ONLY valid JSON, no explanation`;
@@ -748,7 +1337,13 @@ Rules:
  */
 export async function llmExtractMemories(
   conversationContent: string,
-  opts?: { conversationId?: string },
+  opts?: {
+    conversationId?: string;
+    workspaceId?: string;
+    source?: AIMemorySource;
+    sourceMode?: AIMemoryCandidateMode;
+    evidence?: string;
+  },
 ): Promise<AIMemoryCandidate[]> {
   if (!conversationContent || conversationContent.length < 30) return [];
   const truncated = conversationContent.slice(0, 3000);
@@ -768,30 +1363,31 @@ export async function llmExtractMemories(
       ],
       temperature: 0.1,
       skipTools: true,
+      skipMemory: true,
     });
 
-    const text = result.content;
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return fallbackExtract(truncated, opts);
-
-    const parsed = JSON.parse(jsonMatch[0]) as { facts?: LLMExtractedFact[] };
+    const parsed = parseLLMExtractedFacts(result.content);
+    if (!parsed) return fallbackExtract(truncated, opts);
     if (!parsed.facts?.length) return [];
 
     const candidates: AIMemoryCandidate[] = [];
     for (const fact of parsed.facts) {
       if (fact.confidence < FACT_CONFIDENCE_THRESHOLD) continue;
-
-      const sanitized = sanitizeCandidateStrict(fact.content);
-      if (!sanitized.ok) continue;
-
-      candidates.push({
-        id: createId("memc"),
-        content: sanitized.sanitized,
-        reason: `LLM extracted [${fact.category}] confidence=${fact.confidence}`,
+      const kind = normalizeLLMExtractedKind(fact.category, fact.content);
+      if (shouldSkipLLMExtractedFact(fact.content, kind)) continue;
+      const candidate = buildMemoryCandidate(fact.content, {
+        conversationId: opts?.conversationId,
+        workspaceId: opts?.workspaceId,
+        kind,
+        source: opts?.source ?? "assistant",
+        sourceMode: opts?.sourceMode,
+        reason: `AI 从对话中提取出 ${KIND_LABELS[kind] ?? fact.category} 候选`,
         confidence: clamp(fact.confidence, 0, 1),
-        created_at: Date.now(),
-        conversation_id: opts?.conversationId,
+        evidence: opts?.evidence ?? fact.content,
       });
+      if (candidate) {
+        candidates.push(candidate);
+      }
     }
     return candidates;
   } catch {
@@ -801,9 +1397,25 @@ export async function llmExtractMemories(
 
 function fallbackExtract(
   text: string,
-  opts?: { conversationId?: string },
+  opts?: {
+    conversationId?: string;
+    workspaceId?: string;
+    source?: AIMemorySource;
+    sourceMode?: AIMemoryCandidateMode;
+    evidence?: string;
+  },
 ): AIMemoryCandidate[] {
-  return extractMemoryCandidates(text, opts);
+  if ((opts?.source ?? "assistant") !== "user") {
+    return [];
+  }
+  return extractMemoryCandidates(text, {
+    conversationId: opts?.conversationId,
+    workspaceId: opts?.workspaceId,
+    source: opts?.source ?? "assistant",
+    sourceMode: opts?.sourceMode,
+    reason: "从对话中匹配到明确的长期记忆提示词",
+    evidence: opts?.evidence ?? text,
+  });
 }
 
 /**
@@ -833,13 +1445,21 @@ export async function mergeMemoryCandidatesIntoStore(
 
     if (match) {
       if (candidate.confidence > (match.confidence ?? 0.5)) {
-        const kind = inferKind(sanitized.sanitized);
+        const kind = candidate.kind ?? inferKind(sanitized.sanitized);
         await aiMemoryDb.update(match.id, {
           content: trimMemoryContent(sanitized.sanitized),
           kind,
           confidence: candidate.confidence,
-          tags: [...new Set([...(match.tags || []), ...inferTags(sanitized.sanitized)])],
+          tags: uniqueStrings([
+            ...(match.tags || []),
+            ...(candidate.tags || []),
+            ...inferTags(sanitized.sanitized),
+          ]),
           importance: Math.max(match.importance ?? 0.5, inferImportance(kind, sanitized.sanitized)),
+          scope: candidate.scope ?? match.scope,
+          conversation_id: candidate.conversation_id ?? match.conversation_id,
+          workspace_id: candidate.workspace_id ?? match.workspace_id,
+          source: candidate.source ?? match.source,
           updated_at: Date.now(),
         });
         updated++;
@@ -848,17 +1468,24 @@ export async function mergeMemoryCandidatesIntoStore(
         skipped++;
       }
     } else {
-      const kind = inferKind(sanitized.sanitized);
+      const kind = candidate.kind ?? inferKind(sanitized.sanitized);
       await aiMemoryDb.create({
         id: createId("mem"),
         content: trimMemoryContent(sanitized.sanitized),
         kind,
-        tags: inferTags(sanitized.sanitized),
-        scope: candidate.conversation_id ? "conversation" : "global",
+        tags: uniqueStrings([...(candidate.tags || []), ...inferTags(sanitized.sanitized)]),
+        scope: candidate.scope ?? (
+          candidate.workspace_id
+            ? "workspace"
+            : candidate.conversation_id
+              ? "conversation"
+              : "global"
+        ),
         conversation_id: candidate.conversation_id,
+        workspace_id: candidate.workspace_id,
         importance: inferImportance(kind, sanitized.sanitized),
         confidence: candidate.confidence,
-        source: "system",
+        source: candidate.source ?? "system",
         created_at: Date.now(),
         updated_at: Date.now(),
         last_used_at: null,
@@ -877,7 +1504,13 @@ export async function mergeMemoryCandidatesIntoStore(
     const sorted = activeAfter.sort((a, b) => (b.confidence ?? 0.5) - (a.confidence ?? 0.5));
     const toDelete = sorted.slice(MAX_FACTS);
     for (const m of toDelete) {
-      await aiMemoryDb.update(m.id, { deleted: true, updated_at: Date.now() });
+      const now = Date.now();
+      await aiMemoryDb.update(m.id, {
+        deleted: true,
+        updated_at: now,
+        archived_at: now,
+        archived_reason: "limit_trimmed",
+      });
       invalidateMemoryVectorIndex();
     }
   }

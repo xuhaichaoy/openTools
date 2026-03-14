@@ -39,6 +39,8 @@ export interface MToolsAI {
     signal?: AbortSignal;
     /** 跳过后端系统工具注入和默认 system prompt，发送干净的纯 LLM 请求 */
     skipTools?: boolean;
+    /** 跳过长期记忆自动提取与召回，避免内部辅助请求污染记忆 */
+    skipMemory?: boolean;
   }): Promise<{ content: string; usage?: { tokens: number } }>;
 
   /** 流式对话 */

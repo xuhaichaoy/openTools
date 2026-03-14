@@ -54,6 +54,11 @@ ${transcript}
       `对话摘要 (${new Date().toLocaleDateString()})`,
       summary.slice(0, 500),
       "conversation_summary",
+      {
+        scope: conversationId ? "conversation" : "global",
+        conversationId,
+        source: "system",
+      },
     );
 
     return summary;

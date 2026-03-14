@@ -2,10 +2,11 @@ import type { AgentTool } from "@/plugins/builtin/SmartAgent/core/react-agent";
 import {
   semanticRecall,
   recallMemories,
-  addMemoryFromAgent,
   extractMemoryCandidates,
   listConfirmedMemories,
   llmExtractMemories,
+  queueMemoryCandidateFromAgent,
+  type AIMemoryCandidateMode,
   type AIMemoryItem,
 } from "@/core/ai/memory-store";
 import { useAIStore } from "@/store/ai-store";
@@ -25,7 +26,7 @@ const MAX_EXTRACT_CONTENT_LENGTH = 2000;
  * 创建 Actor 专用的记忆工具（memory_search / memory_save）。
  * 让 Agent 能主动检索和存储记忆，对标 OpenClaw 的 memory_search / memory_get。
  */
-export function createActorMemoryTools(actorId: string): AgentTool[] {
+export function createActorMemoryTools(actorId: string, workspaceId?: string): AgentTool[] {
   return [
     {
       name: "memory_search",
@@ -52,20 +53,33 @@ export function createActorMemoryTools(actorId: string): AgentTool[] {
 
         if (!query.trim()) {
           const all = await listConfirmedMemories();
+          const visible = all.filter((memory) => {
+            if (memory.scope === "conversation") return false;
+            if (memory.scope === "workspace") {
+              return !!workspaceId && memory.workspace_id === workspaceId;
+            }
+            return true;
+          });
           return {
-            results: all.slice(0, maxResults).map(formatMemoryItem),
-            total: all.length,
+            results: visible.slice(0, maxResults).map(formatMemoryItem),
+            total: visible.length,
           };
         }
 
         try {
-          const results = await semanticRecall(query, { topK: maxResults });
+          const results = await semanticRecall(query, {
+            topK: maxResults,
+            workspaceId,
+          });
           return {
             results: results.map(formatMemoryItem),
             total: results.length,
           };
         } catch {
-          const fallback = await recallMemories(query, { topK: maxResults });
+          const fallback = await recallMemories(query, {
+            topK: maxResults,
+            workspaceId,
+          });
           return {
             results: fallback.map(formatMemoryItem),
             total: fallback.length,
@@ -77,8 +91,8 @@ export function createActorMemoryTools(actorId: string): AgentTool[] {
     {
       name: "memory_save",
       description:
-        "保存用户的长期记忆。当用户表达了偏好、约束、目标、重要事实时，调用此工具存储。" +
-        "示例：用户说'我喜欢简洁的代码风格'→ 存为偏好。",
+        "将用户的长期记忆加入待确认候选。当用户表达了偏好、约束、目标、重要事实时，调用此工具建议保存。" +
+        "示例：用户说'我喜欢简洁的代码风格'→ 进入偏好候选，等待用户确认。",
       parameters: {
         content: {
           type: "string",
@@ -97,10 +111,21 @@ export function createActorMemoryTools(actorId: string): AgentTool[] {
         const category = String(params.category ?? "preference");
         if (!content.trim()) return { saved: false, error: "内容不能为空" };
 
-        const result = await addMemoryFromAgent(content, "", category);
+        const result = await queueMemoryCandidateFromAgent(content, "", category, {
+          workspaceId,
+          sourceMode: "agent",
+          reason: "Dialog / Agent 提议将这条用户信息加入长期记忆候选",
+          evidence: content,
+        });
         return result
-          ? { saved: true, id: result.id, kind: result.kind }
-          : { saved: false, error: "保存失败（内容不合规或重复）" };
+          ? {
+              saved: true,
+              queued: true,
+              pending_review: true,
+              candidate_id: result.id,
+              kind: result.kind,
+            }
+          : { saved: false, error: "保存失败（内容不合规、过短或已存在）" };
       },
     },
   ];
@@ -125,8 +150,14 @@ function formatMemoryItem(m: AIMemoryItem) {
 export async function autoExtractMemories(
   conversationContent: string,
   conversationId?: string,
+  opts?: { sourceMode?: AIMemoryCandidateMode; workspaceId?: string },
 ): Promise<number> {
   if (!shouldAutoSaveAssistantMemory(useAIStore.getState().config)) {
+    return 0;
+  }
+  // Dialog 房间里包含大量内部 Agent 协作内容，直接拿内部任务对话做长期记忆会非常吵。
+  // Dialog 模式改为仅在用户原始输入侧做轻量候选提取，这里不再分析内部运行结果。
+  if (opts?.sourceMode === "dialog") {
     return 0;
   }
   if (!conversationContent || conversationContent.length < 20) return 0;
@@ -134,7 +165,13 @@ export async function autoExtractMemories(
   const truncated = conversationContent.slice(0, MAX_EXTRACT_CONTENT_LENGTH);
 
   // Try LLM-based extraction first for richer results
-  const llmCandidates = await llmExtractMemories(truncated, { conversationId }).catch(() => []);
+  const llmCandidates = await llmExtractMemories(truncated, {
+    conversationId,
+    workspaceId: opts?.workspaceId,
+    source: "assistant",
+    sourceMode: opts?.sourceMode ?? "agent",
+    evidence: truncated,
+  }).catch(() => []);
 
   if (llmCandidates.length > 0) {
     await appendAssistantMemoryCandidates(llmCandidates);
@@ -142,7 +179,14 @@ export async function autoExtractMemories(
   }
 
   // Fallback to regex-based heuristic
-  const candidates = extractMemoryCandidates(truncated, { conversationId });
+  const candidates = extractMemoryCandidates(truncated, {
+    conversationId,
+    workspaceId: opts?.workspaceId,
+    source: "assistant",
+    sourceMode: opts?.sourceMode ?? "agent",
+    reason: "从对话中匹配到明确的长期记忆提示词",
+    evidence: truncated,
+  });
   if (candidates.length === 0) return 0;
 
   await appendAssistantMemoryCandidates(candidates);
@@ -152,12 +196,16 @@ export async function autoExtractMemories(
 /**
  * 构建记忆 prompt 片段（用于注入 system prompt）。
  */
-export async function buildActorMemoryPrompt(query: string): Promise<string> {
+export async function buildActorMemoryPrompt(
+  query: string,
+  opts?: { workspaceId?: string },
+): Promise<string> {
   if (!shouldRecallAssistantMemory(useAIStore.getState().config)) {
     return "";
   }
   return buildAssistantMemoryPromptForQuery(query, {
     topK: 6,
     preferSemantic: true,
+    workspaceId: opts?.workspaceId,
   });
 }

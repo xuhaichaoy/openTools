@@ -81,6 +81,11 @@ export async function indexProjectContext(rootPath: string): Promise<ProjectCont
     `项目结构 (${rootPath.split("/").pop()})`,
     contextLines.join("; "),
     "project_context" as string,
+    {
+      scope: "workspace",
+      workspaceId: rootPath,
+      source: "system",
+    },
   );
 
   lastIndexedPath = rootPath;

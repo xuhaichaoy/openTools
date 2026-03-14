@@ -1,10 +1,10 @@
 import { create } from "zustand";
 import {
-  addMemoryFromAgent,
   deleteMemory,
   recallMemories,
   buildMemoryPromptBlock,
   migrateAgentMemory,
+  queueMemoryCandidateFromAgent,
 } from "@/core/ai/memory-store";
 import { buildAssistantMemoryPromptForQuery } from "@/core/ai/assistant-memory";
 
@@ -35,7 +35,12 @@ interface AgentMemoryState {
   getMemoriesForPrompt: () => string;
   getMemoriesForQueryPromptAsync: (
     query: string,
-    options?: { topK?: number; conversationId?: string; preferSemantic?: boolean },
+    options?: {
+      topK?: number;
+      conversationId?: string;
+      workspaceId?: string;
+      preferSemantic?: boolean;
+    },
   ) => Promise<string>;
 }
 
@@ -70,7 +75,10 @@ export const useAgentMemoryStore = create<AgentMemoryState>((set, get) => ({
 
   addMemory: (key, value, category = "preference") => {
     promptDirty = true;
-    addMemoryFromAgent(key, value, category).catch((err) => {
+    queueMemoryCandidateFromAgent(key, value, category, {
+      sourceMode: "agent",
+      reason: "Agent 建议记录这条用户偏好，等待确认后生效",
+    }).catch((err) => {
       console.warn("[AgentMemoryStore] addMemory failed:", err);
     });
   },
@@ -112,6 +120,7 @@ export const useAgentMemoryStore = create<AgentMemoryState>((set, get) => ({
     return buildAssistantMemoryPromptForQuery(query, {
       topK: options?.topK ?? 6,
       conversationId: options?.conversationId,
+      workspaceId: options?.workspaceId,
       preferSemantic: options?.preferSemantic ?? true,
     });
   },

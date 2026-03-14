@@ -37,7 +37,7 @@ export class ToolResolverMiddleware implements ActorMiddleware {
     const commTools = ctx.actorSystem
       ? createActorCommunicationTools(ctx.actorId, ctx.actorSystem)
       : [];
-    const memoryTools = createActorMemoryTools(ctx.actorId);
+    const memoryTools = createActorMemoryTools(ctx.actorId, ctx.workspace);
 
     let codeSearchTools: AgentTool[] = [];
     if (ctx.workspace) {

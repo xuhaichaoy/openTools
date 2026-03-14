@@ -28,6 +28,7 @@ export class MemoryMiddleware implements ActorMiddleware {
 
     const userMemory = await memorySnap.getMemoriesForQueryPromptAsync(ctx.query, {
       topK: 6,
+      workspaceId: ctx.workspace,
       preferSemantic: true,
     });
     ctx.userMemoryPrompt = userMemory

@@ -1277,7 +1277,7 @@ export function createBuiltinAgentTools(
   tools.push({
     name: "save_user_memory",
     description:
-      "将用户偏好或习惯保存到长期记忆中，以便在后续对话中自动参考。例如：用户习惯将文件保存到 ~/Downloads、用户偏好 Markdown 格式等。仅在用户明确表达偏好或你发现重复模式时使用。",
+      "将用户偏好或习惯加入长期记忆候选，待用户确认后再生效。例如：用户习惯将文件保存到 ~/Downloads、用户偏好 Markdown 格式等。仅在用户明确表达偏好或你发现重复模式时使用。",
     parameters: {
       key: {
         type: "string",
@@ -1299,9 +1299,14 @@ export function createBuiltinAgentTools(
       if (!key || !value) return { error: "key 和 value 不能为空" };
       const category = String(params.category || "preference");
       try {
-        const { addMemoryFromAgent } = await import("@/core/ai/memory-store");
-        const saved = await addMemoryFromAgent(key, value, category);
-        return saved ? { status: "saved", key, value } : { status: "filtered", reason: "content filtered" };
+        const { queueMemoryCandidateFromAgent } = await import("@/core/ai/memory-store");
+        const queued = await queueMemoryCandidateFromAgent(key, value, category, {
+          sourceMode: "agent",
+          reason: "工具提议将这条用户偏好加入长期记忆候选",
+        });
+        return queued
+          ? { status: "queued", pending_review: true, candidate_id: queued.id, key, value }
+          : { status: "filtered", reason: "content filtered" };
       } catch (e) {
         return { error: `保存记忆失败: ${e}` };
       }

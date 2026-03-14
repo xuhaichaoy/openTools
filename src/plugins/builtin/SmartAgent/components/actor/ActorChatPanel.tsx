@@ -38,6 +38,8 @@ import {
 } from "@/core/ai/ai-center-mode-meta";
 import { routeToAICenter } from "@/core/ai/ai-center-routing";
 import { primeTeamModelCache } from "@/core/ai/router";
+import { queueAssistantMemoryCandidates } from "@/core/ai/assistant-memory";
+import { shouldAutoSaveAssistantMemory } from "@/core/ai/assistant-config";
 import { DIALOG_FULL_ROLE } from "@/core/agent/actor/agent-actor";
 import type {
   AgentCapability,
@@ -2658,6 +2660,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     addAttachmentFromPath,
   } = useInputAttachments();
   const pendingAICenterHandoff = useAppStore((s) => s.pendingAICenterHandoff);
+  const config = useAIStore((s) => s.config);
 
   const runningActors = useMemo(() => actors.filter((a) => a.status === "running"), [actors]);
   const hasRunningActors = runningActors.length > 0;
@@ -2818,6 +2821,13 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     actors.forEach((a) => map.set(a.id, a));
     return map;
   }, [actors]);
+  const dialogMemoryWorkspaceId = useMemo(
+    () => (
+      (coordinatorActorId ? actorById.get(coordinatorActorId)?.workspace : undefined)
+      ?? actors.find((actor) => typeof actor.workspace === "string" && actor.workspace.trim().length > 0)?.workspace
+    ),
+    [actorById, actors, coordinatorActorId],
+  );
 
   const artifacts = useMemo(
     () => collectArtifacts(dialogHistory, actorById, structuredArtifacts),
@@ -3043,6 +3053,23 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     }
     return { targetId: null, cleanContent: text };
   }, [actorNameToId]);
+  const queueDialogUserMemoryCapture = useCallback((rawText: string) => {
+    const normalized = rawText.trim();
+    if (!normalized) return;
+    if (!shouldAutoSaveAssistantMemory(config)) return;
+    const sessionId = getSystem()?.sessionId;
+    Promise.resolve().then(async () => {
+      try {
+        await queueAssistantMemoryCandidates(normalized, {
+          conversationId: sessionId,
+          workspaceId: dialogMemoryWorkspaceId,
+          sourceMode: "dialog",
+        });
+      } catch {
+        // best-effort only: typing a message should never be blocked by memory extraction
+      }
+    });
+  }, [config, dialogMemoryWorkspaceId, getSystem]);
 
   const handleSend = useCallback(async () => {
     const trimmed = input.trim();
@@ -3090,6 +3117,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
 
     if (effectiveReplyTarget) {
       const liveSystem = useActorSystemStore.getState().getSystem() ?? getSystem();
+      queueDialogUserMemoryCapture(trimmed);
       replyToMessage(effectiveReplyTarget.messageId, content, {
         _briefContent: briefContent,
         images: imagesToSend,
@@ -3173,6 +3201,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     }
 
     try {
+      queueDialogUserMemoryCapture(cleanContent || trimmed);
       if (shouldRouteToFocusedSession && focusedSessionTask) {
         system?.sendUserMessageToSpawnedSession(focusedSessionTask.runId, finalContent, {
           _briefContent: finalBrief,
@@ -3227,7 +3256,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     clearAttachments();
     setIncomingHandoff(null);
     inputRef.current?.focus();
-  }, [input, hasAttachments, imagePaths, attachments, fileContextBlock, attachmentSummary, ensureSystem, pendingUserInteractions, pendingInteractionByMessageId, selectedPendingMessageId, parseMention, actors, sendMessage, broadcastMessage, broadcastAndResolve, steer, replyToMessage, routingMode, routeTask, clearAttachments, requirePlanApproval, openPlanApprovalDialog, getSystem, coordinatorActorId, focusedSessionTask, messageById]);
+  }, [input, hasAttachments, imagePaths, attachments, fileContextBlock, attachmentSummary, ensureSystem, pendingUserInteractions, pendingInteractionByMessageId, selectedPendingMessageId, parseMention, actors, sendMessage, broadcastMessage, broadcastAndResolve, steer, replyToMessage, routingMode, routeTask, clearAttachments, requirePlanApproval, openPlanApprovalDialog, getSystem, coordinatorActorId, focusedSessionTask, messageById, queueDialogUserMemoryCapture]);
 
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value;

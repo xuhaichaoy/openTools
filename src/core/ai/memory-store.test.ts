@@ -17,6 +17,7 @@ function mockMemory(partial: Partial<AIMemoryItem>): AIMemoryItem {
     tags: partial.tags ?? [],
     scope: partial.scope ?? "global",
     conversation_id: partial.conversation_id,
+    workspace_id: partial.workspace_id,
     importance: partial.importance ?? 0.6,
     confidence: partial.confidence ?? 0.8,
     source: partial.source ?? "user",
@@ -45,6 +46,25 @@ describe("memory-store", () => {
     expect(candidates).toHaveLength(1);
     expect(candidates[0]?.conversation_id).toBe("conv-1");
     expect(candidates[0]?.content).toContain("默认输出 Markdown");
+    expect(candidates[0]?.kind).toBe("preference");
+    expect(candidates[0]?.scope).toBe("global");
+    expect(candidates[0]?.source).toBe("user");
+  });
+
+  it("does not extract generic short-term task instructions as memory", () => {
+    const candidates = extractMemoryCandidates(
+      "这次请让 Specialist 先做一下自我介绍，然后继续当前任务",
+      { conversationId: "conv-1" },
+    );
+    expect(candidates).toHaveLength(0);
+  });
+
+  it("rejects internal memory extraction prompts", () => {
+    const result = sanitizeCandidateStrict(
+      "You are a memory extraction system. Analyze this conversation and extract important facts about the user. Conversation: 我的角色是开发者",
+    );
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("prompt_leak");
   });
 
   it("ranks memories with lexical match plus conversation boost", () => {
@@ -96,11 +116,42 @@ describe("memory-store", () => {
     expect(ranked[0]?.id).toBe("mem-cn-a");
   });
 
-  it("builds prompt block from recalled memories", () => {
+  it("prefers workspace-scoped project memory when workspace matches", () => {
+    const memories: AIMemoryItem[] = [
+      mockMemory({
+        id: "mem-workspace-a",
+        kind: "project_context",
+        scope: "workspace",
+        workspace_id: "/repo-a",
+        content: "项目结构: 前端使用 React，后端使用 Rust",
+        importance: 0.8,
+      }),
+      mockMemory({
+        id: "mem-workspace-b",
+        kind: "project_context",
+        scope: "workspace",
+        workspace_id: "/repo-b",
+        content: "项目结构: 前端使用 Vue，后端使用 Go",
+        importance: 0.8,
+      }),
+    ];
+
+    const ranked = rankMemoriesForRecall(memories, "当前项目的前端技术栈是什么", {
+      topK: 2,
+      workspaceId: "/repo-a",
+    });
+    expect(ranked).toHaveLength(1);
+    expect(ranked[0]?.id).toBe("mem-workspace-a");
+  });
+
+  it("builds grouped prompt block from recalled memories", () => {
     const prompt = buildMemoryPromptBlock([
+      mockMemory({ id: "mem-rule", content: "禁止直接删除用户文件", kind: "constraint" }),
       mockMemory({ id: "mem-x", content: "默认用中文回答", kind: "preference" }),
     ]);
     expect(prompt).toContain("长期记忆");
+    expect(prompt).toContain("【必须遵守】");
+    expect(prompt).toContain("【用户偏好】");
     expect(prompt).toContain("默认用中文回答");
   });
 
