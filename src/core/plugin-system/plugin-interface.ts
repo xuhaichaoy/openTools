@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type { PluginContext } from "./context";
+import type { ThinkingLevel } from "@/core/agent/actor/types";
 
 // ── AI SDK 接口 ──
 
@@ -67,6 +68,8 @@ export interface MToolsAI {
     onToolArgs?: (chunk: string) => void;
     /** 运行时模型覆盖（用于多 Agent 场景下每个 Agent 使用不同模型） */
     modelOverride?: string;
+    /** 运行时思考深度（用于 Actor/Dialog 等多 Agent 执行） */
+    thinkingLevel?: ThinkingLevel;
   }): Promise<
     | { type: "content"; content: string }
     | { type: "tool_calls"; toolCalls: AIToolCall[] }

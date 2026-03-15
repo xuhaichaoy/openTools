@@ -259,15 +259,13 @@ async function syncAIConfig() {
     }
   }
 
-  // 2. PUSH（只推送非敏感配置）
+  // 2. PUSH（只推送可跨设备复用的非敏感配置）
   const syncContent = {
     model: effectiveConfig.model,
     temperature: effectiveConfig.temperature,
     max_tokens: effectiveConfig.max_tokens,
     system_prompt: effectiveConfig.system_prompt,
-    enable_advanced_tools: effectiveConfig.enable_advanced_tools,
     enable_rag_auto_search: effectiveConfig.enable_rag_auto_search,
-    enable_native_tools: effectiveConfig.enable_native_tools,
     enable_long_term_memory: effectiveConfig.enable_long_term_memory,
     enable_memory_auto_recall: effectiveConfig.enable_memory_auto_recall,
     enable_memory_auto_save: effectiveConfig.enable_memory_auto_save,

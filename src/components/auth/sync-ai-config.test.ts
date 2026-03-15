@@ -36,7 +36,7 @@ describe("mergeCloudAIConfig", () => {
     expect((merged as any)._syncVersion).toBe(100);
   });
 
-  it("should merge team context and own key selection fields", () => {
+  it("should keep local-only tool toggles while merging shared fields", () => {
     const local = {
       base_url: "https://api.openai.com/v1",
       api_key: "local-key",
@@ -46,7 +46,7 @@ describe("mergeCloudAIConfig", () => {
       enable_advanced_tools: false,
       system_prompt: "",
       enable_rag_auto_search: true,
-      enable_native_tools: true,
+      enable_native_tools: false,
       enable_long_term_memory: true,
       enable_memory_auto_recall: true,
       enable_memory_auto_save: true,
@@ -63,6 +63,7 @@ describe("mergeCloudAIConfig", () => {
       protocol: "anthropic",
       active_own_key_id: "key-cloud",
       enable_advanced_tools: true,
+      enable_native_tools: true,
       enable_memory_auto_recall: false,
     };
 
@@ -73,7 +74,8 @@ describe("mergeCloudAIConfig", () => {
     expect(merged.team_config_id).toBe("cfg-2");
     expect(merged.protocol).toBe("anthropic");
     expect(merged.active_own_key_id).toBe("key-cloud");
-    expect(merged.enable_advanced_tools).toBe(true);
+    expect(merged.enable_advanced_tools).toBe(false);
+    expect(merged.enable_native_tools).toBe(false);
     expect(merged.enable_memory_auto_recall).toBe(false);
     expect((merged as any)._syncVersion).toBe(101);
   });

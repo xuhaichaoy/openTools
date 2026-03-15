@@ -16,6 +16,8 @@ import type {
   AIToolDefinition,
   AIToolCall,
 } from "@/core/plugin-system/plugin-interface";
+import type { ThinkingLevel } from "@/core/agent/actor/types";
+import { inferCodingExecutionProfile } from "@/core/agent/coding-profile";
 import type { PluginAction } from "@/core/plugin-system/plugin-interface";
 import { applyContextBudget, type PromptSection } from "@/core/agent/context-budget";
 import { mergeStreamChunk } from "@/core/ai/stream-chunk-merge";
@@ -111,6 +113,8 @@ export interface AgentConfig {
   contextBudget?: number;
   /** 运行时模型覆盖（用于多 Agent / Actor 场景下每个 Agent 使用不同模型） */
   modelOverride?: string;
+  /** 运行时思考深度（由 Actor/Dialog 透传） */
+  thinkingLevel?: ThinkingLevel;
   /** Actor 收件箱排空回调：每次 iteration 间隙调用，返回待处理消息（空数组 = 无新消息） */
   inboxDrain?: () => { id: string; from: string; content: string; expectReply?: boolean; replyTo?: string }[];
   /** 对话历史上下文：作为多轮 messages 注入（system 之后、当前 query 之前），用于 Actor 会话连续性 */
@@ -512,6 +516,19 @@ export class ReActAgent {
     );
   }
 
+  private isQuickMathQuery(userInput: string): boolean {
+    const q = userInput.trim();
+    if (!q || q.length > 80) return false;
+    if (inferCodingExecutionProfile({ query: q }).profile.codingMode) return false;
+    if (/网页|页面|html|代码|文件|保存|实现|生成|修复|下载|artifact|write|create|build/i.test(q)) {
+      return false;
+    }
+    const directExpression = /^[-+*/%().\d\s=xX]+$/i.test(q);
+    const askMath = /^(请)?(帮我)?(计算|算一下|求|evaluate|what is|是多少|等于多少)/i.test(q)
+      && /[-+*/%().\d\s=xX]+/.test(q);
+    return directExpression || askMath;
+  }
+
   private buildQuickAnswerFromTool(
     userInput: string,
     toolName: string,
@@ -531,6 +548,9 @@ export class ReActAgent {
     }
 
     if (toolName === "calculate" && toolOutput && typeof toolOutput === "object") {
+      if (!this.isQuickMathQuery(userInput)) {
+        return null;
+      }
       const output = toolOutput as { result?: unknown; expression?: unknown };
       if (typeof output.result === "number") {
         if (typeof output.expression === "string" && output.expression.trim()) {
@@ -1478,6 +1498,7 @@ ${s.taskStrategy}
       tools: toolDefs,
       signal,
       modelOverride: this.config.modelOverride,
+      thinkingLevel: this.config.thinkingLevel,
       onChunk: (chunk) => {
         if (signal?.aborted) return;
         const merged = mergeStreamChunk(accumulated, chunk);

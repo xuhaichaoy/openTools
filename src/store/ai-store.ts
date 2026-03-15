@@ -33,6 +33,7 @@ import {
   buildAssistantMemoryPromptForQuery,
   queueAssistantMemoryCandidates,
 } from "@/core/ai/assistant-memory";
+import { applyAILocalConfigOverrides } from "@/core/ai/local-ai-config-preferences";
 import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
 import { loadAndResolveSkills } from "@/store/skill-store";
 import { useMcpStore, executeMcpTool } from "@/store/mcp-store";
@@ -143,6 +144,7 @@ function normalizeConfig(config: AIConfig): AIConfig {
   const normalized: AIConfig = {
     ...config,
     source,
+    thinking_level: undefined,
     enable_long_term_memory: config.enable_long_term_memory ?? true,
     enable_memory_auto_recall: config.enable_memory_auto_recall ?? true,
     enable_memory_auto_save: config.enable_memory_auto_save ?? true,
@@ -156,44 +158,47 @@ function normalizeConfig(config: AIConfig): AIConfig {
     disable_force_rag: undefined,
   };
 
+  const finalConfig = applyAILocalConfigOverrides(normalized);
   if (source !== "team") {
-    normalized.team_id = undefined;
-    normalized.team_config_id = undefined;
-  } else if (!normalized.team_id) {
-    normalized.team_config_id = undefined;
+    finalConfig.team_id = undefined;
+    finalConfig.team_config_id = undefined;
+  } else if (!finalConfig.team_id) {
+    finalConfig.team_config_id = undefined;
   }
   if (source !== "own_key") {
-    normalized.active_own_key_id = undefined;
+    finalConfig.active_own_key_id = undefined;
   }
   if (!nativeToolsSupportedOnCurrentPlatform()) {
-    normalized.enable_native_tools = false;
+    finalConfig.enable_native_tools = false;
   }
 
-  return normalized;
+  return finalConfig;
 }
 
+const DEFAULT_AI_CONFIG: AIConfig = normalizeConfig({
+  base_url: DEFAULT_AI_BASE_URL,
+  api_key: "",
+  model: DEFAULT_AI_MODEL,
+  temperature: DEFAULT_AI_TEMPERATURE,
+  max_tokens: null,
+  enable_advanced_tools: false,
+  system_prompt: "",
+  enable_rag_auto_search: true,
+  enable_native_tools: nativeToolsSupportedOnCurrentPlatform(),
+  enable_long_term_memory: true,
+  enable_memory_auto_recall: true,
+  enable_memory_auto_save: true,
+  enable_memory_sync: true,
+  source: "own_key",
+  agent_runtime_mode: "host",
+  agent_max_concurrency: 2,
+  agent_retry_max: 3,
+  agent_retry_backoff_ms: 5000,
+  agent_max_iterations: 25,
+});
+
 export const useAIStore = create<AIState>((set, get) => ({
-  config: {
-    base_url: DEFAULT_AI_BASE_URL,
-    api_key: "",
-    model: DEFAULT_AI_MODEL,
-    temperature: DEFAULT_AI_TEMPERATURE,
-    max_tokens: null,
-    enable_advanced_tools: false,
-    system_prompt: "",
-    enable_rag_auto_search: true,
-    enable_native_tools: nativeToolsSupportedOnCurrentPlatform(),
-    enable_long_term_memory: true,
-    enable_memory_auto_recall: true,
-    enable_memory_auto_save: true,
-    enable_memory_sync: true,
-    source: "own_key",
-    agent_runtime_mode: "host",
-    agent_max_concurrency: 2,
-    agent_retry_max: 3,
-    agent_retry_backoff_ms: 5000,
-    agent_max_iterations: 25,
-  },
+  config: DEFAULT_AI_CONFIG,
   conversations: [],
   currentConversationId: null,
   isStreaming: false,

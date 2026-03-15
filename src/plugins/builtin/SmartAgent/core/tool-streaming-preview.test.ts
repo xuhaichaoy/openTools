@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   decodePartialToolContent,
+  formatArtifactPreviewBody,
   hasArtifactPayloadKey,
   parsePartialToolJSON,
   recoverArtifactBodyFromRaw,
@@ -38,8 +39,34 @@ describe("tool-streaming-preview", () => {
     ).toBe(true);
   });
 
+  it("extracts sequential thinking payload fields", () => {
+    const parsed = parsePartialToolJSON(
+      "{\"thought\":\"先分析页面结构\",\"thought_number\":1,\"total_thoughts\":4,\"next_thought_needed\":true}",
+    );
+
+    expect(parsed.thought).toBe("先分析页面结构");
+    expect(parsed.thoughtNumber).toBe(1);
+    expect(parsed.totalThoughts).toBe(4);
+  });
+
+  it("extracts spawn_task payload fields", () => {
+    const parsed = parsePartialToolJSON(
+      "{\"target_agent\":\"Specialist\",\"task\":\"创建完整 HTML 页面\",\"label\":\"页面实现\"}",
+    );
+
+    expect(parsed.targetAgent).toBe("Specialist");
+    expect(parsed.task).toBe("创建完整 HTML 页面");
+    expect(parsed.label).toBe("页面实现");
+  });
+
   it("decodes escaped preview text", () => {
     expect(decodePartialToolContent("\\\"hello\\\"\\nworld")).toBe("\"hello\"\nworld");
+  });
+
+  it("decodes double-escaped preview text into real line breaks", () => {
+    expect(
+      decodePartialToolContent("<!DOCTYPE html>\\\\n<html>\\\\n  <body>ok</body>\\\\n</html>"),
+    ).toBe("<!DOCTYPE html>\n<html>\n  <body>ok</body>\n</html>");
   });
 
   it("falls back to html body content when raw tool args still contain the wrapper", () => {
@@ -60,5 +87,32 @@ describe("tool-streaming-preview", () => {
     expect(parsed.content).toContain("<html lang=\"zh-CN\">");
     expect(parsed.content).toContain("<div class=\"app\">hello</div>");
     expect(parsed.content.split("\n").length).toBeGreaterThan(6);
+  });
+
+  it("recovers double-escaped html from raw tool args", () => {
+    const recovered = recoverArtifactBodyFromRaw(
+      "{\"path\":\"/tmp/demo.html\",\"content\":\"<!DOCTYPE html>\\\\n<html>\\\\n  <body>ok</body>\\\\n</html>\"}",
+      "/tmp/demo.html",
+    );
+
+    expect(recovered).toBe("<!DOCTYPE html>\n<html>\n  <body>ok</body>\n</html>");
+  });
+
+  it("formats single-line html previews into readable multiline code", () => {
+    const formatted = formatArtifactPreviewBody(
+      "/tmp/demo.html",
+      "<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"UTF-8\"><style>body { margin: 0; padding: 0; } .app { display: flex; }</style></head><body><div class=\"app\">hello</div></body></html>",
+    );
+
+    expect(formatted).toContain("<html lang=\"zh-CN\">");
+    expect(formatted).toContain("\n  <head>");
+    expect(formatted).toContain("\n      body {");
+    expect(formatted).toContain("\n      .app {");
+    expect(formatted.split("\n").length).toBeGreaterThan(8);
+  });
+
+  it("keeps existing multiline artifact previews unchanged", () => {
+    const source = "<!DOCTYPE html>\n<html>\n  <body>ok</body>\n</html>";
+    expect(formatArtifactPreviewBody("/tmp/demo.html", source)).toBe(source);
   });
 });

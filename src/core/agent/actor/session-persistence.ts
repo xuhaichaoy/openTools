@@ -238,7 +238,7 @@ async function atomicWrite<T>(path: string, data: T): Promise<void> {
     } catch { /* ignore */ }
     
     // 重命名临时文件为目标文件
-    await invoke("move_file", { from: tempPath, to: path });
+    await invoke("move_file", { source: tempPath, destination: path });
   } catch (err) {
     // 写入失败，删除临时文件
     await deleteFile(tempPath);

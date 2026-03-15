@@ -39,6 +39,8 @@ pub struct AIConfig {
     pub model: String,
     pub temperature: f32,
     pub max_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<String>,
     #[serde(default)]
     pub enable_advanced_tools: bool,
     #[serde(default)]
@@ -124,6 +126,7 @@ impl Default for AIConfig {
             model: "gpt-4o".to_string(),
             temperature: 0.7,
             max_tokens: None,
+            thinking_level: None,
             enable_advanced_tools: false,
             system_prompt: String::new(),
             enable_rag_auto_search: true,

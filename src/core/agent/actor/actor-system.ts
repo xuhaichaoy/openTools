@@ -929,10 +929,18 @@ export class ActorSystem {
         if (coordinator) {
           log(`broadcastAndResolve(coordinator): delivering to coordinator ${coordinator.role.name}`);
           coordinator.receive(msg);
-        } else if (activePending.length > 0) {
-          log(`broadcastAndResolve: no available coordinator, pending interactions resolved`);
         } else {
-          log(`broadcastAndResolve: no available coordinator and no pending interactions`);
+          const fallbackCoordinator = this.getCoordinator();
+          if (fallbackCoordinator) {
+            log(
+              `broadcastAndResolve(fallback): queueing to ${fallbackCoordinator.role.name} despite pending interactions/state=${fallbackCoordinator.status}`,
+            );
+            fallbackCoordinator.receive(msg);
+          } else if (activePending.length > 0) {
+            log(`broadcastAndResolve: no available coordinator, pending interactions resolved`);
+          } else {
+            log(`broadcastAndResolve: no available coordinator and no pending interactions`);
+          }
         }
       }
       this.activateDialogExecutionPlan(msg.id);

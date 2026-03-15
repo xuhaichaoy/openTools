@@ -71,6 +71,16 @@ fn extract_openai_reasoning_text(delta: &serde_json::Value) -> Option<&str> {
         })
 }
 
+fn should_enable_kimi_reasoning(config: &AIConfig) -> bool {
+    if !config.model.to_lowercase().contains("kimi") {
+        return false;
+    }
+    !matches!(
+        config.thinking_level.as_deref().map(|level| level.trim().to_lowercase()),
+        Some(level) if level == "off"
+    )
+}
+
 fn summarize_anthropic_request_payload(request: &serde_json::Value) -> String {
     let Some(messages) = request.get("messages").and_then(|v| v.as_array()) else {
         return "messages=0".to_string();
@@ -127,7 +137,7 @@ pub async fn ai_agent_stream(
 ) -> Result<(), AppError> {
     let protocol = config.protocol.as_deref().unwrap_or("openai");
     log::info!(
-        "[ai_agent_stream] start conv={} protocol={} source={:?} model={} base_url={} team_id={:?} team_config_id={:?} messages={} tools={}",
+        "[ai_agent_stream] start conv={} protocol={} source={:?} model={} base_url={} team_id={:?} team_config_id={:?} thinking_level={:?} messages={} tools={}",
         conversation_id,
         protocol,
         config.source,
@@ -135,6 +145,7 @@ pub async fn ai_agent_stream(
         config.base_url,
         config.team_id,
         config.team_config_id,
+        config.thinking_level,
         messages.len(),
         tools.len()
     );
@@ -171,7 +182,7 @@ async fn agent_stream_openai(
         true,
     );
 
-    if config.model.to_lowercase().contains("kimi") {
+    if should_enable_kimi_reasoning(config) {
         request["reasoning"] = serde_json::json!({"enabled": true});
     }
 
@@ -184,13 +195,14 @@ async fn agent_stream_openai(
 
     let url = format!("{}/chat/completions", config.base_url);
     log::info!(
-        "[ai_agent_stream/openai] POST {} conv={} model={} source={:?} team_id={:?} team_config_id={:?}",
+        "[ai_agent_stream/openai] POST {} conv={} model={} source={:?} team_id={:?} team_config_id={:?} thinking_level={:?}",
         url,
         conversation_id,
         config.model,
         config.source,
         config.team_id,
         config.team_config_id,
+        config.thinking_level,
     );
 
     let _ = app.emit(
@@ -399,6 +411,15 @@ async fn agent_stream_openai(
                             emitted = true;
                         }
 
+                        if let Some(thinking_text) = extract_openai_reasoning_text(delta) {
+                            let payload = serde_json::json!({
+                                "conversation_id": conversation_id,
+                                "content": thinking_text
+                            });
+                            let _ = app.emit("ai-stream-thinking", payload);
+                            emitted = true;
+                        }
+
                         if let Some(tcs) = delta["tool_calls"].as_array() {
                             emitted = true;
                             for tc in tcs {
@@ -443,13 +464,6 @@ async fn agent_stream_openai(
                                     preview,
                                     conversation_id
                                 );
-                            }
-                            if let Some(thinking_text) = extract_openai_reasoning_text(delta) {
-                                let payload = serde_json::json!({
-                                    "conversation_id": conversation_id,
-                                    "content": thinking_text
-                                });
-                                let _ = app.emit("ai-stream-thinking", payload);
                             }
                         }
                     }
@@ -579,13 +593,14 @@ async fn agent_stream_anthropic(
     };
 
     log::info!(
-        "[ai_agent_stream/anthropic] POST {} conv={} model={} source={:?} team_id={:?} team_config_id={:?}",
+        "[ai_agent_stream/anthropic] POST {} conv={} model={} source={:?} team_id={:?} team_config_id={:?} thinking_level={:?}",
         url,
         conversation_id,
         config.model,
         config.source,
         config.team_id,
-        config.team_config_id
+        config.team_config_id,
+        config.thinking_level,
     );
     let _ = app.emit(
         "ai-stream-raw",

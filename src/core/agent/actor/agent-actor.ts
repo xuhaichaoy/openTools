@@ -589,6 +589,9 @@ export class AgentActor {
           "1. 如果任务需要生成网页、代码、文档或文件，请给出真实文件路径、关键内容或明确的产物说明。",
           "2. 如果你实际上还没有完成，就继续执行，不要输出无关算术、占位文本或空泛总结。",
           "3. 如果确实无法完成，请直接说明真实阻塞原因和缺失条件，不要假装完成。",
+          ...(finalValidation.reason?.includes("算术结果")
+            ? ["4. 这不是数学题，禁止调用 calculate 工具，也不要返回算式结果。请继续围绕真实产物执行。"] 
+            : []),
         ].join("\n");
         const { result: repairedResult, finalQuery: repairedQuery } = await this.runWithClarifications(
           repairPrompt,
@@ -921,12 +924,16 @@ export class AgentActor {
     const effectiveContextTokens = runOverrides?.contextTokens ?? this._contextTokens;
     const effectiveToolPolicy = runOverrides?.toolPolicy ?? this.toolPolicy;
     const effectiveMiddlewareOverrides = runOverrides?.middlewareOverrides ?? this._middlewareOverrides;
+    const effectiveThinkingLevel = runOverrides?.thinkingLevel ?? this._thinkingLevel;
     const effectiveTemperature = runOverrides?.temperature
       ?? this.role.temperature
       ?? useAIStore.getState().config.temperature
       ?? 0.7;
 
-    actorLog(this.role.name, `runWithInbox: model=${effectiveModelOverride ?? "default"}, maxIter=${effectiveMaxIterations}, inboxSize=${this.inbox.length}`);
+    actorLog(
+      this.role.name,
+      `runWithInbox: model=${effectiveModelOverride ?? "default"}, maxIter=${effectiveMaxIterations}, thinking=${effectiveThinkingLevel ?? "adaptive"}, inboxSize=${this.inbox.length}`,
+    );
 
     const ctx: ActorRunContext = {
       query,
@@ -975,6 +982,7 @@ export class AgentActor {
         confirmDangerousAction: this.confirmDangerousAction,
         onToolExecuted: ctx.notifyToolCalled,
         modelOverride: effectiveModelOverride,
+        thinkingLevel: effectiveThinkingLevel,
         contextBudget: effectiveContextTokens,
         contextMessages: ctx.contextMessages,
         inboxDrain: () => {

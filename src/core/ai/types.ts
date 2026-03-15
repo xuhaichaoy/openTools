@@ -51,6 +51,8 @@ export interface AIConfig {
   model: string;
   temperature: number;
   max_tokens: number | null;
+  /** 运行时思考深度（仅 Agent/Actor 执行链按需注入，不持久化） */
+  thinking_level?: import("@/core/agent/actor/types").ThinkingLevel;
   enable_advanced_tools: boolean;
   system_prompt: string;
   enable_rag_auto_search: boolean;

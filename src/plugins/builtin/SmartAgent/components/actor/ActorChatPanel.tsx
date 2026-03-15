@@ -31,6 +31,7 @@ import { AICenterHandoffCard } from "@/components/ai/AICenterHandoffCard";
 import {
   buildDialogDispatchPlanBundle,
   inferDialogDispatchInsight,
+  type DialogDispatchInsight,
   type DialogDispatchPlanBundle,
 } from "@/core/agent/actor/dialog-dispatch-plan";
 import {
@@ -40,7 +41,10 @@ import {
   type SpawnedTaskCheckpoint,
   type SpawnedTaskTranscriptEntry,
 } from "@/core/agent/actor/spawned-task-checkpoint";
-import { inferCodingExecutionProfile } from "@/core/agent/coding-profile";
+import {
+  describeCodingExecutionProfile,
+  inferCodingExecutionProfile,
+} from "@/core/agent/coding-profile";
 import { useActorSystemStore, type ActorSnapshot } from "@/store/actor-system-store";
 import { useAIStore } from "@/store/ai-store";
 import { useAppStore, type AICenterHandoff } from "@/store/app-store";
@@ -56,12 +60,14 @@ import {
 } from "@/core/ai/ai-center-handoff";
 import { routeToAICenter } from "@/core/ai/ai-center-routing";
 import { buildDialogWorkingSetSnapshot } from "@/core/ai/ai-working-set";
+import { KnowledgeGraph } from "@/core/knowledge/knowledge-graph";
 import { primeTeamModelCache } from "@/core/ai/router";
 import { queueAssistantMemoryCandidates } from "@/core/ai/assistant-memory";
 import { shouldAutoSaveAssistantMemory } from "@/core/ai/assistant-config";
 import { DIALOG_FULL_ROLE } from "@/core/agent/actor/agent-actor";
 import {
   decodePartialToolContent,
+  formatArtifactPreviewBody,
   hasArtifactPayloadKey,
   parsePartialToolJSON,
   recoverArtifactBodyFromRaw,
@@ -166,6 +172,27 @@ function describeAgentActivity(steps: AgentStep[], roleName: string, hasStreamin
 
   if (latest.type === "thinking") return "深度思考中";
 
+  if (latest.type === "tool_streaming") {
+    const parsed = parsePartialToolJSON(latest.content || "");
+    if (parsed.thought.trim()) {
+      return "深度思考中";
+    }
+    if (parsed.targetAgent.trim() && parsed.task.trim()) {
+      const codingLabel = describeCodingExecutionProfile(
+        inferCodingExecutionProfile({ query: `${parsed.label}\n${parsed.task}` }).profile,
+      );
+      return codingLabel
+        ? `派发 ${codingLabel} 子任务给 ${parsed.targetAgent}`
+        : `派发子任务给 ${parsed.targetAgent}`;
+    }
+    if (parsed.path && (parsed.content || hasArtifactPayloadKey(latest.content))) {
+      return `生成 ${basename(parsed.path)}`;
+    }
+    if (parsed.query) return `搜索 "${parsed.query.slice(0, 30)}"`;
+    if (parsed.url) return `访问 ${parsed.url.replace(/^https?:\/\//, "").slice(0, 35)}`;
+    if (parsed.command) return `执行 ${parsed.command.slice(0, 40)}`;
+  }
+
   if (latest.type === "action" && latest.toolName) {
     const input = latest.toolInput ?? {};
     switch (latest.toolName) {
@@ -216,6 +243,18 @@ function describeAgentActivity(steps: AgentStep[], roleName: string, hasStreamin
         return `搜索完成，分析结果`;
       if (name === "run_shell_command" || name === "persistent_shell")
         return `命令执行完成，分析输出`;
+      if (name === "sequential_thinking")
+        return "深度思考完成，继续处理";
+      if (name === "spawn_task") {
+        const target = String(prevAction.toolInput?.target_agent ?? "").trim();
+        const taskText = String(prevAction.toolInput?.task ?? "").trim();
+        const codingLabel = describeCodingExecutionProfile(
+          inferCodingExecutionProfile({ query: taskText }).profile,
+        );
+        if (target && codingLabel) return `${codingLabel} 子任务已派发给 ${target}`;
+        if (target) return `子任务已派发给 ${target}`;
+        return "子任务已派发，等待进展";
+      }
       return `${name} 完成，继续处理`;
     }
     return `处理结果中`;
@@ -232,6 +271,52 @@ function describeAgentActivity(steps: AgentStep[], roleName: string, hasStreamin
   return `${roleName} 正在思考`;
 }
 
+type ToolStreamingPreview = {
+  kind: "artifact" | "generic" | "thinking" | "spawn";
+  title: string;
+  body: string;
+  fullBody?: string;
+  meta?: string;
+  collapsible?: boolean;
+};
+
+function buildSequentialThinkingPreview(parsed: ReturnType<typeof parsePartialToolJSON>): ToolStreamingPreview {
+  const thoughtText = decodePartialToolContent(parsed.thought || "");
+  const thoughtMeta = [
+    typeof parsed.thoughtNumber === "number" ? `步骤 ${parsed.thoughtNumber}` : "",
+    typeof parsed.totalThoughts === "number" ? `共 ${parsed.totalThoughts} 步` : "",
+  ].filter(Boolean).join(" · ");
+
+  return {
+    kind: "thinking",
+    title: "深度思考",
+    body: thoughtText || "正在组织思路...",
+    meta: thoughtMeta || "顺序推理中",
+  };
+}
+
+function buildSpawnTaskPreview(parsed: ReturnType<typeof parsePartialToolJSON>): ToolStreamingPreview {
+  const taskText = decodePartialToolContent(parsed.task || "");
+  const target = parsed.targetAgent || "未知 Agent";
+  const codingLabel = describeCodingExecutionProfile(
+    inferCodingExecutionProfile({ query: `${parsed.label}\n${taskText}` }).profile,
+  );
+  const title = codingLabel
+    ? `派发 ${codingLabel} 子任务 -> ${target}`
+    : `派发子任务 -> ${target}`;
+  const meta = [
+    parsed.label ? `标签: ${parsed.label}` : "",
+    codingLabel ? `模式: ${codingLabel}` : "",
+  ].filter(Boolean).join(" · ");
+
+  return {
+    kind: "spawn",
+    title,
+    body: taskText || "正在整理委派任务...",
+    meta: meta || "协作派发中",
+  };
+}
+
 function ThinkingBlock({
   roleName,
   content,
@@ -245,15 +330,27 @@ function ThinkingBlock({
   isStreaming: boolean;
   color: { bg: string; text: string; border: string; dot: string };
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(() => isStreaming);
   const [now, setNow] = useState(Date.now());
   const containerRef = useRef<HTMLDivElement>(null);
+  const manualToggleRef = useRef(false);
 
   useEffect(() => {
     if (!isStreaming) return;
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, [isStreaming]);
+
+  useEffect(() => {
+    if (isStreaming) {
+      manualToggleRef.current = false;
+      setExpanded(true);
+      return;
+    }
+    if (content.trim() && !manualToggleRef.current) {
+      setExpanded(false);
+    }
+  }, [isStreaming, content]);
 
   useEffect(() => {
     if (expanded && containerRef.current) {
@@ -275,7 +372,10 @@ function ThinkingBlock({
         <div className="text-[10px] mb-0.5">{roleName}</div>
         <div className={`rounded-xl ${color.bg} overflow-hidden`}>
           <button
-            onClick={() => setExpanded((v) => !v)}
+            onClick={() => {
+              manualToggleRef.current = true;
+              setExpanded((v) => !v);
+            }}
             className="w-full flex items-center gap-1.5 px-3 py-1.5 text-[11px] cursor-pointer hover:opacity-80 transition-opacity"
           >
             {expanded
@@ -345,7 +445,7 @@ function buildStreamingArtifactPreview(path: string, body: string): {
   fullBody: string;
   truncated: boolean;
 } {
-  const normalized = body.replace(/\r\n/g, "\n").trim();
+  const normalized = formatArtifactPreviewBody(path, body);
   const lines = normalized ? normalized.split("\n") : [];
   const maxLines = 18;
   const maxChars = 1200;
@@ -370,14 +470,7 @@ function buildStreamingArtifactPreview(path: string, body: string): {
   };
 }
 
-function buildToolStreamingPreview(jsonStr: string): {
-  kind: "artifact" | "generic";
-  title: string;
-  body: string;
-  fullBody?: string;
-  meta?: string;
-  collapsible?: boolean;
-} {
+function buildToolStreamingPreview(jsonStr: string): ToolStreamingPreview {
   const parsed = parsePartialToolJSON(jsonStr);
   const raw = decodePartialToolContent(jsonStr);
   const looksLikeArtifact = Boolean(
@@ -388,13 +481,25 @@ function buildToolStreamingPreview(jsonStr: string): {
       ),
   );
 
+  if (parsed.thought.trim()) {
+    return buildSequentialThinkingPreview(parsed);
+  }
+
+  if (parsed.targetAgent.trim() && parsed.task.trim()) {
+    return buildSpawnTaskPreview(parsed);
+  }
+
   if (looksLikeArtifact) {
-    const artifactBody = parsed.content || recoverArtifactBodyFromRaw(jsonStr, parsed.path);
+    const artifactBody = decodePartialToolContent(parsed.content || "")
+      || recoverArtifactBodyFromRaw(jsonStr, parsed.path);
     const preview = buildStreamingArtifactPreview(parsed.path || "未知文件", artifactBody);
     return {
       kind: "artifact",
       title: `生成文件: ${parsed.path || "未知文件"}`,
-      body: preview.fullBody || preview.previewBody,
+      body: preview.previewBody,
+      fullBody: preview.fullBody,
+      meta: preview.meta,
+      collapsible: preview.truncated,
     };
   }
 
@@ -450,6 +555,7 @@ function ToolStreamingBlock({
   const [now, setNow] = useState(Date.now());
   const [expanded, setExpanded] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const debugSignatureRef = useRef("");
 
   useEffect(() => {
     if (!isStreaming) return;
@@ -467,10 +573,39 @@ function ToolStreamingBlock({
   const timeLabel = elapsed >= 60 ? `${Math.floor(elapsed / 60)}分${elapsed % 60}秒` : `${elapsed}秒`;
   
   const preview = buildToolStreamingPreview(content);
-  const Icon = preview.kind === "artifact" ? FileDown : Settings2;
+  const Icon = preview.kind === "artifact"
+    ? FileDown
+    : preview.kind === "thinking"
+      ? Brain
+      : preview.kind === "spawn"
+        ? ArrowRightCircle
+        : Settings2;
   const displayedBody = preview.kind === "artifact" && preview.collapsible && expanded
     ? (preview.fullBody || preview.body)
     : preview.body;
+
+  useEffect(() => {
+    if (preview.kind !== "artifact" || !content.trim()) return;
+
+    const parsed = parsePartialToolJSON(content);
+    const artifactBody = decodePartialToolContent(parsed.content || "")
+      || recoverArtifactBodyFromRaw(content, parsed.path);
+    const signature = `${parsed.path}|${content.length}|${artifactBody.length}`;
+    if (debugSignatureRef.current === signature) return;
+    debugSignatureRef.current = signature;
+
+    console.info("[ActorChatPanel] [toolStreamingPreview]", {
+      roleName,
+      path: parsed.path || "unknown",
+      rawLength: content.length,
+      parsedContentLength: (parsed.content || "").length,
+      artifactBodyLength: artifactBody.length,
+      rawPreview: content.slice(0, 220),
+      parsedContentPreview: (parsed.content || "").slice(0, 220),
+      artifactBodyPreview: artifactBody.slice(0, 220),
+      artifactBodyJsonPreview: JSON.stringify(artifactBody.slice(0, 220)),
+    });
+  }, [content, preview.kind, roleName]);
 
   return (
     <div className={`flex gap-2 ${color.text} mt-2`}>
@@ -501,7 +636,7 @@ function ToolStreamingBlock({
           )}
           <div
             ref={containerRef}
-            className={`p-3 text-[12px] leading-[1.6] bg-[#1e1e1e] text-[#d4d4d4] font-mono overflow-y-auto whitespace-pre overflow-x-auto ${
+            className={`p-3 text-[12px] leading-[1.6] bg-[#1e1e1e] text-[#d4d4d4] font-mono overflow-y-auto whitespace-pre-wrap break-words ${
               preview.kind === "artifact" && !expanded ? "max-h-[220px]" : "max-h-[350px]"
             }`}
           >
@@ -1374,7 +1509,7 @@ function MessageBubbleBase({
             />
           ) : (
             <>
-              <div className={`prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-headings:mt-2 prose-headings:mb-1 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_code]:break-words ${isUser ? "[&_p]:text-right [&_li]:text-right [&_ol]:text-right [&_ul]:text-right" : ""}`}>
+              <div className={`prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-headings:mt-2 prose-headings:mb-1 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_code]:break-words [&_p]:whitespace-pre-wrap [&_li]:whitespace-pre-wrap ${isUser ? "[&_p]:text-right [&_li]:text-right [&_ol]:text-right [&_ul]:text-right" : ""}`}>
                 <ReactMarkdown remarkPlugins={MARKDOWN_REMARK_PLUGINS}>
                   {displayText}
                 </ReactMarkdown>
@@ -2743,6 +2878,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   const [openApprovalMessageId, setOpenApprovalMessageId] = useState<string | null>(null);
   const [inputNotice, setInputNotice] = useState<string | null>(null);
   const [selectedSpawnRunId, setSelectedSpawnRunId] = useState<string | null>(null);
+  const [lastCommittedDispatchInsight, setLastCommittedDispatchInsight] = useState<DialogDispatchInsight | null>(null);
   const [requirePlanApproval, setRequirePlanApproval] = useState<boolean>(() => {
     try {
       return localStorage.getItem(DIALOG_PLAN_APPROVAL_KEY) === "1";
@@ -3267,6 +3403,17 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     if (!trimmed && !hasAttachments) return;
 
     ensureSystem();
+    const currentSystem = useActorSystemStore.getState().getSystem() ?? getSystem();
+    if (!currentSystem) {
+      setInputNotice("Dialog 房间尚未准备好，请稍后再试。");
+      inputRef.current?.focus();
+      return;
+    }
+    if (currentSystem.size === 0) {
+      setInputNotice("当前房间还没有可执行的 Agent，请先检查 Agent 阵容，或等待房间恢复完成。");
+      inputRef.current?.focus();
+      return;
+    }
 
     const hasContext = fileContextBlock.trim().length > 0;
     const hasImages = imagePaths.length > 0;
@@ -3280,6 +3427,12 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     const briefContent = hasContext
       ? (attachmentSummary ? `${attachmentSummary}\n${userText}` : userText)
       : undefined;
+    const committedDispatchInsight = inferDialogDispatchInsight({
+      content,
+      attachmentSummary: briefContent,
+      attachmentPaths: inputAttachmentPaths,
+      handoff: incomingHandoff,
+    });
 
     const imagesToSend = hasImages ? [...imagePaths] : undefined;
     const uploadRecords = attachments.length > 0 ? buildSessionUploadRecords(attachments) : [];
@@ -3308,6 +3461,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
 
     if (effectiveReplyTarget) {
       const liveSystem = useActorSystemStore.getState().getSystem() ?? getSystem();
+      setLastCommittedDispatchInsight(committedDispatchInsight);
       queueDialogUserMemoryCapture(trimmed);
       replyToMessage(effectiveReplyTarget.messageId, content, {
         _briefContent: briefContent,
@@ -3354,7 +3508,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       : [];
     const selectedSmartRoute = smartRoutes.length > 0 ? smartRoutes[0] : null;
 
-    const system = useActorSystemStore.getState().getSystem() ?? getSystem();
+    const system = currentSystem;
     let runtimePlan: DialogExecutionPlan | null = null;
 
     if (!effectiveReplyTarget && requirePlanApproval && !isSteerCommand) {
@@ -3401,6 +3555,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     }
 
     try {
+      setLastCommittedDispatchInsight(dispatchInsight);
       queueDialogUserMemoryCapture(cleanContent || trimmed);
       if (shouldRouteToFocusedSession && focusedSessionTask) {
         system?.sendUserMessageToSpawnedSession(focusedSessionTask.runId, finalContent, {
@@ -3644,12 +3799,47 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   }, [input, fileContextBlock, imagePaths, selectedPendingMessageId, pendingInteractionByMessageId, pendingUserInteractions, parseMention, attachmentSummary, routingMode, routeTask, actors, coordinatorActorId, inputAttachmentPaths, incomingHandoff]);
   const draftDispatchPlan = draftDispatchBundle?.clusterPlan ?? null;
   const draftDispatchInsight = draftDispatchBundle?.insight ?? null;
+  const latestUserDispatchInsight = useMemo(() => {
+    if (draftDispatchInsight) return null;
+
+    const latestUserMessage = [...dialogHistory]
+      .reverse()
+      .find((message) =>
+        message.from === "user"
+        && message.kind === "user_input"
+        && (message._briefContent || message.content).trim(),
+      );
+
+    if (!latestUserMessage) return null;
+
+    const latestAttachmentSummary =
+      latestUserMessage._briefContent
+      && latestUserMessage._briefContent !== latestUserMessage.content
+        ? latestUserMessage._briefContent
+        : undefined;
+
+    return inferDialogDispatchInsight({
+      content: latestUserMessage.content,
+      attachmentSummary: latestAttachmentSummary,
+      attachmentPaths: latestUserMessage.images ?? [],
+    });
+  }, [dialogHistory, draftDispatchInsight]);
+  const activeDispatchInsight = draftDispatchInsight ?? latestUserDispatchInsight ?? lastCommittedDispatchInsight;
+
+  useEffect(() => {
+    if (dialogHistory.length === 0) {
+      setLastCommittedDispatchInsight(null);
+      return;
+    }
+    if (latestUserDispatchInsight) {
+      setLastCommittedDispatchInsight(latestUserDispatchInsight);
+    }
+  }, [dialogHistory.length, latestUserDispatchInsight]);
 
   // 图谱数据
   const graphData = useMemo(() => {
     if (overlay !== "graph") return null;
     try {
-      const { KnowledgeGraph } = require("@/core/knowledge/knowledge-graph");
       const actorNodes = actors.map((a) => ({
         id: a.id, name: a.roleName, status: a.status, capabilities: a.capabilities?.tags,
       }));
@@ -3936,30 +4126,49 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
             const hasPendingApproval = pendingUserInteractions.some(
               (interaction) => interaction.fromActorId === a.id && interaction.type === "approval",
             );
+            const reversedSteps = [...steps].reverse();
 
-            const latestStreamingAnswer = [...steps].reverse().find((s) => s.streaming && s.type === "answer");
-            const latestThinkingStep = [...steps].reverse().find((s) => s.type === "thinking");
+            const latestStreamingAnswer = reversedSteps.find((s) => s.streaming && s.type === "answer");
+            const latestThinkingStep = reversedSteps.find((s) => s.type === "thinking");
+            const latestThoughtToolStep = hasPendingApproval
+              ? undefined
+              : reversedSteps.find((s) => {
+                if (s.type !== "tool_streaming") return false;
+                return buildToolStreamingPreview(s.content).kind === "thinking";
+              });
+            const latestThoughtToolPreview = latestThoughtToolStep
+              ? buildToolStreamingPreview(latestThoughtToolStep.content)
+              : null;
             const latestToolStreamingStep = hasPendingApproval
               ? undefined
-              : [...steps].reverse().find((s) => s.type === "tool_streaming" && s.streaming);
+              : reversedSteps.find((s) => {
+                if (s.type !== "tool_streaming" || !s.streaming) return false;
+                return buildToolStreamingPreview(s.content).kind !== "thinking";
+              });
+            const latestToolStreamingPreview = latestToolStreamingStep
+              ? buildToolStreamingPreview(latestToolStreamingStep.content)
+              : null;
+            const derivedThinkingContent = !latestThinkingStep && latestThoughtToolPreview?.kind === "thinking"
+              ? latestThoughtToolPreview.body
+              : undefined;
 
             const streamingContent = latestStreamingAnswer?.content;
-            const thinkingContent = latestThinkingStep?.content;
+            const thinkingContent = latestThinkingStep?.content ?? derivedThinkingContent;
             const toolStreamingContent = latestToolStreamingStep?.content;
 
             return (
               <div key={`thinking-${a.id}`} className="space-y-2">
-                {latestThinkingStep && (
+                {(latestThinkingStep || derivedThinkingContent) && (
                   <ThinkingBlock
                     roleName={a.roleName}
                     content={thinkingContent ?? ""}
-                    startedAt={latestThinkingStep.timestamp}
-                    isStreaming={latestThinkingStep.streaming ?? false}
+                    startedAt={latestThinkingStep?.timestamp ?? latestThoughtToolStep?.timestamp ?? Date.now()}
+                    isStreaming={latestThinkingStep?.streaming ?? latestThoughtToolStep?.streaming ?? false}
                     color={color}
                   />
                 )}
 
-                {latestToolStreamingStep && (
+                {latestToolStreamingStep && latestToolStreamingPreview?.kind !== "thinking" && (
                   <ToolStreamingBlock
                     roleName={a.roleName}
                     content={toolStreamingContent ?? ""}
@@ -3982,7 +4191,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                         </span>
                       </div>
                       <div className={`inline-block text-[13px] leading-relaxed rounded-xl px-3 py-2 ${color.bg}`}>
-                        <div className="prose prose-sm dark:prose-invert max-w-none prose-p:my-1">
+                        <div className="prose prose-sm dark:prose-invert max-w-none prose-p:my-1 [&_p]:whitespace-pre-wrap [&_li]:whitespace-pre-wrap">
                           <ReactMarkdown remarkPlugins={MARKDOWN_REMARK_PLUGINS}>
                             {streamingContent}
                           </ReactMarkdown>
@@ -4183,13 +4392,15 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                   accent="accent"
                 />
                 <RoutingModeButton value={routingMode} onChange={setRoutingMode} />
-                {draftDispatchInsight?.autoModeLabel && (
+                {activeDispatchInsight?.autoModeLabel && (
                   <span
                     className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-[10px] text-emerald-700"
-                    title={draftDispatchInsight.reasons.join(" · ")}
+                    title={activeDispatchInsight.reasons.join(" · ")}
                   >
-                    自动 {draftDispatchInsight.autoModeLabel}
-                    {draftDispatchInsight.focusLabel ? ` · ${draftDispatchInsight.focusLabel}` : ""}
+                    {draftDispatchInsight ? "自动" : "当前任务"} {activeDispatchInsight.autoModeLabel}
+                    {activeDispatchInsight.focusLabel
+                      ? ` · ${activeDispatchInsight.focusLabel}`
+                      : ""}
                   </span>
                 )}
                 {selectedPendingInteractionLabel ? (

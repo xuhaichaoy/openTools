@@ -314,4 +314,53 @@ describe("ReActAgent FC compatibility cache", () => {
     expect(secondAnswer).toContain("文本模式回答");
     expect(fcCalls).toBe(1);
   });
+
+  it("should not treat calculate output as final answer for concrete artifact tasks", async () => {
+    let fcCalls = 0;
+    const ai = createMockAI(async () => {
+      fcCalls += 1;
+      if (fcCalls === 1) {
+        return {
+          type: "tool_calls",
+          toolCalls: [
+            {
+              id: "call-calculate",
+              type: "function",
+              function: {
+                name: "calculate",
+                arguments: "{\"expression\":\"10+20\"}",
+              },
+            },
+          ],
+        };
+      }
+
+      return {
+        type: "content",
+        content: "已继续执行页面生成任务，并准备输出真实文件结果。",
+      };
+    });
+
+    const tools: AgentTool[] = [
+      {
+        name: "calculate",
+        description: "math",
+        parameters: {
+          expression: { type: "string", description: "expression" },
+        },
+        execute: async () => ({ expression: "10+20", result: 30 }),
+      },
+    ];
+
+    const agent = new ReActAgent(ai, tools, {
+      maxIterations: 4,
+      fcCompatibilityKey: "calculate-not-final-for-artifacts",
+    });
+
+    const answer = await agent.run("根据图片生成一个 html 页面并保存到 Downloads");
+
+    expect(answer).toContain("继续执行页面生成任务");
+    expect(answer).not.toContain("10+20 = 30");
+    expect(fcCalls).toBe(2);
+  });
 });

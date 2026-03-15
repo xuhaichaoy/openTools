@@ -46,6 +46,24 @@ function traceStreamEvent(
   // console.log(`[AI TRACE][${conversationId}][${phase}]`, payload);
 }
 
+function previewStreamDebugText(value: unknown, maxLength = 180): string {
+  if (typeof value !== "string") {
+    try {
+      return JSON.stringify(value)?.slice(0, maxLength) ?? String(value);
+    } catch {
+      return String(value);
+    }
+  }
+
+  const normalized = value
+    .replace(/\r/g, "\\r")
+    .replace(/\n/g, "\\n")
+    .replace(/\t/g, "\\t");
+  return normalized.length > maxLength
+    ? `${normalized.slice(0, maxLength)}...`
+    : normalized;
+}
+
 function normalizeStreamChunk(params: {
   conversationId: string;
   phase: string;
@@ -745,6 +763,9 @@ export function createMToolsAI(): MToolsAI {
       const config: AIConfig = {
         ...getConfig(),
         ...(options.modelOverride ? { model: options.modelOverride } : {}),
+        ...(options.thinkingLevel && options.thinkingLevel !== "adaptive"
+          ? { thinking_level: options.thinkingLevel }
+          : {}),
       };
       const conversationId = `agent-${generateId()}`;
       let fullContent = "";
@@ -893,9 +914,25 @@ export function createMToolsAI(): MToolsAI {
                       "thinking_inline",
                       emittedThinking || parsed.thinking,
                     );
+                    aiLog.info("[streamWithTools] thinking parsed from ai-stream-chunk", {
+                      conversationId,
+                      rawLength: event.payload.content.length,
+                      parsedLength: parsed.thinking.length,
+                      emittedLength: emittedThinking.length,
+                      fullLength: fullThinking.length,
+                      rawPreview: previewStreamDebugText(event.payload.content),
+                      parsedPreview: previewStreamDebugText(parsed.thinking),
+                      emittedPreview: previewStreamDebugText(emittedThinking || parsed.thinking),
+                    });
                     if (emittedThinking) {
                       options.onThinking?.(emittedThinking);
                     }
+                  } else if (/<\s*\/?\s*(?:think(?:ing)?|thought|reasoning|final)\b/i.test(event.payload.content)) {
+                    aiLog.warn("[streamWithTools] ai-stream-chunk contains reasoning tags but produced no thinking text", {
+                      conversationId,
+                      rawLength: event.payload.content.length,
+                      rawPreview: previewStreamDebugText(event.payload.content),
+                    });
                   }
                 }
               },
@@ -910,6 +947,10 @@ export function createMToolsAI(): MToolsAI {
                   aiLog.info("[streamWithTools] tool calls received", {
                     conversationId,
                     count: resolvedToolCalls.length,
+                    tools: resolvedToolCalls.map((toolCall) => ({
+                      name: toolCall.function?.name,
+                      argsPreview: previewStreamDebugText(toolCall.function?.arguments ?? "", 120),
+                    })),
                   });
                 }
               },
@@ -934,6 +975,8 @@ export function createMToolsAI(): MToolsAI {
                   chunkCount,
                   chunkChars,
                   hasToolCalls: !!resolvedToolCalls?.length,
+                  fullThinkingChars: fullThinking.length,
+                  fullToolArgsChars: fullToolArgs.length,
                 });
                 if (abortBridge.isAborted()) {
                   safeReject(new Error("Aborted"));
@@ -973,6 +1016,14 @@ export function createMToolsAI(): MToolsAI {
                     "thinking_inline",
                     emittedThinking || remaining.thinking,
                   );
+                  aiLog.info("[streamWithTools] thinking flushed on done", {
+                    conversationId,
+                    parsedLength: remaining.thinking.length,
+                    emittedLength: emittedThinking.length,
+                    fullLength: fullThinking.length,
+                    parsedPreview: previewStreamDebugText(remaining.thinking),
+                    emittedPreview: previewStreamDebugText(emittedThinking || remaining.thinking),
+                  });
                   if (emittedThinking) {
                     options.onThinking?.(emittedThinking);
                   }
@@ -1048,6 +1099,14 @@ export function createMToolsAI(): MToolsAI {
                     "thinking_inline",
                     emittedThinking || remaining.thinking,
                   );
+                  aiLog.info("[streamWithTools] thinking flushed on error", {
+                    conversationId,
+                    parsedLength: remaining.thinking.length,
+                    emittedLength: emittedThinking.length,
+                    fullLength: fullThinking.length,
+                    parsedPreview: previewStreamDebugText(remaining.thinking),
+                    emittedPreview: previewStreamDebugText(emittedThinking || remaining.thinking),
+                  });
                   if (emittedThinking) {
                     options.onThinking?.(emittedThinking);
                   }
@@ -1060,6 +1119,11 @@ export function createMToolsAI(): MToolsAI {
               (event) => {
                 if (event.payload.conversation_id === conversationId) {
                   kickWatchdog("thinking");
+                  aiLog.info("[streamWithTools] ai-stream-thinking event", {
+                    conversationId,
+                    rawLength: (event.payload.content ?? "").length,
+                    rawPreview: previewStreamDebugText(event.payload.content ?? ""),
+                  });
                   const parsed = reasoningStream.processThinkingChunk(
                     event.payload.content ?? "",
                   );
@@ -1077,9 +1141,23 @@ export function createMToolsAI(): MToolsAI {
                         ? normalizedThinking.full
                         : normalizedThinking.delta;
                     traceStreamEvent(conversationId, "thinking", emittedThinking || parsed.thinking);
+                    aiLog.info("[streamWithTools] thinking normalized from ai-stream-thinking", {
+                      conversationId,
+                      parsedLength: parsed.thinking.length,
+                      emittedLength: emittedThinking.length,
+                      fullLength: fullThinking.length,
+                      parsedPreview: previewStreamDebugText(parsed.thinking),
+                      emittedPreview: previewStreamDebugText(emittedThinking || parsed.thinking),
+                    });
                     if (emittedThinking) {
                       options.onThinking?.(emittedThinking);
                     }
+                  } else {
+                    aiLog.warn("[streamWithTools] ai-stream-thinking event parsed to empty thinking", {
+                      conversationId,
+                      rawLength: (event.payload.content ?? "").length,
+                      rawPreview: previewStreamDebugText(event.payload.content ?? ""),
+                    });
                   }
                 }
               },
@@ -1105,6 +1183,15 @@ export function createMToolsAI(): MToolsAI {
                     "tool_args",
                     emittedToolArgs || event.payload.content || "",
                   );
+                  aiLog.info("[streamWithTools] tool args chunk", {
+                    conversationId,
+                    rawLength: (event.payload.content ?? "").length,
+                    emittedLength: emittedToolArgs.length,
+                    fullLength: fullToolArgs.length,
+                    rawPreview: previewStreamDebugText(event.payload.content ?? ""),
+                    emittedPreview: previewStreamDebugText(emittedToolArgs || event.payload.content || ""),
+                    fullPreview: previewStreamDebugText(fullToolArgs),
+                  });
                   if (emittedToolArgs) {
                     options.onToolArgs?.(emittedToolArgs);
                   }

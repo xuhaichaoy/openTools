@@ -29,12 +29,9 @@ export function mergeCloudAIConfig(
     temperature: cloudConfig.temperature ?? localConfig.temperature,
     max_tokens: cloudConfig.max_tokens ?? localConfig.max_tokens,
     system_prompt: cloudConfig.system_prompt ?? localConfig.system_prompt,
-    enable_advanced_tools:
-      cloudConfig.enable_advanced_tools ?? localConfig.enable_advanced_tools,
+    // 高级工具 / 原生工具属于本机权限偏好，不参与跨设备覆盖。
     enable_rag_auto_search:
       cloudConfig.enable_rag_auto_search ?? localConfig.enable_rag_auto_search,
-    enable_native_tools:
-      cloudConfig.enable_native_tools ?? localConfig.enable_native_tools,
     enable_long_term_memory:
       cloudConfig.enable_long_term_memory ?? localConfig.enable_long_term_memory,
     enable_memory_auto_recall:

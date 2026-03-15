@@ -3,6 +3,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { useAIStore } from "@/store/ai-store";
 import { useRAGStore } from "@/store/rag-store";
 import type { OwnKeyModelConfig } from "@/core/ai/types";
+import {
+  saveAILocalConfigOverrides,
+  type AILocalConfigOverrides,
+} from "@/core/ai/local-ai-config-preferences";
 import { useTeamStore } from "@/store/team-store";
 import {
   deleteMemory,
@@ -230,7 +234,13 @@ export function AIModelTab() {
     saveConfig(newConfig);
   };
 
-  const updateAndSave = (partial: Partial<typeof config>) => {
+  const updateAndSave = (
+    partial: Partial<typeof config>,
+    localOverrides?: AILocalConfigOverrides,
+  ) => {
+    if (localOverrides) {
+      saveAILocalConfigOverrides(localOverrides);
+    }
     const newConfig = { ...config, ...partial };
     setConfig(newConfig);
     saveConfig(newConfig);
@@ -438,16 +448,21 @@ export function AIModelTab() {
                 启用高级工具
               </span>
               <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
-                开启后 AI 可执行 shell 命令、读写本地文件、获取系统信息等。危险操作会弹窗确认。
+                开启后 AI 可执行 shell 命令、读写本地文件、获取系统信息等。危险操作会弹窗确认；该开关仅保存在当前设备，不再被云同步覆盖。
               </p>
               <ScopePills items={["Ask", "Agent", "Cluster", "Dialog"]} />
             </div>
             <Toggle
               checked={config.enable_advanced_tools}
               onChange={() =>
-                updateAndSave({
-                  enable_advanced_tools: !config.enable_advanced_tools,
-                })
+                updateAndSave(
+                  {
+                    enable_advanced_tools: !config.enable_advanced_tools,
+                  },
+                  {
+                    enable_advanced_tools: !config.enable_advanced_tools,
+                  },
+                )
               }
               color="#f59e0b"
             />
@@ -604,16 +619,21 @@ export function AIModelTab() {
                   </span>
                 </div>
                 <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
-                  开启后 AI 可调用日历、提醒事项、备忘录、邮件、快捷指令、打开应用等本机能力。
+                  开启后 AI 可调用日历、提醒事项、备忘录、邮件、快捷指令、打开应用等本机能力。该开关仅保存在当前设备。
                 </p>
                 <ScopePills items={["Ask", "Agent", "Cluster", "Dialog"]} />
               </div>
               <Toggle
                 checked={config.enable_native_tools}
                 onChange={() =>
-                  updateAndSave({
-                    enable_native_tools: !config.enable_native_tools,
-                  })
+                  updateAndSave(
+                    {
+                      enable_native_tools: !config.enable_native_tools,
+                    },
+                    {
+                      enable_native_tools: !config.enable_native_tools,
+                    },
+                  )
                 }
               />
             </label>
