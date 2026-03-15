@@ -2,7 +2,7 @@
  * 插件事件总线 — 基于 BroadcastChannel 的插件间通信
  *
  * 用于插件之间的数据共享和事件通知。
- * 例如：截图插件发出截图数据 → OCR 插件接收并识别文字
+ * 例如：外部图片输入或历史截图工作流发出图片数据 → OCR 插件接收并识别文字
  */
 
 const CHANNEL_NAME = "mtools-plugin-bus";
@@ -17,7 +17,7 @@ export interface PluginEvent<T = unknown> {
 
 /** 预定义事件类型 */
 export const PluginEventTypes = {
-  /** 截图完成 — payload: { imageBase64: string, rect?: { x, y, w, h } } */
+  /** 历史截图/图片输入完成 — payload: { imageBase64: string, rect?: { x, y, w, h } } */
   SCREENSHOT_CAPTURED: "screenshot:captured",
   /** OCR 识别完成 — payload: { text: string, blocks: OcrBlock[] } */
   OCR_RESULT: "ocr:result",

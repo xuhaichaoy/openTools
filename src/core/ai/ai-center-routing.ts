@@ -1,4 +1,5 @@
 import { useAIStore } from "@/store/ai-store";
+import { normalizeAICenterHandoff } from "@/core/ai/ai-center-handoff";
 import {
   useAppStore,
   type AICenterMode,
@@ -55,7 +56,11 @@ export function routeToAICenter(params: RouteToAICenterParams): void {
     void useAIStore.getState().sendMessage(query, images);
   }
 
-  const normalizedHandoff = handoff ?? agentHandoff;
+  const normalizedHandoff = handoff
+    ? normalizeAICenterHandoff(handoff)
+    : agentHandoff
+      ? normalizeAICenterHandoff(agentHandoff)
+      : undefined;
   if (normalizedHandoff) {
     appStore.setPendingAICenterHandoff({
       mode,
@@ -65,7 +70,7 @@ export function routeToAICenter(params: RouteToAICenterParams): void {
   } else if (mode === "agent" && agentInitialQuery?.trim()) {
     appStore.setPendingAICenterHandoff({
       mode,
-      payload: { query: agentInitialQuery },
+      payload: normalizeAICenterHandoff({ query: agentInitialQuery }),
       createdAt: Date.now(),
     });
   }

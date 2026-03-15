@@ -42,7 +42,7 @@ describe("buildAskAgentHandoff", () => {
       ],
     };
 
-    expect(buildAskAgentHandoff(conversation)).toEqual({
+    expect(buildAskAgentHandoff(conversation)).toEqual(expect.objectContaining({
       query: [
         "以下是之前的对话上下文，并已附带相关图片、文件或目录，请基于此继续执行任务：",
         "",
@@ -56,7 +56,15 @@ describe("buildAskAgentHandoff", () => {
       sourceSessionId: "conv-1",
       sourceLabel: "Ask 对话",
       summary: "Ask 对话上下文，附带 3 个文件/图片/目录",
-    });
+      title: "延续 Ask 对话：demo",
+      goal: "请帮我看下这个项目",
+      intent: "coding",
+      keyPoints: expect.arrayContaining(["带入最近 2 条 Ask 消息", "包含 3 个附件路径"]),
+      nextSteps: expect.arrayContaining(["先阅读 Ask 对话与附件上下文，再继续处理任务"]),
+      files: expect.arrayContaining([
+        expect.objectContaining({ path: "/tmp/demo.ts", reason: "Ask 附件/目录上下文" }),
+      ]),
+    }));
   });
 
   it("returns null when there is no reusable conversation context", () => {

@@ -48,7 +48,6 @@ const PLUGIN_API_METHODS = [
   "shellShowItemInFolder",
   "getPath",
   "copyImage",
-  "screenCapture",
   "setSubInput",
   "removeSubInput",
   "redirect",
@@ -69,7 +68,6 @@ const PLUGIN_API_METHOD_PERMISSIONS: Record<string, PluginPermission> = {
   shellOpenPath: "shell",
   shellShowItemInFolder: "shell",
   getPath: "filesystem",
-  screenCapture: "system",
 };
 
 /** 全量权限映射（核心 API + plugin_api_call） */

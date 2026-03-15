@@ -6,9 +6,10 @@ import { describe, it, expect } from "vitest";
 import {
   checkPermission,
   getDeclaredPermissions,
+  isKnownPluginApiMethod,
   PERMISSION_LABELS,
 } from "./permission-guard";
-import type { PluginInstance } from "./types";
+import type { PluginInstance, PluginPermission } from "./types";
 
 function makePlugin(
   overrides: Partial<PluginInstance> & {
@@ -24,7 +25,7 @@ function makePlugin(
       version: "1.0.0",
       features: [],
       mtools: {
-        permissions: permissions as any,
+        permissions: permissions as PluginPermission[] | undefined,
       },
     },
     dirPath: "/tmp/test",
@@ -123,5 +124,11 @@ describe("PERMISSION_LABELS", () => {
     expect(keys).toContain("notification");
     expect(keys).toContain("system");
     expect(keys.length).toBe(6);
+  });
+});
+
+describe("isKnownPluginApiMethod", () => {
+  it("should reject removed screenshot capture bridge method", () => {
+    expect(isKnownPluginApiMethod("screenCapture")).toBe(false);
   });
 });

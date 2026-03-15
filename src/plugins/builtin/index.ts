@@ -6,7 +6,6 @@ import {
   DataForgeIcon,
   PluginsIcon,
   ColorIcon,
-  ScreenCaptureIcon,
   QrCodeIcon,
   ImageSearchIcon,
   CloudSyncIcon,
@@ -44,11 +43,6 @@ const AICenter = lazy(() =>
 );
 
 // ── 独立插件 (懒加载) ──
-const ScreenCapture = lazy(() =>
-  import("@/components/tools/ScreenCapture").then((m) => ({
-    default: m.ScreenCapture,
-  })),
-);
 const ScreenTranslatePlugin = lazy(
   () => import("@/plugins/builtin/ScreenTranslate/index"),
 );
@@ -126,7 +120,7 @@ export function resolveBuiltinPlugins(
   });
 }
 
-// ── 所有内置插件定义（15 个） ──
+// ── 所有内置插件定义 ──
 
 export const builtinPlugins: MToolsPlugin[] = [
   // ── 开发工具箱（JSON + 时间戳 + Base64）──
@@ -253,53 +247,16 @@ export const builtinPlugins: MToolsPlugin[] = [
     ],
   },
 
-  // ── 截图（融合工具栏：OCR / 贴图 / 编辑 / 保存 / 复制）──
-  {
-    id: "screen-capture",
-    tier: "core",
-    name: "截图",
-    description: "截图录屏，选区后直接 OCR / 贴图 / 编辑 / 保存 / 复制",
-    icon: createElement(ScreenCaptureIcon, { className: "w-6 h-6" }),
-    color: "text-sky-500 bg-sky-500/10",
-    category: "工具",
-    keywords: [
-      "截图",
-      "录屏",
-      "screenshot",
-      "capture",
-      "录制",
-      "ocr",
-      "贴图",
-      "pin",
-      "编辑",
-      "保存",
-      "复制",
-    ],
-    viewId: "screen-capture",
-    render: (props) => createElement(ScreenCapture, props),
-    actions: [
-      {
-        name: "take_screenshot",
-        description: "开始区域截图",
-        execute: async () => {
-          const { invoke } = await import("@tauri-apps/api/core");
-          await invoke("start_capture", {});
-          return { info: "截图选区窗口已打开" };
-        },
-      },
-    ],
-  },
-
   // ── OCR（独立结果页）──
   {
     id: "ocr",
     tier: "core",
     name: "OCR",
-    description: "图片文字识别（支持截图直达）",
+    description: "图片文字识别（支持粘贴图片或上传图片）",
     icon: createElement(OcrIcon, { className: "w-6 h-6" }),
     color: "text-amber-500 bg-amber-500/10",
     category: "工具",
-    keywords: ["ocr", "文字识别", "提取文字", "图片转文字"],
+    keywords: ["ocr", "文字识别", "提取文字", "图片转文字", "识图"],
     viewId: "ocr",
     render: (props) => createElement(OCRPlugin, props),
   },
@@ -309,15 +266,13 @@ export const builtinPlugins: MToolsPlugin[] = [
     id: "screen-translate",
     tier: "core",
     name: "翻译",
-    description: "屏幕翻译、实时翻译、多语言",
+    description: "文本翻译、多语言转换",
     icon: createElement(ScreenTranslateIcon, { className: "w-6 h-6" }),
     color: "text-teal-500 bg-teal-500/10",
     category: "工具",
     keywords: [
       "翻译",
       "translate",
-      "屏幕翻译",
-      "实时翻译",
       "多语言",
       "language",
     ],
@@ -506,7 +461,6 @@ export const builtinPlugins: MToolsPlugin[] = [
       "暗黑",
       "回收站",
       "wifi",
-      "截图",
       "静音",
       "桌面",
       "system",

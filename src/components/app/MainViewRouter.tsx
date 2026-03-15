@@ -14,6 +14,7 @@ import {
   HOME_VIEW_ID,
   MAIN_VIEW_ID,
   PLUGIN_EMBED_VIEW_ID,
+  ROOT_VIEW_ID,
 } from "@/core/navigation/view-stack";
 
 interface MainViewRouterProps {
@@ -23,6 +24,8 @@ interface MainViewRouterProps {
   handleSubmit: (value: string, currentMode: string, images?: string[]) => void;
   pushView: (viewId: string) => void;
   popView: () => void;
+  viewDepth: number;
+  openLauncher: () => void;
   resetToMain: () => void;
   activePlugin?: MToolsPlugin;
   pluginContext: PluginContext | null;
@@ -39,6 +42,8 @@ export function MainViewRouter({
   handleSubmit,
   pushView,
   popView,
+  viewDepth,
+  openLauncher,
   resetToMain,
   activePlugin,
   pluginContext,
@@ -84,7 +89,13 @@ export function MainViewRouter({
           >
             <div className="h-full">
               {activePlugin.render({
-                onBack: () => popView(),
+                onBack: () => {
+                  if (activePlugin.viewId === ROOT_VIEW_ID && viewDepth === 1) {
+                    openLauncher();
+                    return;
+                  }
+                  popView();
+                },
                 context: pluginContext,
               })}
             </div>
@@ -130,4 +141,3 @@ export function MainViewRouter({
     </>
   );
 }
-

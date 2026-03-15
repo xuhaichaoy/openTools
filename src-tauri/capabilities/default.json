@@ -4,8 +4,7 @@
   "description": "Capability for the main window",
   "windows": [
     "main",
-    "plugin-*",
-    "screenshot"
+    "plugin-*"
   ],
   "remote": {
     "urls": [

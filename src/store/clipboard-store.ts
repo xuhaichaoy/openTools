@@ -31,7 +31,6 @@ export const useClipboardStore = create<ClipboardState>((set, get) => ({
 
   setSearch: (s: string) => {
     set({ search: s });
-    get().load(s);
   },
 
   load: async (search?: string, limit?: number) => {
@@ -80,6 +79,12 @@ export const useClipboardStore = create<ClipboardState>((set, get) => ({
 
 let unlistenFn: UnlistenFn | null = null;
 
+function matchesClipboardSearch(entry: ClipboardEntry, search: string): boolean {
+  const keyword = search.trim().toLowerCase();
+  if (!keyword) return true;
+  return entry.content.toLowerCase().includes(keyword);
+}
+
 export function startClipboardListener() {
   if (unlistenFn) return; // 已监听
   listen<{ entry: ClipboardEntry; total: number }>(
@@ -87,6 +92,9 @@ export function startClipboardListener() {
     (event) => {
       const { entry } = event.payload;
       useClipboardStore.setState((s) => {
+        if (!matchesClipboardSearch(entry, s.search)) {
+          return s;
+        }
         // 去重
         const filtered = s.entries.filter((e) => e.id !== entry.id);
         return { entries: [entry, ...filtered].slice(0, 50) };

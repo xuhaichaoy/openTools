@@ -19,6 +19,7 @@ import {
   type AgentTool,
   type AgentStep,
 } from "@/plugins/builtin/SmartAgent/core/react-agent";
+import { applyIncomingAgentStep } from "@/plugins/builtin/SmartAgent/core/agent-task-state";
 import {
   createBuiltinAgentTools,
   type AskUserQuestion,
@@ -185,7 +186,8 @@ export class LocalAgentBridge implements AgentBridge {
         contextMessages: knowledgeContextMessages,
       },
       (step) => {
-        collectedSteps.push(step);
+        const nextSteps = applyIncomingAgentStep(collectedSteps, step);
+        collectedSteps.splice(0, collectedSteps.length, ...nextSteps);
         options?.onStep?.(step);
       },
     );

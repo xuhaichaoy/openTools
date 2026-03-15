@@ -33,8 +33,10 @@ import {
   buildAssistantMemoryPromptForQuery,
   queueAssistantMemoryCandidates,
 } from "@/core/ai/assistant-memory";
+import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
 import { loadAndResolveSkills } from "@/store/skill-store";
 import { useMcpStore, executeMcpTool } from "@/store/mcp-store";
+import { useAISessionRuntimeStore } from "@/store/ai-session-runtime-store";
 
 import type {
   ToolCallInfo,
@@ -317,6 +319,21 @@ export const useAIStore = create<AIState>((set, get) => ({
   loadHistory: async () => {
     const conversations = await loadConversationHistory();
     if (conversations.length > 0) {
+      useAISessionRuntimeStore.getState().syncSessions(
+        conversations.map((conversation) => ({
+          mode: "ask" as const,
+          externalSessionId: conversation.id,
+          title: conversation.title,
+          createdAt: conversation.createdAt,
+          updatedAt: conversation.updatedAt
+            ?? conversation.messages[conversation.messages.length - 1]?.timestamp
+            ?? conversation.createdAt,
+          summary: summarizeAISessionRuntimeText(
+            conversation.messages[conversation.messages.length - 1]?.content,
+            140,
+          ),
+        })),
+      );
       set({
         conversations,
         currentConversationId: conversations[0]?.id || null,
@@ -333,16 +350,24 @@ export const useAIStore = create<AIState>((set, get) => ({
 
   createConversation: () => {
     const id = generateChatId();
+    const now = Date.now();
     const conversation: Conversation = {
       id,
       title: "新对话",
       messages: [],
-      createdAt: Date.now(),
+      createdAt: now,
     };
     set((state) => ({
       conversations: [conversation, ...state.conversations],
       currentConversationId: id,
     }));
+    useAISessionRuntimeStore.getState().ensureSession({
+      mode: "ask",
+      externalSessionId: id,
+      title: conversation.title,
+      createdAt: now,
+      updatedAt: now,
+    });
     triggerPersist();
     return id;
   },
@@ -374,6 +399,7 @@ export const useAIStore = create<AIState>((set, get) => ({
         c.id === id ? { ...c, title } : c,
       ),
     }));
+    useAISessionRuntimeStore.getState().touchSession("ask", id, { title });
     triggerPersist();
   },
 
@@ -552,6 +578,9 @@ export const useAIStore = create<AIState>((set, get) => ({
           : c,
       ),
     }));
+    useAISessionRuntimeStore.getState().touchSession("ask", conversationId, {
+      title: content.slice(0, 30) || undefined,
+    });
 
     // 记忆候选提取（非阻塞，不影响 API 请求速度）
     if (state.config.enable_long_term_memory && state.config.enable_memory_auto_save) {

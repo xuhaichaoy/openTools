@@ -32,10 +32,39 @@ export interface AICenterSourceRef {
   summary?: string
 }
 
+export type AICenterHandoffIntent = 'general' | 'research' | 'delivery' | 'coding'
+
+export interface AICenterHandoffFileRef {
+  path: string
+  label?: string
+  reason?: string
+  lineStart?: number
+  lineEnd?: number
+}
+
+export interface AICenterHandoffSection {
+  title: string
+  items: string[]
+}
+
 export interface AICenterHandoff extends Partial<AICenterSourceRef> {
   query: string
   /** 传递的文件/文件夹附件绝对路径 */
   attachmentPaths?: string[]
+  /** 任务包标题，用于跨模式展示 */
+  title?: string
+  /** 当前接力最想完成的目标 */
+  goal?: string
+  /** 通用执行意图，不绑定具体模式 */
+  intent?: AICenterHandoffIntent
+  /** 需要带过去的关键结论 / 约束 / 背景 */
+  keyPoints?: string[]
+  /** 建议目标模式接力后的下一步 */
+  nextSteps?: string[]
+  /** 更结构化的上下文片段 */
+  contextSections?: AICenterHandoffSection[]
+  /** 明确带入的文件或路径线索 */
+  files?: AICenterHandoffFileRef[]
 }
 
 /** @deprecated 保留旧类型名，统一使用 AICenterHandoff */

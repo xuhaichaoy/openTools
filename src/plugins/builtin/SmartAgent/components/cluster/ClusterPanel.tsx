@@ -21,11 +21,21 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { AICenterHandoffCard } from "@/components/ai/AICenterHandoffCard";
+import {
+  buildAICenterHandoffFileRefs,
+  normalizeAICenterHandoff,
+} from "@/core/ai/ai-center-handoff";
 import { AttachDropdown } from "@/components/ui/AttachDropdown";
 import { useClusterStore, type ClusterSession } from "@/store/cluster-store";
 import { ChatImage } from "@/components/ai/MessageBubble";
 import { useAIStore } from "@/store/ai-store";
 import { useAppStore, type AICenterHandoff } from "@/store/app-store";
+import {
+  describeCodingExecutionProfile,
+  inferCodingExecutionProfile,
+  resolveCodingExecutionProfile,
+} from "@/core/agent/coding-profile";
 import {
   AI_CENTER_MODE_META,
   describeAICenterSource,
@@ -225,16 +235,33 @@ function SessionCard({
     const report = session.result.finalAnswer;
     const truncated = report.length > 2000 ? report.slice(0, 2000) + "\n\n...（完整内容见上方 Cluster 报告）" : report;
     const prefilled = `根据以下 Cluster 分析报告，请帮我改进/修复或按报告执行（可在此补充具体诉求，如：修复其中的问题、把建议落地为代码、保存为文档等）：\n\n${truncated}`;
+    const inferredCoding = inferCodingExecutionProfile({
+      query: `${session.query}\n\n${truncated}`,
+      attachmentPaths: session.images,
+      handoff: session.sourceHandoff,
+    });
     routeToAICenter({
       mode: "agent",
       source: "cluster_continue_to_agent",
-      handoff: {
+      handoff: normalizeAICenterHandoff({
         query: prefilled,
+        title: "基于 Cluster 报告继续落地",
+        goal: session.query.slice(0, 140) || "根据 Cluster 报告继续执行",
+        intent: inferredCoding.profile.codingMode ? "coding" : "delivery",
+        keyPoints: [
+          "已带入 Cluster 最终报告",
+          session.plan?.steps?.length ? `本轮计划共 ${session.plan.steps.length} 个步骤` : "",
+        ].filter(Boolean),
+        nextSteps: [
+          "先阅读 Cluster 报告，再决定修改、验证或产出最终文件",
+          "如果报告已指出问题，优先按问题清单逐项落地",
+        ],
+        files: buildAICenterHandoffFileRefs(session.images, "Cluster 相关图片"),
         sourceMode: "cluster",
         sourceSessionId: session.id,
         sourceLabel: "Cluster 报告",
         summary: "已带入 Cluster 最终报告，适合继续修改和落地执行",
-      },
+      }),
       taskId: session.id,
       navigate: false,
     });
@@ -246,16 +273,35 @@ function SessionCard({
     const report = session.result.finalAnswer;
     const truncated = report.length > 2000 ? report.slice(0, 2000) + "\n\n...（完整内容见上方 Cluster 报告）" : report;
     const prefilled = `这是当前 Cluster 的分析报告。请让多个 Agent 基于它继续 review、争论方案、拆补细节或形成下一步执行共识：\n\n${truncated}`;
+    const inferredCoding = inferCodingExecutionProfile({
+      query: `${session.query}\n\n${truncated}`,
+      attachmentPaths: session.images,
+      handoff: session.sourceHandoff,
+    });
     routeToAICenter({
       mode: "dialog",
       source: "cluster_continue_to_dialog",
-      handoff: {
+      handoff: normalizeAICenterHandoff({
         query: prefilled,
+        title: "围绕 Cluster 报告继续协作",
+        goal: session.query.slice(0, 140) || "基于 Cluster 报告继续讨论",
+        intent: inferredCoding.profile.codingMode ? "coding" : "research",
+        keyPoints: [
+          "已带入 Cluster 最终报告",
+          session.result.agentInstances.length > 0
+            ? `Cluster 中共有 ${session.result.agentInstances.length} 个 Agent 参与`
+            : "",
+        ].filter(Boolean),
+        nextSteps: [
+          "围绕报告中的争议点、风险和后续动作继续讨论",
+          "必要时把需要落地的部分再接力给 Agent",
+        ],
+        files: buildAICenterHandoffFileRefs(session.images, "Cluster 相关图片"),
         sourceMode: "cluster",
         sourceSessionId: session.id,
         sourceLabel: "Cluster 报告",
         summary: "已带入 Cluster 最终报告，适合继续多 Agent 讨论和评审",
-      },
+      }),
       taskId: session.id,
       navigate: false,
     });
@@ -331,6 +377,10 @@ function SessionCard({
 
       {expanded && (
         <div className="border-t border-[var(--color-border)] px-3 py-3 space-y-3">
+          {session.sourceHandoff?.sourceMode && (
+            <AICenterHandoffCard handoff={session.sourceHandoff} variant="active" />
+          )}
+
           {session.images && session.images.length > 0 && (
             <div className="flex flex-wrap gap-2">
               {session.images.map((img) => (
@@ -464,6 +514,7 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
   const { toast } = useToast();
   const openConfirmDialog = useConfirmDialogStore((s) => s.open);
   const openPlanApprovalDialog = useClusterPlanApprovalStore((s) => s.open);
+  const planApprovalActive = useClusterPlanApprovalStore((s) => s.active !== null);
 
   const clusterFileInputRef = useRef<HTMLInputElement>(null);
   const {
@@ -488,6 +539,18 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
   const deleteAllSessions = useClusterStore((s) => s.deleteAllSessions);
   const hasAnyRunning = runningCount > 0;
   const currentSessionRunning = !!(currentSessionId && isClusterRunning(currentSessionId));
+  const effectiveCodingProfile = resolveCodingExecutionProfile({
+    manualProfile: { codingMode, largeProjectMode, openClawMode },
+    query: input,
+    fileContextBlock,
+    attachmentPaths: attachments
+      .map((attachment) => attachment.path)
+      .filter((path): path is string => typeof path === "string" && path.trim().length > 0),
+    handoff: incomingHandoff,
+  });
+  const autoDetectedProfileLabel = effectiveCodingProfile.autoDetected
+    ? describeCodingExecutionProfile(effectiveCodingProfile.profile)
+    : null;
 
   useEffect(() => {
     saveSettings({ autoReview, humanApproval, codingMode, largeProjectMode, openClawMode });
@@ -605,12 +668,7 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
       aiConfig.model,
       imagePaths.length > 0 ? imagePaths : undefined,
       incomingHandoff?.sourceMode
-        ? {
-            sourceMode: incomingHandoff.sourceMode,
-            sourceSessionId: incomingHandoff.sourceSessionId,
-            sourceLabel: incomingHandoff.sourceLabel,
-            summary: incomingHandoff.summary,
-          }
+        ? incomingHandoff
         : undefined,
     );
     recordAIRouteEvent({
@@ -629,20 +687,20 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
       1,
       Math.min(8, aiConfig.agent_max_concurrency ?? 4),
     );
-    const recommendedConcurrency = openClawMode
+    const recommendedConcurrency = effectiveCodingProfile.profile.openClawMode
       ? 2
-      : codingMode && largeProjectMode
+      : effectiveCodingProfile.profile.codingMode && effectiveCodingProfile.profile.largeProjectMode
         ? 3
         : configuredConcurrency;
 
     const orchestrator = new ClusterOrchestrator({
       maxConcurrency: Math.min(configuredConcurrency, recommendedConcurrency),
       signal: abortController.signal,
-      autoReviewCodeSteps: autoReview || codingMode || openClawMode,
-      maxReviewRetries: openClawMode ? 4 : codingMode ? 3 : 2,
-      codingMode: codingMode || openClawMode,
-      largeProjectMode: largeProjectMode || openClawMode,
-      openClawMode,
+      autoReviewCodeSteps: autoReview || effectiveCodingProfile.profile.codingMode,
+      maxReviewRetries: effectiveCodingProfile.profile.openClawMode ? 4 : effectiveCodingProfile.profile.codingMode ? 3 : 2,
+      codingMode: effectiveCodingProfile.profile.codingMode,
+      largeProjectMode: effectiveCodingProfile.profile.largeProjectMode,
+      openClawMode: effectiveCodingProfile.profile.openClawMode,
       confirmDangerousAction,
       askUser,
       onPlanApproval: humanApproval
@@ -692,7 +750,7 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
         setRunningCount(getActiveOrchestratorCount());
       }
     }
-  }, [input, attachments, fileContextBlock, attachmentSummary, imagePaths, mode, autoReview, humanApproval, codingMode, largeProjectMode, openClawMode, createSession, clearAttachments, incomingHandoff, aiConfig.model, handlePlanApproval, confirmDangerousAction, askUser, toast]);
+  }, [input, attachments, fileContextBlock, attachmentSummary, imagePaths, mode, autoReview, humanApproval, createSession, clearAttachments, incomingHandoff, aiConfig.model, handlePlanApproval, confirmDangerousAction, askUser, toast, effectiveCodingProfile]);
 
   const handleAbort = useCallback(() => {
     const targetSessionId =
@@ -706,12 +764,17 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      if (planApprovalActive) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         handleRun();
       }
     },
-    [handleRun],
+    [handleRun, planApprovalActive],
   );
 
   return (
@@ -846,16 +909,21 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
 
       <div className="px-4 py-3 border-b border-[var(--color-border)] space-y-2">
         {incomingHandoff?.sourceMode && (
-          <div className="flex flex-wrap items-center gap-2 rounded-xl border border-cyan-500/15 bg-cyan-500/10 px-3 py-2 text-[10px] text-cyan-700">
-            <span>已接力自 {describeAICenterSource(incomingHandoff)}</span>
-            {incomingHandoff.summary && <span className="opacity-80">{incomingHandoff.summary}</span>}
-            <button
-              type="button"
-              onClick={() => setIncomingHandoff(null)}
-              className="ml-auto rounded-full border border-cyan-500/20 px-2 py-0.5 hover:border-cyan-500/40 transition-colors"
-            >
-              仅隐藏提示
-            </button>
+          <AICenterHandoffCard
+            handoff={incomingHandoff}
+            dismissLabel="仅隐藏提示"
+            onDismiss={() => setIncomingHandoff(null)}
+          />
+        )}
+        {autoDetectedProfileLabel && !codingMode && !largeProjectMode && !openClawMode && (
+          <div className="flex flex-wrap items-center gap-2 rounded-xl border border-emerald-500/15 bg-emerald-500/10 px-3 py-2 text-[10px] text-emerald-700">
+            <ShieldCheck className="w-3 h-3" />
+            <span>已自动识别为 {autoDetectedProfileLabel} 任务</span>
+            {effectiveCodingProfile.reasons.slice(0, 2).map((reason) => (
+              <span key={reason} className="rounded-full border border-emerald-500/20 px-2 py-0.5 opacity-80">
+                {reason}
+              </span>
+            ))}
           </div>
         )}
         <div className="flex gap-2">

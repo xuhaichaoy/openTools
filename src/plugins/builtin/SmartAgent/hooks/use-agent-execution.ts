@@ -19,6 +19,7 @@ import {
 } from "../core/ui-state";
 import { useAgentRunningStore } from "@/store/agent-running-store";
 import { recordAIRouteEvent } from "@/store/ai-route-store";
+import { applyIncomingAgentStep } from "../core/agent-task-state";
 import {
   buildAssistantSupplementalPrompt,
   shouldAutoSaveAssistantMemory,
@@ -177,17 +178,16 @@ export function useAgentExecution({
         queryPreview: query.length > 120 ? `${query.slice(0, 120)}...` : query,
       });
 
-      let latestWaitingStage: ExecutionWaitingStage | null = null;
       const setWaitingStageIfChanged = (stage: ExecutionWaitingStage | null) => {
-        latestWaitingStage = stage;
         setExecutionWaitingStage((prev) => (prev === stage ? prev : stage));
       };
 
       setRunning(true);
       setRunningPhase("executing");
       setWaitingStageIfChanged("model_first_token");
+      const runStartedAt = Date.now();
       useAgentRunningStore.getState().start(
-        { sessionId, query, startedAt: Date.now() },
+        { sessionId, query, startedAt: runStartedAt },
         () => abortControllerRef.current?.abort(),
       );
       if (inputRef.current) inputRef.current.style.height = "auto";
@@ -196,11 +196,11 @@ export function useAgentExecution({
         retry_count: 0,
         last_error: undefined,
         next_run_at: undefined,
+        last_started_at: runStartedAt,
       });
 
       const abortController = new AbortController();
       abortControllerRef.current = abortController;
-      const runStartedAt = Date.now();
       let lastProgressAt = runStartedAt;
       let timeoutAborted = false;
       let modelStallAborted = false;
@@ -215,30 +215,8 @@ export function useAgentExecution({
       let scrollTimer: ReturnType<typeof setTimeout> | null = null;
 
       const applyStep = (step: AgentStep, markProgress = true) => {
-        const findLastIdx = (pred: (s: AgentStep) => boolean) => {
-          for (let i = collectedSteps.length - 1; i >= 0; i--) {
-            if (pred(collectedSteps[i])) return i;
-          }
-          return -1;
-        };
-
-        const matchesStream = (s: AgentStep) =>
-          !!s.streaming && s.type === step.type && (s.streamId ?? "") === (step.streamId ?? "");
-
-        if (step.streaming) {
-          const lastIdx = findLastIdx(matchesStream);
-          if (lastIdx >= 0) {
-            collectedSteps[lastIdx] = step;
-          } else {
-            collectedSteps.push(step);
-          }
-        } else {
-          const streamIdx = findLastIdx(matchesStream);
-          if (streamIdx >= 0) {
-            collectedSteps.splice(streamIdx, 1);
-          }
-          collectedSteps.push(step);
-        }
+        const nextSteps = applyIncomingAgentStep(collectedSteps, step);
+        collectedSteps.splice(0, collectedSteps.length, ...nextSteps);
 
         if (markProgress) {
           lastProgressAt = Date.now();
@@ -471,7 +449,15 @@ export function useAgentExecution({
 
           try {
             const result = await agent.run(effectiveQuery, abortController.signal, opts?.images);
-            updateTask(sessionId, taskId, { answer: result, status: "success" });
+            const finishedAt = Date.now();
+            updateTask(sessionId, taskId, {
+              answer: result,
+              status: "success",
+              last_error: undefined,
+              last_finished_at: finishedAt,
+              last_duration_ms: finishedAt - runStartedAt,
+              last_result_status: "success",
+            });
             if (shouldAutoSaveAssistantMemory(aiConfig)) {
               void autoExtractMemories(`${query}\n${result}`, taskId, {
                 sourceMode: "agent",
@@ -510,10 +496,14 @@ export function useAgentExecution({
           : modelStall
             ? "模型长时间无响应，已自动中断本次执行。请重试或切换模型后再试。"
             : `Agent 执行失败: ${e}`;
+        const finishedAt = Date.now();
         updateTask(sessionId, taskId, {
           answer: msg,
           status: aborted && !timeoutAborted ? "cancelled" : "error",
           last_error: aborted && !timeoutAborted ? undefined : String(e),
+          last_finished_at: finishedAt,
+          last_duration_ms: finishedAt - runStartedAt,
+          last_result_status: aborted && !timeoutAborted ? undefined : "error",
         });
       } finally {
         if (abortControllerRef.current === abortController) {
@@ -540,6 +530,7 @@ export function useAgentExecution({
       inputRef,
       availableTools,
       openDangerConfirm,
+      notifyToolCalled,
       scrollRef,
       resetPerRunState,
     ],

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import {
   ArrowLeft, Monitor, Moon, Trash2, BatteryCharging,
-  Wifi, Camera, MonitorSmartphone, Volume2, VolumeX,
+  Wifi, MonitorSmartphone, Volume2, VolumeX,
   Loader2, Check,
 } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
@@ -41,7 +41,8 @@ const SYSTEM_ACTIONS: SystemAction[] = [
     icon: Moon,
     color: 'text-purple-400 bg-purple-400/10',
     macCommand: `osascript -e 'tell app "System Events" to tell appearance preferences to set dark mode to not dark mode'`,
-    winCommand: 'reg add HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize /v AppsUseLightTheme /t REG_DWORD /d 0 /f',
+    winCommand:
+      `PowerShell.exe -Command "$path = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize'; New-Item -Path $path -Force | Out-Null; $current = (Get-ItemProperty -Path $path -Name AppsUseLightTheme -ErrorAction SilentlyContinue).AppsUseLightTheme; if ($null -eq $current) { $current = 1 }; $next = if ($current -eq 0) { 1 } else { 0 }; New-ItemProperty -Path $path -Name AppsUseLightTheme -PropertyType DWord -Value $next -Force | Out-Null; New-ItemProperty -Path $path -Name SystemUsesLightTheme -PropertyType DWord -Value $next -Force | Out-Null"`,
   },
   {
     id: 'empty_trash',
@@ -68,15 +69,6 @@ const SYSTEM_ACTIONS: SystemAction[] = [
     icon: Wifi,
     color: 'text-cyan-400 bg-cyan-400/10',
     macCommand: `networksetup -getairportpower en0 | grep -q 'On' && networksetup -setairportpower en0 off || networksetup -setairportpower en0 on`,
-  },
-  {
-    id: 'screenshot_full',
-    label: '全屏截图',
-    description: '截取全屏并保存到桌面',
-    icon: Camera,
-    color: 'text-orange-400 bg-orange-400/10',
-    macCommand: 'screencapture ~/Desktop/screenshot_$(date +%Y%m%d_%H%M%S).png',
-    winCommand: 'snippingtool /clip',
   },
   {
     id: 'show_desktop',

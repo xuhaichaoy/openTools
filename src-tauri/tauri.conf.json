@@ -44,8 +44,7 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "plugins/**/*",
-      "bin/**/*"
+      "plugins/**/*"
     ]
   },
   "plugins": {

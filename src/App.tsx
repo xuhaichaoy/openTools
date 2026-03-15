@@ -1,5 +1,4 @@
 import { useState, useCallback, useEffect } from "react";
-import { ScreenshotSelector } from "@/components/tools/ScreenshotSelector";
 import { LoginModal } from "@/components/auth/LoginModal";
 import { SyncManager } from "@/components/auth/SyncManager";
 import { ClusterFloatingIndicator } from "@/components/cluster/ClusterFloatingIndicator";
@@ -13,10 +12,13 @@ import { routeToAICenter } from "@/core/ai/ai-center-routing";
 import { registry } from "@/core/plugin-system/registry";
 import { usePluginEmbed } from "@/shell/usePluginEmbed";
 import "@/shell/commands";
-import { useScreenshotHandler } from "@/shell/useScreenshotHandler";
 import { updateWindowSize } from "@/shell/WindowSizeManager";
 import { resolveBuiltinPlugins } from "@/plugins/builtin";
-import { MAIN_VIEW_ID, getTopViewEntry } from "@/core/navigation/view-stack";
+import {
+  MAIN_VIEW_ID,
+  ROOT_VIEW_ID,
+  getTopViewEntry,
+} from "@/core/navigation/view-stack";
 
 import { useColorPicker } from "@/hooks/useColorPicker";
 import { useAppInitializer } from "@/hooks/useAppInitializer";
@@ -26,23 +28,14 @@ import { usePluginLifecycle } from "@/hooks/usePluginLifecycle";
 // 初始化：注册所有内置插件
 registry.registerAll(resolveBuiltinPlugins());
 
-// 独立窗口模式检测：截图选区窗口
-const specialView = window.__SCREENSHOT_MODE__ ? "screenshot" : null;
-
 function App() {
-  if (specialView === "screenshot") {
-    return (
-      <div className="w-full h-full" style={{ background: "#000" }}>
-        <ScreenshotSelector />
-      </div>
-    );
-  }
   return <MainApp />;
 }
 
 /** 主应用组件 — 所有 hooks 在此无条件调用，符合 Rules of Hooks */
 function MainApp() {
   const view = useAppStore((s) => getTopViewEntry(s.viewStack).viewId);
+  const viewDepth = useAppStore((s) => s.viewStack.length);
   const {
     mode,
     searchValue,
@@ -50,6 +43,7 @@ function MainApp() {
     resetSearchState,
     pushView,
     popView,
+    replaceView,
     resetToMain,
   } = useAppStore();
 
@@ -63,7 +57,6 @@ function MainApp() {
     view,
     pushView,
   );
-  useScreenshotHandler(pushView);
 
   const { filteredResults, getFilteredResults } = useSearchResults(
     searchValue,
@@ -72,6 +65,11 @@ function MainApp() {
   );
 
   const { activePlugin, pluginContext } = usePluginLifecycle(view, resetToMain);
+
+  const openLauncher = useCallback(() => {
+    resetSearchState();
+    replaceView(MAIN_VIEW_ID);
+  }, [replaceView, resetSearchState]);
 
   // ── Window size management ──
   useEffect(() => {
@@ -122,14 +120,21 @@ function MainApp() {
   // ── ESC to go back ──
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && view !== MAIN_VIEW_ID) {
+      if (e.key !== "Escape") return;
+
+      if (view === ROOT_VIEW_ID && viewDepth === 1) {
+        openLauncher();
+        return;
+      }
+
+      if (view !== MAIN_VIEW_ID) {
         popView();
         resetSearchState();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [view, popView, resetSearchState]);
+  }, [view, viewDepth, openLauncher, popView, resetSearchState]);
 
   return (
     <div className="w-full h-full flex flex-col bg-[var(--color-bg)] text-[var(--color-text)] overflow-hidden rounded-xl border border-[var(--color-border)] shadow-2xl">
@@ -140,6 +145,8 @@ function MainApp() {
         handleSubmit={handleSubmit}
         pushView={pushView}
         popView={popView}
+        viewDepth={viewDepth}
+        openLauncher={openLauncher}
         resetToMain={resetToMain}
         activePlugin={activePlugin}
         pluginContext={pluginContext}

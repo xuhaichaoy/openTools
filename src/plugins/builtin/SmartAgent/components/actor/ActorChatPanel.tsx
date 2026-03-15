@@ -27,20 +27,45 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { AICenterHandoffCard } from "@/components/ai/AICenterHandoffCard";
+import {
+  buildDialogDispatchPlanBundle,
+  inferDialogDispatchInsight,
+  type DialogDispatchPlanBundle,
+} from "@/core/agent/actor/dialog-dispatch-plan";
+import {
+  buildDialogSpawnedTaskHandoff,
+  buildSpawnedTaskCheckpoint,
+  collectSpawnedTaskTranscriptEntries,
+  type SpawnedTaskCheckpoint,
+  type SpawnedTaskTranscriptEntry,
+} from "@/core/agent/actor/spawned-task-checkpoint";
+import { inferCodingExecutionProfile } from "@/core/agent/coding-profile";
 import { useActorSystemStore, type ActorSnapshot } from "@/store/actor-system-store";
 import { useAIStore } from "@/store/ai-store";
 import { useAppStore, type AICenterHandoff } from "@/store/app-store";
+import { useAISessionRuntimeStore } from "@/store/ai-session-runtime-store";
 import { useTeamStore } from "@/store/team-store";
 import { useClusterPlanApprovalStore } from "@/store/cluster-plan-approval-store";
+import { useConfirmDialogStore } from "@/store/confirm-dialog-store";
+import { useToolTrustStore } from "@/store/command-allowlist-store";
 import { api } from "@/core/api/client";
 import {
-  describeAICenterSource,
-} from "@/core/ai/ai-center-mode-meta";
+  buildAICenterHandoffFileRefs,
+  normalizeAICenterHandoff,
+} from "@/core/ai/ai-center-handoff";
 import { routeToAICenter } from "@/core/ai/ai-center-routing";
+import { buildDialogWorkingSetSnapshot } from "@/core/ai/ai-working-set";
 import { primeTeamModelCache } from "@/core/ai/router";
 import { queueAssistantMemoryCandidates } from "@/core/ai/assistant-memory";
 import { shouldAutoSaveAssistantMemory } from "@/core/ai/assistant-config";
 import { DIALOG_FULL_ROLE } from "@/core/agent/actor/agent-actor";
+import {
+  decodePartialToolContent,
+  hasArtifactPayloadKey,
+  parsePartialToolJSON,
+  recoverArtifactBodyFromRaw,
+} from "@/plugins/builtin/SmartAgent/core/tool-streaming-preview";
 import type {
   AgentCapability,
   AgentCapabilities,
@@ -280,31 +305,133 @@ function ThinkingBlock({
   );
 }
 
-function parsePartialToolJSON(jsonStr: string): { path: string; content: string } {
-  let path = "";
-  let content = "";
-  try {
-    const pathMatch = jsonStr.match(/"path"\s*:\s*"([^"]*)"/);
-    if (pathMatch) path = pathMatch[1];
-    
-    // Attempt rudimentary extraction of content
-    const contentIdx = jsonStr.indexOf('"content"');
-    if (contentIdx !== -1) {
-      const startQuote = jsonStr.indexOf('"', contentIdx + 9);
-      if (startQuote !== -1) {
-        let extracted = jsonStr.substring(startQuote + 1);
-        if (extracted.endsWith('"}')) extracted = extracted.slice(0, -2);
-        else if (extracted.endsWith('"')) extracted = extracted.slice(0, -1);
-        
-        // Unescape literal newlines and quotes
-        extracted = extracted.replace(/\\n/g, '\n').replace(/\\"/g, '"');
-        content = extracted;
-      }
-    }
-  } catch (e) {
-    // ignore
+function inferStreamingArtifactLanguage(path: string): string | undefined {
+  const fileName = basename(path).toLowerCase();
+  const ext = fileName.includes(".") ? fileName.split(".").pop() : "";
+  switch (ext) {
+    case "html":
+    case "htm":
+      return "HTML";
+    case "tsx":
+    case "ts":
+      return "TypeScript";
+    case "jsx":
+    case "js":
+      return "JavaScript";
+    case "css":
+    case "scss":
+    case "less":
+      return "CSS";
+    case "json":
+      return "JSON";
+    case "md":
+      return "Markdown";
+    case "py":
+      return "Python";
+    case "rs":
+      return "Rust";
+    case "sh":
+    case "bash":
+    case "zsh":
+      return "Shell";
+    default:
+      return ext ? ext.toUpperCase() : undefined;
   }
-  return { path: path || "未知文件", content };
+}
+
+function buildStreamingArtifactPreview(path: string, body: string): {
+  meta: string;
+  previewBody: string;
+  fullBody: string;
+  truncated: boolean;
+} {
+  const normalized = body.replace(/\r\n/g, "\n").trim();
+  const lines = normalized ? normalized.split("\n") : [];
+  const maxLines = 18;
+  const maxChars = 1200;
+  const previewByLines = lines.slice(0, maxLines).join("\n");
+  const previewBase = previewByLines.length > maxChars
+    ? `${previewByLines.slice(0, maxChars)}...`
+    : previewByLines;
+  const truncated = normalized.length > previewBase.length || lines.length > maxLines;
+  const previewBody = truncated ? `${previewBase}\n...` : previewBase;
+  const language = inferStreamingArtifactLanguage(path);
+  const metaParts = [
+    language,
+    lines.length > 0 ? `${lines.length} 行` : "",
+    normalized.length > 0 ? `${normalized.length} 字符` : "",
+  ].filter(Boolean);
+
+  return {
+    meta: metaParts.join(" · "),
+    previewBody,
+    fullBody: normalized,
+    truncated,
+  };
+}
+
+function buildToolStreamingPreview(jsonStr: string): {
+  kind: "artifact" | "generic";
+  title: string;
+  body: string;
+  fullBody?: string;
+  meta?: string;
+  collapsible?: boolean;
+} {
+  const parsed = parsePartialToolJSON(jsonStr);
+  const raw = decodePartialToolContent(jsonStr);
+  const looksLikeArtifact = Boolean(
+    parsed.path
+      && (
+        parsed.content
+        || hasArtifactPayloadKey(jsonStr)
+      ),
+  );
+
+  if (looksLikeArtifact) {
+    const artifactBody = parsed.content || recoverArtifactBodyFromRaw(jsonStr, parsed.path);
+    const preview = buildStreamingArtifactPreview(parsed.path || "未知文件", artifactBody);
+    return {
+      kind: "artifact",
+      title: `生成文件: ${parsed.path || "未知文件"}`,
+      body: preview.fullBody || preview.previewBody,
+    };
+  }
+
+  if (parsed.query) {
+    return {
+      kind: "generic",
+      title: `准备搜索: ${parsed.query.slice(0, 48)}`,
+      body: raw,
+    };
+  }
+  if (parsed.url) {
+    return {
+      kind: "generic",
+      title: `准备访问: ${parsed.url.replace(/^https?:\/\//, "").slice(0, 56)}`,
+      body: raw,
+    };
+  }
+  if (parsed.command) {
+    return {
+      kind: "generic",
+      title: `准备执行命令`,
+      body: raw,
+    };
+  }
+  if (parsed.path) {
+    return {
+      kind: "generic",
+      title: `准备处理: ${basename(parsed.path)}`,
+      body: raw,
+    };
+  }
+
+  return {
+    kind: "generic",
+    title: "准备调用工具",
+    body: raw,
+  };
 }
 
 function ToolStreamingBlock({
@@ -321,6 +448,7 @@ function ToolStreamingBlock({
   color: { bg: string; text: string; border: string; dot: string };
 }) {
   const [now, setNow] = useState(Date.now());
+  const [expanded, setExpanded] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -338,32 +466,66 @@ function ToolStreamingBlock({
   const elapsed = Math.floor(((isStreaming ? now : Date.now()) - startedAt) / 1000);
   const timeLabel = elapsed >= 60 ? `${Math.floor(elapsed / 60)}分${elapsed % 60}秒` : `${elapsed}秒`;
   
-  const parsed = parsePartialToolJSON(content);
+  const preview = buildToolStreamingPreview(content);
+  const Icon = preview.kind === "artifact" ? FileDown : Settings2;
+  const displayedBody = preview.kind === "artifact" && preview.collapsible && expanded
+    ? (preview.fullBody || preview.body)
+    : preview.body;
 
   return (
     <div className={`flex gap-2 ${color.text} mt-2`}>
       <div className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 ${color.bg}`}>
-        <FileDown className="w-3.5 h-3.5" />
+        <Icon className="w-3.5 h-3.5" />
       </div>
       <div className="max-w-[90%] min-w-[250px] flex-1">
         <div className="text-[10px] mb-0.5">{roleName}</div>
         <div className={`rounded-xl border border-current/10 bg-[var(--color-bg)] overflow-hidden shadow-sm`}>
           <div className={`flex items-center gap-2 px-3 py-2 text-[11px] border-b border-current/10 ${color.bg}`}>
             <span className="font-medium opacity-90 truncate max-w-[70%]">
-              生成文件: {parsed.path}
+              {preview.title}
             </span>
+            {preview.meta && (
+              <span className="hidden md:inline text-[10px] opacity-60 truncate max-w-[28%]">
+                {preview.meta}
+              </span>
+            )}
             <span className="opacity-50 ml-auto tabular-nums flex items-center gap-1">
               {isStreaming && <Loader2 className="w-3 h-3 animate-spin" />}
               {timeLabel}
             </span>
           </div>
+          {preview.kind === "artifact" && preview.meta && (
+            <div className="px-3 py-1.5 text-[10px] border-b border-current/10 bg-[var(--color-bg-secondary)]/70 text-[var(--color-text-secondary)]">
+              {preview.meta}
+            </div>
+          )}
           <div
             ref={containerRef}
-            className="p-3 text-[12px] leading-[1.6] bg-[#1e1e1e] text-[#d4d4d4] font-mono max-h-[350px] overflow-y-auto whitespace-pre overflow-x-auto"
+            className={`p-3 text-[12px] leading-[1.6] bg-[#1e1e1e] text-[#d4d4d4] font-mono overflow-y-auto whitespace-pre overflow-x-auto ${
+              preview.kind === "artifact" && !expanded ? "max-h-[220px]" : "max-h-[350px]"
+            }`}
           >
-            {parsed.content || <span className="opacity-30">准备写入中...</span>}
+            {displayedBody || (
+              <span className="opacity-30">
+                {preview.kind === "artifact" ? "准备写入中..." : "准备参数中..."}
+              </span>
+            )}
             {isStreaming && <span className="inline-block w-1.5 h-3 bg-current animate-pulse ml-0.5" />}
           </div>
+          {preview.kind === "artifact" && preview.collapsible && (
+            <div className="flex justify-between items-center px-3 py-2 border-t border-current/10 bg-[var(--color-bg-secondary)]/60">
+              <span className="text-[10px] text-[var(--color-text-secondary)]">
+                默认只展示截断预览，避免生成文件内容铺满聊天区
+              </span>
+              <button
+                type="button"
+                onClick={() => setExpanded((value) => !value)}
+                className="text-[11px] font-medium text-[var(--color-accent)] hover:opacity-80 transition-opacity"
+              >
+                {expanded ? "收起代码" : "展开代码"}
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -395,11 +557,6 @@ const DIALOG_PLAN_APPROVAL_KEY = "dialog-plan-approval-enabled";
 type DialogArtifact = DialogArtifactRecord & {
   actorName: string;
 };
-
-interface DialogDispatchPlanBundle {
-  clusterPlan: ClusterPlan;
-  runtimePlan: DialogExecutionPlan;
-}
 
 type ArtifactAvailability = "ready" | "missing" | "unknown";
 
@@ -496,96 +653,23 @@ function getArtifactSourceMeta(source: DialogArtifactRecord["source"]): {
   }
 }
 
-function getDialogKindLabel(kind?: DialogMessage["kind"]): string | undefined {
-  switch (kind) {
-    case "approval_request":
-      return "审批请求";
-    case "approval_response":
-      return "审批回复";
-    case "clarification_request":
-      return "澄清请求";
-    case "clarification_response":
-      return "澄清回复";
-    case "agent_result":
-      return "结果回传";
-    case "system_notice":
-      return "系统提示";
-    default:
-      return undefined;
-  }
-}
-
-interface TaskTranscriptEntry {
-  id: string;
-  content: string;
-  timestamp: number;
-  label: string;
-  kindLabel?: string;
-  source: "history" | "dialog";
-}
-
 function collectTaskTranscript(params: {
   task: SpawnedTaskRecord | null;
   actorById: Map<string, ActorSnapshot>;
   dialogHistory: DialogMessage[];
-}): TaskTranscriptEntry[] {
+}): SpawnedTaskTranscriptEntry[] {
   const { task, actorById, dialogHistory } = params;
   if (!task) return [];
 
   const targetActor = actorById.get(task.targetActorId);
-  if (!targetActor) return [];
-
-  const start = typeof task.sessionHistoryStartIndex === "number"
-    ? Math.max(0, task.sessionHistoryStartIndex)
-    : 0;
-  const end = task.mode === "session" && task.sessionOpen
-    ? undefined
-    : typeof task.sessionHistoryEndIndex === "number"
-      ? Math.max(start, task.sessionHistoryEndIndex)
-      : undefined;
-  const historySlice = typeof task.sessionHistoryStartIndex === "number"
-    ? targetActor.sessionHistory.slice(start, end)
-    : targetActor.sessionHistory.filter((entry) => {
-        const completedAt = task.completedAt ?? Number.POSITIVE_INFINITY;
-        return entry.timestamp >= task.spawnedAt - 1000 && entry.timestamp <= completedAt;
-      });
-
-  const dialogEntries: TaskTranscriptEntry[] = dialogHistory
-    .filter((message) => message.relatedRunId === task.runId)
-    .map((message) => {
-      const fromLabel = message.from === "user"
-        ? "你"
-        : (actorById.get(message.from)?.roleName ?? message.from);
-      const toLabel = message.to
-        ? (message.to === "user" ? "你" : (actorById.get(message.to)?.roleName ?? message.to))
-        : undefined;
-      const directionLabel = toLabel ? `${fromLabel} → ${toLabel}` : fromLabel;
-      return {
-        id: `dialog-${message.id}`,
-        content: message._briefContent ?? message.content,
-        timestamp: message.timestamp,
-        label: directionLabel,
-        kindLabel: getDialogKindLabel(message.kind),
-        source: "dialog",
-      };
-    });
-
-  const dedupedHistoryEntries: TaskTranscriptEntry[] = historySlice
-    .filter((entry) => !dialogEntries.some((message) =>
-      message.content.trim() === entry.content.trim()
-      && Math.abs(message.timestamp - entry.timestamp) <= 1500,
-    ))
-    .map((entry, index) => ({
-      id: `history-${entry.timestamp}-${index}`,
-      content: entry.content,
-      timestamp: entry.timestamp,
-      label: entry.role === "user"
-        ? (task.mode === "session" ? "子会话输入" : "任务输入")
-        : (targetActor.roleName ?? task.targetActorId),
-      source: "history",
-    }));
-
-  return [...dedupedHistoryEntries, ...dialogEntries].sort((a, b) => a.timestamp - b.timestamp);
+  return collectSpawnedTaskTranscriptEntries({
+    task,
+    targetActor,
+    actorNameById: new Map(
+      [...actorById.entries()].map(([id, actor]) => [id, actor.roleName]),
+    ),
+    dialogHistory,
+  });
 }
 
 function collectArtifacts(
@@ -672,18 +756,28 @@ function buildSessionUploadRecords(attachments: InputAttachment[]): SessionUploa
 function buildDialogAgentHandoff(params: {
   dialogHistory: DialogMessage[];
   actorById: Map<string, ActorSnapshot>;
+  artifacts: DialogArtifact[];
   sessionUploads: SessionUploadRecord[];
+  spawnedTasks: SpawnedTaskRecord[];
   sourceSessionId?: string;
   maxMessages?: number;
   maxCharsPerMessage?: number;
+  maxArtifacts?: number;
+  maxSpawnedTasks?: number;
+  maxAttachmentPaths?: number;
 }): AICenterHandoff | null {
   const {
     dialogHistory,
     actorById,
+    artifacts,
     sessionUploads,
+    spawnedTasks,
     sourceSessionId,
     maxMessages = 10,
     maxCharsPerMessage = 500,
+    maxArtifacts = 6,
+    maxSpawnedTasks = 6,
+    maxAttachmentPaths = 16,
   } = params;
   const recentMessages = dialogHistory.slice(-maxMessages);
   if (recentMessages.length === 0) return null;
@@ -705,178 +799,83 @@ function buildDialogAgentHandoff(params: {
     return parts.join("\n");
   }).join("\n");
 
-  const attachmentPaths = Array.from(
-    new Set(
-      [
-        ...sessionUploads.map((upload) => upload.path),
-        ...recentMessages.flatMap((message) => message.images || []),
-      ].filter((path): path is string => typeof path === "string" && path.trim().length > 0),
+  const workingSet = buildDialogWorkingSetSnapshot({
+    artifacts,
+    sessionUploads,
+    spawnedTasks,
+    actorNameById: new Map(
+      [...actorById.entries()].map(([id, actor]) => [id, actor.roleName]),
     ),
-  );
+    extraAttachmentPaths: recentMessages.flatMap((message) => message.images || []),
+    maxArtifacts,
+    maxSpawnedTasks,
+    maxAttachmentPaths,
+  });
+  const attachmentPaths = workingSet.attachmentPaths;
 
   const intro = attachmentPaths.length > 0
     ? "以下是之前 Dialog 协作房间的最近上下文，并已附带相关图片/文件，请继续落地执行："
     : "以下是之前 Dialog 协作房间的最近上下文，请继续落地执行：";
-  const uploadSummary = sessionUploads.length > 0
-    ? `当前房间登记了 ${sessionUploads.length} 份上传/上下文附件，可按需继续使用。`
+  const uploadSummary = workingSet.uploadSummaryLine ?? "";
+  const artifactSummary = workingSet.artifactSummaryLines.length > 0
+    ? `当前房间最近生成/修改的文件产物：\n${workingSet.artifactSummaryLines.join("\n")}`
     : "";
-  const query = [intro, "", transcript, uploadSummary ? `---\n\n${uploadSummary}` : ""]
+  const spawnedTaskSummary = workingSet.spawnedTaskSummaryLines.length > 0
+    ? `当前房间子任务/子会话概览：\n${workingSet.spawnedTaskSummaryLines.join("\n")}`
+    : "";
+  const query = [
+    intro,
+    "",
+    transcript,
+    spawnedTaskSummary ? `---\n\n${spawnedTaskSummary}` : "",
+    artifactSummary ? `---\n\n${artifactSummary}` : "",
+    uploadSummary ? `---\n\n${uploadSummary}` : "",
+  ]
     .filter(Boolean)
     .join("\n");
 
-  return {
+  const latestUserMessage = [...recentMessages]
+    .reverse()
+    .find((message) => message.from === "user" && (message._briefContent || message.content).trim());
+  const inferredCoding = inferCodingExecutionProfile({
+    query,
+    attachmentPaths,
+  });
+
+  return normalizeAICenterHandoff({
     query,
     ...(attachmentPaths.length > 0 ? { attachmentPaths } : {}),
+    title: "延续 Dialog 协作房间",
+    goal: summarizeAISessionRuntimeText(
+      latestUserMessage?._briefContent || latestUserMessage?.content,
+      120,
+    ) || "延续 Dialog 房间中的当前协作任务",
+    intent: inferredCoding.profile.codingMode ? "coding" : "delivery",
+    keyPoints: [
+      `带入最近 ${recentMessages.length} 条 Dialog 消息`,
+      workingSet.artifactSummaryLines.length > 0 ? `${workingSet.artifactSummaryLines.length} 条产物线索` : "",
+      workingSet.spawnedTaskSummaryLines.length > 0 ? `${workingSet.spawnedTaskSummaryLines.length} 条子任务线索` : "",
+    ].filter(Boolean),
+    nextSteps: [
+      "先阅读 Dialog 最近讨论与工作集，再继续执行或收束结论",
+      workingSet.openSessionCount > 0 ? `注意当前仍有 ${workingSet.openSessionCount} 个开放子会话线索` : "",
+    ].filter(Boolean),
+    contextSections: [
+      workingSet.spawnedTaskSummaryLines.length > 0
+        ? { title: "子任务概览", items: workingSet.spawnedTaskSummaryLines }
+        : null,
+      workingSet.artifactSummaryLines.length > 0
+        ? { title: "产物线索", items: workingSet.artifactSummaryLines }
+        : null,
+    ].filter((section): section is { title: string; items: string[] } => Boolean(section)),
+    files: [
+      ...(buildAICenterHandoffFileRefs(attachmentPaths, "Dialog 工作集文件") || []),
+    ],
     sourceMode: "dialog",
     ...(sourceSessionId ? { sourceSessionId } : {}),
     sourceLabel: "Dialog 房间",
-    summary: attachmentPaths.length > 0
-      ? `Dialog 协作上下文，附带 ${attachmentPaths.length} 个文件/图片`
-      : "Dialog 协作上下文",
-  };
-}
-
-function buildDialogDispatchPlanBundle(params: {
-  actors: ActorSnapshot[];
-  routingMode: DialogRoutingMode;
-  content: string;
-  attachmentSummary?: string;
-  mentionedTargetId?: string | null;
-  selectedRoute?: { agentId: string; reason: string } | null;
-  coordinatorActorId?: string | null;
-}): DialogDispatchPlanBundle | null {
-  const {
-    actors,
-    routingMode,
-    content,
-    attachmentSummary,
-    mentionedTargetId,
-    selectedRoute,
-    coordinatorActorId,
-  } = params;
-  if (actors.length === 0) return null;
-
-  const planId = `dialog-plan-${Date.now().toString(36)}`;
-  const normalizedTask = content.trim() || "等待用户输入任务";
-  const taskSummary = attachmentSummary
-    ? `${attachmentSummary}\n${normalizedTask}`.trim()
-    : normalizedTask;
-
-  if (mentionedTargetId) {
-    const target = actors.find((actor) => actor.id === mentionedTargetId);
-    if (!target) return null;
-    return {
-      clusterPlan: {
-        id: planId,
-        mode: "multi_role",
-        sharedContext: { routingMode: "direct" },
-        steps: [
-          {
-            id: "direct-1",
-            role: target.roleName,
-            task: `直接处理用户指派任务：${taskSummary.slice(0, 240)}`,
-            dependencies: [],
-            critical: true,
-          },
-        ],
-      },
-      runtimePlan: {
-        id: planId,
-        routingMode: "direct",
-        summary: `仅 ${target.roleName} 直接处理本轮任务`,
-        approvedAt: Date.now(),
-        initialRecipientActorIds: [target.id],
-        participantActorIds: [target.id],
-        allowedMessagePairs: [],
-        allowedSpawnPairs: [],
-        state: "armed",
-      },
-    };
-  }
-
-  if (routingMode === "broadcast") {
-    return {
-      clusterPlan: {
-        id: planId,
-        mode: "parallel_split",
-        sharedContext: { routingMode, actorCount: actors.length },
-        steps: actors.map((actor, index) => ({
-          id: `broadcast-${index + 1}`,
-          role: actor.roleName,
-          task: `并行处理同一主题并给出视角：${taskSummary.slice(0, 220)}`,
-          dependencies: [],
-          critical: index === 0,
-        })),
-      },
-      runtimePlan: {
-        id: planId,
-        routingMode: "broadcast",
-        summary: `广播到 ${actors.length} 个 Agent 并行处理`,
-        approvedAt: Date.now(),
-        initialRecipientActorIds: actors.map((actor) => actor.id),
-        participantActorIds: actors.map((actor) => actor.id),
-        allowedMessagePairs: [],
-        allowedSpawnPairs: [],
-        state: "armed",
-      },
-    };
-  }
-
-  const preferredPrimaryId = routingMode === "smart"
-    ? selectedRoute?.agentId
-    : coordinatorActorId;
-  const primaryActor = preferredPrimaryId
-    ? actors.find((actor) => actor.id === preferredPrimaryId) ?? actors[0]
-    : actors[0];
-  const supportingActors = actors.filter((actor) => actor.id !== primaryActor.id);
-  const allowedMessagePairs = supportingActors.flatMap((actor) => ([
-    { fromActorId: primaryActor.id, toActorId: actor.id },
-    { fromActorId: actor.id, toActorId: primaryActor.id },
-  ]));
-  const allowedSpawnPairs = supportingActors.map((actor) => ({
-    fromActorId: primaryActor.id,
-    toActorId: actor.id,
-  }));
-
-  const steps = [
-    {
-      id: "plan-1",
-      role: primaryActor.roleName,
-      task: routingMode === "smart"
-        ? `优先接手用户任务并判断是否要派发子任务：${taskSummary.slice(0, 240)}${selectedRoute?.reason ? `（路由理由：${selectedRoute.reason}）` : ""}`
-        : `作为协调者先拆解任务，再按需 spawn_task：${taskSummary.slice(0, 240)}`,
-      dependencies: [],
-      critical: true,
-    },
-    ...supportingActors.map((actor, index) => ({
-      id: `plan-${index + 2}`,
-      role: actor.roleName,
-      task: `保持待命；当 ${primaryActor.roleName} 派发任务时，负责自己擅长的子问题`,
-      dependencies: ["plan-1"],
-      critical: false,
-    })),
-  ];
-
-  return {
-    clusterPlan: {
-      id: planId,
-      mode: "multi_role",
-      sharedContext: { routingMode, coordinator: primaryActor.roleName },
-      steps,
-    },
-    runtimePlan: {
-      id: planId,
-      routingMode: routingMode === "smart" ? "smart" : "coordinator",
-      summary: `${primaryActor.roleName} 作为主协调者按需调度其他 Agent`,
-      approvedAt: Date.now(),
-      initialRecipientActorIds: [primaryActor.id],
-      participantActorIds: [primaryActor.id, ...supportingActors.map((actor) => actor.id)],
-      coordinatorActorId: primaryActor.id,
-      allowedMessagePairs,
-      allowedSpawnPairs,
-      state: "armed",
-    },
-  };
+    summary: workingSet.summary,
+  });
 }
 
 function FileActionButtons({ content }: { content: string }) {
@@ -1327,6 +1326,8 @@ function MessageBubbleBase({
   const hasBrief = !approvalResponseText && isUser && !!message._briefContent && message._briefContent !== message.content;
   const displayText = approvalResponseText ?? (hasBrief && !showFullContext ? message._briefContent! : message.content);
   const isStructuredApproval = message.kind === "approval_request" && !!message.approvalRequest;
+  const interactionStatus = pendingInteraction?.status ?? message.interactionStatus;
+  const showTimedOutHint = !isUser && message.expectReply && !isStructuredApproval && interactionStatus === "timed_out";
   const bubbleClassName = isStructuredApproval
     ? "bg-transparent p-0 rounded-none shadow-none"
     : isUser
@@ -1395,6 +1396,11 @@ function MessageBubbleBase({
           <div className="flex items-center gap-1 mt-1 text-[10px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-600 animate-pulse">
             <Loader2 className="w-2.5 h-2.5 animate-spin" />
             等待你的回复...
+          </div>
+        )}
+        {showTimedOutHint && (
+          <div className="mt-1 max-w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2.5 py-1.5 text-[10px] leading-relaxed text-[var(--color-text-secondary)]">
+            这次提问会保持已超时。Agent 已按已有信息继续或结束当前分支；现在再发送内容，只会作为新的跟进消息发给原提问 Actor，不会把状态改回已处理，也不会接回原等待流程。
           </div>
         )}
       </div>
@@ -1952,7 +1958,9 @@ function DialogWorkspaceDock({
   focusedSessionRunId,
   onFocusSession,
   onCloseSession,
+  onContinueTaskWithAgent,
   draftPlan,
+  draftInsight,
   requirePlanApproval,
   onTogglePlanApproval,
   lastPlanReview,
@@ -1972,7 +1980,9 @@ function DialogWorkspaceDock({
   focusedSessionRunId: string | null;
   onFocusSession: (runId: string | null) => void;
   onCloseSession: (runId: string) => void;
+  onContinueTaskWithAgent: (runId: string) => void;
   draftPlan: ClusterPlan | null;
+  draftInsight: DialogDispatchPlanBundle["insight"] | null;
   requirePlanApproval: boolean;
   onTogglePlanApproval: (value: boolean) => void;
   lastPlanReview: { status: "approved" | "rejected"; timestamp: number; plan: ClusterPlan } | null;
@@ -1982,6 +1992,11 @@ function DialogWorkspaceDock({
   const actorById = useMemo(() => {
     const map = new Map<string, ActorSnapshot>();
     actors.forEach((actor) => map.set(actor.id, actor));
+    return map;
+  }, [actors]);
+  const actorNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    actors.forEach((actor) => map.set(actor.id, actor.roleName));
     return map;
   }, [actors]);
 
@@ -2005,6 +2020,27 @@ function DialogWorkspaceDock({
       dialogHistory,
     });
   }, [actorById, dialogHistory, selectedTask]);
+  const taskCheckpointByRunId = useMemo(() => {
+    const map = new Map<string, SpawnedTaskCheckpoint>();
+    for (const task of sortedTasks) {
+      const checkpoint = buildSpawnedTaskCheckpoint({
+        task,
+        targetActor: actorById.get(task.targetActorId),
+        actorTodos: actorTodos[task.targetActorId] ?? [],
+        dialogHistory,
+        artifacts,
+        actorNameById,
+      });
+      if (checkpoint) {
+        map.set(task.runId, checkpoint);
+      }
+    }
+    return map;
+  }, [sortedTasks, actorById, actorTodos, dialogHistory, artifacts, actorNameById]);
+  const selectedTaskCheckpoint = useMemo<SpawnedTaskCheckpoint | null>(() => {
+    if (!selectedTask) return null;
+    return taskCheckpointByRunId.get(selectedTask.runId) ?? null;
+  }, [selectedTask, taskCheckpointByRunId]);
 
   const [artifactAvailabilityByPath, setArtifactAvailabilityByPath] = useState<Record<string, ArtifactAvailability>>({});
 
@@ -2402,6 +2438,7 @@ function DialogWorkspaceDock({
                   {sortedTasks.map((task) => {
                     const spawner = actorById.get(task.spawnerActorId)?.roleName ?? task.spawnerActorId;
                     const target = actorById.get(task.targetActorId)?.roleName ?? task.targetActorId;
+                    const checkpoint = taskCheckpointByRunId.get(task.runId);
                     return (
                       <button
                         key={task.runId}
@@ -2421,11 +2458,21 @@ function DialogWorkspaceDock({
                               子会话
                             </span>
                           )}
+                          {checkpoint && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-cyan-500/10 text-cyan-700">
+                              {checkpoint.stageLabel}
+                            </span>
+                          )}
                           <span className="ml-auto text-[10px] text-[var(--color-text-tertiary)]">{task.status}</span>
                         </div>
                         <div className="mt-1 text-[10px] text-[var(--color-text-secondary)] truncate">
                           {spawner} → {target}
                         </div>
+                        {checkpoint?.summary && (
+                          <div className="mt-1 text-[10px] text-[var(--color-text-secondary)] line-clamp-2 text-left">
+                            {checkpoint.summary}
+                          </div>
+                        )}
                         <div className="mt-1 text-[10px] text-[var(--color-text-tertiary)]">
                           {formatShortTime(task.spawnedAt)}
                         </div>
@@ -2445,6 +2492,13 @@ function DialogWorkspaceDock({
                       <span className="text-[10px] text-[var(--color-text-tertiary)]">
                         持续 {formatElapsedTime((selectedTask.completedAt ?? Date.now()) - selectedTask.spawnedAt)}
                       </span>
+                      <button
+                        onClick={() => onContinueTaskWithAgent(selectedTask.runId)}
+                        className="ml-auto text-[10px] px-2 py-1 rounded-full border border-cyan-500/20 bg-cyan-500/5 text-cyan-700 hover:border-cyan-500/35 hover:bg-cyan-500/10 transition-colors"
+                        title="把当前子任务的 checkpoint、待办、最近子会话记录和相关文件带到 Agent 继续执行"
+                      >
+                        转 Agent 接力
+                      </button>
                       {selectedTask.mode === "session" && selectedTask.sessionOpen && (
                         <>
                           <button
@@ -2483,6 +2537,60 @@ function DialogWorkspaceDock({
                         </div>
                       </div>
                     </div>
+                    {selectedTaskCheckpoint && (
+                      <div className="rounded-xl border border-cyan-500/15 bg-cyan-500/5 px-3 py-2.5">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <div className="text-[10px] uppercase tracking-[0.12em] text-cyan-700">Checkpoint</div>
+                          <span className="rounded-full border border-cyan-500/20 bg-white/70 px-1.5 py-0.5 text-[10px] text-cyan-700">
+                            {selectedTaskCheckpoint.stageLabel}
+                          </span>
+                          {selectedTaskCheckpoint.activeTodoCount > 0 && (
+                            <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-700">
+                              {selectedTaskCheckpoint.activeTodoCount} 个活跃待办
+                            </span>
+                          )}
+                          <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                            更新于 {formatShortTime(selectedTaskCheckpoint.updatedAt)}
+                          </span>
+                        </div>
+                        <div className="mt-2 text-[11px] text-[var(--color-text-secondary)] whitespace-pre-wrap break-words">
+                          {selectedTaskCheckpoint.summary}
+                        </div>
+                        {selectedTaskCheckpoint.nextStep && (
+                          <div className="mt-2 rounded-lg bg-white/60 px-2.5 py-2 text-[11px] text-[var(--color-text-secondary)]">
+                            下一步：{selectedTaskCheckpoint.nextStep}
+                          </div>
+                        )}
+                        {(selectedTaskCheckpoint.activeTodos.length > 0 || selectedTaskCheckpoint.relatedArtifactPaths.length > 0) && (
+                          <div className="mt-2 grid gap-2 md:grid-cols-2">
+                            {selectedTaskCheckpoint.activeTodos.length > 0 && (
+                              <div className="rounded-lg bg-white/60 px-2.5 py-2">
+                                <div className="text-[10px] text-[var(--color-text-tertiary)]">活跃待办</div>
+                                <div className="mt-1 space-y-1">
+                                  {selectedTaskCheckpoint.activeTodos.map((todo) => (
+                                    <div key={todo} className="text-[11px] text-[var(--color-text-secondary)]">
+                                      {todo}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                            {selectedTaskCheckpoint.relatedArtifactPaths.length > 0 && (
+                              <div className="rounded-lg bg-white/60 px-2.5 py-2">
+                                <div className="text-[10px] text-[var(--color-text-tertiary)]">相关文件</div>
+                                <div className="mt-1 space-y-1">
+                                  {selectedTaskCheckpoint.relatedArtifactPaths.slice(0, 3).map((filePath) => (
+                                    <div key={filePath} className="text-[11px] text-[var(--color-text-secondary)] break-all">
+                                      {filePath}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
                     {selectedTask.result && (
                       <div>
                         <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">结果摘要</div>
@@ -2564,6 +2672,26 @@ function DialogWorkspaceDock({
             </div>
             {draftPlan ? (
               <div className="space-y-2">
+                {draftInsight?.autoModeLabel && (
+                  <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+                    <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-emerald-700">
+                      自动识别 {draftInsight.autoModeLabel}
+                    </span>
+                    {draftInsight.focusLabel && (
+                      <span className="rounded-full border border-sky-500/20 bg-sky-500/10 px-2 py-0.5 text-sky-700">
+                        {draftInsight.focusLabel}
+                      </span>
+                    )}
+                    {draftInsight.reasons[0] && (
+                      <span
+                        className="truncate text-[10px] text-[var(--color-text-tertiary)]"
+                        title={draftInsight.reasons.join(" · ")}
+                      >
+                        {draftInsight.reasons[0]}
+                      </span>
+                    )}
+                  </div>
+                )}
                 <div className="text-[11px] text-[var(--color-text-secondary)]">
                   当前输入会生成以下 dispatch plan 预览。
                 </div>
@@ -2642,6 +2770,8 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
 
   const models = useAvailableModels();
   const openPlanApprovalDialog = useClusterPlanApprovalStore((state) => state.open);
+  const planApprovalActive = useClusterPlanApprovalStore((state) => state.active !== null);
+  const openConfirmDialog = useConfirmDialogStore((state) => state.open);
 
   const {
     attachments,
@@ -2659,10 +2789,32 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     clearAttachments,
     addAttachmentFromPath,
   } = useInputAttachments();
+  const inputAttachmentPaths = useMemo(
+    () => [...new Set([
+      ...imagePaths,
+      ...attachments
+        .map((attachment) => attachment.path)
+        .filter((path): path is string => typeof path === "string" && path.trim().length > 0),
+    ])],
+    [attachments, imagePaths],
+  );
   const pendingAICenterHandoff = useAppStore((s) => s.pendingAICenterHandoff);
   const config = useAIStore((s) => s.config);
 
   const runningActors = useMemo(() => actors.filter((a) => a.status === "running"), [actors]);
+  const confirmDangerousAction = useCallback(
+    (toolName: string, params: Record<string, unknown>): Promise<boolean> => {
+      if (!useToolTrustStore.getState().shouldConfirm(toolName)) {
+        return Promise.resolve(true);
+      }
+      return openConfirmDialog({
+        source: "actor_dialog",
+        toolName,
+        params,
+      });
+    },
+    [openConfirmDialog],
+  );
   const hasRunningActors = runningActors.length > 0;
   const runningActivityKey = useMemo(
     () =>
@@ -2688,9 +2840,11 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   const ensureSystem = useCallback(() => {
     const storeState = useActorSystemStore.getState();
     if (storeState.active) return;
-    init();
+    init({
+      confirmDangerousAction,
+    });
     sync();
-  }, [init, sync]);
+  }, [confirmDangerousAction, init, sync]);
 
   useEffect(() => {
     if (active && !initRef.current) {
@@ -2709,6 +2863,21 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       setInput(payload.query);
       clearAttachments();
       setIncomingHandoff(payload);
+      const sessionId = getSystem()?.sessionId;
+      if (sessionId && payload.sourceMode) {
+        useAISessionRuntimeStore.getState().ensureSession({
+          mode: "dialog",
+          externalSessionId: sessionId,
+          title: "Dialog 房间",
+          updatedAt: Date.now(),
+          source: {
+            sourceMode: payload.sourceMode,
+            sourceSessionId: payload.sourceSessionId,
+            sourceLabel: payload.sourceLabel,
+            summary: payload.summary,
+          },
+        });
+      }
 
       if (payload.attachmentPaths?.length) {
         for (const path of payload.attachmentPaths) {
@@ -2727,7 +2896,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     return () => {
       cancelled = true;
     };
-  }, [pendingAICenterHandoff, ensureSystem, clearAttachments, addAttachmentFromPath]);
+  }, [pendingAICenterHandoff, ensureSystem, clearAttachments, addAttachmentFromPath, getSystem]);
 
   // 加载自定义预设
   useEffect(() => {
@@ -3022,7 +3191,9 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     const handoff = buildDialogAgentHandoff({
       dialogHistory,
       actorById,
+      artifacts,
       sessionUploads,
+      spawnedTasks,
       sourceSessionId: getSystem()?.sessionId,
     });
     if (!handoff) return;
@@ -3032,7 +3203,27 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       handoff,
       navigate: false,
     });
-  }, [actorById, dialogHistory, getSystem, sessionUploads]);
+  }, [actorById, artifacts, dialogHistory, getSystem, sessionUploads, spawnedTasks]);
+  const handleContinueSpawnedTaskWithAgent = useCallback((runId: string) => {
+    const task = spawnedTasks.find((item) => item.runId === runId);
+    if (!task) return;
+    const handoff = buildDialogSpawnedTaskHandoff({
+      task,
+      targetActor: actorById.get(task.targetActorId),
+      actorTodos: actorTodos[task.targetActorId] ?? [],
+      dialogHistory,
+      artifacts,
+      actorNameById: new Map(actors.map((actor) => [actor.id, actor.roleName])),
+      sourceSessionId: getSystem()?.sessionId,
+    });
+    if (!handoff) return;
+    routeToAICenter({
+      mode: "agent",
+      source: "dialog_continue_to_agent",
+      handoff,
+      navigate: false,
+    });
+  }, [spawnedTasks, actorById, actorTodos, dialogHistory, artifacts, actors, getSystem]);
   const handleNewTopic = useCallback(() => {
     resetSession();
     setIncomingHandoff(null);
@@ -3144,6 +3335,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     const finalBrief = hasContext
       ? (attachmentSummary ? `${attachmentSummary}\n${cleanContent || userText}` : (cleanContent || userText))
       : undefined;
+    const planAttachmentSummary = finalBrief ?? attachmentSummary ?? undefined;
     const isSteerCommand = Boolean(targetId && finalContent.startsWith("!steer "));
     const shouldRouteToFocusedSession = Boolean(
       focusedSessionTask &&
@@ -3151,8 +3343,14 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       !targetId &&
       !isSteerCommand,
     );
+    const dispatchInsight = inferDialogDispatchInsight({
+      content: finalContent,
+      attachmentSummary: planAttachmentSummary,
+      attachmentPaths: inputAttachmentPaths,
+      handoff: incomingHandoff,
+    });
     const smartRoutes = !targetId && routingMode === "smart" && finalContent
-      ? routeTask(finalContent)
+      ? routeTask(finalContent, dispatchInsight.preferredCapabilities)
       : [];
     const selectedSmartRoute = smartRoutes.length > 0 ? smartRoutes[0] : null;
 
@@ -3167,7 +3365,9 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
           actors,
           routingMode,
           content: finalContent,
-          attachmentSummary: finalBrief,
+          attachmentSummary: planAttachmentSummary,
+          attachmentPaths: inputAttachmentPaths,
+          handoff: incomingHandoff,
           mentionedTargetId: targetId,
           selectedRoute: selectedSmartRoute,
           coordinatorActorId,
@@ -3256,7 +3456,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     clearAttachments();
     setIncomingHandoff(null);
     inputRef.current?.focus();
-  }, [input, hasAttachments, imagePaths, attachments, fileContextBlock, attachmentSummary, ensureSystem, pendingUserInteractions, pendingInteractionByMessageId, selectedPendingMessageId, parseMention, actors, sendMessage, broadcastMessage, broadcastAndResolve, steer, replyToMessage, routingMode, routeTask, clearAttachments, requirePlanApproval, openPlanApprovalDialog, getSystem, coordinatorActorId, focusedSessionTask, messageById, queueDialogUserMemoryCapture]);
+  }, [input, hasAttachments, imagePaths, attachments, fileContextBlock, attachmentSummary, ensureSystem, pendingUserInteractions, pendingInteractionByMessageId, selectedPendingMessageId, parseMention, actors, sendMessage, broadcastMessage, broadcastAndResolve, steer, replyToMessage, routingMode, routeTask, clearAttachments, requirePlanApproval, openPlanApprovalDialog, getSystem, coordinatorActorId, focusedSessionTask, messageById, queueDialogUserMemoryCapture, inputAttachmentPaths, incomingHandoff]);
 
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value;
@@ -3285,6 +3485,11 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      if (planApprovalActive) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         handleSend();
@@ -3293,7 +3498,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
         setShowMention(false);
       }
     },
-    [handleSend, showMention],
+    [handleSend, planApprovalActive, showMention],
   );
 
   const pendingAgentNames = useMemo(() => {
@@ -3415,8 +3620,14 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     const brief = hasContext
       ? (attachmentSummary ? `${attachmentSummary}\n${userText}` : userText)
       : attachmentSummary || undefined;
+    const dispatchInsight = inferDialogDispatchInsight({
+      content,
+      attachmentSummary: brief,
+      attachmentPaths: inputAttachmentPaths,
+      handoff: incomingHandoff,
+    });
     const smartRoute = !targetId && routingMode === "smart" && content
-      ? routeTask(content)[0] ?? null
+      ? routeTask(content, dispatchInsight.preferredCapabilities)[0] ?? null
       : null;
 
     return buildDialogDispatchPlanBundle({
@@ -3424,12 +3635,15 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       routingMode,
       content,
       attachmentSummary: brief,
+      attachmentPaths: inputAttachmentPaths,
+      handoff: incomingHandoff,
       mentionedTargetId: targetId,
       selectedRoute: smartRoute,
       coordinatorActorId,
     });
-  }, [input, fileContextBlock, imagePaths, selectedPendingMessageId, pendingInteractionByMessageId, pendingUserInteractions, parseMention, attachmentSummary, routingMode, routeTask, actors, coordinatorActorId]);
+  }, [input, fileContextBlock, imagePaths, selectedPendingMessageId, pendingInteractionByMessageId, pendingUserInteractions, parseMention, attachmentSummary, routingMode, routeTask, actors, coordinatorActorId, inputAttachmentPaths, incomingHandoff]);
   const draftDispatchPlan = draftDispatchBundle?.clusterPlan ?? null;
+  const draftDispatchInsight = draftDispatchBundle?.insight ?? null;
 
   // 图谱数据
   const graphData = useMemo(() => {
@@ -3582,7 +3796,9 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                 focusedSessionRunId={focusedSpawnedSessionRunId}
                 onFocusSession={focusSpawnedSession}
                 onCloseSession={closeSpawnedSession}
+                onContinueTaskWithAgent={handleContinueSpawnedTaskWithAgent}
                 draftPlan={draftDispatchPlan}
+                draftInsight={draftDispatchInsight}
                 requirePlanApproval={requirePlanApproval}
                 onTogglePlanApproval={setRequirePlanApproval}
                 lastPlanReview={lastPlanReview}
@@ -3813,16 +4029,11 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
             {(incomingHandoff || focusedSessionTask || pendingUserInteractions.length > 0 || attachments.length > 0 || inputNotice) && (
               <div className="space-y-2 border-b border-[var(--color-border)] bg-[linear-gradient(135deg,rgba(15,23,42,0.02),transparent_45%)] px-3 py-2.5">
                 {incomingHandoff?.sourceMode && (
-                  <div className="flex flex-wrap items-center gap-2 rounded-xl border border-cyan-500/15 bg-cyan-500/10 px-3 py-1.5 text-[10px] text-cyan-700">
-                    <span>已接力自 {describeAICenterSource(incomingHandoff)}</span>
-                    {incomingHandoff.summary && <span className="opacity-80">{incomingHandoff.summary}</span>}
-                    <button
-                      onClick={() => setIncomingHandoff(null)}
-                      className="ml-auto rounded-full border border-cyan-500/20 px-2.5 py-1 text-[10px] hover:border-cyan-500/40 transition-colors"
-                    >
-                      仅隐藏提示
-                    </button>
-                  </div>
+                  <AICenterHandoffCard
+                    handoff={incomingHandoff}
+                    dismissLabel="仅隐藏提示"
+                    onDismiss={() => setIncomingHandoff(null)}
+                  />
                 )}
 
                 {focusedSessionTask && (
@@ -3972,6 +4183,15 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                   accent="accent"
                 />
                 <RoutingModeButton value={routingMode} onChange={setRoutingMode} />
+                {draftDispatchInsight?.autoModeLabel && (
+                  <span
+                    className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-[10px] text-emerald-700"
+                    title={draftDispatchInsight.reasons.join(" · ")}
+                  >
+                    自动 {draftDispatchInsight.autoModeLabel}
+                    {draftDispatchInsight.focusLabel ? ` · ${draftDispatchInsight.focusLabel}` : ""}
+                  </span>
+                )}
                 {selectedPendingInteractionLabel ? (
                   <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-2.5 py-1 text-[10px] text-amber-700">
                     当前回复 {selectedPendingInteractionLabel}

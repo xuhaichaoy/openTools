@@ -89,13 +89,9 @@ pub(super) async fn plugin_dev_simulate_event(
             );
             "void 0;".to_string()
         }
-        "screenCapture" => format!(
-            "(() => {{ const p = {payload}; if (window.__utoolsScreenCaptureCallback) window.__utoolsScreenCaptureCallback(p); }})();",
-            payload = payload_literal
-        ),
         _ => {
             return Err(format!(
-                "不支持的事件类型: {} (支持: onPluginEnter/onPluginOut/setSubInput/redirect/screenCapture)",
+                "不支持的事件类型: {} (支持: onPluginEnter/onPluginOut/setSubInput/redirect)",
                 event_type
             ));
         }

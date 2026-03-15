@@ -15,6 +15,7 @@ import {
   Sparkles,
   X,
   MoreHorizontal,
+  LayoutGrid,
 } from "lucide-react";
 import { useDragWindow } from "@/hooks/useDragWindow";
 import { ModelSelector } from "@/components/ai/ModelSelector";
@@ -221,10 +222,6 @@ export function AICenter({
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  useEffect(() => {
-    setShowAskMore(false);
-  }, [mode]);
-
   const compactMetaCopy = mode === "ask"
     ? {
       detail: "提问 / 读图 / 轻工具",
@@ -244,7 +241,10 @@ export function AICenter({
 
   const modeBtn = (m: AICenterMode, icon: React.ReactNode, label: string) => (
     <button
-      onClick={() => setMode(m)}
+      onClick={() => {
+        setShowAskMore(false);
+        setMode(m);
+      }}
       className={`flex items-center gap-1 text-[11px] px-2 py-1 rounded-md transition-all ${
         mode === m
           ? "bg-[var(--color-bg)] text-[var(--color-text)] shadow-sm"
@@ -431,6 +431,15 @@ export function AICenter({
         <div className="flex-1" />
 
         <button
+          onClick={onBack}
+          className="flex items-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2 py-1 text-[11px] text-[var(--color-text-secondary)] transition-colors hover:text-[var(--color-text)]"
+          title="打开工具页"
+        >
+          <LayoutGrid className="w-3.5 h-3.5" />
+          工具
+        </button>
+
+        <button
           onClick={() => setShowSkills((v) => !v)}
           className={`${iconBtn} ${showSkills ? "text-[var(--color-accent)]" : ""}`}
           title="技能管理"
@@ -536,7 +545,7 @@ export function AICenter({
                       onClick={() => { void confirmMemoryCandidate(candidate.id); }}
                       className="rounded-md bg-amber-500 px-2 py-0.5 text-[10px] text-white transition-colors hover:bg-amber-600"
                     >
-                      {!!candidate.conflict_memory_ids?.length ? "保留并记住" : "记住"}
+                      {candidate.conflict_memory_ids?.length ? "保留并记住" : "记住"}
                     </button>
                   </div>
                 </div>

@@ -228,8 +228,13 @@ pub(super) fn generate_utools_shim(plugin_id: &str) -> String {
     shellOpenPath(path) {{ __invoke('shellOpenPath', {{ path }}); }},
     shellShowItemInFolder(path) {{ __invoke('shellShowItemInFolder', {{ path }}); }},
     screenCapture(callback) {{
-      window.__utoolsScreenCaptureCallback = callback;
-      __invoke('screenCapture');
+      if (typeof callback === 'function') {{
+        try {{
+          callback(null);
+        }} catch (_callbackErr) {{}}
+      }}
+      console.warn('[mtools] screenCapture has been removed; use external screenshots and paste or upload images instead');
+      return Promise.resolve(null);
     }},
     getFeatures() {{ return __invoke('getFeatures'); }},
     screenColorPick(callback) {{ __screenColorPick(callback); }},
@@ -423,7 +428,15 @@ pub(super) fn generate_embed_bridge(plugin_id: &str, bridge_token: &str) -> Stri
     shellOpenExternal: function(u) {{ return __apiInvoke('shellOpenExternal', {{ url: u }}); }},
     shellOpenPath: function(p) {{ return __apiInvoke('shellOpenPath', {{ path: p }}); }},
     shellShowItemInFolder: function(p) {{ return __apiInvoke('shellShowItemInFolder', {{ path: p }}); }},
-    screenCapture: function(cb) {{ if (cb) cb(null); }},
+    screenCapture: function(cb) {{
+      if (typeof cb === 'function') {{
+        try {{
+          cb(null);
+        }} catch (_callbackErr) {{}}
+      }}
+      console.warn('[mtools] screenCapture has been removed; use external screenshots and paste or upload images instead');
+      return Promise.resolve(null);
+    }},
     screenColorPick: function(cb) {{ __screenColorPick(cb); }},
     getUser: function() {{ return {{ avatar: '', nickname: '本地用户', type: 'member' }}; }},
     getAppVersion: function() {{ return '0.1.0'; }},
@@ -496,9 +509,6 @@ pub(super) fn generate_embed_bridge(plugin_id: &str, bridge_token: &str) -> Stri
       case 'setSubInput':
         var text = typeof p === 'string' ? p : (p && (p.text || p.value || '')) || '';
         if (window.__utoolsSubInputCallback) window.__utoolsSubInputCallback(text);
-        break;
-      case 'screenCapture':
-        if (window.__utoolsScreenCaptureCallback) window.__utoolsScreenCaptureCallback(p || null);
         break;
       case 'redirect':
         // redirect 无内建回调，这里仅保留兼容入口

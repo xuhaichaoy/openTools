@@ -28,6 +28,10 @@ import {
 } from "./actor-transcript";
 import { ActorCron } from "./actor-cron";
 import { clearSessionApprovals, clearAllTodos, resetTitleGeneration, clearTelemetry } from "./middlewares";
+import {
+  buildSpawnTaskExecutionHint,
+  validateSpawnedTaskResult,
+} from "./spawned-task-result-validator";
 
 const generateId = (): string => {
   // 使用更安全的随机 ID 生成
@@ -1096,6 +1100,10 @@ export class ActorSystem {
     if (opts?.attachments?.length) {
       fullTask += `\n\n附件文件路径：\n${opts.attachments.map((f) => `- ${f}`).join("\n")}`;
     }
+    const executionHint = buildSpawnTaskExecutionHint(task);
+    if (executionHint) {
+      fullTask += `\n\n${executionHint}`;
+    }
 
     const record: SpawnedTaskRecord = {
       runId,
@@ -1236,16 +1244,37 @@ export class ActorSystem {
       if (record.timeoutId) clearTimeout(record.timeoutId);
 
       if (taskResult.status === "completed" && taskResult.result) {
-        record.status = "completed";
-        record.completedAt = Date.now();
-        record.result = taskResult.result;
-        this.finalizeSpawnedTaskHistoryWindow(record, target);
-        log(`✅ spawnTask COMPLETED: ${targetName} → announce to ${spawnerName}, runId=${runId}, duration=${Date.now() - record.spawnedAt}ms`);
-        appendAnnounceEvent(this.sessionId, runId, "completed", taskResult.result);
-        try { const { getTaskQueue } = require("@/core/task-center/task-queue"); getTaskQueue().complete(`spawn-${runId}`, taskResult.result?.slice(0, 500)); } catch { /* noop */ }
+        const validation = validateSpawnedTaskResult({
+          task: record,
+          result: taskResult.result,
+          artifacts: this.getArtifactRecordsSnapshot(),
+        });
+        if (!validation.accepted) {
+          record.status = "error";
+          record.completedAt = Date.now();
+          record.error = validation.reason ?? "子任务结果未通过有效性校验";
+          this.finalizeSpawnedTaskHistoryWindow(record, target);
+          log(
+            `❌ spawnTask INVALID_RESULT: ${targetName}, error=${record.error}, runId=${runId}, duration=${Date.now() - record.spawnedAt}ms, resultPreview="${taskResult.result.slice(0, 120)}"`,
+          );
+          appendAnnounceEvent(this.sessionId, runId, "error", undefined, record.error);
+          try { const { getTaskQueue } = require("@/core/task-center/task-queue"); getTaskQueue().fail(`spawn-${runId}`, record.error || "invalid result"); } catch { /* noop */ }
 
-        if (expectsCompletionMessage) {
-          this.announceWithRetry(targetActorId, spawnerActorId, `[Task completed: ${label}]\n\n${taskResult.result}`, runId);
+          if (expectsCompletionMessage) {
+            this.announceWithRetry(targetActorId, spawnerActorId, `[Task failed: ${label}]\n\nError: ${record.error}`, runId);
+          }
+        } else {
+          record.status = "completed";
+          record.completedAt = Date.now();
+          record.result = taskResult.result;
+          this.finalizeSpawnedTaskHistoryWindow(record, target);
+          log(`✅ spawnTask COMPLETED: ${targetName} → announce to ${spawnerName}, runId=${runId}, duration=${Date.now() - record.spawnedAt}ms`);
+          appendAnnounceEvent(this.sessionId, runId, "completed", taskResult.result);
+          try { const { getTaskQueue } = require("@/core/task-center/task-queue"); getTaskQueue().complete(`spawn-${runId}`, taskResult.result?.slice(0, 500)); } catch { /* noop */ }
+
+          if (expectsCompletionMessage) {
+            this.announceWithRetry(targetActorId, spawnerActorId, `[Task completed: ${label}]\n\n${taskResult.result}`, runId);
+          }
         }
       } else {
         record.status = taskResult.status === "aborted" ? "aborted" : "error";
@@ -1831,27 +1860,27 @@ export class ActorSystem {
     const sourceMessage = this.dialogHistory.find((message) => message.id === messageId);
     const relatedRunId = sourceMessage?.relatedRunId
       ?? (pendingInteraction ? this.getOpenSpawnedSessionByTarget(pendingInteraction.fromActorId)?.runId : undefined);
-    const msg: DialogMessage = {
-      id: generateId(),
-      from: "user",
-      to: pendingInteraction?.fromActorId,
-      content,
-      timestamp: Date.now(),
-      priority: "normal",
-      replyTo: messageId,
-      _briefContent: opts?._briefContent,
-      kind: getInteractionResponseKind(pendingInteraction?.type ?? "question"),
-      interactionType: pendingInteraction?.type,
-      interactionId: pendingInteraction?.id,
-      interactionStatus: "answered",
-      relatedRunId,
-      ...(opts?.images?.length ? { images: opts.images } : {}),
-    };
-    this.dialogHistory.push(msg);
-    appendDialogMessage(this.sessionId, msg);
-    this.emitEvent(msg);
-
     if (pendingInteraction) {
+      const msg: DialogMessage = {
+        id: generateId(),
+        from: "user",
+        to: pendingInteraction.fromActorId,
+        content,
+        timestamp: Date.now(),
+        priority: "normal",
+        replyTo: messageId,
+        _briefContent: opts?._briefContent,
+        kind: getInteractionResponseKind(pendingInteraction.type),
+        interactionType: pendingInteraction.type,
+        interactionId: pendingInteraction.id,
+        interactionStatus: "answered",
+        relatedRunId,
+        ...(opts?.images?.length ? { images: opts.images } : {}),
+      };
+      this.dialogHistory.push(msg);
+      appendDialogMessage(this.sessionId, msg);
+      this.emitEvent(msg);
+
       pendingInteraction.status = "answered";
       if (pendingInteraction.timeoutId) clearTimeout(pendingInteraction.timeoutId);
       this.pendingInteractions.delete(messageId);
@@ -1868,11 +1897,61 @@ export class ActorSystem {
 
     const pendingReply = this.pendingReplies.get(messageId);
     if (pendingReply) {
+      const msg: DialogMessage = {
+        id: generateId(),
+        from: "user",
+        to: pendingReply.fromActorId,
+        content,
+        timestamp: Date.now(),
+        priority: "normal",
+        replyTo: messageId,
+        _briefContent: opts?._briefContent,
+        kind: getInteractionResponseKind("question"),
+        interactionType: "question",
+        interactionStatus: "answered",
+        relatedRunId,
+        ...(opts?.images?.length ? { images: opts.images } : {}),
+      };
+      this.dialogHistory.push(msg);
+      appendDialogMessage(this.sessionId, msg);
+      this.emitEvent(msg);
+
       if (pendingReply.timeoutId) clearTimeout(pendingReply.timeoutId);
       this.pendingReplies.delete(messageId);
       pendingReply.resolve(msg);
+      return msg;
     }
 
+    const fallbackActorId = sourceMessage?.from && sourceMessage.from !== "user" && this.actors.has(sourceMessage.from)
+      ? sourceMessage.from
+      : this.getCoordinator()?.id;
+
+    if (fallbackActorId) {
+      log(`replyToMessage: no pending interaction for ${messageId}, routing late reply to ${fallbackActorId} as a new user message`);
+      return this.send("user", fallbackActorId, content, {
+        _briefContent: opts?._briefContent,
+        images: opts?.images,
+        bypassPlanCheck: true,
+        relatedRunId,
+      });
+    }
+
+    const msg: DialogMessage = {
+      id: generateId(),
+      from: "user",
+      to: undefined,
+      content,
+      timestamp: Date.now(),
+      priority: "normal",
+      replyTo: messageId,
+      _briefContent: opts?._briefContent,
+      kind: "user_input",
+      relatedRunId,
+      ...(opts?.images?.length ? { images: opts.images } : {}),
+    };
+    this.dialogHistory.push(msg);
+    appendDialogMessage(this.sessionId, msg);
+    this.emitEvent(msg);
     return msg;
   }
 

@@ -189,6 +189,80 @@ describe("ReActAgent FC compatibility cache", () => {
     expect(fcCalls).toBe(2);
   });
 
+  it("should replace restarted tool arg streams instead of appending from the beginning", async () => {
+    let fcCalls = 0;
+    const steps: Array<{ type: string; content: string; streaming?: boolean }> = [];
+    const finalArgs =
+      "{\"path\":\"/tmp/demo.html\",\"content\":\"<!doctype html>\\n<html lang=\\\"zh-CN\\\">\\n  <body>\\n    <div>ok</div>\\n  </body>\\n</html>\"}";
+
+    const ai = createMockAI(async ({ onToolArgs }) => {
+      fcCalls += 1;
+      if (fcCalls === 1) {
+        onToolArgs?.(
+          "{\"path\":\"/tmp/demo.html\",\"content\":\"<!doctype html>\\n<html lang=\\\"zh-CN\\\">\\n  <body>\\n    <div>temporary tail that will be reset",
+        );
+        onToolArgs?.(
+          "{\"path\":\"/tmp/demo.html\",\"content\":\"<!doctype html>\\n<html lang=\\\"zh-CN\\\">\\n  <body>",
+        );
+        onToolArgs?.(finalArgs);
+        return {
+          type: "tool_calls",
+          toolCalls: [
+            {
+              id: "call-write-file",
+              type: "function",
+              function: {
+                name: "write_file",
+                arguments: finalArgs,
+              },
+            },
+          ],
+        };
+      }
+
+      return {
+        type: "content",
+        content: "已写入 demo.html",
+      };
+    });
+
+    const tools: AgentTool[] = [
+      {
+        name: "write_file",
+        description: "write",
+        parameters: {
+          path: { type: "string", description: "path" },
+          content: { type: "string", description: "content" },
+        },
+        execute: async () => ({ ok: true }),
+      },
+    ];
+
+    const agent = new ReActAgent(
+      ai,
+      tools,
+      {
+        maxIterations: 4,
+        fcCompatibilityKey: "replace-restarted-tool-args",
+      },
+      (step) => {
+        steps.push({
+          type: step.type,
+          content: step.content,
+          streaming: step.streaming,
+        });
+      },
+    );
+
+    const answer = await agent.run("保存 demo.html");
+
+    expect(answer).toContain("已写入 demo.html");
+    const lastToolStep = steps.filter((step) => step.type === "tool_streaming").at(-1);
+    expect(lastToolStep?.content).toBe(finalArgs);
+    expect(lastToolStep?.content.match(/<!doctype html>/gi)?.length ?? 0).toBe(1);
+    expect(lastToolStep?.content).not.toContain("temporary tail");
+  });
+
   it("should not downgrade or cache on generic FC execution errors", async () => {
     let fcCalls = 0;
     const ai = createMockAI(async () => {

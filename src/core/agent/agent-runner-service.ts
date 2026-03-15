@@ -16,6 +16,7 @@ import {
   type AgentStep,
   type AgentTool,
 } from "@/plugins/builtin/SmartAgent/core/react-agent";
+import { applyIncomingAgentStep } from "@/plugins/builtin/SmartAgent/core/agent-task-state";
 import { loadAndResolveSkills } from "@/store/skill-store";
 import { applySkillToolFilter } from "@/core/agent/skills/skill-resolver";
 import {
@@ -424,27 +425,8 @@ export class AgentRunnerService {
         contextMessages: knowledgeContextMessages,
       },
       (step) => {
-        const findLastIdx = (pred: (s: AgentStep) => boolean) => {
-          for (let i = collectedSteps.length - 1; i >= 0; i--) {
-            if (pred(collectedSteps[i])) return i;
-          }
-          return -1;
-        };
-
-        if (step.streaming) {
-          const idx = findLastIdx((s) => !!s.streaming && s.type === step.type);
-          if (idx >= 0) {
-            collectedSteps[idx] = step;
-          } else {
-            collectedSteps.push(step);
-          }
-        } else {
-          const idx = findLastIdx((s) => !!s.streaming && s.type === step.type);
-          if (idx >= 0) {
-            collectedSteps.splice(idx, 1);
-          }
-          collectedSteps.push(step);
-        }
+        const nextSteps = applyIncomingAgentStep(collectedSteps, step);
+        collectedSteps.splice(0, collectedSteps.length, ...nextSteps);
 
         useAgentStore.getState().updateTask(sessionId!, taskId, {
           steps: [...collectedSteps],

@@ -133,7 +133,7 @@ fn allowed_mtplugin_roots(app: &tauri::AppHandle) -> Vec<PathBuf> {
             }
         }
     }
-    // 4) 截图预览等临时文件目录
+    // 4) 临时文件目录（插件中转图片等）
     roots.push(std::env::temp_dir());
     // 5) 官方市场插件目录（AppData/plugins/official）
     if let Ok(app_data_dir) = app.path().app_data_dir() {
@@ -393,20 +393,6 @@ pub fn run() {
             commands::workflow::scheduler::workflow_scheduler_stop,
             commands::workflow::scheduler::workflow_scheduler_reload,
             commands::workflow::scheduler::workflow_scheduler_status,
-            // ── Screen Capture ──
-            commands::screen_capture::capture::screen_capture_check,
-            commands::screen_capture::capture::screen_capture_download,
-            commands::screen_capture::capture::screen_capture_call,
-            commands::screen_capture::recording::init_screenshot_window,
-            commands::screen_capture::recording::screenshot_window_ready,
-            commands::screen_capture::recording::show_screenshot_window,
-            commands::screen_capture::recording::start_capture,
-            commands::screen_capture::recording::finish_capture,
-            commands::screen_capture::recording::cancel_capture,
-            commands::screen_capture::recording::get_last_screenshot,
-            commands::screen_capture::image_utils::capture_all_windows,
-            commands::screen_capture::image_utils::list_windows_xcap,
-            commands::screen_capture::image_utils::capture_window_xcap_by_id,
             // ── OCR ──
             commands::ocr::ocr_detect,
             commands::ocr::ocr_detect_advanced,

@@ -221,6 +221,7 @@ describe("useAgentRunActions", () => {
         openClawMode: boolean;
       };
       systemHint?: string;
+      codingHint?: string;
     };
     expect(call?.[0]).toBe("修复这个模块并验证");
     expect(options.runProfile).toEqual({
@@ -228,6 +229,56 @@ describe("useAgentRunActions", () => {
       largeProjectMode: true,
       openClawMode: true,
     });
-    expect(String(options.systemHint || "")).toContain("OpenClaw");
+    expect(String(options.codingHint || "")).toContain("OpenClaw");
+  });
+
+  it("auto-detects coding profile from incoming handoff", async () => {
+    const executeAgentTask = vi.fn(async (_query: string, _opts?: unknown) => undefined);
+    let hookValue: ReturnType<typeof useAgentRunActions> | null = null;
+
+    act(() => {
+      root.render(
+        <HookHarness
+          onReady={(value) => {
+            hookValue = value;
+          }}
+          params={{
+            ai: {} as never,
+            input: "继续处理",
+            imagePaths: [],
+            fileContextBlock: "",
+            attachmentSummary: "",
+            pendingSourceHandoff: {
+              query: "请修复构建错误",
+              intent: "coding",
+              files: [{ path: "/tmp/project/src/App.tsx" }],
+              sourceMode: "ask",
+            },
+            setInput: vi.fn(),
+            clearAssets: vi.fn(),
+            executeAgentTask,
+            stopExecution: vi.fn(),
+          }}
+        />,
+      );
+    });
+
+    expect(hookValue?.effectiveRunProfile.profile.codingMode).toBe(true);
+    expect(hookValue?.effectiveRunProfile.autoDetected).toBe(true);
+
+    await act(async () => {
+      await hookValue!.handleRun();
+    });
+
+    const options = (executeAgentTask.mock.calls[0]?.[1] ?? {}) as {
+      runProfile?: {
+        codingMode: boolean;
+        largeProjectMode: boolean;
+        openClawMode: boolean;
+      };
+      codingHint?: string;
+    };
+    expect(options.runProfile?.codingMode).toBe(true);
+    expect(String(options.codingHint || "")).toContain("Coding Execution Policy");
   });
 });

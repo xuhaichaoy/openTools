@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef, useEffect } from "react";
+import React, { useState, useCallback, useRef } from "react";
 import {
   Search,
   Upload,
@@ -9,10 +9,6 @@ import {
   Bot,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
-import {
-  onPluginEvent,
-  PluginEventTypes,
-} from "@/core/plugin-system/event-bus";
 import type { PluginContext } from "@/core/plugin-system/context";
 
 interface SearchEngine {
@@ -36,7 +32,7 @@ const ENGINES: SearchEngine[] = [
     id: "baidu",
     name: "百度",
     icon: "🅱️",
-    buildUrl: (_url) => `https://graph.baidu.com/pcpage/index?tpl_from=pc`,
+    buildUrl: () => `https://graph.baidu.com/pcpage/index?tpl_from=pc`,
     uploadBased: true,
   },
   {
@@ -69,7 +65,6 @@ const ImageSearchPlugin: React.FC<ImageSearchPluginProps> = ({
   const [imageBase64, setImageBase64] = useState<string | null>(null);
   const [aiResult, setAiResult] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [selectedEngine, setSelectedEngine] = useState("google");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const setImage = useCallback((dataUrl: string) => {
@@ -106,18 +101,6 @@ const ImageSearchPlugin: React.FC<ImageSearchPluginProps> = ({
     } catch {
       // ignore
     }
-  }, [setImage]);
-
-  // 监听截图事件
-  useEffect(() => {
-    const unsub = onPluginEvent<{ imageBase64: string }>(
-      PluginEventTypes.SCREENSHOT_CAPTURED,
-      (event) => {
-        const dataUrl = `data:image/png;base64,${event.payload.imageBase64}`;
-        setImage(dataUrl);
-      },
-    );
-    return unsub;
   }, [setImage]);
 
   const handleSearchInEngine = useCallback(

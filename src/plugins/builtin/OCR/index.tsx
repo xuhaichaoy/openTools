@@ -12,7 +12,6 @@ import {
 } from "lucide-react";
 import {
   emitPluginEvent,
-  onPluginEvent,
   PluginEventTypes,
 } from "@/core/plugin-system/event-bus";
 import { useDragWindow } from "@/hooks/useDragWindow";
@@ -31,12 +30,6 @@ interface OcrResult {
   language: string;
   rotation_detected: boolean;
   rotation_angle: number;
-}
-
-declare global {
-  interface Window {
-    __PENDING_OCR_IMAGE__?: string;
-  }
 }
 
 const LANGUAGES = [
@@ -137,19 +130,6 @@ const OCRPlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     setTimeout(() => setCopied(false), 2000);
   }, [result]);
 
-  // 监听截图事件
-  React.useEffect(() => {
-    const unsub = onPluginEvent<{ imageBase64: string }>(
-      PluginEventTypes.SCREENSHOT_CAPTURED,
-      (event) => {
-        const dataUrl = `data:image/png;base64,${event.payload.imageBase64}`;
-        setImagePreview(dataUrl);
-        doOcr(event.payload.imageBase64);
-      },
-    );
-    return unsub;
-  }, [doOcr]);
-
   // 监听全局粘贴事件
   React.useEffect(() => {
     const handleGlobalPaste = async (e: ClipboardEvent) => {
@@ -178,16 +158,6 @@ const OCRPlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     return () => window.removeEventListener("paste", handleGlobalPaste);
   }, [doOcr]);
 
-  // 兜底：如果先切页后发事件失败，则读取全局待处理图片
-  React.useEffect(() => {
-    const pending = window.__PENDING_OCR_IMAGE__;
-    if (!pending) return;
-    delete window.__PENDING_OCR_IMAGE__;
-    const dataUrl = `data:image/png;base64,${pending}`;
-    setImagePreview(dataUrl);
-    doOcr(pending);
-  }, [doOcr]);
-
   return (
     <div className="flex flex-col h-full bg-[var(--color-bg)] text-[var(--color-text)]">
       {/* 头部 */}
@@ -206,7 +176,7 @@ const OCRPlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
             </button>
           )}
           <ScanText className="w-5 h-5 text-amber-500" />
-          <h2 className="font-semibold">OCR 文字识别</h2>
+          <h2 className="font-semibold">图片 OCR</h2>
         </div>
 
         {/* 语言选择 */}
@@ -291,7 +261,7 @@ const OCRPlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
             ) : (
               <div className="text-center text-[var(--color-text-secondary)]">
                 <ScanText className="w-12 h-12 mx-auto mb-2 opacity-30" />
-                <p className="text-sm">选择图片、粘贴剪贴板或从截图获取</p>
+                <p className="text-sm">选择图片或粘贴剪贴板中的图片</p>
                 <p className="text-xs mt-1 opacity-60">
                   支持 PNG、JPG、BMP、WebP
                 </p>

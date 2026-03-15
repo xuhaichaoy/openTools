@@ -19,6 +19,7 @@ import type { AIConfig } from "@/core/ai/types";
 import { AssistantReasoningStreamNormalizer } from "@/core/ai/reasoning-tag-stream";
 import { resolveModelCapabilities } from "@/core/ai/model-capabilities";
 import { resolveRoutedConfig } from "@/core/ai/router";
+import { mergeStreamChunk } from "@/core/ai/stream-chunk-merge";
 import { createLogger } from "@/core/logger";
 import {
   buildAssistantMemoryPromptForQuery,
@@ -39,10 +40,33 @@ function traceStreamEvent(
   payload?: unknown,
 ): void {
   if (payload === undefined) {
-    console.log(`[AI TRACE][${conversationId}][${phase}]`);
+    // console.log(`[AI TRACE][${conversationId}][${phase}]`);
     return;
   }
-  console.log(`[AI TRACE][${conversationId}][${phase}]`, payload);
+  // console.log(`[AI TRACE][${conversationId}][${phase}]`, payload);
+}
+
+function normalizeStreamChunk(params: {
+  conversationId: string;
+  phase: string;
+  previous: string;
+  incoming: string;
+}): { full: string; delta: string; mode: ReturnType<typeof mergeStreamChunk>["mode"] } {
+  const merged = mergeStreamChunk(params.previous, params.incoming);
+  if (merged.mode === "reset") {
+    aiLog.warn("[stream] detected chunk restart, reset canonical buffer", {
+      conversationId: params.conversationId,
+      phase: params.phase,
+      previousLength: params.previous.length,
+      incomingLength: params.incoming.length,
+      incomingPreview: params.incoming.slice(0, 120),
+    });
+  }
+  return {
+    full: merged.full,
+    delta: merged.delta,
+    mode: merged.mode,
+  };
 }
 
 /** 获取当前 AI 配置 */
@@ -400,8 +424,14 @@ export function createMToolsAI(): MToolsAI {
               (event) => {
                 if (event.payload.conversation_id === conversationId) {
                   kickWatchdog("chunk");
-                  content += event.payload.content;
-                  traceStreamEvent(conversationId, "chunk", event.payload.content);
+                  const normalized = normalizeStreamChunk({
+                    conversationId,
+                    phase: "chat",
+                    previous: content,
+                    incoming: event.payload.content,
+                  });
+                  content = normalized.full;
+                  traceStreamEvent(conversationId, "chunk", normalized.delta || event.payload.content);
                 }
               },
             ),
@@ -555,9 +585,17 @@ export function createMToolsAI(): MToolsAI {
                     event.payload.content,
                   );
                   if (parsed.visible) {
-                    fullContent += parsed.visible;
-                    traceStreamEvent(conversationId, "chunk", parsed.visible);
-                    options.onChunk(parsed.visible);
+                    const normalized = normalizeStreamChunk({
+                      conversationId,
+                      phase: "stream_visible",
+                      previous: fullContent,
+                      incoming: parsed.visible,
+                    });
+                    fullContent = normalized.full;
+                    if (normalized.delta) {
+                      traceStreamEvent(conversationId, "chunk", normalized.delta);
+                      options.onChunk(normalized.delta);
+                    }
                   }
                   if (parsed.thinking) {
                     traceStreamEvent(
@@ -580,9 +618,17 @@ export function createMToolsAI(): MToolsAI {
                   }
                   const remaining = reasoningStream.flush();
                   if (remaining.visible) {
-                    fullContent += remaining.visible;
-                    traceStreamEvent(conversationId, "chunk", remaining.visible);
-                    options.onChunk(remaining.visible);
+                    const normalized = normalizeStreamChunk({
+                      conversationId,
+                      phase: "stream_flush",
+                      previous: fullContent,
+                      incoming: remaining.visible,
+                    });
+                    fullContent = normalized.full;
+                    if (normalized.delta) {
+                      traceStreamEvent(conversationId, "chunk", normalized.delta);
+                      options.onChunk(normalized.delta);
+                    }
                   }
                   if (remaining.thinking) {
                     traceStreamEvent(
@@ -705,6 +751,8 @@ export function createMToolsAI(): MToolsAI {
       const reasoningStream = new AssistantReasoningStreamNormalizer();
       let resolvedToolCalls: AIToolCall[] | null = null;
       let hadModelResponse = false;
+      let fullThinking = "";
+      let fullToolArgs = "";
 
       return new Promise((resolve, reject) => {
         const startedAt = Date.now();
@@ -814,18 +862,40 @@ export function createMToolsAI(): MToolsAI {
                   );
                   if (parsed.visible) {
                     hadModelResponse = true;
-                    fullContent += parsed.visible;
-                    traceStreamEvent(conversationId, "chunk", parsed.visible);
-                    options.onChunk(parsed.visible);
+                    const normalized = normalizeStreamChunk({
+                      conversationId,
+                      phase: "stream_with_tools_visible",
+                      previous: fullContent,
+                      incoming: parsed.visible,
+                    });
+                    fullContent = normalized.full;
+                    const emittedChunk = normalized.mode === "reset" ? normalized.full : normalized.delta;
+                    if (emittedChunk) {
+                      traceStreamEvent(conversationId, "chunk", emittedChunk);
+                      options.onChunk(emittedChunk);
+                    }
                   }
                   if (parsed.thinking) {
                     hadModelResponse = true;
+                    const normalizedThinking = normalizeStreamChunk({
+                      conversationId,
+                      phase: "stream_with_tools_inline_thinking",
+                      previous: fullThinking,
+                      incoming: parsed.thinking,
+                    });
+                    fullThinking = normalizedThinking.full;
+                    const emittedThinking =
+                      normalizedThinking.mode === "reset"
+                        ? normalizedThinking.full
+                        : normalizedThinking.delta;
                     traceStreamEvent(
                       conversationId,
                       "thinking_inline",
-                      parsed.thinking,
+                      emittedThinking || parsed.thinking,
                     );
-                    options.onThinking?.(parsed.thinking);
+                    if (emittedThinking) {
+                      options.onThinking?.(emittedThinking);
+                    }
                   }
                 }
               },
@@ -872,18 +942,40 @@ export function createMToolsAI(): MToolsAI {
                 const remaining = reasoningStream.flush();
                 if (remaining.visible) {
                   hadModelResponse = true;
-                  fullContent += remaining.visible;
-                  traceStreamEvent(conversationId, "chunk", remaining.visible);
-                  options.onChunk(remaining.visible);
+                  const normalized = normalizeStreamChunk({
+                    conversationId,
+                    phase: "stream_with_tools_flush",
+                    previous: fullContent,
+                    incoming: remaining.visible,
+                  });
+                  fullContent = normalized.full;
+                  const emittedChunk = normalized.mode === "reset" ? normalized.full : normalized.delta;
+                  if (emittedChunk) {
+                    traceStreamEvent(conversationId, "chunk", emittedChunk);
+                    options.onChunk(emittedChunk);
+                  }
                 }
                 if (remaining.thinking) {
                   hadModelResponse = true;
+                  const normalizedThinking = normalizeStreamChunk({
+                    conversationId,
+                    phase: "stream_with_tools_thinking_flush",
+                    previous: fullThinking,
+                    incoming: remaining.thinking,
+                  });
+                  fullThinking = normalizedThinking.full;
+                  const emittedThinking =
+                    normalizedThinking.mode === "reset"
+                      ? normalizedThinking.full
+                      : normalizedThinking.delta;
                   traceStreamEvent(
                     conversationId,
                     "thinking_inline",
-                    remaining.thinking,
+                    emittedThinking || remaining.thinking,
                   );
-                  options.onThinking?.(remaining.thinking);
+                  if (emittedThinking) {
+                    options.onThinking?.(emittedThinking);
+                  }
                 }
                 if (resolvedToolCalls && resolvedToolCalls.length > 0) {
                   safeResolve({ type: "tool_calls", toolCalls: resolvedToolCalls });
@@ -940,12 +1032,25 @@ export function createMToolsAI(): MToolsAI {
                 const remaining = reasoningStream.flush();
                 if (remaining.thinking) {
                   hadModelResponse = true;
+                  const normalizedThinking = normalizeStreamChunk({
+                    conversationId,
+                    phase: "stream_with_tools_error_flush",
+                    previous: fullThinking,
+                    incoming: remaining.thinking,
+                  });
+                  fullThinking = normalizedThinking.full;
+                  const emittedThinking =
+                    normalizedThinking.mode === "reset"
+                      ? normalizedThinking.full
+                      : normalizedThinking.delta;
                   traceStreamEvent(
                     conversationId,
                     "thinking_inline",
-                    remaining.thinking,
+                    emittedThinking || remaining.thinking,
                   );
-                  options.onThinking?.(remaining.thinking);
+                  if (emittedThinking) {
+                    options.onThinking?.(emittedThinking);
+                  }
                 }
                 safeReject(new Error(event.payload.error));
               },
@@ -958,10 +1063,23 @@ export function createMToolsAI(): MToolsAI {
                   const parsed = reasoningStream.processThinkingChunk(
                     event.payload.content ?? "",
                   );
-                  traceStreamEvent(conversationId, "thinking", parsed.thinking);
                   if (parsed.thinking) {
                     hadModelResponse = true;
-                    options.onThinking?.(parsed.thinking);
+                    const normalizedThinking = normalizeStreamChunk({
+                      conversationId,
+                      phase: "stream_with_tools_reasoning_event",
+                      previous: fullThinking,
+                      incoming: parsed.thinking,
+                    });
+                    fullThinking = normalizedThinking.full;
+                    const emittedThinking =
+                      normalizedThinking.mode === "reset"
+                        ? normalizedThinking.full
+                        : normalizedThinking.delta;
+                    traceStreamEvent(conversationId, "thinking", emittedThinking || parsed.thinking);
+                    if (emittedThinking) {
+                      options.onThinking?.(emittedThinking);
+                    }
                   }
                 }
               },
@@ -971,8 +1089,25 @@ export function createMToolsAI(): MToolsAI {
               (event) => {
                 if (event.payload.conversation_id === conversationId) {
                   kickWatchdog("tool-args");
-                  traceStreamEvent(conversationId, "tool_args", event.payload.content ?? "");
-                  options.onToolArgs?.(event.payload.content ?? "");
+                  const normalizedToolArgs = normalizeStreamChunk({
+                    conversationId,
+                    phase: "stream_with_tools_tool_args",
+                    previous: fullToolArgs,
+                    incoming: event.payload.content ?? "",
+                  });
+                  fullToolArgs = normalizedToolArgs.full;
+                  const emittedToolArgs =
+                    normalizedToolArgs.mode === "reset"
+                      ? normalizedToolArgs.full
+                      : normalizedToolArgs.delta;
+                  traceStreamEvent(
+                    conversationId,
+                    "tool_args",
+                    emittedToolArgs || event.payload.content || "",
+                  );
+                  if (emittedToolArgs) {
+                    options.onToolArgs?.(emittedToolArgs);
+                  }
                 }
               },
             ),

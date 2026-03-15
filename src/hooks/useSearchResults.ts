@@ -125,6 +125,12 @@ export function useSearchResults(
   const bookmarks = useBookmarkStore((s) => s.bookmarks);
 
   const filteredResults = useMemo((): ResultItem[] => {
+    // These reactive slices intentionally participate in memo invalidation so
+    // search results refresh when workflows/plugins/bookmarks change.
+    void workflows;
+    void externalPlugins;
+    void bookmarks;
+
     if (!searchValue) return [];
 
     // 1) Prefix commands
@@ -201,11 +207,9 @@ export function useSearchResults(
         return true;
       });
     const BUILTIN_COLOR_PICKER = "color-picker";
-    const BUILTIN_SCREEN_CAPTURE = "screen-capture";
     const pluginResults: ResultItem[] = pluginMatches.map((pr) => {
       const code = pr.feature.code;
       const isColorPicker = code === BUILTIN_COLOR_PICKER;
-      const isScreenCapture = code === BUILTIN_SCREEN_CAPTURE;
       const slug = pr.plugin.slug?.toLowerCase();
       const openBuiltin = () => {
         if (
@@ -227,20 +231,18 @@ export function useSearchResults(
         category: "插件",
         action: isColorPicker
           ? handleDirectColorPicker
-          : isScreenCapture
-            ? () => pushView("screen-capture")
-            : () => {
-                if (openBuiltin()) return;
-                if (pr.plugin.manifest.mtools?.openMode === "embed") {
-                  useAppStore.getState().requestEmbed({
-                    pluginId: pr.plugin.id,
-                    featureCode: code,
-                    title: pr.feature.explain || pr.plugin.manifest.pluginName,
-                  });
-                  return;
-                }
-                usePluginStore.getState().openPlugin(pr.plugin.id, code);
-              },
+          : () => {
+              if (openBuiltin()) return;
+              if (pr.plugin.manifest.mtools?.openMode === "embed") {
+                useAppStore.getState().requestEmbed({
+                  pluginId: pr.plugin.id,
+                  featureCode: code,
+                  title: pr.feature.explain || pr.plugin.manifest.pluginName,
+                });
+                return;
+              }
+              usePluginStore.getState().openPlugin(pr.plugin.id, code);
+            },
       };
     });
 
@@ -293,7 +295,6 @@ export function useSearchResults(
     fileResults,
     appResults,
     pushView,
-    // Reactive store slices — trigger re-computation when data changes
     workflows,
     externalPlugins,
     bookmarks,

@@ -10,8 +10,9 @@ import type { AgentTool } from "./core/react-agent";
 import type { MToolsAI } from "@/core/plugin-system/plugin-interface";
 import { useAgentStore, type AgentTask } from "@/store/agent-store";
 import { useAppStore } from "@/store/app-store";
-import { describeAICenterSource } from "@/core/ai/ai-center-mode-meta";
+import { AICenterHandoffCard } from "@/components/ai/AICenterHandoffCard";
 import type { RuntimeFallbackContext } from "@/core/agent/runtime";
+import { describeCodingExecutionProfile } from "@/core/agent/coding-profile";
 
 import { AgentInputBar } from "./components/AgentInputBar";
 import { useToolTrustStore } from "@/store/command-allowlist-store";
@@ -29,6 +30,7 @@ import { useAgentEffects } from "./hooks/use-agent-effects";
 import { useAgentDerivedState } from "./hooks/use-agent-derived-state";
 import { useAgentRunActions } from "./hooks/use-agent-run-actions";
 import { useShallow } from "zustand/shallow";
+import { buildRecoveredAgentTaskPatch } from "./core/agent-task-state";
 import {
   type ExecutionWaitingStage,
   type RunningPhase,
@@ -319,12 +321,7 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
         }
 
         if (!cancelled && payload.sourceMode) {
-          setPendingSourceHandoff({
-            sourceMode: payload.sourceMode,
-            sourceSessionId: payload.sourceSessionId,
-            sourceLabel: payload.sourceLabel,
-            summary: payload.summary,
-          });
+          setPendingSourceHandoff(payload);
         }
       };
 
@@ -339,10 +336,13 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       };
     }, [pendingHandoff, addAttachmentFromPath, clearAttachments]);
 
-    const { handleRun, handleStop } = useAgentRunActions({
+    const { handleRun, handleStop, effectiveRunProfile } = useAgentRunActions({
       ai,
       input,
       imagePaths,
+      attachmentPaths: attachments
+        .map((attachment) => attachment.path)
+        .filter((path): path is string => typeof path === "string" && path.trim().length > 0),
       fileContextBlock,
       attachmentSummary,
       codingMode: codingMode || openClawMode,
@@ -354,6 +354,9 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       executeAgentTask,
       stopExecution,
     });
+    const autoExecutionModeLabel = effectiveRunProfile.autoDetected
+      ? describeCodingExecutionProfile(effectiveRunProfile.profile)
+      : null;
 
     useEffect(() => {
       saveAgentSettings({ codingMode, largeProjectMode, openClawMode });
@@ -368,6 +371,16 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
         setPendingSourceHandoff(null);
       }
     }, [running, pendingSourceHandoff]);
+
+    useEffect(() => {
+      if (running || !currentSessionId || tasks.length === 0) return;
+      const finishedAt = Date.now();
+      for (const task of tasks) {
+        const patch = buildRecoveredAgentTaskPatch(task, finishedAt);
+        if (!patch) continue;
+        updateTask(currentSessionId, task.id, patch);
+      }
+    }, [currentSessionId, running, tasks, updateTask]);
 
     const toggleStep = useCallback((key: string) => {
       setExpandedSteps((prev) => {
@@ -497,26 +510,18 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
           />
 
           {currentSession?.sourceHandoff && (
-            <div className="mx-4 mt-2 mb-1 flex items-center gap-1.5 text-xs text-indigo-400/80">
-              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
-              </svg>
-              <span>
-                从 {describeAICenterSource(currentSession.sourceHandoff)} 接力
-                {currentSession.sourceHandoff.summary ? ` · ${currentSession.sourceHandoff.summary}` : ""}
-              </span>
+            <div className="mx-4 mt-2 mb-1">
+              <AICenterHandoffCard handoff={currentSession.sourceHandoff} variant="active" />
             </div>
           )}
 
           {!currentSession?.sourceHandoff && pendingSourceHandoff && input.trim() && !running && (
-            <div className="mx-4 mt-2 mb-1 flex items-center gap-1.5 text-xs text-cyan-500/85">
-              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
-              </svg>
-              <span>
-                已带入来自 {describeAICenterSource(pendingSourceHandoff)} 的上下文
-                {pendingSourceHandoff.summary ? ` · ${pendingSourceHandoff.summary}` : ""}
-              </span>
+            <div className="mx-4 mt-2 mb-1">
+              <AICenterHandoffCard
+                handoff={pendingSourceHandoff}
+                dismissLabel="清除"
+                onDismiss={() => setPendingSourceHandoff(null)}
+              />
             </div>
           )}
 
@@ -592,6 +597,8 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
                 return next;
               });
             }}
+            autoExecutionModeLabel={autoExecutionModeLabel}
+            autoExecutionModeReasons={effectiveRunProfile.reasons}
             inputRef={inputRef}
             fileInputRef={fileInputRef}
           />

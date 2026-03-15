@@ -1,4 +1,11 @@
 import type { ChatMessage, Conversation } from "@/core/ai/types";
+import type { AICenterHandoff } from "@/store/app-store";
+import {
+  buildAICenterHandoffFileRefs,
+  normalizeAICenterHandoff,
+} from "@/core/ai/ai-center-handoff";
+import { inferCodingExecutionProfile } from "@/core/agent/coding-profile";
+import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
 
 const DEFAULT_MAX_MESSAGES = 10;
 const DEFAULT_MAX_CHARS_PER_MESSAGE = 600;
@@ -48,14 +55,7 @@ export function buildAskAgentHandoff(
     maxContextBlocks?: number;
     maxContextChars?: number;
   },
-): {
-  query: string;
-  attachmentPaths?: string[];
-  sourceMode: "ask";
-  sourceSessionId: string;
-  sourceLabel: string;
-  summary: string;
-} | null {
+): AICenterHandoff | null {
   if (!conversation || conversation.messages.length === 0) return null;
 
   const maxMessages = options?.maxMessages ?? DEFAULT_MAX_MESSAGES;
@@ -100,13 +100,45 @@ export function buildAskAgentHandoff(
   const summary = attachmentPaths.length > 0
     ? `Ask 对话上下文，附带 ${attachmentPaths.length} 个文件/图片/目录`
     : "Ask 对话上下文";
+  const latestUserMessage = [...recentMessages]
+    .reverse()
+    .find((message) => message.role === "user" && message.content.trim());
+  const keyPoints = [
+    `带入最近 ${recentMessages.length} 条 Ask 消息`,
+    attachmentPaths.length > 0 ? `包含 ${attachmentPaths.length} 个附件路径` : "",
+    contextBlocks.length > 0 ? `附带 ${contextBlocks.length} 段原始附件上下文摘录` : "",
+  ].filter(Boolean);
+  const inferredCoding = inferCodingExecutionProfile({
+    query: transcriptSummary,
+    attachmentPaths,
+  });
 
-  return {
+  return normalizeAICenterHandoff({
     query: querySections.join("\n\n---\n\n"),
     ...(attachmentPaths.length > 0 ? { attachmentPaths } : {}),
+    title: conversation.title ? `延续 Ask 对话：${conversation.title}` : "延续 Ask 对话",
+    goal: summarizeAISessionRuntimeText(latestUserMessage?.content, 120) || "延续 Ask 对话里的当前任务",
+    intent: inferredCoding.profile.codingMode ? "coding" : "general",
+    keyPoints,
+    nextSteps: [
+      "先阅读 Ask 对话与附件上下文，再继续处理任务",
+      attachmentPaths.length > 0 ? "优先利用已带入的图片、文件或目录，不必重新索要" : "",
+    ].filter(Boolean),
+    contextSections: contextBlocks.length > 0
+      ? [
+          {
+            title: "原始附件上下文",
+            items: contextBlocks.map((block) => summarizeAISessionRuntimeText(block, 160) || block),
+          },
+        ]
+      : undefined,
+    files: buildAICenterHandoffFileRefs(
+      attachmentPaths,
+      attachmentPaths.length > 0 ? "Ask 附件/目录上下文" : undefined,
+    ),
     sourceMode: "ask",
     sourceSessionId: conversation.id,
     sourceLabel: "Ask 对话",
     summary,
-  };
+  });
 }

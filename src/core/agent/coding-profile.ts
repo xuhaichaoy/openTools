@@ -1,3 +1,5 @@
+import type { AICenterHandoff } from "@/store/app-store";
+
 export interface CodingExecutionProfile {
   codingMode?: boolean;
   largeProjectMode?: boolean;
@@ -8,6 +10,188 @@ export interface NormalizedCodingExecutionProfile {
   codingMode: boolean;
   largeProjectMode: boolean;
   openClawMode: boolean;
+}
+
+export interface ResolvedCodingExecutionProfile {
+  profile: NormalizedCodingExecutionProfile;
+  autoDetected: boolean;
+  reasons: string[];
+}
+
+const CODE_EXTENSIONS = new Set([
+  "c", "cc", "cpp", "cxx", "h", "hpp",
+  "go", "rs", "py", "rb", "php", "java", "kt", "swift",
+  "js", "jsx", "ts", "tsx", "mjs", "cjs",
+  "vue", "svelte", "css", "scss", "less", "html", "htm",
+  "json", "yaml", "yml", "toml", "ini", "sql", "sh", "bash", "zsh",
+  "mdx",
+]);
+
+const CODE_FILENAMES = new Set([
+  "package.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+  "package-lock.json",
+  "tsconfig.json",
+  "vite.config.ts",
+  "vite.config.js",
+  "webpack.config.js",
+  "eslint.config.js",
+  "eslint.config.mjs",
+  "cargo.toml",
+  "cargo.lock",
+  "pyproject.toml",
+  "requirements.txt",
+  "dockerfile",
+  "makefile",
+  "go.mod",
+  "go.sum",
+]);
+
+const CODING_KEYWORDS = [
+  /修复|排查|调试|debug|bug|报错|异常|堆栈/i,
+  /代码|编码|编程|实现|改文件|写文件|函数|类|模块|接口|重构/i,
+  /repo|repository|codebase|仓库|项目结构|工程|源码/i,
+  /test|测试|单测|lint|build|编译|打包|类型检查|review/i,
+  /typescript|javascript|python|rust|java|go|react|vue|node/i,
+];
+
+const LARGE_PROJECT_KEYWORDS = [
+  /大型项目|大项目|整个项目|整个仓库|全仓|全项目|跨模块|多模块|代码库/i,
+  /architecture|monorepo|workspace|多目录|多文件|多阶段|分阶段|codebase/i,
+];
+
+function uniqueReasons(reasons: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const reason of reasons) {
+    const normalized = reason.trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(normalized);
+  }
+  return result;
+}
+
+function hasAnyKeyword(texts: string[], patterns: RegExp[]): boolean {
+  return texts.some((text) => patterns.some((pattern) => pattern.test(text)));
+}
+
+function normalizePath(path?: string | null): string {
+  return String(path ?? "").trim().toLowerCase();
+}
+
+export function isLikelyCodingPath(path?: string | null): boolean {
+  const normalized = normalizePath(path);
+  if (!normalized) return false;
+  const filename = normalized.split("/").pop() || normalized;
+  if (CODE_FILENAMES.has(filename)) return true;
+  if (/(^|\/)(src|app|lib|packages|components|pages|crates|server|client|tests?|spec|scripts)(\/|$)/.test(normalized)) {
+    return true;
+  }
+  const ext = filename.includes(".") ? filename.split(".").pop() : "";
+  return Boolean(ext && CODE_EXTENSIONS.has(ext));
+}
+
+export function inferCodingExecutionProfile(params: {
+  query?: string;
+  fileContextBlock?: string;
+  attachmentPaths?: readonly string[];
+  handoff?: Partial<AICenterHandoff> | null;
+}): ResolvedCodingExecutionProfile {
+  const query = String(params.query ?? "").trim();
+  const fileContextBlock = String(params.fileContextBlock ?? "").trim();
+  const attachmentPaths = [
+    ...(params.attachmentPaths ?? []),
+    ...(params.handoff?.attachmentPaths ?? []),
+    ...((params.handoff?.files ?? []).map((file) => file.path)),
+  ].filter((path): path is string => typeof path === "string" && path.trim().length > 0);
+  const codingPaths = attachmentPaths.filter((path) => isLikelyCodingPath(path));
+  const directoryPaths = attachmentPaths.filter((path) => {
+    const normalized = normalizePath(path);
+    const filename = normalized.split("/").pop() || normalized;
+    return Boolean(normalized) && !filename.includes(".");
+  });
+  const texts = [
+    query,
+    fileContextBlock,
+    params.handoff?.query ?? "",
+    params.handoff?.goal ?? "",
+    params.handoff?.summary ?? "",
+    ...(params.handoff?.keyPoints ?? []),
+    ...(params.handoff?.nextSteps ?? []),
+    ...((params.handoff?.contextSections ?? []).flatMap((section) => [section.title, ...section.items])),
+  ]
+    .map((text) => String(text).trim())
+    .filter(Boolean);
+
+  const reasons: string[] = [];
+  let codingMode = false;
+  let largeProjectMode = false;
+
+  if (params.handoff?.intent === "coding") {
+    codingMode = true;
+    reasons.push("handoff 已标记为编码任务");
+  }
+  if (codingPaths.length > 0) {
+    codingMode = true;
+    reasons.push(`检测到 ${codingPaths.length} 个代码相关文件/路径`);
+  }
+  if (hasAnyKeyword(texts, CODING_KEYWORDS)) {
+    codingMode = true;
+    reasons.push("任务描述包含明显的代码实现/调试关键词");
+  }
+  if (fileContextBlock && /```|package\.json|tsconfig|cargo\.toml|import |export |function |class /i.test(fileContextBlock)) {
+    codingMode = true;
+    reasons.push("附带上下文看起来像源码或工程配置");
+  }
+
+  if (codingMode) {
+    const manyCodePaths = codingPaths.length >= 4;
+    const manyDirectories = directoryPaths.length >= 2;
+    const mentionsLargeScope = hasAnyKeyword(texts, LARGE_PROJECT_KEYWORDS);
+    if (manyCodePaths || manyDirectories || mentionsLargeScope) {
+      largeProjectMode = true;
+      if (manyCodePaths) reasons.push("涉及多个代码文件");
+      if (manyDirectories) reasons.push("涉及多个目录范围");
+      if (mentionsLargeScope) reasons.push("任务描述指向较大代码库范围");
+    }
+  }
+
+  return {
+    profile: normalizeCodingExecutionProfile({
+      codingMode,
+      largeProjectMode,
+      openClawMode: false,
+    }),
+    autoDetected: codingMode,
+    reasons: uniqueReasons(reasons),
+  };
+}
+
+export function resolveCodingExecutionProfile(params: {
+  manualProfile?: CodingExecutionProfile;
+  query?: string;
+  fileContextBlock?: string;
+  attachmentPaths?: readonly string[];
+  handoff?: Partial<AICenterHandoff> | null;
+}): ResolvedCodingExecutionProfile {
+  const manual = normalizeCodingExecutionProfile(params.manualProfile);
+  if (manual.codingMode || manual.largeProjectMode || manual.openClawMode) {
+    return {
+      profile: manual,
+      autoDetected: false,
+      reasons: [],
+    };
+  }
+  return inferCodingExecutionProfile(params);
+}
+
+export function describeCodingExecutionProfile(profile: NormalizedCodingExecutionProfile): string | null {
+  if (profile.openClawMode) return "OpenClaw";
+  if (profile.largeProjectMode) return "Coding · 大项目";
+  if (profile.codingMode) return "Coding";
+  return null;
 }
 
 export function normalizeCodingExecutionProfile(
@@ -60,6 +244,7 @@ OpenClaw 执行约束：
   return `## Coding Execution Policy
 你正在执行 coding 任务。请严格遵守：
 - 先读后改：先用 read_file / read_file_range / search_in_files 建立上下文
+- 如果任务是从零生成独立页面、脚本、文档或其他文件产物，且目标路径已经明确，可先确认目标目录后直接创建，不要为了“先读后改”陷入无意义的仓库分析
 - 修改已有文件优先使用 str_replace_edit，避免整文件覆写
 - 每次修改后立即验证：run_lint / run_shell_command（测试或构建）
 - 输出结果必须包含：修改文件列表、关键变更点、验证结果、剩余风险${scopeHint}${openClawHint}`;

@@ -32,6 +32,8 @@ interface AgentInputBarProps {
   onToggleCodingMode?: () => void;
   onToggleLargeProjectMode?: () => void;
   onToggleOpenClawMode?: () => void;
+  autoExecutionModeLabel?: string | null;
+  autoExecutionModeReasons?: string[];
 }
 
 export function AgentInputBar({
@@ -62,6 +64,8 @@ export function AgentInputBar({
   onToggleCodingMode,
   onToggleLargeProjectMode,
   onToggleOpenClawMode,
+  autoExecutionModeLabel,
+  autoExecutionModeReasons,
 }: AgentInputBarProps) {
   type ExecutionMode = "standard" | "large" | "openclaw";
   const useAttachments = attachments && onRemoveAttachment;
@@ -353,6 +357,15 @@ export function AgentInputBar({
         </div>
 
         <div className="flex items-center gap-1 shrink-0 self-end mb-0.5">
+          {autoExecutionModeLabel && !codingMode && !largeProjectMode && !openClawMode && (
+            <div
+              className="hidden md:flex items-center gap-1 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-1 text-[10px] text-emerald-600"
+              title={autoExecutionModeReasons?.join("；") || "自动识别为代码任务"}
+            >
+              <span>自动</span>
+              <span>{autoExecutionModeLabel}</span>
+            </div>
+          )}
           {onToggleCodingMode && (
             <button
               type="button"

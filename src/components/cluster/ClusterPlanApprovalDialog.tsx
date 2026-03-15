@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { CheckCircle, ShieldCheck, XCircle } from "lucide-react";
 import type { ClusterPlan } from "@/core/agent/cluster/types";
 
@@ -13,25 +13,61 @@ export function ClusterPlanApprovalDialog({
   onApprove,
   onReject,
 }: ClusterPlanApprovalDialogProps) {
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const approveButtonRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    const previousFocused = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    const id = requestAnimationFrame(() => {
+      if (approveButtonRef.current) {
+        approveButtonRef.current.focus();
+      } else {
+        dialogRef.current?.focus();
+      }
+    });
+
+    return () => {
+      cancelAnimationFrame(id);
+      previousFocused?.focus?.();
+    };
+  }, []);
+
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onReject();
-      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) onApprove();
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        onReject();
+        return;
+      }
+      if (e.key === "Enter") {
+        e.preventDefault();
+        e.stopPropagation();
+        onApprove();
+      }
     }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, [onApprove, onReject]);
 
   return (
     <div className="fixed inset-0 z-[9998] flex items-center justify-center bg-black/40">
-      <div className="bg-[var(--color-bg)] border border-[var(--color-border)] rounded-xl shadow-2xl max-w-lg w-full mx-4 overflow-hidden">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        tabIndex={-1}
+        className="bg-[var(--color-bg)] border border-[var(--color-border)] rounded-xl shadow-2xl max-w-lg w-full mx-4 overflow-hidden focus:outline-none"
+      >
         <div className="px-5 py-4 border-b border-[var(--color-border)]">
           <div className="flex items-center gap-2">
             <ShieldCheck className="w-5 h-5 text-[var(--color-accent)]" />
             <h3 className="text-sm font-semibold">审批执行计划</h3>
           </div>
           <p className="text-xs text-[var(--color-text-secondary)] mt-1">
-            请确认以下计划是否可以执行（Esc 拒绝，⌘+Enter 批准）
+            请确认以下计划是否可以执行（Enter 批准，Esc 拒绝）
           </p>
         </div>
 
@@ -67,6 +103,7 @@ export function ClusterPlanApprovalDialog({
             拒绝
           </button>
           <button
+            ref={approveButtonRef}
             className="flex items-center gap-1.5 px-4 py-2 text-xs rounded-lg bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity"
             onClick={onApprove}
           >

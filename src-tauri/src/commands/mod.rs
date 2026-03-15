@@ -14,7 +14,6 @@ pub mod native_apps;
 pub mod ocr;
 pub mod plugin;
 pub mod rag;
-pub mod screen_capture;
 pub mod ssh;
 pub mod system;
 pub mod translate;

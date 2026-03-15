@@ -1,8 +1,10 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
 import { tauriPersistStorage } from "@/core/storage";
 import type { AgentStep } from "@/plugins/builtin/SmartAgent/core/react-agent";
-import type { AICenterSourceRef } from "@/store/app-store";
+import type { AICenterHandoff } from "@/store/app-store";
+import { useAISessionRuntimeStore } from "@/store/ai-session-runtime-store";
 import type {
   AgentInstance,
   AgentMessage,
@@ -21,7 +23,7 @@ export interface ClusterSession {
   /** 用户附带的图片路径 */
   images?: string[];
   /** 跨模式 handoff 来源信息 */
-  sourceHandoff?: AICenterSourceRef;
+  sourceHandoff?: AICenterHandoff;
   status: ClusterSessionStatus;
   plan?: ClusterPlan;
   instances: AgentInstance[];
@@ -42,7 +44,7 @@ interface ClusterState {
     mode?: ClusterMode,
     model?: string,
     images?: string[],
-    sourceHandoff?: AICenterSourceRef,
+    sourceHandoff?: AICenterHandoff,
   ) => string;
   getCurrentSession: () => ClusterSession | null;
   setCurrentSession: (id: string) => void;
@@ -57,6 +59,30 @@ interface ClusterState {
 const generateId = () =>
   Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
 
+function buildClusterRuntimeSummary(session: ClusterSession): string | undefined {
+  if (session.result?.finalAnswer?.trim()) {
+    return summarizeAISessionRuntimeText(session.result.finalAnswer, 160);
+  }
+  switch (session.status) {
+    case "planning":
+      return "正在拆解任务";
+    case "awaiting_approval":
+      return "等待计划审批";
+    case "dispatching":
+      return "正在分发子任务";
+    case "running":
+      return "多 Agent 执行中";
+    case "aggregating":
+      return "正在汇总结果";
+    case "done":
+      return "Cluster 已完成";
+    case "error":
+      return "Cluster 执行失败";
+    default:
+      return undefined;
+  }
+}
+
 export const useClusterStore = create<ClusterState>()(
   persist(
     (set, get) => ({
@@ -65,6 +91,7 @@ export const useClusterStore = create<ClusterState>()(
 
       createSession: (query, mode, model, images, sourceHandoff) => {
         const id = generateId();
+        const now = Date.now();
         const session: ClusterSession = {
           id,
           query,
@@ -75,12 +102,20 @@ export const useClusterStore = create<ClusterState>()(
           status: "idle",
           instances: [],
           messages: [],
-          createdAt: Date.now(),
+          createdAt: now,
         };
         set((state) => ({
           sessions: [session, ...state.sessions].slice(0, MAX_PERSISTED_SESSIONS),
           currentSessionId: id,
         }));
+        useAISessionRuntimeStore.getState().ensureSession({
+          mode: "cluster",
+          externalSessionId: id,
+          title: query.slice(0, 60) || "Cluster 会话",
+          createdAt: now,
+          updatedAt: now,
+          source: sourceHandoff,
+        });
         return id;
       },
 
@@ -97,6 +132,17 @@ export const useClusterStore = create<ClusterState>()(
             s.id === id ? { ...s, ...patch } : s,
           ),
         }));
+        const session = get().sessions.find((item) => item.id === id);
+        if (session) {
+          useAISessionRuntimeStore.getState().ensureSession({
+            mode: "cluster",
+            externalSessionId: id,
+            title: session.query.slice(0, 60) || "Cluster 会话",
+            summary: buildClusterRuntimeSummary(session),
+            updatedAt: session.finishedAt ?? Date.now(),
+            source: session.sourceHandoff,
+          });
+        }
       },
 
       updateInstance: (sessionId, instance) => {
@@ -155,6 +201,20 @@ export const useClusterStore = create<ClusterState>()(
     {
       name: "mtools-cluster",
       storage: tauriPersistStorage("cluster-sessions.json", "集群会话"),
+      onRehydrateStorage: () => (state) => {
+        if (!state?.sessions?.length) return;
+        useAISessionRuntimeStore.getState().syncSessions(
+          state.sessions.map((session) => ({
+            mode: "cluster" as const,
+            externalSessionId: session.id,
+            title: session.query.slice(0, 60) || "Cluster 会话",
+            createdAt: session.createdAt,
+            updatedAt: session.finishedAt ?? session.createdAt,
+            summary: buildClusterRuntimeSummary(session),
+            source: session.sourceHandoff,
+          })),
+        );
+      },
       partialize: (state) => ({
         sessions: state.sessions
           .map((s) => {

@@ -1,6 +1,10 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
-import type { PluginInstance, PluginMatchResult } from '@/core/plugin-system/types'
+import type {
+  PluginInstance,
+  PluginMatchContext,
+  PluginMatchResult,
+} from '@/core/plugin-system/types'
 import { handleError } from '@/core/errors'
 import { matchPlugins } from '@/core/plugin-system/command-matcher'
 import { registry } from '@/core/plugin-system/registry'
@@ -11,7 +15,7 @@ interface PluginState {
   devDirs: string[]
 
   loadPlugins: () => Promise<void>
-  matchInput: (input: string) => PluginMatchResult[]
+  matchInput: (input: string, context?: PluginMatchContext) => PluginMatchResult[]
   openPlugin: (pluginId: string, featureCode: string) => Promise<void>
   closePlugin: (pluginId: string, featureCode: string) => Promise<void>
   addDevDir: (dirPath: string) => Promise<void>
@@ -47,9 +51,9 @@ export const usePluginStore = create<PluginState>((set, get) => ({
     }
   },
 
-  matchInput: (input: string) => {
+  matchInput: (input: string, context?: PluginMatchContext) => {
     const { plugins } = get()
-    return matchPlugins(plugins, input)
+    return matchPlugins(plugins, input, context)
   },
 
   openPlugin: async (pluginId, featureCode) => {

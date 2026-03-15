@@ -2,6 +2,7 @@ export const MAIN_VIEW_ID = "main";
 export const HOME_VIEW_ID = "home";
 export const PLUGIN_EMBED_VIEW_ID = "plugin-embed";
 export const CONTEXT_ACTION_VIEW_ID = "context-action";
+export const ROOT_VIEW_ID = "ai-center";
 
 export const SHELL_VIEW_IDS = [
   MAIN_VIEW_ID,
@@ -24,11 +25,11 @@ export function isShellViewId(viewId: string): viewId is ShellViewId {
 }
 
 export function createRootViewStack(): ViewEntry[] {
-  return [{ viewId: MAIN_VIEW_ID }];
+  return [{ viewId: ROOT_VIEW_ID }];
 }
 
 export function getTopViewEntry(viewStack: ViewEntry[]): ViewEntry {
-  return viewStack[viewStack.length - 1] ?? { viewId: MAIN_VIEW_ID };
+  return viewStack[viewStack.length - 1] ?? { viewId: ROOT_VIEW_ID };
 }
 
 export function pushViewEntry(

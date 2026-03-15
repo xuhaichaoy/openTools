@@ -69,11 +69,17 @@ interface ChromeBookmarkNode {
   children?: ChromeBookmarkNode[];
 }
 
+interface BookmarkImportEntry {
+  title: string;
+  url: string;
+  category: string;
+}
+
 function flattenChromeNodes(
   node: ChromeBookmarkNode,
   category: string,
-): { title: string; url: string; category: string }[] {
-  const results: { title: string; url: string; category: string }[] = [];
+): BookmarkImportEntry[] {
+  const results: BookmarkImportEntry[] = [];
   if (node.type === "url" && node.url && node.name) {
     results.push({ title: node.name, url: node.url, category });
   }
@@ -86,12 +92,36 @@ function flattenChromeNodes(
   return results;
 }
 
+function findDirectChildByTagName(
+  element: Element,
+  tagName: string,
+): Element | null {
+  const target = tagName.toUpperCase();
+  for (const child of Array.from(element.children)) {
+    if (child.tagName === target) return child;
+  }
+  return null;
+}
+
+function filterNewBookmarkEntries(
+  entries: BookmarkImportEntry[],
+  existingUrls: Set<string>,
+): BookmarkImportEntry[] {
+  const seenUrls = new Set(existingUrls);
+  return entries.filter((entry) => {
+    if (!entry.url || !entry.title) return false;
+    if (seenUrls.has(entry.url)) return false;
+    seenUrls.add(entry.url);
+    return true;
+  });
+}
+
 // ── 浏览器 HTML 解析 ──
 
 function parseBookmarkHTML(
   html: string,
-): { title: string; url: string; category: string }[] {
-  const results: { title: string; url: string; category: string }[] = [];
+): BookmarkImportEntry[] {
+  const results: BookmarkImportEntry[] = [];
   const parser = new DOMParser();
   const doc = parser.parseFromString(html, "text/html");
 
@@ -100,7 +130,7 @@ function parseBookmarkHTML(
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
       if (item.tagName === "DT") {
-        const anchor = item.querySelector("a");
+        const anchor = findDirectChildByTagName(item, "a");
         if (anchor) {
           const url = anchor.getAttribute("href") || "";
           const title = anchor.textContent?.trim() || "";
@@ -108,8 +138,12 @@ function parseBookmarkHTML(
             results.push({ title, url, category });
           }
         }
-        const subDL = item.querySelector("dl");
-        const subH3 = item.querySelector("h3");
+        const subH3 = findDirectChildByTagName(item, "h3");
+        const subDL =
+          findDirectChildByTagName(item, "dl") ||
+          (item.nextElementSibling?.tagName === "DL"
+            ? item.nextElementSibling
+            : null);
         if (subDL) {
           const folderName = subH3?.textContent?.trim() || category;
           walkDL(subDL, folderName);
@@ -241,15 +275,27 @@ export class BookmarkService {
     try {
       const imported: Bookmark[] = JSON.parse(json);
       if (!Array.isArray(imported)) return { count: 0, bookmarks: await bookmarksDb.getAll() };
-      const newBookmarks = imported.filter((b) => b.url && b.title && !existingUrls.has(b.url));
+      const newBookmarks = filterNewBookmarkEntries(
+        imported.map((b) => ({
+          title: b.title,
+          url: b.url,
+          category: b.category ?? "",
+        })),
+        existingUrls,
+      );
       if (newBookmarks.length === 0) return { count: 0, bookmarks: await bookmarksDb.getAll() };
-      for (const b of newBookmarks) {
+      for (const entry of newBookmarks) {
+        const source =
+          imported.find(
+            (item) => item.url === entry.url && item.title === entry.title,
+          ) ?? imported.find((item) => item.url === entry.url);
+        if (!source) continue;
         await bookmarksDb.create({
-          ...b,
-          id: b.id || generateBookmarkId(),
-          createdAt: b.createdAt || Date.now(),
-          lastVisitedAt: b.lastVisitedAt || 0,
-          visitCount: b.visitCount || 0,
+          ...source,
+          id: source.id || generateBookmarkId(),
+          createdAt: source.createdAt || Date.now(),
+          lastVisitedAt: source.lastVisitedAt || 0,
+          visitCount: source.visitCount || 0,
           version: Date.now(),
           deleted: false,
           updatedAt: Date.now(),
@@ -267,7 +313,7 @@ export class BookmarkService {
   async importFromBrowserHTML(html: string, existingUrls: Set<string>): Promise<{ count: number; bookmarks: Bookmark[] }> {
     const parsed = parseBookmarkHTML(html);
     if (parsed.length === 0) return { count: 0, bookmarks: await bookmarksDb.getAll() };
-    const newEntries = parsed.filter((p) => !existingUrls.has(p.url));
+    const newEntries = filterNewBookmarkEntries(parsed, existingUrls);
     if (newEntries.length === 0) return { count: 0, bookmarks: await bookmarksDb.getAll() };
     for (const p of newEntries) {
       await bookmarksDb.create({
@@ -301,8 +347,9 @@ export class BookmarkService {
         }
       }
       if (allEntries.length === 0) return { count: 0, bookmarks: await bookmarksDb.getAll() };
-      const newEntries = allEntries.filter(
-        (e) => e.url.startsWith("http") && !existingUrls.has(e.url),
+      const newEntries = filterNewBookmarkEntries(
+        allEntries.filter((e) => e.url.startsWith("http")),
+        existingUrls,
       );
       if (newEntries.length === 0) return { count: 0, bookmarks: await bookmarksDb.getAll() };
       for (const e of newEntries) {

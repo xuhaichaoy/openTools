@@ -74,7 +74,6 @@ fn required_permission(method: &str) -> Option<&'static str> {
         "showNotification" => Some("notification"),
         "shellOpenExternal" | "shellOpenPath" | "shellShowItemInFolder" => Some("shell"),
         "getPath" => Some("filesystem"),
-        "screenCapture" => Some("system"),
         _ => None,
     }
 }

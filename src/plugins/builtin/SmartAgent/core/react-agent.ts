@@ -18,6 +18,8 @@ import type {
 } from "@/core/plugin-system/plugin-interface";
 import type { PluginAction } from "@/core/plugin-system/plugin-interface";
 import { applyContextBudget, type PromptSection } from "@/core/agent/context-budget";
+import { mergeStreamChunk } from "@/core/ai/stream-chunk-merge";
+import { parseToolCallArguments } from "./tool-call-arguments";
 
 // ── 结构化工具错误类型（借鉴 Kimi CLI 四层体系） ──
 
@@ -167,141 +169,6 @@ function isFCCompatibilityErrorMessage(message: string): boolean {
 function isTransportOrTimeoutErrorMessage(message: string): boolean {
   return /(timeout|timed out|超时|卡住|请求失败|网络|network|econn|socket hang up|connection reset|流读取错误|503|504|502|rate limit|overloaded|temporarily unavailable)/i
     .test(message);
-}
-
-function escapeRawControlCharsInJsonStrings(input: string): string {
-  let result = "";
-  let inString = false;
-  let escaped = false;
-
-  for (let i = 0; i < input.length; i++) {
-    const ch = input[i];
-    if (escaped) {
-      result += ch;
-      escaped = false;
-      continue;
-    }
-    if (ch === "\\") {
-      result += ch;
-      escaped = true;
-      continue;
-    }
-    if (ch === "\"") {
-      result += ch;
-      inString = !inString;
-      continue;
-    }
-    if (inString) {
-      if (ch === "\n") {
-        result += "\\n";
-        continue;
-      }
-      if (ch === "\r") {
-        result += "\\r";
-        continue;
-      }
-      if (ch === "\t") {
-        result += "\\t";
-        continue;
-      }
-    }
-    result += ch;
-  }
-
-  return result;
-}
-
-function decodeJsonLikeString(value: string): string {
-  return value
-    .replace(/\\r/g, "\r")
-    .replace(/\\n/g, "\n")
-    .replace(/\\t/g, "\t")
-    .replace(/\\"/g, "\"")
-    .replace(/\\'/g, "'")
-    .replace(/\\\\/g, "\\");
-}
-
-function extractLooseStringValue(input: string, key: string): string | null {
-  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const regex = new RegExp(`["']${escapedKey}["']\\s*:\\s*(["'])([\\s\\S]*?)\\1(?=\\s*(?:,|\\}))`);
-  const match = input.match(regex);
-  if (!match) return null;
-  return decodeJsonLikeString(match[2]);
-}
-
-function extractTrailingLooseStringValue(input: string, key: string): string | null {
-  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const regex = new RegExp(`["']${escapedKey}["']\\s*:\\s*(["'])`);
-  const match = regex.exec(input);
-  if (!match) return null;
-
-  const quote = match[1];
-  const start = match.index + match[0].length;
-  let end = input.length - 1;
-
-  while (end >= start && /\s/.test(input[end])) end--;
-  if (end >= start && input[end] === "}") end--;
-  while (end >= start && /\s/.test(input[end])) end--;
-  if (end < start || input[end] !== quote) return null;
-
-  return decodeJsonLikeString(input.slice(start, end));
-}
-
-function recoverLooseToolArguments(input: string): Record<string, unknown> | null {
-  const writePath = extractLooseStringValue(input, "path");
-  const writeContent = extractTrailingLooseStringValue(input, "content");
-  if (writePath && writeContent !== null) {
-    return { path: writePath, content: writeContent };
-  }
-
-  const command = extractLooseStringValue(input, "command");
-  const editPath = extractLooseStringValue(input, "path");
-  const newStr = extractTrailingLooseStringValue(input, "new_str");
-  if (command === "create" && editPath && newStr !== null) {
-    return { command, path: editPath, new_str: newStr };
-  }
-
-  return null;
-}
-
-function parseToolCallArguments(rawArguments: string): {
-  params: Record<string, unknown>;
-  parseError?: string;
-} {
-  const raw = (rawArguments || "").trim();
-  if (!raw) return { params: {} };
-
-  const tryParseObject = (candidate: string): Record<string, unknown> | null => {
-    try {
-      const parsed = JSON.parse(candidate);
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-        ? parsed as Record<string, unknown>
-        : null;
-    } catch {
-      return null;
-    }
-  };
-
-  const direct = tryParseObject(raw);
-  if (direct) return { params: direct };
-
-  const normalizedQuotes = raw
-    .replace(/[\u201C\u201D]/g, "\"")
-    .replace(/[\u2018\u2019]/g, "'");
-  const normalized = tryParseObject(normalizedQuotes);
-  if (normalized) return { params: normalized };
-
-  const escapedControls = tryParseObject(escapeRawControlCharsInJsonStrings(normalizedQuotes));
-  if (escapedControls) return { params: escapedControls };
-
-  const recovered = recoverLooseToolArguments(normalizedQuotes);
-  if (recovered) return { params: recovered };
-
-  const snippet = raw.length > 400 ? `${raw.slice(0, 400)}...` : raw;
-  return {
-    params: {},
-    parseError: `工具参数不是有效 JSON。请严格返回合法 JSON，并确保多行文本中的换行和双引号被正确转义。原始参数片段: ${snippet}`,
-  };
 }
 
 // ── Context 管理 ──
@@ -1383,9 +1250,10 @@ ${s.taskStrategy}
     let accumulated = "";
     let lastPushedLen = 0;
 
-    const pushThinking = () => {
+    const pushThinking = (force = false) => {
       const current = accumulated.trim();
-      if (!current || current.length <= lastPushedLen + 10) return;
+      if (!current) return;
+      if (!force && current.length <= lastPushedLen + 10) return;
 
       const thoughtMatch = current.match(
         /Thought:\s*(.+?)(?=\n(?:Action|Final Answer)|$)/s,
@@ -1408,8 +1276,9 @@ ${s.taskStrategy}
       signal,
       onChunk: (chunk) => {
         if (signal?.aborted) return;
-        accumulated += chunk;
-        pushThinking();
+        const merged = mergeStreamChunk(accumulated, chunk);
+        accumulated = merged.full;
+        pushThinking(merged.mode === "reset");
       },
       onDone: (full) => {
         accumulated = full;
@@ -1604,83 +1473,77 @@ ${s.taskStrategy}
     let toolArgsStartedAt = 0;
     let lastToolArgsPushedLen = 0;
 
-    try {
-      const result = await this.ai.streamWithTools!({
-        messages,
-        tools: toolDefs,
-        signal,
-        modelOverride: this.config.modelOverride,
-        onChunk: (chunk) => {
-          if (signal?.aborted) return;
-          accumulated += chunk;
-          const current = accumulated.trim();
-          if (current && current.length > lastPushedLen + 10) {
-            this.onStep?.({
-              type: "answer",
-              content: current,
-              timestamp: Date.now(),
-              streaming: true,
-            });
-            this.lastStreamingAnswer = current;
-            lastPushedLen = current.length;
-          }
-        },
-        onDone: (full) => {
-          accumulated = full;
-        },
-        onThinking: (chunk) => {
-          if (signal?.aborted) return;
-          if (!thinkingStartedAt) thinkingStartedAt = Date.now();
-          thinkingAccum += chunk;
+    const result = await this.ai.streamWithTools!({
+      messages,
+      tools: toolDefs,
+      signal,
+      modelOverride: this.config.modelOverride,
+      onChunk: (chunk) => {
+        if (signal?.aborted) return;
+        const merged = mergeStreamChunk(accumulated, chunk);
+        accumulated = merged.full;
+        const current = accumulated.trim();
+        if (current && (merged.mode === "reset" || current.length > lastPushedLen + 10)) {
           this.onStep?.({
-            type: "thinking",
-            content: thinkingAccum || " ",
-            timestamp: thinkingStartedAt,
+            type: "answer",
+            content: current,
+            timestamp: Date.now(),
             streaming: true,
           });
-        },
-        onToolArgs: (chunk) => {
-          if (signal?.aborted) return;
-          if (!toolArgsStartedAt) toolArgsStartedAt = Date.now();
-          toolArgsAccum += chunk;
-
-          if (toolArgsAccum.length < 100) {
-             console.log("[react-agent] receiving tool args:", chunk);
-          }
-
-          if (toolArgsAccum && toolArgsAccum.length > lastToolArgsPushedLen + 5) {
-            this.onStep?.({
-              type: "tool_streaming",
-              content: toolArgsAccum || " ",
-              timestamp: toolArgsStartedAt,
-              streaming: true,
-            });
-            lastToolArgsPushedLen = toolArgsAccum.length;
-          }
-        },
-      });
-
-      if (signal?.aborted) throw new Error("Aborted");
-      if (thinkingAccum) {
+          this.lastStreamingAnswer = current;
+          lastPushedLen = current.length;
+        }
+      },
+      onDone: (full) => {
+        accumulated = full;
+      },
+      onThinking: (chunk) => {
+        if (signal?.aborted) return;
+        if (!thinkingStartedAt) thinkingStartedAt = Date.now();
+        thinkingAccum = mergeStreamChunk(thinkingAccum, chunk).full;
         this.onStep?.({
           type: "thinking",
-          content: thinkingAccum,
-          timestamp: thinkingStartedAt || Date.now(),
-          streaming: false,
+          content: thinkingAccum || " ",
+          timestamp: thinkingStartedAt,
+          streaming: true,
         });
-      }
-      if (toolArgsAccum) {
-        this.onStep?.({
-          type: "tool_streaming",
-          content: toolArgsAccum,
-          timestamp: toolArgsStartedAt || Date.now(),
-          streaming: false,
-        });
-      }
-      return result;
-    } catch (e) {
-      throw e;
+      },
+      onToolArgs: (chunk) => {
+        if (signal?.aborted) return;
+        if (!toolArgsStartedAt) toolArgsStartedAt = Date.now();
+        const merged = mergeStreamChunk(toolArgsAccum, chunk);
+        toolArgsAccum = merged.full;
+
+        if (toolArgsAccum && (merged.mode === "reset" || toolArgsAccum.length > lastToolArgsPushedLen + 5)) {
+          this.onStep?.({
+            type: "tool_streaming",
+            content: toolArgsAccum || " ",
+            timestamp: toolArgsStartedAt,
+            streaming: true,
+          });
+          lastToolArgsPushedLen = toolArgsAccum.length;
+        }
+      },
+    });
+
+    if (signal?.aborted) throw new Error("Aborted");
+    if (thinkingAccum) {
+      this.onStep?.({
+        type: "thinking",
+        content: thinkingAccum,
+        timestamp: thinkingStartedAt || Date.now(),
+        streaming: false,
+      });
     }
+    if (toolArgsAccum) {
+      this.onStep?.({
+        type: "tool_streaming",
+        content: toolArgsAccum,
+        timestamp: toolArgsStartedAt || Date.now(),
+        streaming: false,
+      });
+    }
+    return result;
   }
 
   private isComplexQuery(input: string): boolean {

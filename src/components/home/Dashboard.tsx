@@ -1,84 +1,46 @@
 import { useAppStore } from "@/store/app-store";
 import { registry } from "@/core/plugin-system/registry";
-import { Globe, Terminal } from "lucide-react";
+import { Globe, LayoutGrid, Terminal } from "lucide-react";
 import {
-  PluginsIcon,
   OcrIcon,
   ScreenTranslateIcon,
   AiCenterIcon,
 } from "@/components/icons/animated";
 import { useMemo } from "react";
-import { usePluginStore } from "@/store/plugin-store";
-import { isBuiltinPluginInstallRequired } from "@/plugins/builtin";
-import { getPrimarySupportedFeature } from "@/core/plugin-system/platform";
+import { HOME_VIEW_ID } from "@/core/navigation/view-stack";
 
 interface DashboardProps {
   onNavigate: (view: string) => void;
 }
 
+const PRIMARY_LAUNCHER_PLUGIN_IDS = [
+  "ai-center",
+  "workflows",
+  "knowledge-base",
+  "plugins",
+  "management-center",
+] as const;
+
 export function Dashboard({ onNavigate }: DashboardProps) {
   const { setSelectedIndex, setSearchValue, recentTools, addRecentTool } =
     useAppStore();
-  const { plugins, openPlugin } = usePluginStore();
 
   const allTools = useMemo(() => {
-    const builtinTools = registry.getAll().map((plugin) => ({
-      id: plugin.id,
-      icon: plugin.icon,
-      title: plugin.name,
-      recentKey: plugin.viewId,
-      action: () => {
-        addRecentTool(plugin.viewId);
-        onNavigate(plugin.viewId);
-      },
-      color: plugin.color,
-    }));
-
-    const externalTools = plugins
-      .filter((plugin) => {
-        if (plugin.isBuiltin || !plugin.enabled) {
-          return false;
-        }
-        const slug = plugin.slug?.toLowerCase();
-        if (
-          plugin.source === "official" &&
-          slug &&
-          isBuiltinPluginInstallRequired(slug)
-        ) {
-          return false;
-        }
-        return true;
-      })
-      .map((plugin) => {
-        const primaryFeature = getPrimarySupportedFeature(plugin);
-        if (!primaryFeature) return null;
-        return {
-          id: `ext-${plugin.id}`,
-          icon: <PluginsIcon className="w-6 h-6" />,
-          title: plugin.manifest.pluginName,
-          recentKey: `plugin:${plugin.id}`,
-          action: () => {
-            addRecentTool(`plugin:${plugin.id}`);
-            if (plugin.manifest.mtools?.openMode === "embed") {
-              useAppStore.getState().requestEmbed({
-                pluginId: plugin.id,
-                featureCode: primaryFeature.code,
-                title: primaryFeature.explain || plugin.manifest.pluginName,
-              });
-              return;
-            }
-            openPlugin(plugin.id, primaryFeature.code);
-          },
-          color:
-            plugin.source === "official"
-              ? "text-orange-500 bg-orange-500/10"
-              : "text-cyan-500 bg-cyan-500/10",
-        };
-      })
-      .filter((tool): tool is NonNullable<typeof tool> => tool !== null);
-
-    return [...builtinTools, ...externalTools];
-  }, [addRecentTool, onNavigate, openPlugin, plugins]);
+    return PRIMARY_LAUNCHER_PLUGIN_IDS
+      .map((pluginId) => registry.get(pluginId))
+      .filter((plugin): plugin is NonNullable<typeof plugin> => plugin != null)
+      .map((plugin) => ({
+        id: plugin.id,
+        icon: plugin.icon,
+        title: plugin.name,
+        recentKey: plugin.viewId,
+        action: () => {
+          addRecentTool(plugin.viewId);
+          onNavigate(plugin.viewId);
+        },
+        color: plugin.color,
+      }));
+  }, [addRecentTool, onNavigate]);
 
   // 按最近使用排序：最近使用过的排在前面，其余保持原始顺序
   const tools = useMemo(() => {
@@ -90,12 +52,20 @@ export function Dashboard({ onNavigate }: DashboardProps) {
     const rest = allTools.filter((t) => !recentSet.has(t.recentKey));
     return [...recent, ...rest];
   }, [allTools, recentTools]);
+  const hasVisibleRecent = tools.some((tool, index) => tool.recentKey !== allTools[index]?.recentKey);
 
   const quickActions = [
     {
-      id: "screenshot-ocr",
+      id: "all-tools",
+      icon: <LayoutGrid className="w-6 h-6" />,
+      title: "更多工具",
+      action: () => onNavigate(HOME_VIEW_ID),
+      color: "text-slate-500 bg-slate-500/10",
+    },
+    {
+      id: "image-ocr",
       icon: <OcrIcon className="w-6 h-6" />,
-      title: "截图 OCR",
+      title: "图片 OCR",
       action: () => {
         addRecentTool("ocr");
         onNavigate("ocr");
@@ -103,9 +73,9 @@ export function Dashboard({ onNavigate }: DashboardProps) {
       color: "text-violet-500 bg-violet-500/10",
     },
     {
-      id: "screenshot-translate",
+      id: "text-translate",
       icon: <ScreenTranslateIcon className="w-6 h-6" />,
-      title: "截图翻译",
+      title: "翻译",
       action: () => {
         addRecentTool("screen-translate");
         onNavigate("screen-translate");
@@ -159,7 +129,7 @@ export function Dashboard({ onNavigate }: DashboardProps) {
       {/* 常用工具（按最近使用排序） */}
       <div className="mb-4">
         <h3 className="text-xs font-medium text-[var(--color-text-secondary)] mb-2 px-2">
-          {hasRecent ? "最近使用" : "常用工具"}
+          {hasRecent && hasVisibleRecent ? "最近使用" : "核心入口"}
         </h3>
         <div className="grid grid-cols-8 gap-x-2 gap-y-1 mt-2">
           {tools.map((tool) => (

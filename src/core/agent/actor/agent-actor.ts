@@ -4,13 +4,21 @@ import {
   type AgentTool,
   type AgentStep,
 } from "@/plugins/builtin/SmartAgent/core/react-agent";
+import { applyIncomingAgentStep } from "@/plugins/builtin/SmartAgent/core/agent-task-state";
 import {
   type AskUserQuestion,
   type AskUserAnswers,
 } from "@/plugins/builtin/SmartAgent/core/default-tools";
 import type { AgentRole } from "@/core/agent/cluster/types";
 import type { ActorSystem } from "./actor-system";
+import {
+  buildFinalSynthesisPrompt,
+  buildFollowUpPromptFromRenderedMessages,
+  summarizeFollowUpMessages,
+  type FollowUpPromptDescriptor,
+} from "./actor-follow-up-prompt";
 import { autoExtractMemories } from "./actor-memory";
+import { validateActorTaskResult } from "./spawned-task-result-validator";
 import { appendToolCallSync as appendToolCall, appendToolResultSync as appendToolResult } from "./actor-transcript";
 import type { ActorRunContext } from "./actor-middleware";
 import { runMiddlewareChain } from "./actor-middleware";
@@ -452,7 +460,7 @@ export class AgentActor {
       actorLog(this.role.name, `📋 assignTask RUNNING: taskId=${task.id}, status changed to running`);
       this.emit("task_started", { taskId: task.id, query });
       const emitTaskStep = (step: AgentStep) => {
-        task.steps.push(step);
+        task.steps = applyIncomingAgentStep(task.steps, step);
         this.emit("step", { taskId: task.id, step });
       };
 
@@ -465,12 +473,13 @@ export class AgentActor {
 
       actorLog(this.role.name, `📝 assignTask: executing with sessionHistory=${this.sessionHistory.length} entries, inbox=${this.inbox.length}`);
       this._capturedInboxUserQuery = undefined;
-      let { result, finalQuery: executedQuery } = await this.runWithClarifications(
+      const { result: initialResult, finalQuery: executedQuery } = await this.runWithClarifications(
         query,
         images,
         emitTaskStep,
         opts?.runOverrides,
       );
+      let result = initialResult;
       const historyQuery = this._capturedInboxUserQuery || executedQuery;
       this._capturedInboxUserQuery = undefined;
       this.appendSessionHistory("user", historyQuery);
@@ -481,6 +490,8 @@ export class AgentActor {
       const MAX_WAIT_ROUNDS = 60; // 最多等 5 分钟
       let waitRound = 0;
       let processedSpawnFollowUps = 0;
+      let hadFailedSpawnFollowUp = false;
+      const failedSpawnTaskLabels: string[] = [];
       while (
         this.actorSystem?.getActiveSpawnedTasks(this.id).length &&
         waitRound < MAX_WAIT_ROUNDS
@@ -490,10 +501,23 @@ export class AgentActor {
         await this.waitForInbox(WAIT_POLL_MS);
         if (this.inbox.length > 0) {
           const drainedMessages = this.drainInbox();
-          const followUpQuery = this.buildFollowUpFromMessages(drainedMessages);
-          actorLog(this.role.name, `assignTask: processing ${drainedMessages.length} inbox messages in follow-up run`);
+          const followUp = this.buildFollowUpFromMessages(drainedMessages);
+          if (followUp.summary.hasTaskFailure) {
+            hadFailedSpawnFollowUp = true;
+            failedSpawnTaskLabels.push(...followUp.summary.failedTaskLabels);
+          }
+          actorLog(
+            this.role.name,
+            `assignTask: processing ${drainedMessages.length} inbox messages in follow-up run`,
+            {
+              mode: followUp.mode,
+              failedTasks: followUp.summary.failedTaskLabels,
+              completedTasks: followUp.summary.completedTaskLabels,
+              userMessages: followUp.summary.userMessageCount,
+            },
+          );
           const { result: followUpResult, finalQuery: followUpHistoryQuery } = await this.runWithClarifications(
-            followUpQuery,
+            followUp.prompt,
             undefined,
             emitTaskStep,
             opts?.runOverrides,
@@ -515,14 +539,15 @@ export class AgentActor {
           content: "所有子任务已结束，正在触发一次最终综合，避免停留在中间态回复。",
           timestamp: Date.now(),
         });
-        const finalSynthesisPrompt = [
-          "你派发的子任务现在都已经结束。",
-          "请基于当前会话中的已有结果和刚收到的子任务反馈，输出给上游的最终综合答复。",
-          "要求：",
-          "1. 直接给结论，不要再说“稍后整理”“继续汇总”之类的中间态话术。",
-          "2. 明确列出已经完成的部分与最终判断。",
-          "3. 如果仍有缺口，只说明真实缺口，不要重复之前已经完成的工作。",
-        ].join("\n");
+        const finalSynthesisPrompt = buildFinalSynthesisPrompt({
+          hadFailedSpawnFollowUp,
+          failedTaskLabels: failedSpawnTaskLabels,
+        });
+        actorLog(this.role.name, "assignTask: triggering final synthesis", {
+          hadFailedSpawnFollowUp,
+          failedSpawnTaskLabels: [...new Set(failedSpawnTaskLabels.filter(Boolean))],
+          resultPreview: String(result ?? "").slice(0, 120),
+        });
         const { result: finalSynthesisResult, finalQuery: finalSynthesisQuery } = await this.runWithClarifications(
           finalSynthesisPrompt,
           undefined,
@@ -532,6 +557,57 @@ export class AgentActor {
         this.appendSessionHistory("user", finalSynthesisQuery);
         this.appendSessionHistory("assistant", finalSynthesisResult ?? "");
         result = finalSynthesisResult ?? result;
+      }
+
+      const validateFinalResult = (candidate: string | undefined) => validateActorTaskResult({
+        taskText: query,
+        result: candidate,
+        actorId: this.id,
+        startedAt: task.startedAt,
+        completedAt: Date.now(),
+        artifacts: this.actorSystem?.getArtifactRecordsSnapshot(),
+      });
+
+      let finalValidation = validateFinalResult(result);
+      if (!finalValidation.accepted) {
+        actorLog(this.role.name, "assignTask: final result validation failed", {
+          reason: finalValidation.reason,
+          resultPreview: String(result ?? "").slice(0, 120),
+          queryPreview: query.slice(0, 120),
+        });
+        emitTaskStep({
+          type: "observation",
+          content: `最终答复未通过结果校验，正在触发一次纠偏：${finalValidation.reason}`,
+          timestamp: Date.now(),
+        });
+        const repairPrompt = [
+          "你的上一条答复未通过结果校验。",
+          `原因：${finalValidation.reason}`,
+          `原始任务：${query}`,
+          "",
+          "请立刻纠偏并给出真正可交付的最终结果：",
+          "1. 如果任务需要生成网页、代码、文档或文件，请给出真实文件路径、关键内容或明确的产物说明。",
+          "2. 如果你实际上还没有完成，就继续执行，不要输出无关算术、占位文本或空泛总结。",
+          "3. 如果确实无法完成，请直接说明真实阻塞原因和缺失条件，不要假装完成。",
+        ].join("\n");
+        const { result: repairedResult, finalQuery: repairedQuery } = await this.runWithClarifications(
+          repairPrompt,
+          undefined,
+          emitTaskStep,
+          opts?.runOverrides,
+        );
+        this.appendSessionHistory("user", repairedQuery);
+        this.appendSessionHistory("assistant", repairedResult ?? "");
+        result = repairedResult ?? result;
+        finalValidation = validateFinalResult(result);
+        actorLog(this.role.name, "assignTask: final result revalidation", {
+          accepted: finalValidation.accepted,
+          reason: finalValidation.reason,
+          resultPreview: String(result ?? "").slice(0, 120),
+        });
+        if (!finalValidation.accepted) {
+          throw new Error(finalValidation.reason ?? "最终结果未通过有效性校验");
+        }
       }
 
       if (globalTimeoutId) clearTimeout(globalTimeoutId);
@@ -625,12 +701,15 @@ export class AgentActor {
   }
 
   /** 从已 drain 的消息构建后续查询（用于等待循环） */
-  private buildFollowUpFromMessages(drained: InboxMessage[]): string {
+  private buildFollowUpFromMessages(drained: InboxMessage[]): FollowUpPromptDescriptor {
     const messages = drained.map((m) => {
       const sender = m.from === "user" ? "用户" : (this.actorSystem?.get(m.from)?.role.name ?? m.from);
       return `[${sender}]: ${m.content.slice(0, 300)}`;
     });
-    return `你收到了新消息：\n${messages.join("\n")}\n\n请处理这些消息。如果所有子任务已完成，请整合结果并输出最终成果。`;
+    return buildFollowUpPromptFromRenderedMessages({
+      renderedMessages: messages,
+      summary: summarizeFollowUpMessages(drained),
+    });
   }
 
   /** 等待 inbox 有消息或超时 */

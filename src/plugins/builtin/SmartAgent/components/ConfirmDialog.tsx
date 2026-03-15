@@ -31,9 +31,22 @@ function describeAction(
       : `即将写入一个文件（${len} 字符）`;
   }
 
+  if (name.includes("str_replace_edit") || name.includes("edit_file")) {
+    const path = String(params.path || params.filePath || "");
+    const command = String(params.command || "");
+    return path
+      ? `即将修改文件：${path}${command ? `（${command}）` : ""}`
+      : "即将修改一个文件";
+  }
+
   if (name.includes("read_file") || name.includes("read_text")) {
     const path = String(params.path || params.filePath || "");
     return path ? `即将读取文件：${path}` : "即将读取一个文件";
+  }
+
+  if (name.includes("open_path")) {
+    const path = String(params.path || params.filePath || "");
+    return path ? `即将打开：${path}` : "即将打开文件或目录";
   }
 
   if (name.includes("delete") || name.includes("remove")) {

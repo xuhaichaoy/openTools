@@ -1,6 +1,7 @@
 import type {
   PluginInstance,
   PluginCommand,
+  PluginMatchContext,
   PluginMatchResult,
 } from "./types";
 import { isFeatureSupportedOnCurrentPlatform } from "./platform";
@@ -14,22 +15,40 @@ function containsMatch(text: string, keyword: string): boolean {
   return pinyinScore(text, keyword) > 0;
 }
 
+function isLengthAllowed(cmd: PluginCommand, input: string): boolean {
+  const length = input.trim().length;
+  if (cmd.minLength != null && length < cmd.minLength) return false;
+  if (cmd.maxLength != null && length > cmd.maxLength) return false;
+  return true;
+}
+
 /**
  * 匹配单个指令
  */
 function matchCommand(
   cmd: string | PluginCommand,
   input: string,
+  context: PluginMatchContext,
 ): { matched: boolean; score: number } {
   if (typeof cmd === "string") {
+    if ((context.type ?? "text") !== "text") {
+      return { matched: false, score: 0 };
+    }
     // 字符串指令 — 直接使用 pinyinScore 统一评分
     const score = pinyinScore(cmd, input);
     return { matched: score > 0, score };
   }
 
+  if (!isLengthAllowed(cmd, input)) {
+    return { matched: false, score: 0 };
+  }
+
   // 对象类型指令
   switch (cmd.type) {
     case "text": {
+      if ((context.type ?? "text") !== "text") {
+        return { matched: false, score: 0 };
+      }
       // 文本匹配（label 匹配）
       if (containsMatch(cmd.label, input)) {
         return { matched: true, score: 70 };
@@ -38,6 +57,9 @@ function matchCommand(
     }
 
     case "regex": {
+      if ((context.type ?? "text") !== "text") {
+        return { matched: false, score: 0 };
+      }
       // 正则匹配
       if (cmd.match) {
         try {
@@ -61,6 +83,12 @@ function matchCommand(
       return { matched: true, score: 10 };
     }
 
+    case "img":
+    case "files":
+    case "window": {
+      return { matched: (context.type ?? "text") === cmd.type, score: 95 };
+    }
+
     default:
       return { matched: false, score: 0 };
   }
@@ -72,8 +100,10 @@ function matchCommand(
 export function matchPlugins(
   plugins: PluginInstance[],
   input: string,
+  context: PluginMatchContext = { type: "text" },
 ): PluginMatchResult[] {
-  if (!input.trim()) return [];
+  const normalizedInput = input.trim();
+  if ((context.type ?? "text") === "text" && !normalizedInput) return [];
 
   const results: PluginMatchResult[] = [];
 
@@ -88,7 +118,7 @@ export function matchPlugins(
       let bestCmd: string | PluginCommand | null = null;
 
       for (const cmd of feature.cmds) {
-        const { matched, score } = matchCommand(cmd, input);
+        const { matched, score } = matchCommand(cmd, input, context);
         if (matched && score > bestScore) {
           bestScore = score;
           bestCmd = cmd;
@@ -96,7 +126,7 @@ export function matchPlugins(
       }
 
       // 也检查 feature 的 explain（功能说明）
-      if (containsMatch(feature.explain, input)) {
+      if ((context.type ?? "text") === "text" && containsMatch(feature.explain, input)) {
         const explainScore = 40;
         if (explainScore > bestScore) {
           bestScore = explainScore;
@@ -105,7 +135,7 @@ export function matchPlugins(
       }
 
       // 也检查插件名
-      if (containsMatch(plugin.manifest.pluginName, input)) {
+      if ((context.type ?? "text") === "text" && containsMatch(plugin.manifest.pluginName, input)) {
         const nameScore = 30;
         if (nameScore > bestScore) {
           bestScore = nameScore;

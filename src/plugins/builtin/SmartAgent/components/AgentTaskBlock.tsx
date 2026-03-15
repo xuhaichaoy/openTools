@@ -11,6 +11,7 @@ import {
   X,
   Copy,
   Check,
+  Settings2,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -21,6 +22,12 @@ import {
   getExecutionWaitingStageLabel,
   type ExecutionWaitingStage,
 } from "../core/ui-state";
+import { deriveRecoveredAgentTaskStatus } from "../core/agent-task-state";
+import {
+  decodePartialToolContent,
+  hasArtifactPayloadKey,
+  parsePartialToolJSON,
+} from "../core/tool-streaming-preview";
 
 // 代码块组件提取到渲染函数外，避免每次渲染创建新的组件引用
 function CodeBlock({
@@ -76,7 +83,9 @@ const MarkdownContent = React.memo(function MarkdownContent({
 
 const STEP_ICONS: Record<string, React.ReactNode> = {
   thought: <Brain className="w-3.5 h-3.5 text-[var(--color-text-secondary)]" />,
+  thinking: <Brain className="w-3.5 h-3.5 text-[var(--color-text-secondary)]" />,
   action: <Wrench className="w-3.5 h-3.5 text-[var(--color-text-secondary)]" />,
+  tool_streaming: <Settings2 className="w-3.5 h-3.5 text-[var(--color-text-secondary)]" />,
   observation: <Eye className="w-3.5 h-3.5 text-[var(--color-text-secondary)]" />,
   answer: (
     <MessageCircle className="w-3.5 h-3.5 text-[var(--color-text-secondary)]" />
@@ -86,11 +95,25 @@ const STEP_ICONS: Record<string, React.ReactNode> = {
 
 const STEP_LABELS: Record<string, string> = {
   thought: "思考",
+  thinking: "深度思考",
   action: "操作",
+  tool_streaming: "工具参数",
   observation: "观察",
   answer: "回答",
   error: "错误",
 };
+
+function summarizeToolStreaming(content: string): string {
+  const parsed = parsePartialToolJSON(content);
+  if (parsed.query) return `准备搜索 ${parsed.query}`;
+  if (parsed.url) return `准备访问 ${parsed.url.replace(/^https?:\/\//, "")}`;
+  if (parsed.command) return `准备执行命令 ${parsed.command}`;
+  if (parsed.path && (parsed.content || hasArtifactPayloadKey(content))) {
+    return `准备写入 ${parsed.path}`;
+  }
+  if (parsed.path) return `准备处理 ${parsed.path}`;
+  return decodePartialToolContent(content);
+}
 
 interface AgentTaskBlockProps {
   task: AgentTask;
@@ -121,6 +144,14 @@ function summarizeStepText(content: string, maxLen = 56) {
   return `${normalized.slice(0, maxLen)}...`;
 }
 
+function summarizeStep(step?: AgentTask["steps"][number], maxLen = 56) {
+  if (!step) return "";
+  const raw = step.type === "tool_streaming"
+    ? summarizeToolStreaming(step.content)
+    : step.content;
+  return summarizeStepText(raw, maxLen);
+}
+
 function AgentTaskBlockInner({
   task,
   taskIdx,
@@ -142,8 +173,11 @@ function AgentTaskBlockInner({
     () => onToggleProcess(task.id),
     [onToggleProcess, task.id],
   );
+  const recoveredStatus = !isRunningTask && task.status === "running"
+    ? deriveRecoveredAgentTaskStatus(task)
+    : task.status;
   const effectiveStatus =
-    task.status || (isRunningTask ? "running" : task.answer ? "success" : "pending");
+    (isRunningTask ? "running" : recoveredStatus) || (task.answer ? "success" : "pending");
   const shouldCollapseProcess = processCollapsed && effectiveStatus !== "running";
   const lastStep = task.steps[task.steps.length - 1];
 
@@ -193,14 +227,16 @@ function AgentTaskBlockInner({
           <span className="text-[11px] text-sky-700 font-semibold shrink-0">
             任务 {taskIdx + 1}
           </span>
-          <span
-            className={`text-[10px] px-2 py-0.5 rounded-full shrink-0 flex items-center gap-1 ${statusClassMap[effectiveStatus] || statusClassMap.pending}`}
-          >
-            {effectiveStatus === "running" && (
-              <Loader2 className="w-2.5 h-2.5 animate-spin" />
-            )}
-            {statusLabelMap[effectiveStatus] || "待执行"}
-          </span>
+          {effectiveStatus !== "success" && (
+            <span
+              className={`text-[10px] px-2 py-0.5 rounded-full shrink-0 flex items-center gap-1 ${statusClassMap[effectiveStatus] || statusClassMap.pending}`}
+            >
+              {effectiveStatus === "running" && (
+                <Loader2 className="w-2.5 h-2.5 animate-spin" />
+              )}
+              {statusLabelMap[effectiveStatus] || "待执行"}
+            </span>
+          )}
           <div className="ml-auto flex items-center gap-1">
             {lastStep && (
               <span className="text-[10px] text-[var(--color-text-secondary)]">
@@ -286,8 +322,8 @@ function AgentTaskBlockInner({
                   ) : (
                     <ChevronRight className="w-3 h-3 shrink-0 text-[var(--color-text-secondary)]" />
                   )}
-                  {STEP_ICONS[step.type]}
-                  <span className="text-[12px] font-medium">{STEP_LABELS[step.type]}</span>
+                  {STEP_ICONS[step.type] || <Eye className="w-3.5 h-3.5 text-[var(--color-text-secondary)]" />}
+                  <span className="text-[12px] font-medium">{STEP_LABELS[step.type] || step.type}</span>
                   {step.toolName && (
                     <span className="text-[11px] text-[var(--color-text-secondary)] truncate">
                       → {step.toolName}
@@ -299,7 +335,7 @@ function AgentTaskBlockInner({
                 </button>
                 {expandedSteps.has(stepKey) && (
                   <div className="px-2.5 pb-2 text-[12px] whitespace-pre-wrap break-words pt-1 mx-1.5 mb-1 border-t border-[var(--color-border)]/45">
-                    {step.content}
+                    {step.type === "tool_streaming" ? summarizeToolStreaming(step.content) : step.content}
                   </div>
                 )}
               </div>
@@ -318,7 +354,7 @@ function AgentTaskBlockInner({
           </div>
           {lastStep?.content && (
             <div className="text-[11px] text-[var(--color-text-secondary)] pl-6">
-              最近进展：{STEP_LABELS[lastStep.type]} · {summarizeStepText(lastStep.content)}
+              最近进展：{STEP_LABELS[lastStep.type] || lastStep.type} · {summarizeStep(lastStep)}
             </div>
           )}
           {runningPhase === "executing" && executionWaitingStage && (
@@ -404,6 +440,10 @@ export const AgentTaskBlock = React.memo(AgentTaskBlockInner, (prev, next) => {
       prev.task.answer !== next.task.answer ||
       prev.task.status !== next.task.status ||
       prev.task.steps.length !== next.task.steps.length ||
+      prev.task.steps[prev.task.steps.length - 1]?.type !==
+        next.task.steps[next.task.steps.length - 1]?.type ||
+      prev.task.steps[prev.task.steps.length - 1]?.streaming !==
+        next.task.steps[next.task.steps.length - 1]?.streaming ||
       prev.task.steps[prev.task.steps.length - 1]?.content !==
         next.task.steps[next.task.steps.length - 1]?.content
     ) {

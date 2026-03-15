@@ -2,6 +2,7 @@ import { useCallback, type Dispatch, type SetStateAction } from "react";
 import type { MToolsAI } from "@/core/plugin-system/plugin-interface";
 import {
   buildAgentCodingSystemHint,
+  resolveCodingExecutionProfile,
   type CodingExecutionProfile,
 } from "@/core/agent/coding-profile";
 import type { AgentSession } from "@/store/agent-store";
@@ -10,6 +11,7 @@ interface UseAgentRunActionsParams {
   ai?: MToolsAI;
   input: string;
   imagePaths: string[];
+  attachmentPaths?: string[];
   fileContextBlock: string;
   attachmentSummary: string;
   codingMode?: boolean;
@@ -37,12 +39,14 @@ interface UseAgentRunActionsParams {
 interface UseAgentRunActionsResult {
   handleRun: () => Promise<void>;
   handleStop: () => void;
+  effectiveRunProfile: ReturnType<typeof resolveCodingExecutionProfile>;
 }
 
 export function useAgentRunActions({
   ai,
   input,
   imagePaths,
+  attachmentPaths,
   fileContextBlock,
   attachmentSummary,
   codingMode = false,
@@ -54,6 +58,14 @@ export function useAgentRunActions({
   executeAgentTask,
   stopExecution,
 }: UseAgentRunActionsParams): UseAgentRunActionsResult {
+  const effectiveRunProfile = resolveCodingExecutionProfile({
+    manualProfile: { codingMode, largeProjectMode, openClawMode },
+    query: input,
+    fileContextBlock,
+    attachmentPaths: [...(attachmentPaths ?? []), ...imagePaths],
+    handoff: pendingSourceHandoff,
+  });
+
   const handleRun = useCallback(async () => {
     const hasContent = input.trim() || imagePaths.length > 0 || fileContextBlock.trim().length > 0;
     if (!ai || !hasContent) return;
@@ -61,10 +73,10 @@ export function useAgentRunActions({
     const userText = input.trim() || (fileContextBlock.trim() ? "请了解项目结构，等待下一步指令。" : "");
     const query = attachmentSummary ? `${attachmentSummary}\n${userText}` : userText;
     const systemHint = fileContextBlock.trim() || undefined;
-    const codingHint = buildAgentCodingSystemHint({ codingMode, largeProjectMode, openClawMode });
-    const runProfile = (codingMode || openClawMode)
-      ? { codingMode, largeProjectMode, openClawMode }
+    const runProfile = effectiveRunProfile.profile.codingMode
+      ? effectiveRunProfile.profile
       : undefined;
+    const codingHint = buildAgentCodingSystemHint(runProfile);
 
     setInput("");
     clearAssets();
@@ -82,13 +94,11 @@ export function useAgentRunActions({
     imagePaths,
     fileContextBlock,
     attachmentSummary,
-    codingMode,
-    largeProjectMode,
-    openClawMode,
     pendingSourceHandoff,
     setInput,
     clearAssets,
     executeAgentTask,
+    effectiveRunProfile,
   ]);
 
   const handleStop = useCallback(() => {
@@ -98,5 +108,6 @@ export function useAgentRunActions({
   return {
     handleRun,
     handleStop,
+    effectiveRunProfile,
   };
 }

@@ -7,9 +7,7 @@ import {
   X,
   Minus,
   Plus,
-  Trash2,
   Loader2,
-  Camera,
 } from "lucide-react";
 import {
   onPluginEvent,
@@ -149,7 +147,7 @@ const DingPinPlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     [loadDingList],
   );
 
-  // 监听截图事件
+  // 兼容历史 screenshot 事件，允许外部图片流继续触发贴图
   useEffect(() => {
     const unsub = onPluginEvent<{ imageBase64: string }>(
       PluginEventTypes.SCREENSHOT_CAPTURED,

@@ -25,7 +25,7 @@ const hoisted = vi.hoisted(() => ({
   },
   latestHistorySteps: [] as Array<{ type: string; content: string; timestamp: number }>,
   latestOnStep: null as null | ((step: { type: string; content: string; timestamp: number; streaming?: boolean }) => void),
-  runMode: "success" as "success" | "abort" | "timeout",
+  runMode: "success" as "success" | "abort" | "timeout" | "tool_round",
 }));
 
 vi.mock("../core/react-agent", () => ({
@@ -36,7 +36,6 @@ vi.mock("../core/react-agent", () => ({
       _options: unknown,
       onStep: ((step: { type: string; content: string; timestamp: number; streaming?: boolean }) => void) | undefined,
       historySteps: Array<{ type: string; content: string; timestamp: number }>,
-      _depth?: number,
     ) {
       hoisted.latestHistorySteps = historySteps;
       hoisted.latestOnStep = onStep || null;
@@ -57,6 +56,25 @@ vi.mock("../core/react-agent", () => ({
           );
         });
         return "mock-timeout";
+      }
+      if (hoisted.runMode === "tool_round") {
+        hoisted.latestOnStep?.({
+          type: "answer",
+          content: "先写一大段临时内容",
+          timestamp: Date.now(),
+          streaming: true,
+        });
+        hoisted.latestOnStep?.({
+          type: "action",
+          content: "调用 write_file",
+          timestamp: Date.now(),
+        });
+        hoisted.latestOnStep?.({
+          type: "answer",
+          content: "最终稳定答案",
+          timestamp: Date.now(),
+        });
+        return "最终稳定答案";
       }
       hoisted.latestOnStep?.({
         type: "answer",
@@ -365,5 +383,63 @@ describe("useAgentExecution", () => {
     });
     expect(timeoutOrStallMessageCall).toBeTruthy();
     vi.useRealTimers();
+  });
+
+  it("drops provisional streaming answers after entering tool execution", async () => {
+    hoisted.runMode = "tool_round";
+    hoisted.fakeStoreState = {
+      currentSessionId: "target",
+      sessions: [
+        {
+          id: "target",
+          createdAt: 1,
+          tasks: [],
+        },
+      ],
+    };
+
+    const updateTask = vi.fn();
+    let hookValue: ReturnType<typeof useAgentExecution> | null = null;
+
+    act(() => {
+      root.render(
+        <HookHarness
+          onReady={(value) => {
+            hookValue = value;
+          }}
+          params={{
+            ai: {} as never,
+            setRunning: vi.fn(),
+            setRunningPhase: vi.fn(),
+            setExecutionWaitingStage: vi.fn(),
+            availableTools: [] as AgentTool[],
+            currentSessionId: "target",
+            createSession: vi.fn(() => "target"),
+            addTask: vi.fn(() => "task_tool_round"),
+            updateTask,
+            inputRef: { current: document.createElement("textarea") },
+            scrollRef: {
+              current: {
+                scrollHeight: 100,
+                scrollTo: vi.fn(),
+              } as unknown as HTMLDivElement,
+            },
+            openDangerConfirm: vi.fn(async () => true),
+            resetPerRunState: null,
+          }}
+        />,
+      );
+    });
+
+    await act(async () => {
+      await hookValue!.executeAgentTask("query", { sessionId: "target" });
+    });
+
+    const actionUpdate = updateTask.mock.calls.find((call) => {
+      const steps = call?.[2]?.steps as Array<{ type: string; content: string; streaming?: boolean }> | undefined;
+      return steps?.some((step) => step.type === "action");
+    });
+    const actionSteps = actionUpdate?.[2]?.steps as Array<{ type: string; content: string; streaming?: boolean }> | undefined;
+    expect(actionSteps?.some((step) => step.type === "answer" && step.streaming)).toBe(false);
   });
 });

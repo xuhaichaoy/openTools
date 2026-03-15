@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback, useRef } from "react";
 import {
   useClipboardStore,
   startClipboardListener,
+  stopClipboardListener,
   type ClipboardEntry,
 } from "@/store/clipboard-store";
 import {
@@ -99,8 +100,14 @@ export default function ClipboardHistoryPlugin({ onBack }: { onBack?: () => void
 
   // 首次加载 + 启动监听
   useEffect(() => {
-    load();
+    void load();
     startClipboardListener();
+    return () => {
+      if (debounceRef.current) {
+        clearTimeout(debounceRef.current);
+      }
+      stopClipboardListener();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -113,7 +120,9 @@ export default function ClipboardHistoryPlugin({ onBack }: { onBack?: () => void
       if (debounceRef.current) {
         clearTimeout(debounceRef.current);
       }
-      debounceRef.current = setTimeout(() => load(val), 300);
+      debounceRef.current = setTimeout(() => {
+        void load(val);
+      }, 300);
     },
     [setSearch, load]
   );
@@ -165,7 +174,13 @@ export default function ClipboardHistoryPlugin({ onBack }: { onBack?: () => void
           />
           {search && (
             <button
-              onClick={() => setSearch("")}
+              onClick={() => {
+                if (debounceRef.current) {
+                  clearTimeout(debounceRef.current);
+                }
+                setSearch("");
+                void load("");
+              }}
               className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
             >
               <XCircle className="w-3.5 h-3.5" />

@@ -13,6 +13,11 @@ export interface PluginCommand {
   maxLength?: number
 }
 
+export interface PluginMatchContext {
+  type?: MatchType
+  payload?: unknown
+}
+
 /** 插件功能入口 (uTools 的 features) */
 export interface PluginFeature {
   code: string           // 唯一标识

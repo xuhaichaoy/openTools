@@ -304,7 +304,6 @@ export function PluginDeveloperPanel({
               <option value="onPluginOut">onPluginOut</option>
               <option value="setSubInput">setSubInput</option>
               <option value="redirect">redirect</option>
-              <option value="screenCapture">screenCapture</option>
             </select>
             <button
               onClick={onSimulateEvent}

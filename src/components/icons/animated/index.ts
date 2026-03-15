@@ -1,5 +1,4 @@
 export * from "./DevToolboxIcon";
-export * from "./ScreenCaptureIcon";
 export * from "./OcrIcon";
 export * from "./ScreenTranslateIcon";
 export * from "./NoteHubIcon";

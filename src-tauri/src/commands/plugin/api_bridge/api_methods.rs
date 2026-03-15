@@ -138,10 +138,8 @@ pub(super) async fn dispatch_plugin_api_call(
             }
         }
         "screenCapture" => {
-            let _ = app.emit(
-                "plugin-screen-capture",
-                serde_json::json!({ "pluginId": plugin_id }),
-            );
+            let _ = (app, plugin_id);
+            log::warn!("插件调用了已移除的 screenCapture 能力，已按空结果兼容返回");
             Ok("null".to_string())
         }
         "setSubInput" => {

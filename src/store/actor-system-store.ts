@@ -36,6 +36,12 @@ import {
   restoreSessionApprovals,
   type TodoItem,
 } from "@/core/agent/actor/middlewares";
+import {
+  buildAISessionRuntimeChildExternalId,
+  summarizeAISessionRuntimeText,
+} from "@/core/ai/ai-session-runtime";
+import { buildSpawnedTaskCheckpoint } from "@/core/agent/actor/spawned-task-checkpoint";
+import { useAISessionRuntimeStore } from "@/store/ai-session-runtime-store";
 
 const log = createLogger("ActorStore");
 
@@ -172,6 +178,276 @@ function buildSessionSnapshot(
 
 /** Max session age: discard sessions older than 7 days */
 const MAX_SESSION_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+function extractDialogRuntimeTitle(dialogHistory?: readonly DialogMessage[]): string | undefined {
+  if (!dialogHistory?.length) return undefined;
+  for (const message of dialogHistory) {
+    if (message.from !== "user") continue;
+    const preview = summarizeAISessionRuntimeText(
+      message._briefContent ?? message.content,
+      48,
+    );
+    if (preview) return preview;
+  }
+  return undefined;
+}
+
+function buildDialogRuntimeSummary(
+  dialogHistory?: readonly DialogMessage[],
+  spawnedTasks?: readonly SpawnedTaskRecord[],
+  pendingUserInteractions?: readonly PendingInteraction[],
+): string | undefined {
+  const pendingApprovals = pendingUserInteractions?.filter(
+    (interaction) => interaction.status === "pending" && interaction.type === "approval",
+  ).length ?? 0;
+  if (pendingApprovals > 0) {
+    return `等待 ${pendingApprovals} 个审批确认`;
+  }
+
+  const pendingReplies = pendingUserInteractions?.filter(
+    (interaction) => interaction.status === "pending" && interaction.type !== "approval",
+  ).length ?? 0;
+  if (pendingReplies > 0) {
+    return `等待 ${pendingReplies} 个用户回复`;
+  }
+
+  const runningTasks = spawnedTasks?.filter((task) => task.status === "running").length ?? 0;
+  const openSessions = spawnedTasks?.filter(
+    (task) => task.mode === "session" && task.sessionOpen,
+  ).length ?? 0;
+  if (runningTasks > 0 || openSessions > 0) {
+    if (runningTasks > 0 && openSessions > 0) {
+      return `运行中：${runningTasks} 个子任务，${openSessions} 个开放子会话`;
+    }
+    if (runningTasks > 0) {
+      return `运行中：${runningTasks} 个子任务`;
+    }
+    return `保留 ${openSessions} 个开放子会话`;
+  }
+
+  const latestMessage = dialogHistory?.[dialogHistory.length - 1];
+  return summarizeAISessionRuntimeText(
+    latestMessage?._briefContent ?? latestMessage?.content,
+    140,
+  );
+}
+
+function getDialogRuntimeUpdatedAt(
+  dialogHistory?: readonly DialogMessage[],
+  spawnedTasks?: readonly SpawnedTaskRecord[],
+  pendingUserInteractions?: readonly PendingInteraction[],
+): number | undefined {
+  const timestamps: number[] = [];
+  const lastMessageTimestamp = dialogHistory?.[dialogHistory.length - 1]?.timestamp;
+  if (typeof lastMessageTimestamp === "number") {
+    timestamps.push(lastMessageTimestamp);
+  }
+  for (const task of spawnedTasks ?? []) {
+    if (typeof task.lastActiveAt === "number") timestamps.push(task.lastActiveAt);
+    if (typeof task.completedAt === "number") timestamps.push(task.completedAt);
+    if (typeof task.spawnedAt === "number") timestamps.push(task.spawnedAt);
+  }
+  for (const interaction of pendingUserInteractions ?? []) {
+    if (typeof interaction.createdAt === "number") timestamps.push(interaction.createdAt);
+  }
+  return timestamps.length ? Math.max(...timestamps) : undefined;
+}
+
+function syncDialogRuntimeSession(
+  sessionId: string,
+  options?: {
+    dialogHistory?: readonly DialogMessage[];
+    spawnedTasks?: readonly SpawnedTaskRecord[];
+    pendingUserInteractions?: readonly PendingInteraction[];
+    updatedAt?: number;
+  },
+): void {
+  const runtimeStore = useAISessionRuntimeStore.getState();
+  const title = extractDialogRuntimeTitle(options?.dialogHistory);
+  const summary = buildDialogRuntimeSummary(
+    options?.dialogHistory,
+    options?.spawnedTasks,
+    options?.pendingUserInteractions,
+  );
+  const existing = runtimeStore.getSessionByExternal("dialog", sessionId);
+  const activityAt =
+    options?.updatedAt
+    ?? getDialogRuntimeUpdatedAt(
+      options?.dialogHistory,
+      options?.spawnedTasks,
+      options?.pendingUserInteractions,
+    )
+    ?? Date.now();
+  const shouldRefreshTimestamp = Boolean(
+    (title && title !== existing?.title)
+      || summary !== existing?.summary,
+  );
+  const updatedAt = shouldRefreshTimestamp
+    ? Math.max(activityAt, Date.now())
+    : activityAt;
+
+  if (
+    existing
+    && existing.lastActiveAt >= updatedAt
+    && (!title || title === existing.title)
+    && summary === existing.summary
+  ) {
+    return;
+  }
+
+  runtimeStore.ensureSession({
+    mode: "dialog",
+    externalSessionId: sessionId,
+    title: title || "Dialog 房间",
+    summary,
+    updatedAt,
+  });
+}
+
+function buildDialogSpawnedRuntimeExternalSessionId(
+  sessionId: string,
+  record: Pick<SpawnedTaskRecord, "runId" | "mode">,
+): string {
+  return buildAISessionRuntimeChildExternalId(
+    sessionId,
+    record.mode === "session" ? "spawn_session" : "spawn_run",
+    record.runId,
+  );
+}
+
+function buildDialogSpawnedRuntimeTitle(
+  record: SpawnedTaskRecord,
+  actorNameById: ReadonlyMap<string, string>,
+): string {
+  const targetName = actorNameById.get(record.targetActorId) ?? "子代理";
+  const label = summarizeAISessionRuntimeText(record.label ?? record.task, 40);
+  if (record.mode === "session") {
+    return label ? `${targetName} · ${label}` : `${targetName} 子会话`;
+  }
+  return label ? `${targetName} · ${label}` : `${targetName} 子任务`;
+}
+
+function buildDialogSpawnedRuntimeSummary(
+  record: SpawnedTaskRecord,
+  actorNameById: ReadonlyMap<string, string>,
+  options?: {
+    actorSessionHistoryById?: ReadonlyMap<string, Array<{ role: "user" | "assistant"; content: string; timestamp: number }>>;
+    actorTodosById?: Readonly<Record<string, TodoItem[]>>;
+    dialogHistory?: readonly DialogMessage[];
+    artifacts?: readonly DialogArtifactRecord[];
+  },
+): string | undefined {
+  const targetName = actorNameById.get(record.targetActorId) ?? record.targetActorId;
+  const checkpoint = buildSpawnedTaskCheckpoint({
+    task: record,
+    targetActor: {
+      roleName: targetName,
+      sessionHistory: options?.actorSessionHistoryById?.get(record.targetActorId) ?? [],
+    },
+    actorTodos: options?.actorTodosById?.[record.targetActorId] ?? [],
+    dialogHistory: options?.dialogHistory,
+    artifacts: options?.artifacts,
+    actorNameById,
+  });
+  if (checkpoint) {
+    const parts = [
+      checkpoint.stageLabel,
+      targetName,
+      checkpoint.summary,
+      checkpoint.nextStep ? `下一步：${checkpoint.nextStep}` : "",
+    ].filter(Boolean);
+    const checkpointSummary = summarizeAISessionRuntimeText(parts.join(" · "), 180);
+    if (checkpointSummary) return checkpointSummary;
+  }
+  const taskPreview = summarizeAISessionRuntimeText(record.task, 110);
+  if (typeof record.error === "string" && record.error.trim()) {
+    const errorPreview = summarizeAISessionRuntimeText(record.error, 120);
+    return errorPreview ? `失败 · ${targetName} · ${errorPreview}` : `失败 · ${targetName}`;
+  }
+  if (typeof record.result === "string" && record.result.trim()) {
+    const resultPreview = summarizeAISessionRuntimeText(record.result, 140);
+    return resultPreview ? `完成 · ${targetName} · ${resultPreview}` : `完成 · ${targetName}`;
+  }
+  if (record.mode === "session" && record.sessionOpen) {
+    return taskPreview
+      ? `开放子会话 · ${targetName} · ${taskPreview}`
+      : `开放子会话 · ${targetName}`;
+  }
+  switch (record.status) {
+    case "running":
+      return taskPreview
+        ? `运行中 · ${targetName} · ${taskPreview}`
+        : `运行中 · ${targetName}`;
+    case "completed":
+      return taskPreview
+        ? `已完成 · ${targetName} · ${taskPreview}`
+        : `已完成 · ${targetName}`;
+    case "aborted":
+      return taskPreview
+        ? `已中止 · ${targetName} · ${taskPreview}`
+        : `已中止 · ${targetName}`;
+    case "error":
+      return taskPreview
+        ? `执行失败 · ${targetName} · ${taskPreview}`
+        : `执行失败 · ${targetName}`;
+    default:
+      return taskPreview;
+  }
+}
+
+function syncDialogSpawnedRuntimeSessions(
+  sessionId: string,
+  spawnedTasks: readonly SpawnedTaskRecord[],
+  actors?: ReadonlyArray<{ id: string; roleName: string }>,
+  options?: {
+    actorSessionHistoryById?: ReadonlyMap<string, Array<{ role: "user" | "assistant"; content: string; timestamp: number }>>;
+    actorTodosById?: Readonly<Record<string, TodoItem[]>>;
+    dialogHistory?: readonly DialogMessage[];
+    artifacts?: readonly DialogArtifactRecord[];
+  },
+): void {
+  if (spawnedTasks.length === 0) return;
+
+  const runtimeStore = useAISessionRuntimeStore.getState();
+  const rootRuntime = runtimeStore.getSessionByExternal("dialog", sessionId);
+  const actorNameById = new Map(actors?.map((actor) => [actor.id, actor.roleName]) ?? []);
+
+  for (const record of spawnedTasks) {
+    const externalSessionId = buildDialogSpawnedRuntimeExternalSessionId(sessionId, record);
+    const title = buildDialogSpawnedRuntimeTitle(record, actorNameById);
+    const summary = buildDialogSpawnedRuntimeSummary(record, actorNameById, options);
+    const updatedAt = record.lastActiveAt ?? record.completedAt ?? record.spawnedAt;
+    const kind = record.mode === "session" ? "collaboration_room" : "task_session";
+    const existing = runtimeStore.getSessionByExternal("dialog", externalSessionId);
+
+    if (
+      existing
+      && existing.lastActiveAt >= updatedAt
+      && existing.title === title
+      && existing.summary === summary
+      && existing.kind === kind
+    ) {
+      continue;
+    }
+
+    runtimeStore.ensureSession({
+      mode: "dialog",
+      externalSessionId,
+      kind,
+      title,
+      summary,
+      createdAt: record.spawnedAt,
+      updatedAt,
+      source: {
+        sourceMode: "dialog",
+        sourceSessionId: sessionId,
+        sourceLabel: rootRuntime?.title ?? "Dialog 房间",
+        summary: rootRuntime?.summary,
+      },
+      linkType: "derived",
+    });
+  }
+}
 
 function loadLegacySession(): PersistedSession | null {
   try {
@@ -546,6 +822,17 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
             return { spawnedTaskEvents: events.slice(-MAX_TASK_EVENTS) };
           });
         }
+        if (event.type === "session_title_updated" && event.detail) {
+          const detail = event.detail as { sessionId?: string; title?: string };
+          if (detail.sessionId && detail.title?.trim()) {
+            useAISessionRuntimeStore.getState().ensureSession({
+              mode: "dialog",
+              externalSessionId: detail.sessionId,
+              title: detail.title,
+              updatedAt: Date.now(),
+            });
+          }
+        }
       }
       if (!syncRAF) {
         syncRAF = requestAnimationFrame(() => {
@@ -581,6 +868,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
         spawnDefaultActors(system);
       }
       saveActiveSessionPointer(system.sessionId);
+      syncDialogRuntimeSession(system.sessionId);
       get().sync();
     })().catch((err) => {
       log.warn("Failed to hydrate dialog session snapshot", err);
@@ -588,6 +876,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
         spawnDefaultActors(system);
         get().sync();
       }
+      syncDialogRuntimeSession(system.sessionId);
     });
     return system;
   },
@@ -710,6 +999,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
     if (!system) return;
     system.resetSession(summary);
     saveActiveSessionPointer(system.sessionId);
+    syncDialogRuntimeSession(system.sessionId);
     clearPersistedSession();
     set({
       spawnedTasks: [],
@@ -764,6 +1054,19 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
       coordinatorActorId,
       actorTodos,
       pendingUserInteractions,
+    });
+    syncDialogRuntimeSession(system.sessionId, {
+      dialogHistory,
+      spawnedTasks,
+      pendingUserInteractions,
+    });
+    syncDialogSpawnedRuntimeSessions(system.sessionId, spawnedTasks, actors, {
+      actorSessionHistoryById: new Map(
+        liveActors.map((actor) => [actor.id, actor.getSessionHistory()]),
+      ),
+      actorTodosById: actorTodos,
+      dialogHistory,
+      artifacts,
     });
 
     debouncedSave(system);

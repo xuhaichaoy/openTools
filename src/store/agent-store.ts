@@ -11,7 +11,10 @@ import type {
 import { handleError } from "@/core/errors";
 import { MAX_CONVERSATIONS } from "@/core/constants";
 import { createDebouncedPersister } from "@/core/storage";
-import type { AICenterSourceRef } from "@/store/app-store";
+import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
+import type { AICenterHandoff } from "@/store/app-store";
+import { buildRecoveredAgentTaskPatch } from "@/plugins/builtin/SmartAgent/core/agent-task-state";
+import { useAISessionRuntimeStore } from "@/store/ai-session-runtime-store";
 
 /** 单个任务（一次用户提问 + Agent 执行流程） */
 export interface AgentTask {
@@ -39,7 +42,7 @@ export interface AgentSession {
   tasks: AgentTask[];
   createdAt: number;
   /** 跨模式 handoff 来源信息（如从 Ask 切换到 Agent） */
-  sourceHandoff?: AICenterSourceRef;
+  sourceHandoff?: AICenterHandoff;
 }
 
 interface AgentState {
@@ -99,6 +102,30 @@ interface AgentState {
 const generateId = () =>
   Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
 
+function buildAgentRuntimeSummary(task: Partial<AgentTask>): string | undefined {
+  if (typeof task.answer === "string" && task.answer.trim()) {
+    return summarizeAISessionRuntimeText(task.answer, 140);
+  }
+  if (typeof task.last_error === "string" && task.last_error.trim()) {
+    const preview = summarizeAISessionRuntimeText(task.last_error, 110);
+    return preview ? `失败：${preview}` : "任务执行失败";
+  }
+  switch (task.status) {
+    case "running":
+      return "任务运行中";
+    case "success":
+      return "任务已完成";
+    case "error":
+      return "任务执行失败";
+    case "paused":
+      return "任务已暂停";
+    case "pending":
+      return "任务等待执行";
+    default:
+      return undefined;
+  }
+}
+
 /**
  * 兼容旧格式：将 { query, steps, answer } 迁移到 { tasks: [...] }
  */
@@ -107,12 +134,18 @@ function migrateSession(raw: Record<string, unknown>): AgentSession {
   const r = raw as any;
   if (Array.isArray(r.tasks)) {
     // 为旧数据中缺少 id 的 task 补充 id
-    const tasks = r.tasks.map((t: AgentTask) => ({
-      ...t,
-      id: t.id || generateId(),
-      status: t.status || (t.answer ? "success" : "pending"),
-      retry_count: t.retry_count ?? 0,
-    }));
+    const tasks = r.tasks.map((t: AgentTask) => {
+      const baseTask: AgentTask = {
+        ...t,
+        id: t.id || generateId(),
+        status: t.status || (t.answer ? "success" : "pending"),
+        retry_count: t.retry_count ?? 0,
+      };
+      return {
+        ...baseTask,
+        ...(buildRecoveredAgentTaskPatch(baseTask) ?? {}),
+      };
+    });
     return {
       id: r.id,
       title: r.title,
@@ -128,14 +161,20 @@ function migrateSession(raw: Record<string, unknown>): AgentSession {
     title: r.title || "新任务",
     tasks: hasContent
       ? [
-          {
-            id: generateId(),
-            query: r.query || "",
-            steps: r.steps || [],
-            answer: r.answer ?? null,
-            status: r.answer ? "success" : "pending",
-            retry_count: 0,
-          },
+          (() => {
+            const task: AgentTask = {
+              id: generateId(),
+              query: r.query || "",
+              steps: r.steps || [],
+              answer: r.answer ?? null,
+              status: r.answer ? "success" : "pending",
+              retry_count: 0,
+            };
+            return {
+              ...task,
+              ...(buildRecoveredAgentTaskPatch(task) ?? {}),
+            };
+          })(),
         ]
       : [],
     createdAt: r.createdAt ?? Date.now(),
@@ -172,6 +211,19 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const rawSessions = JSON.parse(json) as any[];
       const sessions = rawSessions.map(migrateSession);
+      useAISessionRuntimeStore.getState().syncSessions(
+        sessions.map((session) => ({
+          mode: "agent" as const,
+          externalSessionId: session.id,
+          title: session.title,
+          createdAt: session.createdAt,
+          updatedAt: session.tasks[session.tasks.length - 1]?.last_finished_at
+            ?? session.tasks[session.tasks.length - 1]?.last_started_at
+            ?? session.createdAt,
+          summary: buildAgentRuntimeSummary(session.tasks[session.tasks.length - 1] ?? {}),
+          source: session.sourceHandoff,
+        })),
+      );
       if (sessions.length > 0) {
         set({
           sessions,
@@ -341,6 +393,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   createSession: (query: string, sourceHandoff?: AgentSession["sourceHandoff"]) => {
     const id = generateId();
+    const now = Date.now();
     const session: AgentSession = {
       id,
       title: query.slice(0, 30) || "新任务",
@@ -356,13 +409,21 @@ export const useAgentStore = create<AgentState>((set, get) => ({
             },
           ]
         : [],
-      createdAt: Date.now(),
+      createdAt: now,
       ...(sourceHandoff ? { sourceHandoff } : {}),
     };
     set((state) => ({
       sessions: [session, ...state.sessions],
       currentSessionId: id,
     }));
+    useAISessionRuntimeStore.getState().ensureSession({
+      mode: "agent",
+      externalSessionId: id,
+      title: session.title,
+      createdAt: now,
+      updatedAt: now,
+      source: sourceHandoff,
+    });
     debouncedPersist();
     return id;
   },
@@ -391,6 +452,9 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         return { ...s, tasks: [...s.tasks, newTask] };
       }),
     }));
+    useAISessionRuntimeStore.getState().touchSession("agent", sessionId, {
+      title: query.slice(0, 30) || undefined,
+    });
     debouncedPersist();
     return taskId;
   },
@@ -413,6 +477,29 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         }),
       };
     });
+    const shouldSyncRuntime = [
+      updates.status,
+      updates.answer,
+      updates.last_error,
+      updates.last_started_at,
+      updates.last_finished_at,
+      updates.last_result_status,
+    ].some((value) => value !== undefined);
+    if (shouldSyncRuntime) {
+      const session = get().sessions.find((item) => item.id === sessionId);
+      const updatedAt =
+        updates.last_finished_at
+        ?? updates.last_started_at
+        ?? Date.now();
+      useAISessionRuntimeStore.getState().ensureSession({
+        mode: "agent",
+        externalSessionId: sessionId,
+        title: session?.title,
+        summary: buildAgentRuntimeSummary(updates),
+        updatedAt,
+        source: session?.sourceHandoff,
+      });
+    }
     debouncedPersist();
   },
 
@@ -422,6 +509,11 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         s.id === id ? { ...s, ...updates } : s,
       ),
     }));
+    if (updates.title !== undefined) {
+      useAISessionRuntimeStore.getState().touchSession("agent", id, {
+        title: updates.title,
+      });
+    }
     debouncedPersist();
   },
 
@@ -453,21 +545,30 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         s.id === id ? { ...s, title } : s,
       ),
     }));
+    useAISessionRuntimeStore.getState().touchSession("agent", id, { title });
     debouncedPersist();
   },
 
   clearCurrentSession: () => {
     const id = generateId();
+    const now = Date.now();
     const session: AgentSession = {
       id,
       title: "新任务",
       tasks: [],
-      createdAt: Date.now(),
+      createdAt: now,
     };
     set((state) => ({
       sessions: [session, ...state.sessions],
       currentSessionId: id,
     }));
+    useAISessionRuntimeStore.getState().ensureSession({
+      mode: "agent",
+      externalSessionId: id,
+      title: session.title,
+      createdAt: now,
+      updatedAt: now,
+    });
     debouncedPersist();
   },
 }));

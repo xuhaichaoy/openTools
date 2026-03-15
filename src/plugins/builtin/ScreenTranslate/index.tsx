@@ -5,9 +5,7 @@ import {
   Copy,
   Check,
   Loader2,
-  Camera,
   Clipboard,
-  Volume2,
 } from "lucide-react";
 import {
   translate,
@@ -123,7 +121,7 @@ const ScreenTranslatePlugin: React.FC<{ onBack?: () => void }> = ({
             </button>
           )}
           <Languages className="w-5 h-5 text-rose-500" />
-          <h2 className="font-semibold">屏幕翻译</h2>
+          <h2 className="font-semibold">文本翻译</h2>
         </div>
 
         {/* 引擎选择 */}
