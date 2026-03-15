@@ -35,7 +35,9 @@ export class ToolResolverMiddleware implements ActorMiddleware {
     builtinResult.resetPerRunState();
 
     const commTools = ctx.actorSystem
-      ? createActorCommunicationTools(ctx.actorId, ctx.actorSystem)
+      ? createActorCommunicationTools(ctx.actorId, ctx.actorSystem, {
+        inheritedImages: ctx.images,
+      })
       : [];
     const memoryTools = createActorMemoryTools(ctx.actorId, ctx.workspace);
 

@@ -116,7 +116,7 @@ export interface AgentConfig {
   /** 运行时思考深度（由 Actor/Dialog 透传） */
   thinkingLevel?: ThinkingLevel;
   /** Actor 收件箱排空回调：每次 iteration 间隙调用，返回待处理消息（空数组 = 无新消息） */
-  inboxDrain?: () => { id: string; from: string; content: string; expectReply?: boolean; replyTo?: string }[];
+  inboxDrain?: () => { id: string; from: string; content: string; expectReply?: boolean; replyTo?: string; images?: string[] }[];
   /** 对话历史上下文：作为多轮 messages 注入（system 之后、当前 query 之前），用于 Actor 会话连续性 */
   contextMessages?: Array<{ role: "user" | "assistant"; content: string }>;
 }
@@ -181,6 +181,11 @@ import { estimateTokens, estimateMessagesTokens } from "@/core/ai/token-utils";
 
 const DEFAULT_CONTEXT_LIMIT = 100_000;
 const CONTEXT_COMPACT_THRESHOLD = 0.75;
+const PROCESSED_HISTORY_IMAGE_MARKER = "[历史图片已处理，无需重复发送原图]";
+const TOOL_CONTEXT_TRUNCATION_NOTICE = "[工具输出已按上下文预算压缩，如需细节请缩小范围或重新读取目标片段]";
+const TOOL_CONTEXT_COMPACTION_PLACEHOLDER = "[较早工具输出已移出上下文以节省空间，必要时请重新执行该工具查看详情]";
+const SINGLE_TOOL_RESULT_CONTEXT_SHARE = 0.18;
+const TOTAL_TOOL_RESULT_CONTEXT_SHARE = 0.35;
 
 function summarizeDiscardedMiddle<
   T extends { role: string; content: string | null; tool_calls?: unknown; [k: string]: unknown },
@@ -296,6 +301,194 @@ function compactMessages<
   }
 
   return result;
+}
+
+function appendContextMarker(content: string | null, marker: string): string {
+  if (!content) return marker;
+  if (content.includes(marker)) return content;
+  return `${content}\n\n${marker}`;
+}
+
+function cloneMessages<
+  T extends { role: string; content: string | null; [k: string]: unknown },
+>(messages: T[]): T[] {
+  return messages.map((message) => ({ ...message }));
+}
+
+function pruneProcessedHistoryImages<
+  T extends { role: string; content: string | null; images?: string[]; [k: string]: unknown },
+>(messages: T[]): T[] {
+  let lastAssistantIndex = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === "assistant") {
+      lastAssistantIndex = i;
+      break;
+    }
+  }
+
+  if (lastAssistantIndex < 0) return messages;
+
+  let nextMessages: T[] | null = null;
+  for (let i = 0; i < lastAssistantIndex; i++) {
+    const message = messages[i];
+    if (message.role !== "user" || !message.images?.length) continue;
+    if (!nextMessages) nextMessages = cloneMessages(messages);
+
+    nextMessages[i] = {
+      ...nextMessages[i],
+      content: appendContextMarker(nextMessages[i].content, PROCESSED_HISTORY_IMAGE_MARKER),
+    };
+    delete nextMessages[i].images;
+  }
+
+  return nextMessages ?? messages;
+}
+
+function findSliceEndByTokenBudget(text: string, maxTokens: number): number {
+  if (!text || maxTokens <= 0) return 0;
+  let low = 0;
+  let high = text.length;
+  while (low < high) {
+    const mid = Math.floor((low + high + 1) / 2);
+    if (estimateTokens(text.slice(0, mid)) <= maxTokens) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return low;
+}
+
+function findSliceStartByTokenBudget(text: string, maxTokens: number): number {
+  if (!text || maxTokens <= 0) return text.length;
+  let low = 0;
+  let high = text.length;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if (estimateTokens(text.slice(mid)) <= maxTokens) {
+      high = mid;
+    } else {
+      low = mid + 1;
+    }
+  }
+  return low;
+}
+
+function truncateTextToTokenBudget(text: string, maxTokens: number, notice: string): string {
+  if (!text) return text;
+  if (estimateTokens(text) <= maxTokens) return text;
+
+  const normalizedBudget = Math.max(1, Math.floor(maxTokens));
+  const noticeTokens = estimateTokens(notice);
+  if (normalizedBudget <= noticeTokens + 8) {
+    return notice;
+  }
+
+  const tailBudget = Math.max(24, Math.floor(normalizedBudget * 0.22));
+  const headBudget = Math.max(24, normalizedBudget - noticeTokens - tailBudget);
+  const headEnd = findSliceEndByTokenBudget(text, headBudget);
+  const tailStart = findSliceStartByTokenBudget(text, tailBudget);
+
+  const head = text.slice(0, headEnd).trimEnd();
+  const tail = text.slice(tailStart).trimStart();
+  let combined = [head, notice, tail].filter(Boolean).join("\n\n");
+
+  if (estimateTokens(combined) <= normalizedBudget) return combined;
+
+  let adjustedTailStart = tailStart;
+  while (adjustedTailStart < text.length && estimateTokens(combined) > normalizedBudget) {
+    adjustedTailStart = Math.min(text.length, adjustedTailStart + Math.max(16, Math.floor((text.length - adjustedTailStart) * 0.15)));
+    const nextTail = text.slice(adjustedTailStart).trimStart();
+    combined = [head, notice, nextTail].filter(Boolean).join("\n\n");
+  }
+
+  if (estimateTokens(combined) <= normalizedBudget) return combined;
+
+  const reducedHeadEnd = findSliceEndByTokenBudget(head, Math.max(16, normalizedBudget - noticeTokens));
+  const reducedHead = head.slice(0, reducedHeadEnd).trimEnd();
+  return [reducedHead, notice].filter(Boolean).join("\n\n");
+}
+
+function buildToolContextNotice(toolName?: string): string {
+  if (toolName === "read_file" || toolName === "read_text_file") {
+    return `${TOOL_CONTEXT_TRUNCATION_NOTICE}，可改用 read_file_range 读取局部行段。`;
+  }
+  if (toolName === "search_in_files") {
+    return `${TOOL_CONTEXT_TRUNCATION_NOTICE}，可缩小 query 或 file_pattern。`;
+  }
+  if (toolName === "run_shell_command" || toolName === "persistent_shell") {
+    return `${TOOL_CONTEXT_TRUNCATION_NOTICE}，可用 grep/head/tail 先过滤结果。`;
+  }
+  return TOOL_CONTEXT_TRUNCATION_NOTICE;
+}
+
+function enforceToolResultContextBudget<
+  T extends { role: string; content: string | null; name?: string; [k: string]: unknown },
+>(messages: T[], contextLimit: number): T[] {
+  const threshold = Math.max(512, Math.floor(contextLimit * CONTEXT_COMPACT_THRESHOLD));
+  const singleToolBudget = Math.max(192, Math.floor(threshold * SINGLE_TOOL_RESULT_CONTEXT_SHARE));
+  const totalToolBudget = Math.max(singleToolBudget, Math.floor(threshold * TOTAL_TOOL_RESULT_CONTEXT_SHARE));
+
+  let nextMessages: T[] | null = null;
+  const toolIndexes: number[] = [];
+
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i];
+    if (message.role !== "tool" || typeof message.content !== "string" || !message.content) continue;
+    toolIndexes.push(i);
+    const truncated = truncateTextToTokenBudget(
+      message.content,
+      singleToolBudget,
+      buildToolContextNotice(message.name),
+    );
+    if (truncated === message.content) continue;
+    if (!nextMessages) nextMessages = cloneMessages(messages);
+    nextMessages[i] = { ...nextMessages[i], content: truncated };
+  }
+
+  const working = nextMessages ?? messages;
+
+  const getToolTokens = () =>
+    toolIndexes.reduce((sum, index) => {
+      const content = working[index]?.content;
+      return sum + estimateTokens(typeof content === "string" ? content : "");
+    }, 0);
+
+  let totalTokens = estimateMessagesTokens(working);
+  let totalToolTokens = getToolTokens();
+  if (totalTokens <= threshold && totalToolTokens <= totalToolBudget) {
+    return working;
+  }
+
+  if (!nextMessages) nextMessages = cloneMessages(messages);
+  for (const index of toolIndexes) {
+    const current = nextMessages[index];
+    if (!current || current.role !== "tool") continue;
+    const placeholder = current.name
+      ? `[${current.name}] ${TOOL_CONTEXT_COMPACTION_PLACEHOLDER}`
+      : TOOL_CONTEXT_COMPACTION_PLACEHOLDER;
+    if (current.content === placeholder) continue;
+
+    nextMessages[index] = { ...current, content: placeholder };
+    totalTokens = estimateMessagesTokens(nextMessages);
+    totalToolTokens = toolIndexes.reduce((sum, toolIndex) => {
+      const content = nextMessages![toolIndex]?.content;
+      return sum + estimateTokens(typeof content === "string" ? content : "");
+    }, 0);
+    if (totalTokens <= threshold && totalToolTokens <= totalToolBudget) {
+      break;
+    }
+  }
+
+  return nextMessages;
+}
+
+function prepareMessagesForModel<
+  T extends { role: string; content: string | null; images?: string[]; name?: string; [k: string]: unknown },
+>(messages: T[], contextLimit: number): T[] {
+  const pruned = pruneProcessedHistoryImages(messages);
+  const compacted = compactMessages(pruned, contextLimit);
+  return enforceToolResultContextBudget(compacted, contextLimit);
 }
 
 // ── 工具输出截断 ──
@@ -1825,19 +2018,23 @@ ${s.taskStrategy}
       if (this.config.inboxDrain) {
         const pending = this.config.inboxDrain();
         if (pending.length > 0) {
-          const inboxBlock = pending.map((m) => {
+          for (const m of pending) {
             const replyHint = m.expectReply
               ? `（等待你的回复，请用 send_message 回复，reply_to 填 "${m.id}"）`
               : "";
-            return `[消息来自 ${m.from}（消息ID: ${m.id}）${replyHint}]: ${m.content}`;
-          }).join("\n");
+            messages.push({
+              role: "user",
+              content: `[收件箱消息]\n来自 ${m.from}（消息ID: ${m.id}）${replyHint}\n\n${m.content}`,
+              ...(m.images?.length ? { images: m.images } : {}),
+            });
+          }
           const hasAgentMsg = pending.some((m) => m.from !== "用户" && m.from !== "user");
           const replyGuide = hasAgentMsg
             ? "如果有其他 Agent 的消息需要回应，使用 send_message 回复。然后继续当前任务。"
             : "请根据消息内容继续当前任务。";
           messages.push({
             role: "user",
-            content: `[收件箱 — 你在执行任务期间收到了新消息]\n${inboxBlock}\n\n${replyGuide}`,
+            content: `[收件箱处理要求]\n你在执行任务期间收到了 ${pending.length} 条新消息。\n${replyGuide}`,
           });
         }
       }
@@ -1870,9 +2067,12 @@ ${s.taskStrategy}
         }
       }
 
-      const compacted = compactMessages(messages, this.config.contextLimit ?? DEFAULT_CONTEXT_LIMIT);
-      this.recordTrajectory({ type: "llm_call", mode: this.mode, tokenEstimate: estimateMessagesTokens(compacted) });
-      const result = await this.streamFCLLM(compacted, signal, isFinalWarningTurn);
+      const preparedMessages = prepareMessagesForModel(
+        messages,
+        this.config.contextLimit ?? DEFAULT_CONTEXT_LIMIT,
+      );
+      this.recordTrajectory({ type: "llm_call", mode: this.mode, tokenEstimate: estimateMessagesTokens(preparedMessages) });
+      const result = await this.streamFCLLM(preparedMessages, signal, isFinalWarningTurn);
 
       if (signal?.aborted) throw new Error("Aborted");
 
@@ -2112,7 +2312,10 @@ ${s.taskStrategy}
       }
 
       let responseContent: string;
-      const compactedTextMessages = compactMessages(messages, this.config.contextLimit ?? DEFAULT_CONTEXT_LIMIT);
+      const compactedTextMessages = prepareMessagesForModel(
+        messages,
+        this.config.contextLimit ?? DEFAULT_CONTEXT_LIMIT,
+      );
       this.recordTrajectory({ type: "llm_call", mode: this.mode, tokenEstimate: estimateMessagesTokens(compactedTextMessages) });
       try {
         responseContent = await this.streamTextLLM(compactedTextMessages, signal);

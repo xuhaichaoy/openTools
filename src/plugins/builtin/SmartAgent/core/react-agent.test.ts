@@ -363,4 +363,173 @@ describe("ReActAgent FC compatibility cache", () => {
     expect(answer).not.toContain("10+20 = 30");
     expect(fcCalls).toBe(2);
   });
+
+  it("should prune already-processed user images from later FC rounds", async () => {
+    let fcCalls = 0;
+    const snapshots: Array<Array<{ role: string; content: string | null; images?: string[]; name?: string }>> = [];
+
+    const ai = createMockAI(async ({ messages }) => {
+      snapshots.push(
+        messages.map((message) => ({
+          role: message.role,
+          content: message.content,
+          name: message.name,
+          ...(message.images?.length ? { images: [...message.images] } : {}),
+        })),
+      );
+      fcCalls += 1;
+      if (fcCalls === 1) {
+        return {
+          type: "tool_calls",
+          toolCalls: [
+            {
+              id: "call-noop-image",
+              type: "function",
+              function: {
+                name: "noop",
+                arguments: "{}",
+              },
+            },
+          ],
+        };
+      }
+      return {
+        type: "content",
+        content: "图片信息已处理完成。",
+      };
+    });
+
+    const agent = new ReActAgent(ai, noopTools, {
+      maxIterations: 4,
+      fcCompatibilityKey: "prune-processed-images",
+    });
+
+    const answer = await agent.run("请根据这张图继续分析", undefined, ["/tmp/demo.png"]);
+
+    expect(answer).toContain("图片信息已处理完成");
+    expect(fcCalls).toBe(2);
+    const firstUserWithImage = snapshots[0].find((message) => message.role === "user" && message.images?.length);
+    expect(firstUserWithImage?.images).toEqual(["/tmp/demo.png"]);
+
+    const secondRoundHasImage = snapshots[1].some((message) => message.images?.length);
+    expect(secondRoundHasImage).toBe(false);
+    const prunedUserMessage = snapshots[1].find(
+      (message) => message.role === "user" && typeof message.content === "string" && message.content.includes("历史图片已处理"),
+    );
+    expect(prunedUserMessage?.content).toContain("无需重复发送原图");
+  });
+
+  it("should compact oversized tool outputs before sending the next FC round", async () => {
+    let fcCalls = 0;
+    const snapshots: Array<Array<{ role: string; content: string | null; name?: string }>> = [];
+    const hugeOutputA = `A-start\n${"A".repeat(9000)}\nA-end`;
+
+    const ai = createMockAI(async ({ messages }) => {
+      snapshots.push(
+        messages.map((message) => ({
+          role: message.role,
+          content: message.content,
+          name: message.name,
+        })),
+      );
+      fcCalls += 1;
+      if (fcCalls === 1) {
+        return {
+          type: "tool_calls",
+          toolCalls: [
+            {
+              id: "call-big-1",
+              type: "function",
+              function: {
+                name: "big_tool",
+                arguments: "{\"label\":\"first\"}",
+              },
+            },
+          ],
+        };
+      }
+      return {
+        type: "content",
+        content: "工具输出已经压缩后继续执行。",
+      };
+    });
+
+    const tools: AgentTool[] = [
+      {
+        name: "big_tool",
+        description: "return huge output",
+        parameters: {
+          label: { type: "string", description: "label" },
+        },
+        execute: async () => hugeOutputA,
+      },
+    ];
+
+    const agent = new ReActAgent(ai, tools, {
+      maxIterations: 4,
+      contextLimit: 1600,
+      fcCompatibilityKey: "tool-output-context-guard",
+    });
+
+    const answer = await agent.run("请继续处理大段工具输出");
+
+    expect(answer).toContain("压缩后继续执行");
+    expect(fcCalls).toBe(2);
+
+    const finalRoundToolMessages = snapshots[1].filter((message) => message.role === "tool");
+    expect(finalRoundToolMessages).toHaveLength(1);
+    expect(
+      finalRoundToolMessages[0].content?.includes("按上下文预算压缩")
+      || finalRoundToolMessages[0].content?.includes("已移出上下文"),
+    ).toBe(true);
+    expect(finalRoundToolMessages[0].content?.length ?? 0).toBeLessThan(2200);
+    expect(finalRoundToolMessages[0].content).not.toBe(hugeOutputA);
+  });
+
+  it("should preserve inbox message images in FC rounds", async () => {
+    const snapshots: Array<Array<{ role: string; content: string | null; images?: string[] }>> = [];
+    let drained = false;
+
+    const ai = createMockAI(async ({ messages }) => {
+      snapshots.push(
+        messages.map((message) => ({
+          role: message.role,
+          content: message.content,
+          ...(message.images?.length ? { images: [...message.images] } : {}),
+        })),
+      );
+      return {
+        type: "content",
+        content: "我已经读取到收件箱里的图片消息。",
+      };
+    });
+
+    const agent = new ReActAgent(ai, noopTools, {
+      maxIterations: 2,
+      fcCompatibilityKey: "inbox-image-forwarding",
+      inboxDrain: () => {
+        if (drained) return [];
+        drained = true;
+        return [
+          {
+            id: "msg-1",
+            from: "Coordinator",
+            content: "请参考这张界面图继续实现页面。",
+            images: ["/tmp/design-shot.png"],
+          },
+        ];
+      },
+    });
+
+    const answer = await agent.run("继续当前任务");
+
+    expect(answer).toContain("读取到收件箱里的图片消息");
+    const inboxImageMessage = snapshots[0]?.find(
+      (message) => message.role === "user"
+        && typeof message.content === "string"
+        && message.content.includes("[收件箱消息]")
+        && message.images?.length,
+    );
+    expect(inboxImageMessage?.images).toEqual(["/tmp/design-shot.png"]);
+  });
 });

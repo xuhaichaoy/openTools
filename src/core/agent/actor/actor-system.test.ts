@@ -21,6 +21,8 @@ vi.mock("./agent-actor", () => {
     capabilities?: ActorConfig["capabilities"];
     private _status = "idle";
     private inbox: unknown[] = [];
+    lastAssignedQuery?: string;
+    lastAssignedImages?: string[];
 
     constructor(config: ActorConfig) {
       this.id = config.id;
@@ -86,6 +88,25 @@ vi.mock("./agent-actor", () => {
 
     getSessionHistory() {
       return [];
+    }
+
+    assignTask(query: string, images?: string[]) {
+      this.lastAssignedQuery = query;
+      this.lastAssignedImages = images;
+      this._status = "running";
+      return Promise.resolve({
+        id: "task-1",
+        query,
+        status: "completed" as const,
+        result: "ok",
+        steps: [],
+        startedAt: Date.now(),
+        finishedAt: Date.now(),
+      });
+    }
+
+    abort() {
+      this._status = "idle";
     }
   }
 
@@ -165,5 +186,24 @@ describe("ActorSystem.broadcastAndResolve", () => {
     system.cancelPendingInteractionsForActor("coordinator");
     system.cancelPendingInteractionsForActor("specialist");
     system.killAll();
+  });
+});
+
+describe("ActorSystem.spawnTask", () => {
+  it("passes inherited images to the spawned actor task", () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+    const specialist = system.spawn(buildActorConfig("specialist", "Specialist")) as unknown as {
+      lastAssignedImages?: string[];
+    };
+
+    const record = system.spawnTask("coordinator", "specialist", "根据设计稿实现页面", {
+      images: ["/tmp/design.png"],
+    });
+
+    expect("error" in record).toBe(false);
+    if ("error" in record) return;
+    expect(record.images).toEqual(["/tmp/design.png"]);
+    expect(specialist.lastAssignedImages).toEqual(["/tmp/design.png"]);
   });
 });

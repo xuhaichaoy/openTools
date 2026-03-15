@@ -373,6 +373,8 @@ export interface SpawnedTaskRecord {
   targetActorId: string;
   task: string;
   label?: string;
+  /** 任务启动时继承的图片附件（如截图、设计稿） */
+  images?: string[];
   /** 任务状态 */
   status: SpawnedTaskStatus;
   spawnedAt: number;

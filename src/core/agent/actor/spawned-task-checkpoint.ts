@@ -306,6 +306,7 @@ export function buildDialogSpawnedTaskHandoff(params: {
     .map((entry) => `- [${entry.label}${entry.kindLabel ? ` · ${entry.kindLabel}` : ""}] ${summarizeAISessionRuntimeText(entry.content, 180) || entry.content}`);
   const relatedArtifacts = collectRelevantArtifacts(task, artifacts);
   const artifactPaths = uniqueStrings([
+    ...(task.images ?? []),
     ...relatedArtifacts.map((artifact) => artifact.path),
     ...(dialogHistory ?? [])
       .filter((message) => message.relatedRunId === task.runId)

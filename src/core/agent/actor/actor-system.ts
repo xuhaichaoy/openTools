@@ -1039,6 +1039,7 @@ export class ActorSystem {
       context?: string;
       timeoutSeconds?: number;
       attachments?: string[];
+      images?: string[];
       /** Spawn 模式：run=一次性任务，session=保持会话 */
       mode?: "run" | "session";
       /** 清理策略：delete=完成后删除，keep=保持 */
@@ -1075,6 +1076,7 @@ export class ActorSystem {
         label: opts?.label,
         context: opts?.context,
         attachments: opts?.attachments,
+        images: opts?.images,
       });
     }
 
@@ -1119,6 +1121,7 @@ export class ActorSystem {
       targetActorId,
       task,
       label,
+      images: opts?.images?.length ? [...new Set(opts.images)] : undefined,
       status: "running",
       spawnedAt: Date.now(),
       mode,
@@ -1243,7 +1246,7 @@ export class ActorSystem {
 
     // 执行任务并设置 Announce Flow 回调（含重试机制）
     // 子任务结果仅通过 announce 回送给委派者，避免全局广播造成协作噪音。
-    void target.assignTask(fullTask, undefined, {
+    void target.assignTask(fullTask, opts?.images, {
       publishResult: false,
       runOverrides: opts?.overrides,
     }).then((taskResult) => {
@@ -1420,6 +1423,7 @@ export class ActorSystem {
       label?: string;
       context?: string;
       attachments?: string[];
+      images?: string[];
     },
   ): SpawnedTaskRecord | { error: string } {
     const record = this.getOpenSpawnedSessionByRunId(runId);
@@ -1449,8 +1453,12 @@ export class ActorSystem {
     if (opts?.label) {
       record.label = opts.label;
     }
+    if (opts?.images?.length) {
+      record.images = [...new Set([...(record.images ?? []), ...opts.images])];
+    }
 
     this.send(fromActorId, record.targetActorId, sessionMessage, {
+      images: opts?.images,
       bypassPlanCheck: true,
       relatedRunId: record.runId,
     });

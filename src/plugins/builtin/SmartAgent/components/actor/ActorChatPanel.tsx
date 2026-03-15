@@ -59,6 +59,7 @@ import {
   normalizeAICenterHandoff,
 } from "@/core/ai/ai-center-handoff";
 import { routeToAICenter } from "@/core/ai/ai-center-routing";
+import { buildDialogContextBreakdown, type DialogContextBreakdown } from "@/core/ai/dialog-context-breakdown";
 import { buildDialogWorkingSetSnapshot } from "@/core/ai/ai-working-set";
 import { KnowledgeGraph } from "@/core/knowledge/knowledge-graph";
 import { primeTeamModelCache } from "@/core/ai/router";
@@ -711,7 +712,7 @@ type DialogArtifact = DialogArtifactRecord & {
 
 type ArtifactAvailability = "ready" | "missing" | "unknown";
 
-type WorkspacePanel = "todos" | "artifacts" | "uploads" | "subtasks" | "plan" | null;
+type WorkspacePanel = "todos" | "artifacts" | "uploads" | "subtasks" | "context" | "plan" | null;
 
 function formatShortTime(timestamp?: number): string {
   if (!timestamp) return "刚刚";
@@ -728,6 +729,45 @@ function formatElapsedTime(ms?: number): string {
   const seconds = totalSeconds % 60;
   if (minutes > 0) return `${minutes}分${seconds}秒`;
   return `${seconds}秒`;
+}
+
+function formatTokenCount(tokens?: number): string {
+  if (!tokens || tokens <= 0) return "0";
+  if (tokens >= 10000) return `${Math.round(tokens / 1000)}k`;
+  if (tokens >= 1000) return `${(tokens / 1000).toFixed(1)}k`;
+  return `${tokens}`;
+}
+
+function formatRatioAsPercent(ratio?: number): string {
+  if (!ratio || ratio <= 0) return "0%";
+  return `${Math.round(ratio * 100)}%`;
+}
+
+function getContextStatusMeta(status: DialogContextBreakdown["actors"][number]["status"]): {
+  badge: string;
+  bar: string;
+  text: string;
+} {
+  switch (status) {
+    case "tight":
+      return {
+        badge: "bg-red-500/10 text-red-600",
+        bar: "bg-red-500",
+        text: "预算偏紧",
+      };
+    case "busy":
+      return {
+        badge: "bg-amber-500/10 text-amber-700",
+        bar: "bg-amber-500",
+        text: "预算偏忙",
+      };
+    default:
+      return {
+        badge: "bg-emerald-500/10 text-emerald-700",
+        bar: "bg-emerald-500",
+        text: "预算宽松",
+      };
+  }
 }
 
 function summarizeToolPolicy(policy?: ToolPolicy): string {
@@ -2112,6 +2152,7 @@ function DialogWorkspaceDock({
   onContinueTaskWithAgent,
   draftPlan,
   draftInsight,
+  contextBreakdown,
   requirePlanApproval,
   onTogglePlanApproval,
   lastPlanReview,
@@ -2134,6 +2175,7 @@ function DialogWorkspaceDock({
   onContinueTaskWithAgent: (runId: string) => void;
   draftPlan: ClusterPlan | null;
   draftInsight: DialogDispatchPlanBundle["insight"] | null;
+  contextBreakdown: DialogContextBreakdown;
   requirePlanApproval: boolean;
   onTogglePlanApproval: (value: boolean) => void;
   lastPlanReview: { status: "approved" | "rejected"; timestamp: number; plan: ClusterPlan } | null;
@@ -2286,6 +2328,13 @@ function DialogWorkspaceDock({
       description: openSessionCount > 0 ? `${openSessionCount} 个子会话仍可继续交互` : "查看已派发子任务与子会话",
     },
     {
+      id: "context",
+      label: "上下文",
+      icon: Brain,
+      count: contextBreakdown.totalSharedTokens + contextBreakdown.totalRuntimeTokens,
+      description: "查看共享工作集、专属预算和运行现场的 token 估算",
+    },
+    {
       id: "plan",
       label: "计划",
       icon: ShieldCheck,
@@ -2301,10 +2350,19 @@ function DialogWorkspaceDock({
   const defaultPanel = useMemo<Exclude<WorkspacePanel, null>>(() => {
     if (activeTodoCount > 0 || totalTodoCount > 0) return "todos";
     if (sortedTasks.length > 0) return "subtasks";
+    if (contextBreakdown.totalSharedTokens > 0 || contextBreakdown.totalRuntimeTokens > 0) return "context";
     if (artifacts.length > 0) return "artifacts";
     if (sessionUploads.length > 0) return "uploads";
     return "plan";
-  }, [activeTodoCount, totalTodoCount, sortedTasks.length, artifacts.length, sessionUploads.length]);
+  }, [
+    activeTodoCount,
+    totalTodoCount,
+    sortedTasks.length,
+    contextBreakdown.totalRuntimeTokens,
+    contextBreakdown.totalSharedTokens,
+    artifacts.length,
+    sessionUploads.length,
+  ]);
   const summaryItems = useMemo(() => {
     const items = [
       { key: "todos", label: "待办", value: activeTodoCount || totalTodoCount },
@@ -2375,7 +2433,7 @@ function DialogWorkspaceDock({
                   </span>
                   <span className="text-[13px] font-medium text-[var(--color-text)]">{activePanelMeta.label}</span>
                   <span className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
-                    {activePanelMeta.count}
+                    {formatTokenCount(activePanelMeta.count)}
                   </span>
                 </div>
                 <div className="mt-1 text-[10px] leading-relaxed text-[var(--color-text-secondary)]">
@@ -2421,7 +2479,7 @@ function DialogWorkspaceDock({
                               : "bg-[var(--color-bg-secondary)] text-[var(--color-text-tertiary)]"
                           }`}
                         >
-                          {tab.count}
+                          {formatTokenCount(tab.count)}
                         </span>
                       )}
                     </button>
@@ -2796,6 +2854,176 @@ function DialogWorkspaceDock({
                 )}
               </div>
             )}
+          </div>
+        )}
+
+        {panel === "context" && (
+          <div className="p-3 space-y-2.5">
+            <div className="rounded-xl border border-[var(--color-border)]/80 bg-[var(--color-bg)] px-3 py-3">
+              <div className="grid gap-2 md:grid-cols-3">
+                <div className="rounded-lg bg-[var(--color-bg-secondary)]/70 px-3 py-2">
+                  <div className="text-[10px] text-[var(--color-text-tertiary)]">共享工作集</div>
+                  <div className="mt-1 text-[18px] font-semibold text-[var(--color-text)]">
+                    ~{formatTokenCount(contextBreakdown.totalSharedTokens)}
+                  </div>
+                  <div className="mt-1 text-[11px] text-[var(--color-text-secondary)]">
+                    房间消息、上传、产物、子任务与计划草案的总估算
+                  </div>
+                </div>
+                <div className="rounded-lg bg-[var(--color-bg-secondary)]/70 px-3 py-2">
+                  <div className="text-[10px] text-[var(--color-text-tertiary)]">运行现场</div>
+                  <div className="mt-1 text-[18px] font-semibold text-[var(--color-text)]">
+                    ~{formatTokenCount(contextBreakdown.totalRuntimeTokens)}
+                  </div>
+                  <div className="mt-1 text-[11px] text-[var(--color-text-secondary)]">
+                    正在执行的 query 与近期步骤轨迹估算
+                  </div>
+                </div>
+                <div className="rounded-lg bg-[var(--color-bg-secondary)]/70 px-3 py-2">
+                  <div className="text-[10px] text-[var(--color-text-tertiary)]">附件与会话</div>
+                  <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-[var(--color-text-secondary)]">
+                    <span className="rounded-full bg-[var(--color-bg)] px-2 py-0.5">
+                      文件 {contextBreakdown.attachmentCount}
+                    </span>
+                    <span className="rounded-full bg-[var(--color-bg)] px-2 py-0.5">
+                      图片 {contextBreakdown.imageCount}
+                    </span>
+                    <span className="rounded-full bg-[var(--color-bg)] px-2 py-0.5">
+                      开放子会话 {contextBreakdown.openSessionCount}
+                    </span>
+                  </div>
+                  <div className="mt-1 text-[11px] text-[var(--color-text-secondary)]">
+                    这些元素越多，后续协作越容易变重
+                  </div>
+                </div>
+              </div>
+              <div className="mt-2 text-[10px] leading-relaxed text-[var(--color-text-tertiary)]">
+                这里展示的是前端侧的粗略 token 估算，便于判断“哪里在变重”。不包含 provider framing、系统保留字段和服务端额外压缩。
+              </div>
+            </div>
+
+            {contextBreakdown.warnings.length > 0 && (
+              <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 px-3 py-2.5">
+                <div className="text-[10px] uppercase tracking-[0.12em] text-amber-700">上下文提醒</div>
+                <div className="mt-2 space-y-1.5">
+                  {contextBreakdown.warnings.map((warning) => (
+                    <div key={warning} className="text-[11px] leading-relaxed text-amber-800">
+                      {warning}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="rounded-xl border border-[var(--color-border)]/80 bg-[var(--color-bg)] px-3 py-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-[11px] font-medium text-[var(--color-text)]">共享工作集拆解</div>
+                <div className="text-[10px] text-[var(--color-text-tertiary)]">
+                  合计 ~{formatTokenCount(contextBreakdown.totalSharedTokens)}
+                </div>
+              </div>
+              <div className="mt-2 space-y-2">
+                {contextBreakdown.sharedSections.length === 0 ? (
+                  <div className="text-[11px] text-[var(--color-text-tertiary)]">当前还没有足够的共享上下文线索。</div>
+                ) : (
+                  contextBreakdown.sharedSections.map((section) => {
+                    const share = contextBreakdown.totalSharedTokens > 0
+                      ? section.tokens / contextBreakdown.totalSharedTokens
+                      : 0;
+                    return (
+                      <div key={section.id} className="rounded-lg border border-[var(--color-border)]/70 bg-[var(--color-bg-secondary)]/60 px-3 py-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[11px] font-medium text-[var(--color-text)]">{section.label}</span>
+                          <span className="rounded-full bg-[var(--color-bg)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
+                            ~{formatTokenCount(section.tokens)}
+                          </span>
+                          {section.itemCount > 0 && (
+                            <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                              {section.itemCount} 项
+                            </span>
+                          )}
+                          <span className="ml-auto text-[10px] text-[var(--color-text-tertiary)]">
+                            {formatRatioAsPercent(share)}
+                          </span>
+                        </div>
+                        <div className="mt-1 text-[11px] text-[var(--color-text-secondary)]">
+                          {section.description}
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-[var(--color-border)]/80 bg-[var(--color-bg)] px-3 py-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-[11px] font-medium text-[var(--color-text)]">Agent 专属预算与运行现场</div>
+                <div className="text-[10px] text-[var(--color-text-tertiary)]">
+                  默认预算按 8k 估算
+                </div>
+              </div>
+              <div className="mt-2 space-y-2">
+                {contextBreakdown.actors.length === 0 ? (
+                  <div className="text-[11px] text-[var(--color-text-tertiary)]">当前还没有 Agent。</div>
+                ) : (
+                  contextBreakdown.actors.map((actor) => {
+                    const statusMeta = getContextStatusMeta(actor.status);
+                    return (
+                      <div key={actor.actorId || actor.roleName} className="rounded-lg border border-[var(--color-border)]/70 bg-[var(--color-bg-secondary)]/60 px-3 py-2.5">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <div className="text-[12px] font-medium text-[var(--color-text)]">{actor.roleName}</div>
+                          <span className={`rounded-full px-1.5 py-0.5 text-[10px] ${statusMeta.badge}`}>
+                            {statusMeta.text}
+                          </span>
+                          <span className="rounded-full bg-[var(--color-bg)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
+                            {actor.modelLabel}
+                          </span>
+                          {actor.thinkingLevel && actor.thinkingLevel !== "adaptive" && (
+                            <span className="rounded-full bg-[var(--color-bg)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
+                              思考 {actor.thinkingLevel}
+                            </span>
+                          )}
+                          {actor.workspaceLabel && (
+                            <span className="max-w-[160px] truncate rounded-full bg-[var(--color-bg)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-secondary)]" title={actor.workspaceLabel}>
+                              {actor.workspaceLabel}
+                            </span>
+                          )}
+                        </div>
+                        <div className="mt-2">
+                          <div className="flex items-center justify-between gap-2 text-[10px] text-[var(--color-text-tertiary)]">
+                            <span>专属预算占用</span>
+                            <span>
+                              ~{formatTokenCount(actor.budgetUsageTokens)} / {formatTokenCount(actor.budgetTokens)} · {formatRatioAsPercent(actor.budgetUsageRatio)}
+                            </span>
+                          </div>
+                          <div className="mt-1 h-2 overflow-hidden rounded-full bg-[var(--color-bg)]">
+                            <div
+                              className={`h-full rounded-full ${statusMeta.bar}`}
+                              style={{ width: `${Math.min(actor.budgetUsageRatio * 100, 100)}%` }}
+                            />
+                          </div>
+                        </div>
+                        <div className="mt-2 grid gap-2 md:grid-cols-3">
+                          <div className="rounded-lg bg-[var(--color-bg)] px-2.5 py-2">
+                            <div className="text-[10px] text-[var(--color-text-tertiary)]">历史记忆</div>
+                            <div className="mt-1 text-[12px] text-[var(--color-text)]">~{formatTokenCount(actor.memoryTokens)}</div>
+                          </div>
+                          <div className="rounded-lg bg-[var(--color-bg)] px-2.5 py-2">
+                            <div className="text-[10px] text-[var(--color-text-tertiary)]">角色附加提示</div>
+                            <div className="mt-1 text-[12px] text-[var(--color-text)]">~{formatTokenCount(actor.promptTokens)}</div>
+                          </div>
+                          <div className="rounded-lg bg-[var(--color-bg)] px-2.5 py-2">
+                            <div className="text-[10px] text-[var(--color-text-tertiary)]">运行现场</div>
+                            <div className="mt-1 text-[12px] text-[var(--color-text)]">~{formatTokenCount(actor.runtimeTokens)}</div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
           </div>
         )}
 
@@ -3847,6 +4075,18 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   }, [input, fileContextBlock, imagePaths, selectedPendingMessageId, pendingInteractionByMessageId, pendingUserInteractions, parseMention, attachmentSummary, routingMode, routeTask, actors, coordinatorActorId, inputAttachmentPaths, incomingHandoff]);
   const draftDispatchPlan = draftDispatchBundle?.clusterPlan ?? null;
   const draftDispatchInsight = draftDispatchBundle?.insight ?? null;
+  const contextBreakdown = useMemo(
+    () => buildDialogContextBreakdown({
+      actors,
+      dialogHistory,
+      artifacts,
+      sessionUploads,
+      spawnedTasks,
+      draftPlan: draftDispatchPlan,
+      draftInsight: draftDispatchInsight,
+    }),
+    [actors, dialogHistory, artifacts, sessionUploads, spawnedTasks, draftDispatchPlan, draftDispatchInsight],
+  );
   const latestUserDispatchInsight = useMemo(() => {
     if (draftDispatchInsight) return null;
 
@@ -4037,6 +4277,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                 onContinueTaskWithAgent={handleContinueSpawnedTaskWithAgent}
                 draftPlan={draftDispatchPlan}
                 draftInsight={draftDispatchInsight}
+                contextBreakdown={contextBreakdown}
                 requirePlanApproval={requirePlanApproval}
                 onTogglePlanApproval={setRequirePlanApproval}
                 lastPlanReview={lastPlanReview}

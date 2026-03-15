@@ -14,6 +14,9 @@ import {
 export function createActorCommunicationTools(
   actorId: string,
   system: ActorSystem,
+  opts?: {
+    inheritedImages?: string[];
+  },
 ): AgentTool[] {
   const tools: AgentTool[] = [];
 
@@ -148,6 +151,7 @@ export function createActorCommunicationTools(
         context,
         timeoutSeconds,
         attachments,
+        images: opts?.inheritedImages,
         mode,
         cleanup,
         expectsCompletionMessage,

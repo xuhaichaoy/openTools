@@ -41,7 +41,7 @@ export interface ActorRunContext {
 
   // ── Callbacks (set by middlewares) ──
   notifyToolCalled?: (toolName: string) => void;
-  inboxDrain?: () => InboxMessage[];
+  inboxDrain?: () => Array<Pick<InboxMessage, "id" | "from" | "content" | "expectReply" | "replyTo" | "images">>;
 
   // ── Retry (set by ModelRetryMiddleware) ──
   retryConfig?: { maxRetries: number; initialDelayMs: number; maxDelayMs: number; backoffMultiplier: number; fallbackModels: string[]; toolTimeoutMs: number };
