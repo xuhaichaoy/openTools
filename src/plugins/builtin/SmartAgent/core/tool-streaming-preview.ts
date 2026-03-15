@@ -101,6 +101,32 @@ function normalizePreviewText(value: string): string {
     .trim();
 }
 
+function normalizeArtifactLineContinuations(value: string): string {
+  return String(value || "")
+    .replace(/\\[ \t]*(?:\r\n|\r|\n)[ \t]*/g, "\n")
+    .replace(/>\s*\\\s*</g, ">\n<")
+    .replace(/\{\s*\\\s*/g, "{\n")
+    .replace(/;\s*\\\s*/g, ";\n")
+    .replace(/\}\s*\\\s*/g, "}\n")
+    .trim();
+}
+
+function hasDenseHtmlStructure(source: string): boolean {
+  return source.split("\n").some((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return false;
+
+    if (/<style\b[^>]*>[\s\S]*<\/style>/i.test(trimmed) || /<script\b[^>]*>[\s\S]*<\/script>/i.test(trimmed)) {
+      return true;
+    }
+
+    const tags = trimmed.match(/<\/?[a-zA-Z][^>]*>/g) ?? [];
+    if (tags.length >= 3) return true;
+
+    return /<\/?[a-zA-Z][^>]*>\s*<\/?[a-zA-Z][^>]*>/.test(trimmed);
+  });
+}
+
 function pushPreviewLine(lines: string[], value: string, indent: number): void {
   const normalized = value.trim();
   if (!normalized) return;
@@ -273,16 +299,27 @@ function formatHtmlPreview(source: string): string {
 }
 
 export function formatArtifactPreviewBody(path: string, body: string): string {
-  const normalized = normalizePreviewText(body);
+  const rawNormalized = normalizePreviewText(body);
+  const normalized = normalizeArtifactLineContinuations(rawNormalized);
   if (!normalized) return "";
-
-  if (normalized.includes("\n")) {
-    return normalized;
-  }
 
   const ext = inferPathExtension(path);
   const looksLikeHtml = /<!doctype html>|<html\b|<head\b|<body\b|<style\b|<div\b/i.test(normalized);
   const looksLikeCss = /^[^{}]+\{.+\}$/.test(normalized);
+  const hasLineContinuationMarkers = /\\[ \t]*(?:\r\n|\r|\n)/.test(rawNormalized);
+  const hasCompressedHtmlLines = looksLikeHtml && hasDenseHtmlStructure(normalized);
+  const maxLineLength = normalized
+    .split("\n")
+    .reduce((max, line) => Math.max(max, line.length), 0);
+
+  if (
+    normalized.includes("\n")
+    && !hasLineContinuationMarkers
+    && maxLineLength < 180
+    && !hasCompressedHtmlLines
+  ) {
+    return normalized;
+  }
 
   if (ext === "json" || normalized.startsWith("{") || normalized.startsWith("[")) {
     try {

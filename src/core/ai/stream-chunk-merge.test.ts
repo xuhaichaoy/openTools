@@ -27,6 +27,14 @@ describe("stream-chunk-merge", () => {
     });
   });
 
+  it("keeps repeated middle substrings when they are a new delta, instead of dropping them", () => {
+    expect(mergeStreamChunk("justify-content: center; align-items: stretch", " center")).toEqual({
+      mode: "delta",
+      full: "justify-content: center; align-items: stretch center",
+      delta: " center",
+    });
+  });
+
   it("merges overlapping chunks without duplicating content", () => {
     expect(mergeStreamChunk("hello wor", "world")).toEqual({
       mode: "overlap",

@@ -173,24 +173,17 @@ function describeAgentActivity(steps: AgentStep[], roleName: string, hasStreamin
   if (latest.type === "thinking") return "深度思考中";
 
   if (latest.type === "tool_streaming") {
-    const parsed = parsePartialToolJSON(latest.content || "");
-    if (parsed.thought.trim()) {
+    const preview = buildToolStreamingPreview(latest.content || "");
+    if (preview.kind === "thinking") {
       return "深度思考中";
     }
-    if (parsed.targetAgent.trim() && parsed.task.trim()) {
-      const codingLabel = describeCodingExecutionProfile(
-        inferCodingExecutionProfile({ query: `${parsed.label}\n${parsed.task}` }).profile,
-      );
-      return codingLabel
-        ? `派发 ${codingLabel} 子任务给 ${parsed.targetAgent}`
-        : `派发子任务给 ${parsed.targetAgent}`;
+    if (preview.kind === "spawn") {
+      return preview.title.replace(" -> ", " 给 ");
     }
-    if (parsed.path && (parsed.content || hasArtifactPayloadKey(latest.content))) {
-      return `生成 ${basename(parsed.path)}`;
+    if (preview.kind === "artifact") {
+      return preview.title.replace(/^生成文件:\s*/, "生成 ");
     }
-    if (parsed.query) return `搜索 "${parsed.query.slice(0, 30)}"`;
-    if (parsed.url) return `访问 ${parsed.url.replace(/^https?:\/\//, "").slice(0, 35)}`;
-    if (parsed.command) return `执行 ${parsed.command.slice(0, 40)}`;
+    if (preview.title) return preview.title;
   }
 
   if (latest.type === "action" && latest.toolName) {
@@ -216,6 +209,12 @@ function describeAgentActivity(steps: AgentStep[], roleName: string, hasStreamin
         return `搜索 "${String(input.query ?? "").slice(0, 30)}"`;
       case "web_fetch":
         return `访问 ${String(input.url ?? "").replace(/^https?:\/\//, "").slice(0, 35)}`;
+      case "get_system_info":
+        return "获取系统信息";
+      case "get_current_time":
+        return "获取当前时间";
+      case "calculate":
+        return "执行计算";
       case "sequential_thinking":
         return `推理分析中`;
       case "ckg_search_function":
@@ -243,6 +242,12 @@ function describeAgentActivity(steps: AgentStep[], roleName: string, hasStreamin
         return `搜索完成，分析结果`;
       if (name === "run_shell_command" || name === "persistent_shell")
         return `命令执行完成，分析输出`;
+      if (name === "get_system_info")
+        return "已获取系统信息，继续处理";
+      if (name === "get_current_time")
+        return "已获取当前时间，继续处理";
+      if (name === "calculate")
+        return "计算完成，继续处理";
       if (name === "sequential_thinking")
         return "深度思考完成，继续处理";
       if (name === "spawn_task") {
@@ -330,27 +335,15 @@ function ThinkingBlock({
   isStreaming: boolean;
   color: { bg: string; text: string; border: string; dot: string };
 }) {
-  const [expanded, setExpanded] = useState(() => isStreaming);
+  const [expanded, setExpanded] = useState(false);
   const [now, setNow] = useState(Date.now());
-  const containerRef = useRef<HTMLDivElement>(null);
-  const manualToggleRef = useRef(false);
+  const containerRef = useRef<HTMLPreElement>(null);
 
   useEffect(() => {
     if (!isStreaming) return;
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, [isStreaming]);
-
-  useEffect(() => {
-    if (isStreaming) {
-      manualToggleRef.current = false;
-      setExpanded(true);
-      return;
-    }
-    if (content.trim() && !manualToggleRef.current) {
-      setExpanded(false);
-    }
-  }, [isStreaming, content]);
 
   useEffect(() => {
     if (expanded && containerRef.current) {
@@ -362,6 +355,7 @@ function ThinkingBlock({
   const timeLabel = elapsed >= 60
     ? `${Math.floor(elapsed / 60)}分${elapsed % 60}秒`
     : `${elapsed}秒`;
+  const displayContent = content.trim() || "模型正在深度思考，暂未返回可展示内容。";
 
   return (
     <div className={`flex gap-2 ${color.text}`}>
@@ -372,10 +366,7 @@ function ThinkingBlock({
         <div className="text-[10px] mb-0.5">{roleName}</div>
         <div className={`rounded-xl ${color.bg} overflow-hidden`}>
           <button
-            onClick={() => {
-              manualToggleRef.current = true;
-              setExpanded((v) => !v);
-            }}
+            onClick={() => setExpanded((v) => !v)}
             className="w-full flex items-center gap-1.5 px-3 py-1.5 text-[11px] cursor-pointer hover:opacity-80 transition-opacity"
           >
             {expanded
@@ -395,8 +386,60 @@ function ThinkingBlock({
               ref={containerRef}
               className="px-3 pb-2 text-[12px] leading-relaxed opacity-70 max-h-[300px] overflow-y-auto whitespace-pre-wrap break-words border-t border-current/5"
             >
-              {content}
+              {displayContent}
               {isStreaming && <span className="inline-block w-1.5 h-3 bg-current animate-pulse ml-0.5" />}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LiveExecutionCard({
+  roleName,
+  title,
+  detail,
+  startedAt,
+  isStreaming,
+  color,
+  icon: Icon = Settings2,
+}: {
+  roleName: string;
+  title: string;
+  detail?: string;
+  startedAt: number;
+  isStreaming: boolean;
+  color: { bg: string; text: string; border: string; dot: string };
+  icon?: LucideIcon;
+}) {
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    if (!isStreaming) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [isStreaming]);
+
+  const elapsed = Math.floor(((isStreaming ? now : Date.now()) - startedAt) / 1000);
+  const timeLabel = elapsed >= 60 ? `${Math.floor(elapsed / 60)}分${elapsed % 60}秒` : `${elapsed}秒`;
+
+  return (
+    <div className={`flex gap-2 ${color.text}`}>
+      <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full ${color.bg}`}>
+        <Icon className="h-3.5 w-3.5" />
+      </div>
+      <div className="max-w-[88%] min-w-[220px] lg:max-w-[78%]">
+        <div className="mb-0.5 text-[10px]">{roleName}</div>
+        <div className={`rounded-xl border border-current/10 ${color.bg} px-3 py-2`}>
+          <div className="flex items-center gap-2 text-[12px]">
+            {isStreaming && <Loader2 className="h-3.5 w-3.5 animate-spin opacity-70" />}
+            <span className="font-medium">{title}</span>
+            <span className="ml-auto text-[10px] opacity-50 tabular-nums">{timeLabel}</span>
+          </div>
+          {detail && (
+            <div className="mt-1 whitespace-pre-wrap break-words text-[11px] leading-relaxed opacity-75">
+              {detail}
             </div>
           )}
         </div>
@@ -437,6 +480,22 @@ function inferStreamingArtifactLanguage(path: string): string | undefined {
     default:
       return ext ? ext.toUpperCase() : undefined;
   }
+}
+
+function shouldRevealStreamingArtifactBody(path: string, body: string, formattedBody: string): boolean {
+  const normalized = body.trim();
+  if (!normalized) return false;
+  if (normalized.includes("\n")) return true;
+  if (formattedBody.includes("\n")) return true;
+  if (normalized.length >= 72) return true;
+
+  const ext = basename(path).toLowerCase().split(".").pop() || "";
+  const codeLikePattern = /<!doctype html>|<html\b|<head\b|<body\b|<div\b|<main\b|<section\b|function\b|const\b|let\b|var\b|class\b|import\b|export\b|body\s*\{|@media\b/i;
+  if (["html", "htm", "css", "scss", "less", "js", "jsx", "ts", "tsx", "json", "md"].includes(ext)) {
+    return normalized.length >= 24 || codeLikePattern.test(normalized);
+  }
+
+  return codeLikePattern.test(normalized);
 }
 
 function buildStreamingArtifactPreview(path: string, body: string): {
@@ -553,9 +612,7 @@ function ToolStreamingBlock({
   color: { bg: string; text: string; border: string; dot: string };
 }) {
   const [now, setNow] = useState(Date.now());
-  const [expanded, setExpanded] = useState(false);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const debugSignatureRef = useRef("");
+  const containerRef = useRef<HTMLPreElement>(null);
 
   useEffect(() => {
     if (!isStreaming) return;
@@ -571,96 +628,55 @@ function ToolStreamingBlock({
 
   const elapsed = Math.floor(((isStreaming ? now : Date.now()) - startedAt) / 1000);
   const timeLabel = elapsed >= 60 ? `${Math.floor(elapsed / 60)}分${elapsed % 60}秒` : `${elapsed}秒`;
-  
-  const preview = buildToolStreamingPreview(content);
-  const Icon = preview.kind === "artifact"
-    ? FileDown
-    : preview.kind === "thinking"
-      ? Brain
-      : preview.kind === "spawn"
-        ? ArrowRightCircle
-        : Settings2;
-  const displayedBody = preview.kind === "artifact" && preview.collapsible && expanded
-    ? (preview.fullBody || preview.body)
-    : preview.body;
-
-  useEffect(() => {
-    if (preview.kind !== "artifact" || !content.trim()) return;
-
-    const parsed = parsePartialToolJSON(content);
-    const artifactBody = decodePartialToolContent(parsed.content || "")
-      || recoverArtifactBodyFromRaw(content, parsed.path);
-    const signature = `${parsed.path}|${content.length}|${artifactBody.length}`;
-    if (debugSignatureRef.current === signature) return;
-    debugSignatureRef.current = signature;
-
-    console.info("[ActorChatPanel] [toolStreamingPreview]", {
-      roleName,
-      path: parsed.path || "unknown",
-      rawLength: content.length,
-      parsedContentLength: (parsed.content || "").length,
-      artifactBodyLength: artifactBody.length,
-      rawPreview: content.slice(0, 220),
-      parsedContentPreview: (parsed.content || "").slice(0, 220),
-      artifactBodyPreview: artifactBody.slice(0, 220),
-      artifactBodyJsonPreview: JSON.stringify(artifactBody.slice(0, 220)),
-    });
-  }, [content, preview.kind, roleName]);
+  const parsed = parsePartialToolJSON(content);
+  const artifactPath = parsed.path || "未知文件";
+  const rawArtifactBody = decodePartialToolContent(parsed.content || "")
+    || recoverArtifactBodyFromRaw(content, artifactPath);
+  const normalizedArtifactBody = rawArtifactBody
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .trim();
+  const formattedArtifactBody = normalizedArtifactBody
+    ? formatArtifactPreviewBody(artifactPath, normalizedArtifactBody)
+    : "";
+  const streamingArtifactBody = shouldRevealStreamingArtifactBody(
+    artifactPath,
+    normalizedArtifactBody,
+    formattedArtifactBody,
+  )
+    ? (formattedArtifactBody || normalizedArtifactBody)
+    : "";
+  const displayedBody = isStreaming
+    ? streamingArtifactBody
+    : (formattedArtifactBody || normalizedArtifactBody);
+  const isBufferingPreview = !displayedBody;
 
   return (
     <div className={`flex gap-2 ${color.text} mt-2`}>
       <div className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 ${color.bg}`}>
-        <Icon className="w-3.5 h-3.5" />
+        <FileDown className="w-3.5 h-3.5" />
       </div>
       <div className="max-w-[90%] min-w-[250px] flex-1">
         <div className="text-[10px] mb-0.5">{roleName}</div>
         <div className={`rounded-xl border border-current/10 bg-[var(--color-bg)] overflow-hidden shadow-sm`}>
           <div className={`flex items-center gap-2 px-3 py-2 text-[11px] border-b border-current/10 ${color.bg}`}>
             <span className="font-medium opacity-90 truncate max-w-[70%]">
-              {preview.title}
+              生成文件: {artifactPath}
             </span>
-            {preview.meta && (
-              <span className="hidden md:inline text-[10px] opacity-60 truncate max-w-[28%]">
-                {preview.meta}
-              </span>
-            )}
             <span className="opacity-50 ml-auto tabular-nums flex items-center gap-1">
               {isStreaming && <Loader2 className="w-3 h-3 animate-spin" />}
               {timeLabel}
             </span>
           </div>
-          {preview.kind === "artifact" && preview.meta && (
-            <div className="px-3 py-1.5 text-[10px] border-b border-current/10 bg-[var(--color-bg-secondary)]/70 text-[var(--color-text-secondary)]">
-              {preview.meta}
-            </div>
-          )}
-          <div
+          <pre
             ref={containerRef}
-            className={`p-3 text-[12px] leading-[1.6] bg-[#1e1e1e] text-[#d4d4d4] font-mono overflow-y-auto whitespace-pre-wrap break-words ${
-              preview.kind === "artifact" && !expanded ? "max-h-[220px]" : "max-h-[350px]"
-            }`}
+            className="max-h-[350px] overflow-auto whitespace-pre bg-[#1e1e1e] p-3 font-mono text-[12px] leading-[1.6] text-[#d4d4d4]"
           >
             {displayedBody || (
-              <span className="opacity-30">
-                {preview.kind === "artifact" ? "准备写入中..." : "准备参数中..."}
-              </span>
+              <span className="opacity-30">{isBufferingPreview ? "正在整理代码内容..." : "准备写入中..."}</span>
             )}
             {isStreaming && <span className="inline-block w-1.5 h-3 bg-current animate-pulse ml-0.5" />}
-          </div>
-          {preview.kind === "artifact" && preview.collapsible && (
-            <div className="flex justify-between items-center px-3 py-2 border-t border-current/10 bg-[var(--color-bg-secondary)]/60">
-              <span className="text-[10px] text-[var(--color-text-secondary)]">
-                默认只展示截断预览，避免生成文件内容铺满聊天区
-              </span>
-              <button
-                type="button"
-                onClick={() => setExpanded((value) => !value)}
-                className="text-[11px] font-medium text-[var(--color-accent)] hover:opacity-80 transition-opacity"
-              >
-                {expanded ? "收起代码" : "展开代码"}
-              </button>
-            </div>
-          )}
+          </pre>
         </div>
       </div>
     </div>
@@ -2895,6 +2911,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   const initRef = useRef(false);
   const dialogUserScrolledUpRef = useRef(false);
   const dialogScrollThrottleRef = useRef(0);
+  const actorThinkingAnchorRef = useRef<Record<string, { taskId: string; startedAt: number }>>({});
 
   const {
     active: systemActive, actors, dialogHistory, pendingUserInteractions, spawnedTasks, artifacts: structuredArtifacts,
@@ -2960,6 +2977,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
           const lastStep = steps[steps.length - 1];
           return [
             actor.id,
+            actor.currentTask?.id ?? "",
             steps.length,
             lastStep?.type ?? "",
             lastStep?.timestamp ?? 0,
@@ -2970,6 +2988,36 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
         .join("|"),
     [runningActors],
   );
+
+  useEffect(() => {
+    const activeActorIds = new Set<string>();
+    for (const actor of runningActors) {
+      activeActorIds.add(actor.id);
+      const taskId = actor.currentTask?.id ?? "";
+      const taskStartedAt = actor.currentTask?.startedAt;
+      const firstStepTimestamp = actor.currentTask?.steps[0]?.timestamp;
+      const existing = actorThinkingAnchorRef.current[actor.id];
+      if (!existing || existing.taskId !== taskId) {
+        actorThinkingAnchorRef.current[actor.id] = {
+          taskId,
+          startedAt: taskStartedAt ?? firstStepTimestamp ?? Date.now(),
+        };
+        continue;
+      }
+      if (typeof taskStartedAt === "number" && taskStartedAt < existing.startedAt) {
+        existing.startedAt = taskStartedAt;
+      }
+      if (typeof firstStepTimestamp === "number" && firstStepTimestamp < existing.startedAt) {
+        existing.startedAt = firstStepTimestamp;
+      }
+    }
+
+    for (const actorId of Object.keys(actorThinkingAnchorRef.current)) {
+      if (!activeActorIds.has(actorId)) {
+        delete actorThinkingAnchorRef.current[actorId];
+      }
+    }
+  }, [runningActors, runningActivityKey]);
 
   // Auto-init: mount 时自动创建 ActorSystem
   // ActorSystemStore 会负责恢复磁盘会话快照或补齐默认 Agent。
@@ -4139,15 +4187,28 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
             const latestThoughtToolPreview = latestThoughtToolStep
               ? buildToolStreamingPreview(latestThoughtToolStep.content)
               : null;
+            const latestExecutionToolStep = hasPendingApproval
+              ? undefined
+              : reversedSteps.find((s) => {
+                if (s.type !== "tool_streaming" || !s.streaming) return false;
+                const kind = buildToolStreamingPreview(s.content).kind;
+                return kind !== "thinking" && kind !== "artifact";
+              });
+            const latestExecutionToolPreview = latestExecutionToolStep
+              ? buildToolStreamingPreview(latestExecutionToolStep.content)
+              : null;
             const latestToolStreamingStep = hasPendingApproval
               ? undefined
               : reversedSteps.find((s) => {
                 if (s.type !== "tool_streaming" || !s.streaming) return false;
-                return buildToolStreamingPreview(s.content).kind !== "thinking";
+                return buildToolStreamingPreview(s.content).kind === "artifact";
               });
             const latestToolStreamingPreview = latestToolStreamingStep
               ? buildToolStreamingPreview(latestToolStreamingStep.content)
               : null;
+            const latestExecutionStateStep = reversedSteps.find(
+              (s) => s.type === "action" || s.type === "observation" || s.type === "error",
+            );
             const derivedThinkingContent = !latestThinkingStep && latestThoughtToolPreview?.kind === "thinking"
               ? latestThoughtToolPreview.body
               : undefined;
@@ -4155,20 +4216,78 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
             const streamingContent = latestStreamingAnswer?.content;
             const thinkingContent = latestThinkingStep?.content ?? derivedThinkingContent;
             const toolStreamingContent = latestToolStreamingStep?.content;
+            const showExecutionCard = Boolean(
+              !streamingContent
+              && !(latestThinkingStep || derivedThinkingContent)
+              && !latestToolStreamingStep
+              && (latestExecutionToolStep || latestExecutionStateStep),
+            );
+            const showThinkingPlaceholder = Boolean(
+              !streamingContent
+              && !latestToolStreamingStep
+              && !showExecutionCard
+              && !(latestThinkingStep || derivedThinkingContent)
+              && a.currentTask?.status === "running",
+            );
+            const showThinkingBlock = Boolean(
+              !streamingContent
+              && !latestToolStreamingStep
+              && !showExecutionCard
+              && (latestThinkingStep || derivedThinkingContent || showThinkingPlaceholder),
+            );
+            const executionCardTitle = showExecutionCard
+              ? describeAgentActivity(steps, a.roleName, false)
+              : "";
+            const executionCardDetail = latestExecutionToolPreview?.kind === "spawn"
+              ? latestExecutionToolPreview.body
+              : undefined;
+            const executionCardIcon = latestExecutionToolPreview?.kind === "spawn"
+              ? ArrowRightCircle
+              : Settings2;
+            const executionCardStartedAt = latestExecutionToolStep?.timestamp
+              ?? latestExecutionStateStep?.timestamp
+              ?? Date.now();
+            const thinkingStartedAt = latestThinkingStep?.timestamp
+              ?? latestThoughtToolStep?.timestamp
+              ?? a.currentTask?.startedAt
+              ?? actorThinkingAnchorRef.current[a.id]?.startedAt
+              ?? Date.now();
+            const thinkingIsStreaming = showThinkingPlaceholder
+              || latestThinkingStep?.streaming
+              || latestThoughtToolStep?.streaming
+              || false;
+            const hasRichLiveBlock = Boolean(
+              showThinkingBlock
+              || showExecutionCard
+              || (latestToolStreamingStep && latestToolStreamingPreview?.kind === "artifact")
+              || streamingContent,
+            );
 
             return (
               <div key={`thinking-${a.id}`} className="space-y-2">
-                {(latestThinkingStep || derivedThinkingContent) && (
+                {showThinkingBlock && (
                   <ThinkingBlock
                     roleName={a.roleName}
                     content={thinkingContent ?? ""}
-                    startedAt={latestThinkingStep?.timestamp ?? latestThoughtToolStep?.timestamp ?? Date.now()}
-                    isStreaming={latestThinkingStep?.streaming ?? latestThoughtToolStep?.streaming ?? false}
+                    startedAt={thinkingStartedAt}
+                    isStreaming={thinkingIsStreaming}
                     color={color}
                   />
                 )}
 
-                {latestToolStreamingStep && latestToolStreamingPreview?.kind !== "thinking" && (
+                {showExecutionCard && (
+                  <LiveExecutionCard
+                    roleName={a.roleName}
+                    title={executionCardTitle}
+                    detail={executionCardDetail}
+                    startedAt={executionCardStartedAt}
+                    isStreaming
+                    color={color}
+                    icon={executionCardIcon}
+                  />
+                )}
+
+                {latestToolStreamingStep && latestToolStreamingPreview?.kind === "artifact" && (
                   <ToolStreamingBlock
                     roleName={a.roleName}
                     content={toolStreamingContent ?? ""}
@@ -4202,15 +4321,17 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                   </div>
                 )}
 
-                <div className={`flex items-center gap-2 ${color.text}`}>
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  <span className="text-[11px] truncate max-w-[88%] lg:max-w-[78%]">
-                    <span className="font-medium">{a.roleName}</span>
-                    <span className="opacity-70 ml-1">
-                      {describeAgentActivity(steps, a.roleName, !!streamingContent)}
+                {!hasRichLiveBlock && (
+                  <div className={`flex items-center gap-2 ${color.text}`}>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span className="text-[11px] truncate max-w-[88%] lg:max-w-[78%]">
+                      <span className="font-medium">{a.roleName}</span>
+                      <span className="opacity-70 ml-1">
+                        {describeAgentActivity(steps, a.roleName, !!streamingContent)}
+                      </span>
                     </span>
-                  </span>
-                </div>
+                  </div>
+                )}
               </div>
             );
           })}

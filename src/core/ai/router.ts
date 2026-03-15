@@ -178,27 +178,10 @@ export function applyRouting(config: AIConfig, token?: string | null): AIConfig 
 
   switch (source) {
     case "platform": {
-      const routed = { ...config, base_url: `${baseUrl}/v1/ai`, api_key: token || "" };
-      console.log("[AI Router] platform →", routed.base_url, "model=", config.model, "protocol=", config.protocol || "openai");
-      return routed;
+      return { ...config, base_url: `${baseUrl}/v1/ai`, api_key: token || "" };
     }
     case "team": {
-      const routed = { ...config, base_url: `${baseUrl}/v1/ai/team`, api_key: token || "" };
-      console.log(
-        "[AI Router] team →",
-        routed.base_url,
-        "model=",
-        routed.model,
-        "protocol=",
-        routed.protocol || "openai",
-        "team_id=",
-        routed.team_id,
-        "team_config_id=",
-        routed.team_config_id,
-        "serverUrl=",
-        baseUrl,
-      );
-      return routed;
+      return { ...config, base_url: `${baseUrl}/v1/ai/team`, api_key: token || "" };
     }
     default:
       return config;

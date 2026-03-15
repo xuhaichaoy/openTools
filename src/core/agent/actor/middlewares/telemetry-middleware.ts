@@ -8,10 +8,6 @@
  */
 
 import type { ActorMiddleware, ActorRunContext } from "../actor-middleware";
-import { createLogger } from "@/core/logger";
-
-const log = createLogger("Telemetry");
-
 export interface ToolCallRecord {
   actorId: string;
   toolName: string;
@@ -167,7 +163,5 @@ export class TelemetryMiddleware implements ActorMiddleware {
         },
       };
     });
-
-    log.debug(`Telemetry instrumented ${ctx.tools.length} tools for actor ${actorId}`);
   }
 }

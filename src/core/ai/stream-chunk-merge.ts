@@ -72,7 +72,7 @@ export function mergeStreamChunk(
     };
   }
 
-  if (previous.endsWith(incoming) || previous.includes(incoming)) {
+  if (previous.endsWith(incoming)) {
     return {
       mode: "duplicate",
       full: previous,

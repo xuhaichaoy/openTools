@@ -45,6 +45,11 @@ export const RETRYABLE_ERROR_PATTERNS = [
   /network[\s_]?error/i,
   /fetch[\s_]?failed/i,
   /request[\s_]?timeout/i,
+  /error[\s_]+sending[\s_]+request/i,
+  /sendrequest/i,
+  /incomplete[\s_]?message/i,
+  /unexpected[\s_]?eof/i,
+  /connection.*closed/i,
   /connection[\s_]?refused/i,
   /socket[\s_]?hang[\s_]?up/i,
 ];

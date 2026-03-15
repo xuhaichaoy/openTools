@@ -34,22 +34,51 @@ const STREAM_HARD_TIMEOUT_MS = 600_000;
 const generateId = () =>
   Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
 
-function traceStreamEvent(
+const THINKING_DEBUG_LOG_PREFIX = "[streamWithTools][thinking-window]";
+const STREAM_FULL_DUMP_PREFIX = "[MToolsAI][streamWithTools][dump]";
+const STREAM_STAGE_PREFIX = "[MToolsAI][streamWithTools][stage]";
+
+type StreamStageKey =
+  | "start"
+  | "tools_ready"
+  | "rust_request_start"
+  | "response_headers"
+  | "first_raw"
+  | "first_chunk"
+  | "first_visible"
+  | "first_thinking"
+  | "first_tool_args"
+  | "first_tool_calls"
+  | "done"
+  | "error"
+  | "cleanup";
+
+function dumpStreamWithToolsEvent(
   conversationId: string,
   phase: string,
   payload?: unknown,
+  startedAt?: number,
 ): void {
+  const now = Date.now();
+  const timing = {
+    at: new Date(now).toISOString(),
+    timestamp: now,
+    ...(typeof startedAt === "number" ? { elapsedMs: now - startedAt } : {}),
+  };
   if (payload === undefined) {
-    // console.log(`[AI TRACE][${conversationId}][${phase}]`);
+    console.log(`${STREAM_FULL_DUMP_PREFIX}[${conversationId}] ${phase}`, timing);
     return;
   }
-  // console.log(`[AI TRACE][${conversationId}][${phase}]`, payload);
+  console.log(`${STREAM_FULL_DUMP_PREFIX}[${conversationId}] ${phase}`, timing, payload);
 }
 
-function previewStreamDebugText(value: unknown, maxLength = 180): string {
+function previewStageText(value: unknown, maxLength = 160): string {
   if (typeof value !== "string") {
     try {
-      return JSON.stringify(value)?.slice(0, maxLength) ?? String(value);
+      const serialized = JSON.stringify(value);
+      return serialized.length > maxLength
+        ? `${serialized.slice(0, maxLength)}...`
+        : serialized;
     } catch {
       return String(value);
     }
@@ -62,6 +91,35 @@ function previewStreamDebugText(value: unknown, maxLength = 180): string {
   return normalized.length > maxLength
     ? `${normalized.slice(0, maxLength)}...`
     : normalized;
+}
+
+function detectRustRawStage(rawLine: string): {
+  stage: Extract<StreamStageKey, "rust_request_start" | "response_headers">;
+  reportedElapsedMs?: number;
+} | null {
+  if (rawLine.includes("[RUST REQUEST START]")) {
+    return { stage: "rust_request_start" };
+  }
+  if (rawLine.includes("[RUST RESPONSE HEADERS RECEIVED]")) {
+    const match = rawLine.match(/Elapsed:\s*(\d+)ms/i);
+    return {
+      stage: "response_headers",
+      reportedElapsedMs: match?.[1] ? Number(match[1]) : undefined,
+    };
+  }
+  return null;
+}
+
+function traceStreamEvent(
+  conversationId: string,
+  phase: string,
+  payload?: unknown,
+): void {
+  if (payload === undefined) {
+    // console.log(`[AI TRACE][${conversationId}][${phase}]`);
+    return;
+  }
+  // console.log(`[AI TRACE][${conversationId}][${phase}]`, payload);
 }
 
 function normalizeStreamChunk(params: {
@@ -778,29 +836,132 @@ export function createMToolsAI(): MToolsAI {
       return new Promise((resolve, reject) => {
         const startedAt = Date.now();
         const abortBridge = attachAbortBridge(options.signal, conversationId);
+        const stageMarks: Partial<Record<StreamStageKey, number>> = { start: startedAt };
+        let rustReportedHeaderElapsedMs: number | undefined;
+        const dump = (phase: string, payload?: unknown) => {
+          dumpStreamWithToolsEvent(conversationId, phase, payload, startedAt);
+        };
+        const deltaBetween = (from: StreamStageKey, to: StreamStageKey): number | undefined => {
+          const fromAt = stageMarks[from];
+          const toAt = stageMarks[to];
+          return typeof fromAt === "number" && typeof toAt === "number"
+            ? toAt - fromAt
+            : undefined;
+        };
+        const summarizeStages = () => ({
+          startedAt: new Date(startedAt).toISOString(),
+          toolsReadyMs: deltaBetween("start", "tools_ready"),
+          rustRequestStartMs: deltaBetween("start", "rust_request_start"),
+          requestBuildGapMs: deltaBetween("tools_ready", "rust_request_start"),
+          waitHeadersMs: deltaBetween("rust_request_start", "response_headers"),
+          rustReportedHeaderElapsedMs,
+          headersToFirstChunkMs: deltaBetween("response_headers", "first_chunk"),
+          headersToFirstVisibleMs: deltaBetween("response_headers", "first_visible"),
+          headersToFirstThinkingMs: deltaBetween("response_headers", "first_thinking"),
+          headersToFirstToolArgsMs: deltaBetween("response_headers", "first_tool_args"),
+          headersToFirstToolCallsMs: deltaBetween("response_headers", "first_tool_calls"),
+          requestToFirstVisibleMs: deltaBetween("rust_request_start", "first_visible"),
+          requestToFirstThinkingMs: deltaBetween("rust_request_start", "first_thinking"),
+          totalToDoneMs: deltaBetween("start", "done"),
+          totalToErrorMs: deltaBetween("start", "error"),
+          totalToCleanupMs: deltaBetween("start", "cleanup"),
+          marks: Object.fromEntries(
+            Object.entries(stageMarks).map(([stage, at]) => [
+              stage,
+              typeof at === "number" ? new Date(at).toISOString() : at,
+            ]),
+          ),
+        });
+        const markStage = (stage: StreamStageKey, detail?: Record<string, unknown>) => {
+          if (typeof stageMarks[stage] === "number") return;
+          const now = Date.now();
+          stageMarks[stage] = now;
+          console.log(`${STREAM_STAGE_PREFIX}[${conversationId}] ${stage}`, {
+            at: new Date(now).toISOString(),
+            timestamp: now,
+            elapsedMs: now - startedAt,
+            sinceToolsReadyMs: typeof stageMarks.tools_ready === "number" ? now - stageMarks.tools_ready : undefined,
+            sinceRustRequestStartMs: typeof stageMarks.rust_request_start === "number" ? now - stageMarks.rust_request_start : undefined,
+            sinceResponseHeadersMs: typeof stageMarks.response_headers === "number" ? now - stageMarks.response_headers : undefined,
+            ...detail,
+          });
+        };
+        const dumpStageSummary = (reason: string) => {
+          console.log(`${STREAM_STAGE_PREFIX}[${conversationId}] summary:${reason}`, summarizeStages());
+        };
+        dump("start", {
+          modelOverride: options.modelOverride ?? null,
+          thinkingLevel: options.thinkingLevel ?? "adaptive",
+          messageCount: options.messages.length,
+          toolCount: options.tools?.length ?? 0,
+        });
         let cleaned = false;
         let settled = false;
         let stallTimer: ReturnType<typeof setTimeout> | null = null;
         let hardTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
         let lastActivityAt = startedAt;
-        let firstChunkAt: number | null = null;
         let chunkCount = 0;
         let chunkChars = 0;
+        let thinkingDebugActive = false;
+        let thinkingDebugStartedAt = 0;
         const unlisteners: Array<() => void> = [];
+        const logThinkingWindow = (phase: string, context?: Record<string, unknown>) => {
+          if (!thinkingDebugActive) return;
+          aiLog.info(`${THINKING_DEBUG_LOG_PREFIX} ${phase}`, {
+            conversationId,
+            elapsedMs: Date.now() - startedAt,
+            ...context,
+          });
+        };
+        const beginThinkingWindow = (trigger: string, context?: Record<string, unknown>) => {
+          if (thinkingDebugActive || fullContent.trim() || (resolvedToolCalls?.length ?? 0) > 0) return;
+          thinkingDebugActive = true;
+          thinkingDebugStartedAt = Date.now();
+          aiLog.info(`${THINKING_DEBUG_LOG_PREFIX} start`, {
+            conversationId,
+            elapsedMs: Date.now() - startedAt,
+            trigger,
+            ...context,
+          });
+        };
+        const endThinkingWindow = (reason: string, context?: Record<string, unknown>) => {
+          if (!thinkingDebugActive) return;
+          aiLog.info(`${THINKING_DEBUG_LOG_PREFIX} stop`, {
+            conversationId,
+            elapsedMs: Date.now() - startedAt,
+            activeForMs: Date.now() - thinkingDebugStartedAt,
+            reason,
+            finalThinking: fullThinking,
+            finalContent: fullContent,
+            hasToolCalls: !!resolvedToolCalls?.length,
+            ...context,
+          });
+          thinkingDebugActive = false;
+          thinkingDebugStartedAt = 0;
+        };
         const cleanup = () => {
           if (cleaned) return;
           cleaned = true;
           if (stallTimer) clearTimeout(stallTimer);
           if (hardTimeoutTimer) clearTimeout(hardTimeoutTimer);
-          for (const fn of unlisteners) fn();
-          abortBridge.detach();
-          aiLog.info("[streamWithTools] cleanup", {
-            conversationId,
-            elapsedMs: Date.now() - startedAt,
+          markStage("cleanup", {
             chunkCount,
             chunkChars,
             hasToolCalls: !!resolvedToolCalls?.length,
           });
+          dump("cleanup", {
+            elapsedMs: Date.now() - startedAt,
+            chunkCount,
+            chunkChars,
+            fullThinking,
+            fullContent,
+            fullToolArgs,
+            hasToolCalls: !!resolvedToolCalls?.length,
+          });
+          dumpStageSummary("cleanup");
+          endThinkingWindow("cleanup");
+          for (const fn of unlisteners) fn();
+          abortBridge.detach();
         };
 
         const safeResolve = (value: { type: "tool_calls"; toolCalls: AIToolCall[] } | { type: "content"; content: string }) => {
@@ -860,7 +1021,26 @@ export function createMToolsAI(): MToolsAI {
               "ai-stream-raw",
               (event) => {
                 if (event.payload.conversation_id === conversationId) {
+                  markStage("first_raw", {
+                    rawPreview: previewStageText(event.payload.raw_line),
+                  });
+                  const rawStage = detectRustRawStage(event.payload.raw_line);
+                  if (rawStage) {
+                    if (rawStage.stage === "response_headers") {
+                      rustReportedHeaderElapsedMs = rawStage.reportedElapsedMs;
+                    }
+                    markStage(rawStage.stage, {
+                      rawPreview: previewStageText(event.payload.raw_line),
+                      ...(typeof rawStage.reportedElapsedMs === "number"
+                        ? { rustReportedElapsedMs: rawStage.reportedElapsedMs }
+                        : {}),
+                    });
+                  }
+                  dump("ai-stream-raw", event.payload);
                   traceStreamEvent(conversationId, "raw", event.payload.raw_line);
+                  logThinkingWindow("raw", {
+                    rawLine: event.payload.raw_line,
+                  });
                 }
               },
             ),
@@ -868,20 +1048,35 @@ export function createMToolsAI(): MToolsAI {
               "ai-stream-chunk",
               (event) => {
                 if (event.payload.conversation_id === conversationId) {
+                  markStage("first_chunk", {
+                    chunkLength: event.payload.content.length,
+                    chunkPreview: previewStageText(event.payload.content),
+                  });
+                  dump("ai-stream-chunk:raw", event.payload);
                   kickWatchdog("chunk");
-                  if (!firstChunkAt) {
-                    firstChunkAt = Date.now();
-                    aiLog.info("[streamWithTools] first chunk", {
-                      conversationId,
-                      latencyMs: firstChunkAt - startedAt,
-                    });
-                  }
                   chunkCount += 1;
                   chunkChars += event.payload.content.length;
                   const parsed = reasoningStream.processTextChunk(
                     event.payload.content,
                   );
+                  dump("ai-stream-chunk:parsed", parsed);
+                  if (parsed.thinking && !thinkingDebugActive) {
+                    beginThinkingWindow("chunk.thinking", {
+                      rawChunk: event.payload.content,
+                      parsedThinking: parsed.thinking,
+                      parsedVisible: parsed.visible,
+                    });
+                  }
+                  logThinkingWindow("chunk", {
+                    rawChunk: event.payload.content,
+                    parsedThinking: parsed.thinking,
+                    parsedVisible: parsed.visible,
+                  });
                   if (parsed.visible) {
+                    markStage("first_visible", {
+                      visiblePreview: previewStageText(parsed.visible),
+                      visibleLength: parsed.visible.length,
+                    });
                     hadModelResponse = true;
                     const normalized = normalizeStreamChunk({
                       conversationId,
@@ -895,8 +1090,15 @@ export function createMToolsAI(): MToolsAI {
                       traceStreamEvent(conversationId, "chunk", emittedChunk);
                       options.onChunk(emittedChunk);
                     }
+                    endThinkingWindow("visible_chunk", {
+                      visibleChunk: emittedChunk || parsed.visible,
+                    });
                   }
                   if (parsed.thinking) {
+                    markStage("first_thinking", {
+                      thinkingPreview: previewStageText(parsed.thinking),
+                      thinkingLength: parsed.thinking.length,
+                    });
                     hadModelResponse = true;
                     const normalizedThinking = normalizeStreamChunk({
                       conversationId,
@@ -914,24 +1116,12 @@ export function createMToolsAI(): MToolsAI {
                       "thinking_inline",
                       emittedThinking || parsed.thinking,
                     );
-                    aiLog.info("[streamWithTools] thinking parsed from ai-stream-chunk", {
-                      conversationId,
-                      rawLength: event.payload.content.length,
-                      parsedLength: parsed.thinking.length,
-                      emittedLength: emittedThinking.length,
-                      fullLength: fullThinking.length,
-                      rawPreview: previewStreamDebugText(event.payload.content),
-                      parsedPreview: previewStreamDebugText(parsed.thinking),
-                      emittedPreview: previewStreamDebugText(emittedThinking || parsed.thinking),
-                    });
                     if (emittedThinking) {
                       options.onThinking?.(emittedThinking);
                     }
-                  } else if (/<\s*\/?\s*(?:think(?:ing)?|thought|reasoning|final)\b/i.test(event.payload.content)) {
-                    aiLog.warn("[streamWithTools] ai-stream-chunk contains reasoning tags but produced no thinking text", {
-                      conversationId,
-                      rawLength: event.payload.content.length,
-                      rawPreview: previewStreamDebugText(event.payload.content),
+                    logThinkingWindow("thinking_from_chunk", {
+                      thinkingChunk: emittedThinking || parsed.thinking,
+                      fullThinking,
                     });
                   }
                 }
@@ -941,16 +1131,19 @@ export function createMToolsAI(): MToolsAI {
               "ai-agent-tool-calls",
               (event) => {
                 if (event.payload.conversation_id === conversationId) {
+                  markStage("first_tool_calls", {
+                    toolCallCount: event.payload.tool_calls.length,
+                    tools: event.payload.tool_calls.map((toolCall) => toolCall.function?.name ?? "unknown"),
+                  });
+                  dump("ai-agent-tool-calls", event.payload);
                   resolvedToolCalls = event.payload.tool_calls;
                   kickWatchdog("tool_calls");
                   traceStreamEvent(conversationId, "tool_calls", event.payload.tool_calls);
-                  aiLog.info("[streamWithTools] tool calls received", {
-                    conversationId,
-                    count: resolvedToolCalls.length,
-                    tools: resolvedToolCalls.map((toolCall) => ({
-                      name: toolCall.function?.name,
-                      argsPreview: previewStreamDebugText(toolCall.function?.arguments ?? "", 120),
-                    })),
+                  logThinkingWindow("tool_calls", {
+                    toolCalls: event.payload.tool_calls,
+                  });
+                  endThinkingWindow("tool_calls", {
+                    toolCalls: event.payload.tool_calls,
                   });
                 }
               },
@@ -961,6 +1154,13 @@ export function createMToolsAI(): MToolsAI {
                 if (event.payload.conversation_id !== conversationId || settled) {
                   return;
                 }
+                markStage("done", {
+                  chunkCount,
+                  chunkChars,
+                  hasToolCalls: !!resolvedToolCalls?.length,
+                });
+                dump("ai-stream-done", event.payload);
+                dumpStageSummary("done");
                 kickWatchdog("done");
                 traceStreamEvent(
                   conversationId,
@@ -969,14 +1169,9 @@ export function createMToolsAI(): MToolsAI {
                     ? { toolCalls: resolvedToolCalls }
                     : fullContent,
                 );
-                aiLog.info("[streamWithTools] done event", {
-                  conversationId,
-                  elapsedMs: Date.now() - startedAt,
+                logThinkingWindow("done_event", {
                   chunkCount,
                   chunkChars,
-                  hasToolCalls: !!resolvedToolCalls?.length,
-                  fullThinkingChars: fullThinking.length,
-                  fullToolArgsChars: fullToolArgs.length,
                 });
                 if (abortBridge.isAborted()) {
                   safeReject(new Error("Aborted"));
@@ -997,6 +1192,9 @@ export function createMToolsAI(): MToolsAI {
                     traceStreamEvent(conversationId, "chunk", emittedChunk);
                     options.onChunk(emittedChunk);
                   }
+                  endThinkingWindow("flush_visible_chunk", {
+                    visibleChunk: emittedChunk || remaining.visible,
+                  });
                 }
                 if (remaining.thinking) {
                   hadModelResponse = true;
@@ -1016,18 +1214,18 @@ export function createMToolsAI(): MToolsAI {
                     "thinking_inline",
                     emittedThinking || remaining.thinking,
                   );
-                  aiLog.info("[streamWithTools] thinking flushed on done", {
-                    conversationId,
-                    parsedLength: remaining.thinking.length,
-                    emittedLength: emittedThinking.length,
-                    fullLength: fullThinking.length,
-                    parsedPreview: previewStreamDebugText(remaining.thinking),
-                    emittedPreview: previewStreamDebugText(emittedThinking || remaining.thinking),
-                  });
                   if (emittedThinking) {
                     options.onThinking?.(emittedThinking);
                   }
+                  logThinkingWindow("thinking_flush", {
+                    thinkingChunk: emittedThinking || remaining.thinking,
+                    fullThinking,
+                  });
                 }
+                endThinkingWindow("done", {
+                  chunkCount,
+                  chunkChars,
+                });
                 if (resolvedToolCalls && resolvedToolCalls.length > 0) {
                   safeResolve({ type: "tool_calls", toolCalls: resolvedToolCalls });
                 } else {
@@ -1067,8 +1265,18 @@ export function createMToolsAI(): MToolsAI {
                 if (event.payload.conversation_id !== conversationId || settled) {
                   return;
                 }
+                markStage("error", {
+                  error: event.payload.error,
+                  chunkCount,
+                  chunkChars,
+                });
+                dump("ai-stream-error", event.payload);
+                dumpStageSummary("error");
                 kickWatchdog("error");
                 traceStreamEvent(conversationId, "error", event.payload.error);
+                logThinkingWindow("error_event", {
+                  error: event.payload.error,
+                });
                 aiLog.error("[streamWithTools] error event", {
                   conversationId,
                   elapsedMs: Date.now() - startedAt,
@@ -1099,18 +1307,17 @@ export function createMToolsAI(): MToolsAI {
                     "thinking_inline",
                     emittedThinking || remaining.thinking,
                   );
-                  aiLog.info("[streamWithTools] thinking flushed on error", {
-                    conversationId,
-                    parsedLength: remaining.thinking.length,
-                    emittedLength: emittedThinking.length,
-                    fullLength: fullThinking.length,
-                    parsedPreview: previewStreamDebugText(remaining.thinking),
-                    emittedPreview: previewStreamDebugText(emittedThinking || remaining.thinking),
-                  });
                   if (emittedThinking) {
                     options.onThinking?.(emittedThinking);
                   }
+                  logThinkingWindow("thinking_error_flush", {
+                    thinkingChunk: emittedThinking || remaining.thinking,
+                    fullThinking,
+                  });
                 }
+                endThinkingWindow("error", {
+                  error: event.payload.error,
+                });
                 safeReject(new Error(event.payload.error));
               },
             ),
@@ -1118,15 +1325,28 @@ export function createMToolsAI(): MToolsAI {
               "ai-stream-thinking",
               (event) => {
                 if (event.payload.conversation_id === conversationId) {
+                  if ((event.payload.content ?? "").length > 0) {
+                    markStage("first_thinking", {
+                      thinkingPreview: previewStageText(event.payload.content ?? ""),
+                      thinkingLength: (event.payload.content ?? "").length,
+                      source: "ai-stream-thinking.raw",
+                    });
+                  }
+                  dump("ai-stream-thinking:raw", event.payload);
                   kickWatchdog("thinking");
-                  aiLog.info("[streamWithTools] ai-stream-thinking event", {
-                    conversationId,
-                    rawLength: (event.payload.content ?? "").length,
-                    rawPreview: previewStreamDebugText(event.payload.content ?? ""),
-                  });
+                  if ((event.payload.content ?? "").trim()) {
+                    beginThinkingWindow("thinking_event.raw", {
+                      rawThinking: event.payload.content ?? "",
+                    });
+                  }
                   const parsed = reasoningStream.processThinkingChunk(
                     event.payload.content ?? "",
                   );
+                  dump("ai-stream-thinking:parsed", parsed);
+                  logThinkingWindow("thinking_event", {
+                    rawThinking: event.payload.content ?? "",
+                    parsedThinking: parsed.thinking,
+                  });
                   if (parsed.thinking) {
                     hadModelResponse = true;
                     const normalizedThinking = normalizeStreamChunk({
@@ -1141,22 +1361,12 @@ export function createMToolsAI(): MToolsAI {
                         ? normalizedThinking.full
                         : normalizedThinking.delta;
                     traceStreamEvent(conversationId, "thinking", emittedThinking || parsed.thinking);
-                    aiLog.info("[streamWithTools] thinking normalized from ai-stream-thinking", {
-                      conversationId,
-                      parsedLength: parsed.thinking.length,
-                      emittedLength: emittedThinking.length,
-                      fullLength: fullThinking.length,
-                      parsedPreview: previewStreamDebugText(parsed.thinking),
-                      emittedPreview: previewStreamDebugText(emittedThinking || parsed.thinking),
-                    });
                     if (emittedThinking) {
                       options.onThinking?.(emittedThinking);
                     }
-                  } else {
-                    aiLog.warn("[streamWithTools] ai-stream-thinking event parsed to empty thinking", {
-                      conversationId,
-                      rawLength: (event.payload.content ?? "").length,
-                      rawPreview: previewStreamDebugText(event.payload.content ?? ""),
+                    logThinkingWindow("thinking_event_parsed", {
+                      thinkingChunk: emittedThinking || parsed.thinking,
+                      fullThinking,
                     });
                   }
                 }
@@ -1166,6 +1376,13 @@ export function createMToolsAI(): MToolsAI {
               "ai-stream-tool-args",
               (event) => {
                 if (event.payload.conversation_id === conversationId) {
+                  if ((event.payload.content ?? "").length > 0) {
+                    markStage("first_tool_args", {
+                      toolArgsPreview: previewStageText(event.payload.content ?? ""),
+                      toolArgsLength: (event.payload.content ?? "").length,
+                    });
+                  }
+                  dump("ai-stream-tool-args:raw", event.payload);
                   kickWatchdog("tool-args");
                   const normalizedToolArgs = normalizeStreamChunk({
                     conversationId,
@@ -1178,19 +1395,19 @@ export function createMToolsAI(): MToolsAI {
                     normalizedToolArgs.mode === "reset"
                       ? normalizedToolArgs.full
                       : normalizedToolArgs.delta;
+                  dump("ai-stream-tool-args:normalized", {
+                    normalizedToolArgs,
+                    fullToolArgs,
+                    emittedToolArgs,
+                  });
                   traceStreamEvent(
                     conversationId,
                     "tool_args",
                     emittedToolArgs || event.payload.content || "",
                   );
-                  aiLog.info("[streamWithTools] tool args chunk", {
-                    conversationId,
-                    rawLength: (event.payload.content ?? "").length,
-                    emittedLength: emittedToolArgs.length,
-                    fullLength: fullToolArgs.length,
-                    rawPreview: previewStreamDebugText(event.payload.content ?? ""),
-                    emittedPreview: previewStreamDebugText(emittedToolArgs || event.payload.content || ""),
-                    fullPreview: previewStreamDebugText(fullToolArgs),
+                  logThinkingWindow("tool_args", {
+                    toolArgsChunk: emittedToolArgs || event.payload.content || "",
+                    fullToolArgs,
                   });
                   if (emittedToolArgs) {
                     options.onToolArgs?.(emittedToolArgs);
@@ -1200,7 +1417,6 @@ export function createMToolsAI(): MToolsAI {
             ),
           ]);
           unlisteners.push(...listeners);
-          aiLog.info("[streamWithTools] listeners ready", { conversationId });
 
           if (abortBridge.isAborted()) {
             safeReject(new Error("Aborted"));
@@ -1218,34 +1434,37 @@ export function createMToolsAI(): MToolsAI {
 
           kickWatchdog("invoke_start");
           const routed = await resolveRoutedConfig(config);
-          aiLog.info("[streamWithTools] start", {
-            conversationId,
+          dump("invoke:resolved-config", {
             model: routed.model,
             protocol: routed.protocol ?? "openai",
-            source: routed.source,
-            baseUrl: routed.base_url,
-            teamId: routed.team_id,
-            teamConfigId: routed.team_config_id,
-            tools: options.tools?.length ?? 0,
-            messages: options.messages.length,
+            source: routed.source ?? "own_key",
+            base_url: routed.base_url,
+            team_id: routed.team_id,
+            team_config_id: routed.team_config_id,
+            thinking_level: routed.thinking_level,
+            messageCount: finalMessages.length,
+            toolCount: options.tools?.length ?? 0,
           });
-          aiLog.info("[streamWithTools] invoke ai_agent_stream", {
-            conversationId,
-            messages: finalMessages.length,
-            tools: options.tools?.length ?? 0,
+          dump("invoke:messages", finalMessages);
+          markStage("tools_ready", {
+            toolCount: options.tools?.length ?? 0,
+            messageCount: finalMessages.length,
+            model: routed.model,
+            source: routed.source ?? "own_key",
           });
+          dump("invoke:tools", options.tools ?? []);
           await invoke("ai_agent_stream", {
             messages: finalMessages,
             config: routed,
             tools: options.tools,
             conversationId,
           });
-          aiLog.info("[streamWithTools] invoke resolved", {
-            conversationId,
-            elapsedMs: Date.now() - startedAt,
-          });
+          dump("invoke:dispatched");
         })().catch((e) => {
           const errMsg = e instanceof Error ? e.message : String(e);
+          dump("invoke:failed", {
+            error: errMsg,
+          });
           aiLog.error("[streamWithTools] invoke failed", {
             conversationId,
             elapsedMs: Date.now() - startedAt,

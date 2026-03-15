@@ -45,9 +45,16 @@ import { createLogger } from "@/core/logger";
 import { useAIStore } from "@/store/ai-store";
 
 const _agentActorLogger = createLogger("AgentActor");
-const actorLog = (name: string, ...args: unknown[]) => {
-  const message = args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" ");
-  _agentActorLogger.info(`[${name}] ${message}`);
+const formatActorLog = (name: string, args: unknown[]) =>
+  `[${name}] ${args.map((arg) => (typeof arg === "string" ? arg : JSON.stringify(arg))).join(" ")}`;
+const actorDebugLog = (name: string, ...args: unknown[]) => {
+  _agentActorLogger.debug(formatActorLog(name, args));
+};
+const actorWarnLog = (name: string, ...args: unknown[]) => {
+  _agentActorLogger.warn(formatActorLog(name, args));
+};
+const actorErrorLog = (name: string, ...args: unknown[]) => {
+  _agentActorLogger.error(formatActorLog(name, args));
 };
 
 type ActorEventHandler = (event: ActorEvent) => void;
@@ -258,7 +265,7 @@ export class AgentActor {
   private createChatAskUser(): AskUserCallback {
     return async (questions) => {
       if (!this.actorSystem) throw new Error("No ActorSystem");
-      actorLog(this.role.name, `askUser: ${questions.length} questions, awaiting user reply...`);
+      actorDebugLog(this.role.name, `askUser: ${questions.length} questions, awaiting user reply...`);
       let questionText = questions.map((q, i) => {
         let line = `**问题${questions.length > 1 ? ` ${i + 1}` : ""}**: ${q.question}`;
         if (q.options?.length) {
@@ -278,7 +285,7 @@ export class AgentActor {
         throw new Error(interaction.status === "timed_out" ? "用户未回复" : "交互已取消");
       }
       const reply = interaction.content;
-      actorLog(this.role.name, `askUser: got reply="${reply.slice(0, 60)}"`);
+      actorDebugLog(this.role.name, `askUser: got reply="${reply.slice(0, 60)}"`);
 
       const parseReplies = (): string[] => {
         const keyed = new Map<number, string>();
@@ -369,12 +376,12 @@ export class AgentActor {
   /** 接收消息（线程安全——JS 单线程，任何时候都可调用） */
   receive(message: InboxMessage): void {
     const senderName = message.from === "user" ? "用户" : (this.actorSystem?.get(message.from)?.role.name ?? message.from);
-    actorLog(this.role.name, `receive: from=${senderName}, status=${this._status}, inboxSize=${this.inbox.length + 1}, content="${String(message.content).slice(0, 60)}"`);
+    actorDebugLog(this.role.name, `receive: from=${senderName}, status=${this._status}, inboxSize=${this.inbox.length + 1}, content="${String(message.content).slice(0, 60)}"`);
     this.inbox.push(message);
     this.emit("message_received", { message });
 
     if (this._status === "idle") {
-      actorLog(this.role.name, "receive: idle → triggering wakeUpForInbox");
+      actorDebugLog(this.role.name, "receive: idle → triggering wakeUpForInbox");
       this.wakeUpForInbox();
     }
   }
@@ -392,12 +399,12 @@ export class AgentActor {
     queueMicrotask(() => {
       this._wakeUpScheduled = false;
       if (this._status !== "idle" || this.inbox.length === 0) {
-        actorLog(this.role.name, `wakeUpForInbox: skipped (status=${this._status}, inbox=${this.inbox.length})`);
+        actorDebugLog(this.role.name, `wakeUpForInbox: skipped (status=${this._status}, inbox=${this.inbox.length})`);
         return;
       }
 
       const messages = this.drainInbox();
-      actorLog(this.role.name, `wakeUpForInbox: drained ${messages.length} messages`);
+      actorDebugLog(this.role.name, `wakeUpForInbox: drained ${messages.length} messages`);
 
       const userMsgs = messages.filter((m) => m.from === "user");
       let query: string;
@@ -421,7 +428,7 @@ export class AgentActor {
   /** 手动读取并清空 inbox（带重入保护，防止并发 drain 丢消息） */
   drainInbox(): InboxMessage[] {
     if (this._draining) {
-      actorLog(this.role.name, `drainInbox: re-entrant call blocked`);
+      actorDebugLog(this.role.name, `drainInbox: re-entrant call blocked`);
       return [];
     }
     this._draining = true;
@@ -442,7 +449,7 @@ export class AgentActor {
     images?: string[],
     opts?: { publishResult?: boolean; runOverrides?: ActorRunOverrides },
   ): Promise<ActorTask> {
-    actorLog(this.role.name, `📋 assignTask START: query="${query.slice(0, 80)}", status=${this._status}, publishResult=${opts?.publishResult !== false}, inbox=${this.inbox.length}`);
+    actorDebugLog(this.role.name, `📋 assignTask START: query="${query.slice(0, 80)}", status=${this._status}, publishResult=${opts?.publishResult !== false}, inbox=${this.inbox.length}`);
     const task: ActorTask = {
       id: generateId(),
       query,
@@ -457,7 +464,7 @@ export class AgentActor {
       task.status = "running";
       task.startedAt = Date.now();
       this.setStatus("running");
-      actorLog(this.role.name, `📋 assignTask RUNNING: taskId=${task.id}, status changed to running`);
+      actorDebugLog(this.role.name, `📋 assignTask RUNNING: taskId=${task.id}, status changed to running`);
       this.emit("task_started", { taskId: task.id, query });
       const emitTaskStep = (step: AgentStep) => {
         task.steps = applyIncomingAgentStep(task.steps, step);
@@ -466,12 +473,12 @@ export class AgentActor {
 
       if (this._timeoutSeconds && this._timeoutSeconds > 0) {
         globalTimeoutId = setTimeout(() => {
-          actorLog(this.role.name, `assignTask: GLOBAL TIMEOUT after ${this._timeoutSeconds}s, aborting task ${task.id}`);
+          actorWarnLog(this.role.name, `assignTask: GLOBAL TIMEOUT after ${this._timeoutSeconds}s, aborting task ${task.id}`);
           this.abort();
         }, this._timeoutSeconds * 1000);
       }
 
-      actorLog(this.role.name, `📝 assignTask: executing with sessionHistory=${this.sessionHistory.length} entries, inbox=${this.inbox.length}`);
+      actorDebugLog(this.role.name, `📝 assignTask: executing with sessionHistory=${this.sessionHistory.length} entries, inbox=${this.inbox.length}`);
       this._capturedInboxUserQuery = undefined;
       const { result: initialResult, finalQuery: executedQuery } = await this.runWithClarifications(
         query,
@@ -497,7 +504,7 @@ export class AgentActor {
         waitRound < MAX_WAIT_ROUNDS
       ) {
         const activeCount = this.actorSystem.getActiveSpawnedTasks(this.id).length;
-        actorLog(this.role.name, `assignTask: waiting for ${activeCount} spawned tasks (round ${waitRound + 1})...`);
+        actorDebugLog(this.role.name, `assignTask: waiting for ${activeCount} spawned tasks (round ${waitRound + 1})...`);
         await this.waitForInbox(WAIT_POLL_MS);
         if (this.inbox.length > 0) {
           const drainedMessages = this.drainInbox();
@@ -506,7 +513,7 @@ export class AgentActor {
             hadFailedSpawnFollowUp = true;
             failedSpawnTaskLabels.push(...followUp.summary.failedTaskLabels);
           }
-          actorLog(
+          actorDebugLog(
             this.role.name,
             `assignTask: processing ${drainedMessages.length} inbox messages in follow-up run`,
             {
@@ -543,7 +550,7 @@ export class AgentActor {
           hadFailedSpawnFollowUp,
           failedTaskLabels: failedSpawnTaskLabels,
         });
-        actorLog(this.role.name, "assignTask: triggering final synthesis", {
+        actorDebugLog(this.role.name, "assignTask: triggering final synthesis", {
           hadFailedSpawnFollowUp,
           failedSpawnTaskLabels: [...new Set(failedSpawnTaskLabels.filter(Boolean))],
           resultPreview: String(result ?? "").slice(0, 120),
@@ -570,7 +577,7 @@ export class AgentActor {
 
       let finalValidation = validateFinalResult(result);
       if (!finalValidation.accepted) {
-        actorLog(this.role.name, "assignTask: final result validation failed", {
+        actorWarnLog(this.role.name, "assignTask: final result validation failed", {
           reason: finalValidation.reason,
           resultPreview: String(result ?? "").slice(0, 120),
           queryPreview: query.slice(0, 120),
@@ -603,7 +610,7 @@ export class AgentActor {
         this.appendSessionHistory("assistant", repairedResult ?? "");
         result = repairedResult ?? result;
         finalValidation = validateFinalResult(result);
-        actorLog(this.role.name, "assignTask: final result revalidation", {
+        actorDebugLog(this.role.name, "assignTask: final result revalidation", {
           accepted: finalValidation.accepted,
           reason: finalValidation.reason,
           resultPreview: String(result ?? "").slice(0, 120),
@@ -619,7 +626,7 @@ export class AgentActor {
       task.result = result;
       task.finishedAt = Date.now();
       const elapsed = task.finishedAt - (task.startedAt ?? task.finishedAt);
-      actorLog(this.role.name, `✅ assignTask COMPLETED: taskId=${task.id}, elapsed=${elapsed}ms, result="${(result ?? "").slice(0, 80)}"`);
+      actorDebugLog(this.role.name, `✅ assignTask COMPLETED: taskId=${task.id}, elapsed=${elapsed}ms, result="${(result ?? "").slice(0, 80)}"`);
       this.setStatus("idle");
 
       // 自动提取记忆（对标 OpenClaw session-memory hook）
@@ -628,7 +635,7 @@ export class AgentActor {
         sourceMode: "dialog",
         workspaceId: this._workspace,
       }).catch((err) => {
-        actorLog(this.role.name, `autoExtractMemories failed (non-blocking):`, err instanceof Error ? err.message : err);
+        actorWarnLog(this.role.name, `autoExtractMemories failed (non-blocking):`, err instanceof Error ? err.message : err);
       });
       if (this.actorSystem && opts?.publishResult !== false) {
         const output = String(result ?? "").trim() || "（任务已完成，但未生成可展示的文本结果）";
@@ -644,7 +651,7 @@ export class AgentActor {
       task.error = error;
       task.finishedAt = Date.now();
       const errorElapsed = task.finishedAt - (task.startedAt ?? task.finishedAt);
-      actorLog(this.role.name, `assignTask: ERROR - ${error}`);
+      actorErrorLog(this.role.name, `assignTask: ERROR - ${error}`);
       this.setStatus("idle");
       if (this.actorSystem && opts?.publishResult !== false) {
         this.actorSystem.publishResult(
@@ -930,7 +937,7 @@ export class AgentActor {
       ?? useAIStore.getState().config.temperature
       ?? 0.7;
 
-    actorLog(
+    actorDebugLog(
       this.role.name,
       `runWithInbox: model=${effectiveModelOverride ?? "default"}, maxIter=${effectiveMaxIterations}, thinking=${effectiveThinkingLevel ?? "adaptive"}, inboxSize=${this.inbox.length}`,
     );
@@ -988,7 +995,7 @@ export class AgentActor {
         inboxDrain: () => {
           const drained = this.drainInbox();
           if (drained.length > 0) {
-            actorLog(this.role.name, `inboxDrain: ${drained.length} messages drained`);
+            actorDebugLog(this.role.name, `inboxDrain: ${drained.length} messages drained`);
             if (!this._capturedInboxUserQuery) {
               const userMsgs = drained.filter((m) => m.from === "user");
               if (userMsgs.length > 0) {

@@ -245,6 +245,7 @@ export const useAppStore = create<AppState>()(
       storage: tauriPersistStorage("app-settings.json", "应用设置"),
       partialize: (state) => ({
         recentTools: state.recentTools,
+        aiCenterMode: state.aiCenterMode,
         aiCenterModelScopes: state.aiCenterModelScopes,
       }),
     },

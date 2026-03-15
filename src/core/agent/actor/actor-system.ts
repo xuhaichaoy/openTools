@@ -202,7 +202,7 @@ function isLowSignalCoordinationMessage(content: string): boolean {
 }
 
 const LOG_PREFIX = "[ActorSystem]";
-const log = (...args: unknown[]) => console.log(LOG_PREFIX, ...args);
+const log = (..._args: unknown[]) => undefined;
 const logWarn = (...args: unknown[]) => console.warn(LOG_PREFIX, ...args);
 
 type SystemEventHandler = (event: ActorEvent | DialogMessage) => void;

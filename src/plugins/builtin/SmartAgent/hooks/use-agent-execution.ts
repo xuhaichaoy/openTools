@@ -27,6 +27,7 @@ import {
 } from "@/core/ai/assistant-config";
 import { autoExtractMemories } from "@/core/agent/actor/actor-memory";
 import { buildKnowledgeContextMessages } from "@/core/agent/actor/middlewares/knowledge-base-middleware";
+import { isRetryableError } from "@/core/agent/actor/middlewares/model-retry-middleware";
 
 type AgentStoreState = ReturnType<typeof useAgentStore.getState>;
 export const AGENT_EXECUTION_HEARTBEAT_INTERVAL_MS = 10_000;
@@ -477,8 +478,7 @@ export function useAgentExecution({
             } else {
               lastError = e as Error;
             }
-            const errMsg = String(lastError);
-            const isRetryable = /rate.?limit|429|503|500|timeout|ECONNRESET|network/i.test(errMsg);
+            const isRetryable = isRetryableError(lastError);
             if (!isRetryable || attempt >= retryMax) {
               throw lastError;
             }

@@ -111,6 +111,30 @@ describe("tool-streaming-preview", () => {
     expect(formatted.split("\n").length).toBeGreaterThan(8);
   });
 
+  it("normalizes backslash-newline html streaming chunks into readable multiline code", () => {
+    const formatted = formatArtifactPreviewBody(
+      "/tmp/demo.html",
+      "<!DOCTYPE html>\\\n<html lang=\"zh-CN\">\\\n<head>\\\n<meta charset=\"UTF-8\" />\\\n</head>\\\n<body><div class=\"app\">hello</div></body>\\\n</html>",
+    );
+
+    expect(formatted).toContain("<!DOCTYPE html>");
+    expect(formatted).toContain("\n<html lang=\"zh-CN\">");
+    expect(formatted).toContain("\n  <head>");
+    expect(formatted).not.toContain("\\\n");
+  });
+
+  it("formats multiline html previews when multiple tags are still compressed into the same line", () => {
+    const formatted = formatArtifactPreviewBody(
+      "/tmp/demo.html",
+      "<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head><meta charset=\"UTF-8\"><title>Demo</title><style>body { margin: 0; padding: 0; } .app { display: flex; }</style></head>\n<body><div class=\"app\">hello</div></body>\n</html>",
+    );
+
+    expect(formatted).toContain("\n  <head>");
+    expect(formatted).toContain("\n    <meta charset=\"UTF-8\">");
+    expect(formatted).toContain("\n      body {");
+    expect(formatted).toContain("\n  <body>");
+  });
+
   it("keeps existing multiline artifact previews unchanged", () => {
     const source = "<!DOCTYPE html>\n<html>\n  <body>ok</body>\n</html>";
     expect(formatArtifactPreviewBody("/tmp/demo.html", source)).toBe(source);
