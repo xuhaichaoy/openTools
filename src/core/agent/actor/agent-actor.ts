@@ -48,7 +48,10 @@ const _agentActorLogger = createLogger("AgentActor");
 const formatActorLog = (name: string, args: unknown[]) =>
   `[${name}] ${args.map((arg) => (typeof arg === "string" ? arg : JSON.stringify(arg))).join(" ")}`;
 const actorDebugLog = (name: string, ...args: unknown[]) => {
-  _agentActorLogger.debug(formatActorLog(name, args));
+  void name;
+  void args;
+  void _agentActorLogger;
+  void formatActorLog;
 };
 const actorWarnLog = (name: string, ...args: unknown[]) => {
   _agentActorLogger.warn(formatActorLog(name, args));

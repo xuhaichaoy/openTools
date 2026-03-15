@@ -77,6 +77,103 @@ function decodeBase64Utf8(input: string): string {
   return new TextDecoder().decode(bytes);
 }
 
+const IMAGE_FILE_EXTENSIONS = new Set([
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".webp",
+  ".bmp",
+  ".ico",
+  ".heic",
+  ".heif",
+  ".avif",
+  ".tif",
+  ".tiff",
+]);
+
+const NON_TEXT_FILE_EXTENSIONS = new Set([
+  ...IMAGE_FILE_EXTENSIONS,
+  ".pdf",
+  ".doc",
+  ".docx",
+  ".ppt",
+  ".pptx",
+  ".xls",
+  ".xlsx",
+  ".zip",
+  ".rar",
+  ".7z",
+  ".tar",
+  ".gz",
+  ".bz2",
+  ".xz",
+  ".dmg",
+  ".pkg",
+  ".exe",
+  ".dll",
+  ".so",
+  ".bin",
+  ".dat",
+  ".db",
+  ".sqlite",
+  ".sqlite3",
+  ".mp3",
+  ".wav",
+  ".ogg",
+  ".m4a",
+  ".mp4",
+  ".mov",
+  ".avi",
+  ".mkv",
+  ".woff",
+  ".woff2",
+  ".ttf",
+  ".otf",
+]);
+
+function normalizePathForExtension(path: string): string {
+  return path.trim().replace(/\\/g, "/").toLowerCase();
+}
+
+function getPathExtension(path: string): string {
+  const normalized = normalizePathForExtension(path);
+  const fileName = normalized.split("/").pop() ?? normalized;
+  const dotIndex = fileName.lastIndexOf(".");
+  return dotIndex >= 0 ? fileName.slice(dotIndex) : "";
+}
+
+function getUnsupportedTextToolPathError(
+  path: string,
+  toolName: string,
+): { error: string; hint: string } | null {
+  const ext = getPathExtension(path);
+  if (!ext || !NON_TEXT_FILE_EXTENSIONS.has(ext)) return null;
+
+  if (IMAGE_FILE_EXTENSIONS.has(ext)) {
+    return {
+      error: `${toolName} 仅支持文本文件，不能读取或编辑图片文件 (${ext})：${path}`,
+      hint:
+        "如果这张图片已经作为会话附件传入，请直接基于图片分析；不要再对图片路径调用 read_file / read_file_range。若当前模型不支持视觉，请改为请求 OCR 或文字摘录。",
+    };
+  }
+
+  return {
+    error: `${toolName} 仅支持文本文件，不能读取或编辑二进制文件 (${ext})：${path}`,
+    hint: "请改用该文件格式的专用解析流程，或让用户提供转换后的文本内容。",
+  };
+}
+
+async function readTextToolFile(
+  path: string,
+  toolName: string,
+): Promise<string | { error: string; hint: string }> {
+  const pathError = getUnsupportedTextToolPathError(path, toolName);
+  if (pathError) return pathError;
+  const result = await invokeTauri<string | { content: string }>("read_text_file", { path });
+  return typeof result === "string" ? result : result.content;
+}
+
 function createLocalDevTools(
   confirmHostFallback: (context: RuntimeFallbackContext) => Promise<boolean>,
 ): AgentTool[] {
@@ -95,7 +192,7 @@ function createLocalDevTools(
     },
     {
       name: "read_file",
-      description: "读取本地文本文件（代码、配置、日志等）",
+      description: "读取本地文本文件（代码、配置、日志等）。禁止读取图片、PDF、Office 等二进制文件。",
       readonly: true,
       parameters: {
         path: { type: "string", description: "文件路径（建议绝对路径）" },
@@ -103,12 +200,12 @@ function createLocalDevTools(
       execute: async (params) => {
         const path = String(params.path || "");
         if (!path.trim()) return { error: "path 不能为空" };
-        return invokeTauri("read_text_file", { path });
+        return readTextToolFile(path, "read_file");
       },
     },
     {
       name: "read_file_range",
-      description: "按行读取代码文件，返回行号，适合定位函数和分析上下文",
+      description: "按行读取代码等文本文件，返回行号，适合定位函数和分析上下文。禁止读取图片、PDF、Office 等二进制文件。",
       readonly: true,
       parameters: {
         path: { type: "string", description: "文件路径（建议绝对路径）" },
@@ -131,6 +228,8 @@ function createLocalDevTools(
       execute: async (params) => {
         const path = String(params.path || "");
         if (!path.trim()) return { error: "path 不能为空" };
+        const pathError = getUnsupportedTextToolPathError(path, "read_file_range");
+        if (pathError) return pathError;
         const start_line =
           typeof params.start_line === "number" ? Math.floor(params.start_line) : undefined;
         const end_line =
@@ -190,7 +289,7 @@ function createLocalDevTools(
     },
     {
       name: "write_file",
-      description: "写入本地文本文件（会覆盖目标文件）。注意：对于已有文件的局部修改，优先使用 str_replace_edit 工具（更精确、更安全）。write_file 仅适合创建全新文件或需要完全重写的场景。严禁在生成网页或代码时将图片转为 base64 嵌入！请务必优先使用外部占位符图片（如 https://placehold.co/600x400）或假文件路径，确保只输出纯文本代码。",
+      description: "写入本地文本文件（会覆盖目标文件）。注意：对于已有文件的局部修改，优先使用 str_replace_edit 工具（更精确、更安全）。write_file 仅适合创建全新文件或需要完全重写的场景。严禁在生成网页或代码时将图片转为 base64 嵌入！请务必优先使用外部占位符图片（如 https://placehold.co/600x400）或假文件路径，确保只输出纯文本代码。不要将该工具用于图片、PDF、Office 等二进制文件。",
       parameters: {
         path: { type: "string", description: "文件路径（建议绝对路径）" },
         content: { type: "string", description: "要写入的纯文本内容，禁止使用 base64", required: true },
@@ -199,8 +298,10 @@ function createLocalDevTools(
       execute: async (params) => {
         const path = String(params.path || "");
         if (!path.trim()) return { error: "path 不能为空" };
+        const pathError = getUnsupportedTextToolPathError(path, "write_file");
+        if (pathError) return pathError;
         const content = String(params.content || "");
-        
+
         if (!content) return { error: "content 不能为空" };
         return agentRuntimeManager.writeTextFile(path, content, {
           confirmHostFallback,
@@ -287,6 +388,8 @@ function createLocalDevTools(
         const command = String(params.command || "").trim();
         const path = String(params.path || "").trim();
         if (!path) return { error: "path 不能为空" };
+        const pathError = getUnsupportedTextToolPathError(path, "str_replace_edit");
+        if (pathError) return pathError;
         if (!["str_replace", "insert", "create"].includes(command)) {
           return { error: `无效命令: ${command}，可选: str_replace, insert, create` };
         }
@@ -312,8 +415,9 @@ function createLocalDevTools(
         // ── 读取文件内容 ──
         let fileContent: string;
         try {
-          const result = await invokeTauri<string | { content: string }>("read_text_file", { path });
-          fileContent = typeof result === "string" ? result : result.content;
+          const result = await readTextToolFile(path, "str_replace_edit");
+          if (typeof result !== "string") return result;
+          fileContent = result;
         } catch (e) {
           return { error: `无法读取文件 ${path}: ${e}` };
         }
@@ -1460,6 +1564,8 @@ export function createBuiltinAgentTools(
       const jsonPath = String(params.json_path ?? "").trim();
 
       if (!filePath) return { error: "path 不能为空" };
+      const pathError = getUnsupportedTextToolPathError(filePath, "json_edit");
+      if (pathError) return pathError;
       if (!["view", "set", "add", "remove"].includes(operation)) {
         return { error: `无效操作: ${operation}，可选: view, set, add, remove` };
       }
@@ -1468,8 +1574,9 @@ export function createBuiltinAgentTools(
       let fileContent: string;
       let jsonData: unknown;
       try {
-        const result = await invokeTauri<string | { content: string }>("read_text_file", { path: filePath });
-        fileContent = typeof result === "string" ? result : result.content;
+        const result = await readTextToolFile(filePath, "json_edit");
+        if (typeof result !== "string") return result;
+        fileContent = result;
         jsonData = JSON.parse(fileContent);
       } catch (e) {
         return { error: `读取或解析 JSON 失败: ${e}` };

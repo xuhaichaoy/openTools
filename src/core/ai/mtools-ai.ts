@@ -37,6 +37,7 @@ const generateId = () =>
 const THINKING_DEBUG_LOG_PREFIX = "[streamWithTools][thinking-window]";
 const STREAM_FULL_DUMP_PREFIX = "[MToolsAI][streamWithTools][dump]";
 const STREAM_STAGE_PREFIX = "[MToolsAI][streamWithTools][stage]";
+const STREAM_CONTEXT_PREFIX = "[MToolsAI][streamWithTools][context]";
 
 type StreamStageKey =
   | "start"
@@ -59,17 +60,11 @@ function dumpStreamWithToolsEvent(
   payload?: unknown,
   startedAt?: number,
 ): void {
-  const now = Date.now();
-  const timing = {
-    at: new Date(now).toISOString(),
-    timestamp: now,
-    ...(typeof startedAt === "number" ? { elapsedMs: now - startedAt } : {}),
-  };
-  if (payload === undefined) {
-    console.log(`${STREAM_FULL_DUMP_PREFIX}[${conversationId}] ${phase}`, timing);
-    return;
-  }
-  console.log(`${STREAM_FULL_DUMP_PREFIX}[${conversationId}] ${phase}`, timing, payload);
+  void conversationId;
+  void phase;
+  void payload;
+  void startedAt;
+  void STREAM_FULL_DUMP_PREFIX;
 }
 
 function previewStageText(value: unknown, maxLength = 160): string {
@@ -120,6 +115,55 @@ function traceStreamEvent(
     return;
   }
   // console.log(`[AI TRACE][${conversationId}][${phase}]`, payload);
+}
+
+function logStreamWithToolsContext(
+  conversationId: string,
+  routed: AIConfig,
+  finalMessages: Array<{
+    role: string;
+    content: string;
+    images?: string[];
+    tool_calls?: AIToolCall[];
+    tool_call_id?: string;
+    name?: string;
+  }>,
+  toolCount: number,
+): void {
+  const totalContentChars = finalMessages.reduce(
+    (sum, message) => sum + String(message.content ?? "").length,
+    0,
+  );
+  const messageStats = finalMessages.map((message, index) => ({
+    index,
+    role: message.role,
+    name: message.name,
+    contentChars: String(message.content ?? "").length,
+    imageCount: message.images?.length ?? 0,
+    toolCallCount: message.tool_calls?.length ?? 0,
+    toolCallId: message.tool_call_id,
+    preview: String(message.content ?? "").slice(0, 160),
+  }));
+
+  console.groupCollapsed(
+    `${STREAM_CONTEXT_PREFIX}[${conversationId}] model=${routed.model} messages=${finalMessages.length} totalChars=${totalContentChars}`,
+  );
+  console.log("summary", {
+    model: routed.model,
+    protocol: routed.protocol ?? "openai",
+    source: routed.source ?? "own_key",
+    base_url: routed.base_url,
+    team_id: routed.team_id,
+    team_config_id: routed.team_config_id,
+    thinking_level: routed.thinking_level,
+    messageCount: finalMessages.length,
+    toolCount,
+    totalContentChars,
+  });
+  console.table(messageStats);
+  console.log("messages", finalMessages);
+  console.log("messagesJson", JSON.stringify(finalMessages, null, 2));
+  console.groupEnd();
 }
 
 function normalizeStreamChunk(params: {
@@ -874,20 +918,17 @@ export function createMToolsAI(): MToolsAI {
         });
         const markStage = (stage: StreamStageKey, detail?: Record<string, unknown>) => {
           if (typeof stageMarks[stage] === "number") return;
-          const now = Date.now();
-          stageMarks[stage] = now;
-          console.log(`${STREAM_STAGE_PREFIX}[${conversationId}] ${stage}`, {
-            at: new Date(now).toISOString(),
-            timestamp: now,
-            elapsedMs: now - startedAt,
-            sinceToolsReadyMs: typeof stageMarks.tools_ready === "number" ? now - stageMarks.tools_ready : undefined,
-            sinceRustRequestStartMs: typeof stageMarks.rust_request_start === "number" ? now - stageMarks.rust_request_start : undefined,
-            sinceResponseHeadersMs: typeof stageMarks.response_headers === "number" ? now - stageMarks.response_headers : undefined,
-            ...detail,
-          });
+          stageMarks[stage] = Date.now();
+          void detail;
+          void STREAM_STAGE_PREFIX;
+          void conversationId;
+          void startedAt;
         };
         const dumpStageSummary = (reason: string) => {
-          console.log(`${STREAM_STAGE_PREFIX}[${conversationId}] summary:${reason}`, summarizeStages());
+          void reason;
+          void STREAM_STAGE_PREFIX;
+          void conversationId;
+          void summarizeStages;
         };
         dump("start", {
           modelOverride: options.modelOverride ?? null,
@@ -906,36 +947,28 @@ export function createMToolsAI(): MToolsAI {
         let thinkingDebugStartedAt = 0;
         const unlisteners: Array<() => void> = [];
         const logThinkingWindow = (phase: string, context?: Record<string, unknown>) => {
-          if (!thinkingDebugActive) return;
-          aiLog.info(`${THINKING_DEBUG_LOG_PREFIX} ${phase}`, {
-            conversationId,
-            elapsedMs: Date.now() - startedAt,
-            ...context,
-          });
+          void phase;
+          void context;
+          void thinkingDebugActive;
+          void THINKING_DEBUG_LOG_PREFIX;
         };
         const beginThinkingWindow = (trigger: string, context?: Record<string, unknown>) => {
           if (thinkingDebugActive || fullContent.trim() || (resolvedToolCalls?.length ?? 0) > 0) return;
           thinkingDebugActive = true;
           thinkingDebugStartedAt = Date.now();
-          aiLog.info(`${THINKING_DEBUG_LOG_PREFIX} start`, {
-            conversationId,
-            elapsedMs: Date.now() - startedAt,
-            trigger,
-            ...context,
-          });
+          void trigger;
+          void context;
+          void THINKING_DEBUG_LOG_PREFIX;
         };
         const endThinkingWindow = (reason: string, context?: Record<string, unknown>) => {
           if (!thinkingDebugActive) return;
-          aiLog.info(`${THINKING_DEBUG_LOG_PREFIX} stop`, {
-            conversationId,
-            elapsedMs: Date.now() - startedAt,
-            activeForMs: Date.now() - thinkingDebugStartedAt,
-            reason,
-            finalThinking: fullThinking,
-            finalContent: fullContent,
-            hasToolCalls: !!resolvedToolCalls?.length,
-            ...context,
-          });
+          void reason;
+          void context;
+          void thinkingDebugStartedAt;
+          void fullThinking;
+          void fullContent;
+          void resolvedToolCalls;
+          void THINKING_DEBUG_LOG_PREFIX;
           thinkingDebugActive = false;
           thinkingDebugStartedAt = 0;
         };
@@ -1445,6 +1478,12 @@ export function createMToolsAI(): MToolsAI {
             messageCount: finalMessages.length,
             toolCount: options.tools?.length ?? 0,
           });
+          logStreamWithToolsContext(
+            conversationId,
+            routed,
+            finalMessages,
+            options.tools?.length ?? 0,
+          );
           dump("invoke:messages", finalMessages);
           markStage("tools_ready", {
             toolCount: options.tools?.length ?? 0,

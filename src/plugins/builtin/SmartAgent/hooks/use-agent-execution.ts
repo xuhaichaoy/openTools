@@ -428,7 +428,7 @@ export function useAgentExecution({
       try {
         let effectiveQuery = opts?.systemHint ? `${opts.systemHint}\n\n---\n\n${query}` : query;
         if (opts?.images?.length) {
-          effectiveQuery += `\n\n[系统提示] 用户已附带 ${opts.images.length} 张图片，这些图片已自动包含在本次对话中，你可以直接看到并分析它们。请勿使用截图工具或其他方式重新获取图片，直接基于已有图片进行分析即可。`;
+          effectiveQuery += `\n\n[系统提示] 用户已附带 ${opts.images.length} 张图片，这些图片已自动包含在本次对话中，你可以直接看到并分析它们。请勿使用截图工具或其他方式重新获取图片，也不要对图片路径调用 read_file / read_file_range；直接基于已有图片进行分析即可。`;
         }
         let lastError: Error | null = null;
 

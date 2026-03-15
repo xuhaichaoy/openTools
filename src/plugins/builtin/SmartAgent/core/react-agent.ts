@@ -362,11 +362,21 @@ const LOOP_DETECTOR_THRESHOLD = 3;
 const DOOM_LOOP_CONSECUTIVE_FAILURES = 3;
 const SAME_TOOL_CONSECUTIVE_LIMIT = 3;
 const CONSECUTIVE_LIMIT_TOOLS = new Set(["sequential_thinking"]);
+const SYSTEM_INFO_LOG_PREFIX = "[ReActAgent][get_system_info]";
+const FILE_REGEN_LOG_PREFIX = "[ReActAgent][file_regen]";
+const FILE_REGEN_PARSE_LOG_PREFIX = "[ReActAgent][file_regen_parse]";
+const FILE_WRITE_TOOL_NAMES = new Set(["write_file", "str_replace_edit", "json_edit"]);
 const LOOP_DETECT_EXEMPT_TOOLS = new Set([
   "get_current_time", "get_system_info", "calculate",
   "native_calendar_list", "native_reminder_lists", "native_shortcuts_list",
   "native_app_list", "native_app_list_interactive",
 ]);
+
+interface FileMutationTrace {
+  count: number;
+  lastToolName: string;
+  lastSignature: string;
+}
 
 class LoopDetector {
   private recentCalls: string[] = [];
@@ -507,6 +517,8 @@ export class ReActAgent {
   private static readonly CALL_CACHE_MAX_SIZE = 200;
   private mode: AgentMode = "execute";
   private trajectory: TrajectoryEntry[] = [];
+  private fileMutationTrace = new Map<string, FileMutationTrace>();
+  private fileMutationParseTrace = new Map<string, number>();
 
   private isQuickTimeQuery(userInput: string): boolean {
     const q = userInput.trim();
@@ -561,6 +573,132 @@ export class ReActAgent {
     }
 
     return null;
+  }
+
+  private logSystemInfoToolResult(source: "cache" | "execute" | "error", payload: Record<string, unknown>): void {
+    console.log(SYSTEM_INFO_LOG_PREFIX, {
+      source,
+      at: new Date().toISOString(),
+      ...payload,
+    });
+  }
+
+  private normalizeMutationPath(path: unknown): string {
+    return String(path ?? "").trim().replace(/\\/g, "/");
+  }
+
+  private extractPathGuessFromRawArgs(rawArguments: string): string {
+    const match = rawArguments.match(/["']path["']\s*:?\s*["']([^"'\n\r]+)["']/i);
+    return this.normalizeMutationPath(match?.[1] ?? "");
+  }
+
+  private extractWriteSignature(toolName: string, toolParams: Record<string, unknown>): string {
+    if (toolName === "write_file") {
+      return `write_file::${String(toolParams.content ?? "")}`;
+    }
+    if (toolName === "str_replace_edit") {
+      return JSON.stringify({
+        command: toolParams.command ?? "",
+        old_str: toolParams.old_str ?? "",
+        new_str: toolParams.new_str ?? "",
+        insert_line: toolParams.insert_line ?? null,
+      });
+    }
+    return JSON.stringify(toolParams);
+  }
+
+  private summarizeRecentStepsForFileRegen(maxCount = 6): Array<{
+    type: AgentStep["type"];
+    toolName?: string;
+    preview: string;
+  }> {
+    return this.steps.slice(-maxCount).map((step) => ({
+      type: step.type,
+      toolName: step.toolName,
+      preview: step.content.replace(/\s+/g, " ").trim().slice(0, 140),
+    }));
+  }
+
+  private maybeLogRepeatedFileMutation(
+    toolName: string,
+    toolParams: Record<string, unknown>,
+    output: unknown,
+    outputStr: string,
+    userInput: string,
+  ): void {
+    if (!FILE_WRITE_TOOL_NAMES.has(toolName)) return;
+    const path = this.normalizeMutationPath(toolParams.path);
+    if (!path) return;
+
+    const signature = this.extractWriteSignature(toolName, toolParams);
+    const previous = this.fileMutationTrace.get(path);
+    const count = (previous?.count ?? 0) + 1;
+    this.fileMutationTrace.set(path, {
+      count,
+      lastToolName: toolName,
+      lastSignature: signature,
+    });
+
+    if (count !== 2 && count !== 4 && count !== 8) return;
+
+    console.warn(FILE_REGEN_LOG_PREFIX, {
+      at: new Date().toISOString(),
+      path,
+      repeatCount: count,
+      toolName,
+      previousToolName: previous?.lastToolName,
+      sameContentAsPrevious: previous ? previous.lastSignature === signature : false,
+      userInputPreview: userInput.slice(0, 300),
+      toolParams: {
+        path,
+        command: toolParams.command,
+        insert_line: toolParams.insert_line,
+        contentChars: typeof toolParams.content === "string" ? toolParams.content.length : undefined,
+        newStrChars: typeof toolParams.new_str === "string" ? toolParams.new_str.length : undefined,
+      },
+      outputPreview: outputStr.slice(0, 300),
+      output,
+      recentSteps: this.summarizeRecentStepsForFileRegen(),
+      trajectoryTail: this.trajectory.slice(-6).map((entry) => ({
+        type: entry.type,
+        toolName: entry.toolName,
+        durationMs: entry.durationMs,
+        resultPreview: typeof entry.result === "string" ? entry.result.slice(0, 160) : entry.result,
+      })),
+    });
+  }
+
+  private maybeLogRepeatedMalformedWriteToolCall(
+    toolName: string,
+    rawArguments: string,
+    parseError: string,
+    userInput: string,
+  ): void {
+    if (!FILE_WRITE_TOOL_NAMES.has(toolName)) return;
+
+    const pathGuess = this.extractPathGuessFromRawArgs(rawArguments) || "(unknown)";
+    const traceKey = `${toolName}::${pathGuess}`;
+    const count = (this.fileMutationParseTrace.get(traceKey) ?? 0) + 1;
+    this.fileMutationParseTrace.set(traceKey, count);
+
+    if (count !== 2 && count !== 4 && count !== 8) return;
+
+    console.warn(FILE_REGEN_PARSE_LOG_PREFIX, {
+      at: new Date().toISOString(),
+      toolName,
+      pathGuess,
+      repeatCount: count,
+      userInputPreview: userInput.slice(0, 300),
+      parseError,
+      rawArgumentsPreview: rawArguments.slice(0, 500),
+      recentSteps: this.summarizeRecentStepsForFileRegen(),
+      trajectoryTail: this.trajectory.slice(-6).map((entry) => ({
+        type: entry.type,
+        toolName: entry.toolName,
+        durationMs: entry.durationMs,
+        resultPreview: typeof entry.result === "string" ? entry.result.slice(0, 160) : entry.result,
+      })),
+    });
   }
 
   private isLikelyUserRefusalClaim(content: string): boolean {
@@ -1026,6 +1164,13 @@ export class ReActAgent {
     const cachedResult = this.successfulCallCache.get(cacheKey);
     if (cachedResult) {
       const hint = `[重复调用拦截] 该工具已用相同参数成功执行过，以下是上次的结果（无需再次调用）:\n${cachedResult}\n\n请直接基于此结果回答用户问题，不要再调用同一工具。`;
+      if (toolName === "get_system_info") {
+        this.logSystemInfoToolResult("cache", {
+          hasData: Boolean(cachedResult.trim()),
+          contentChars: cachedResult.length,
+          preview: cachedResult.slice(0, 300),
+        });
+      }
       this.addStep({ type: "observation", content: hint, toolName, toolOutput: cachedResult, timestamp: Date.now() });
       this.recordTrajectory({ type: "tool_result", toolName, result: "(cached)", durationMs: 0 });
       return { outputStr: hint };
@@ -1074,6 +1219,24 @@ export class ReActAgent {
 
       const rawStr = typeof output === "string" ? output : JSON.stringify(output, null, 2);
       const outputStr = truncateToolOutput(rawStr, toolName);
+      this.maybeLogRepeatedFileMutation(toolName, toolParams, output, outputStr, userInput);
+      if (toolName === "get_system_info") {
+        const outputObj = output && typeof output === "object"
+          ? output as Record<string, unknown>
+          : undefined;
+        this.logSystemInfoToolResult("execute", {
+          hasToolError,
+          hasData: Boolean(outputStr.trim()),
+          rawChars: rawStr.length,
+          outputChars: outputStr.length,
+          platform: outputObj?.platform,
+          home_dir: outputObj?.home_dir,
+          desktop_dir: outputObj?.desktop_dir,
+          downloads_dir: outputObj?.downloads_dir,
+          output,
+          outputStr,
+        });
+      }
 
       if (!hasToolError) {
         this.successfulCallCache.set(cacheKey, outputStr);
@@ -1090,6 +1253,11 @@ export class ReActAgent {
     } catch (e) {
       if ((e as Error).message === "Aborted") throw e;
       if (e instanceof ClarificationInterrupt) throw e;
+      if (toolName === "get_system_info") {
+        this.logSystemInfoToolResult("error", {
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
       const isTimeout = e instanceof ToolTimeoutError;
       const errorType = isTimeout ? ToolErrorType.Timeout : ToolErrorType.RuntimeError;
       const errorStr = isTimeout ? (e as ToolTimeoutError).message : `工具执行失败: ${e}`;
@@ -1781,11 +1949,18 @@ ${s.taskStrategy}
       let callResults: CallResult[];
       if (canParallel) {
         callResults = await Promise.all(
-          parsedCalls.map(async ({ tc, toolName, toolParams, parseError }): Promise<CallResult> => ({
-            tc,
-            toolName,
-            result: parseError
-              ? {
+          parsedCalls.map(async ({ tc, toolName, toolParams, parseError }): Promise<CallResult> => {
+            if (parseError) {
+              this.maybeLogRepeatedMalformedWriteToolCall(
+                toolName,
+                tc.function.arguments || "{}",
+                parseError,
+                userInput,
+              );
+              return {
+                tc,
+                toolName,
+                result: {
                   outputStr: parseError,
                   error: parseError,
                   errorResult: {
@@ -1794,13 +1969,27 @@ ${s.taskStrategy}
                     message: parseError,
                     recoverable: true,
                   },
-                }
-              : await this.executeToolPipeline(toolName, toolParams, userInput, signal),
-          })),
+                },
+              };
+            }
+            return {
+              tc,
+              toolName,
+              result: await this.executeToolPipeline(toolName, toolParams, userInput, signal),
+            };
+          }),
         );
       } else {
         callResults = [];
         for (const { tc, toolName, toolParams, parseError } of parsedCalls) {
+          if (parseError) {
+            this.maybeLogRepeatedMalformedWriteToolCall(
+              toolName,
+              tc.function.arguments || "{}",
+              parseError,
+              userInput,
+            );
+          }
           callResults.push({
             tc,
             toolName,
@@ -2047,6 +2236,8 @@ ${s.taskStrategy}
     this.loopDetector.reset();
     this.approvedDangerousKeys.clear();
     this.successfulCallCache.clear();
+    this.fileMutationTrace.clear();
+    this.fileMutationParseTrace.clear();
     this.mode = this.config.initialMode ?? "execute";
 
     try {
