@@ -55,7 +55,8 @@ import { useConfirmDialogStore } from "@/store/confirm-dialog-store";
 import { useToolTrustStore } from "@/store/command-allowlist-store";
 import { api } from "@/core/api/client";
 import {
-  buildAICenterHandoffFileRefs,
+  buildAICenterHandoffScopedFileRefs,
+  getAICenterHandoffImportPaths,
   normalizeAICenterHandoff,
 } from "@/core/ai/ai-center-handoff";
 import { routeToAICenter } from "@/core/ai/ai-center-routing";
@@ -1003,10 +1004,14 @@ function buildDialogAgentHandoff(params: {
     maxAttachmentPaths,
   });
   const attachmentPaths = workingSet.attachmentPaths;
+  const visualAttachmentPaths = workingSet.visualAttachmentPaths;
 
-  const intro = attachmentPaths.length > 0
-    ? "以下是之前 Dialog 协作房间的最近上下文，并已附带相关图片/文件，请继续落地执行："
+  const intro = visualAttachmentPaths.length > 0
+    ? "以下是之前 Dialog 协作房间的最近上下文，并已附带当前仍相关的视觉参考图与文件，请继续落地执行："
+    : attachmentPaths.length > 0
+      ? "以下是之前 Dialog 协作房间的最近上下文，并已附带相关图片/文件，请继续落地执行："
     : "以下是之前 Dialog 协作房间的最近上下文，请继续落地执行：";
+  const visualSummary = workingSet.visualSummaryLine ?? "";
   const uploadSummary = workingSet.uploadSummaryLine ?? "";
   const artifactSummary = workingSet.artifactSummaryLines.length > 0
     ? `当前房间最近生成/修改的文件产物：\n${workingSet.artifactSummaryLines.join("\n")}`
@@ -1020,6 +1025,7 @@ function buildDialogAgentHandoff(params: {
     transcript,
     spawnedTaskSummary ? `---\n\n${spawnedTaskSummary}` : "",
     artifactSummary ? `---\n\n${artifactSummary}` : "",
+    visualSummary ? `---\n\n${visualSummary}` : "",
     uploadSummary ? `---\n\n${uploadSummary}` : "",
   ]
     .filter(Boolean)
@@ -1036,6 +1042,7 @@ function buildDialogAgentHandoff(params: {
   return normalizeAICenterHandoff({
     query,
     ...(attachmentPaths.length > 0 ? { attachmentPaths } : {}),
+    ...(visualAttachmentPaths.length > 0 ? { visualAttachmentPaths } : {}),
     title: "延续 Dialog 协作房间",
     goal: summarizeAISessionRuntimeText(
       latestUserMessage?._briefContent || latestUserMessage?.content,
@@ -1044,14 +1051,19 @@ function buildDialogAgentHandoff(params: {
     intent: inferredCoding.profile.codingMode ? "coding" : "delivery",
     keyPoints: [
       `带入最近 ${recentMessages.length} 条 Dialog 消息`,
+      visualAttachmentPaths.length > 0 ? `${visualAttachmentPaths.length} 张视觉参考图` : "",
       workingSet.artifactSummaryLines.length > 0 ? `${workingSet.artifactSummaryLines.length} 条产物线索` : "",
       workingSet.spawnedTaskSummaryLines.length > 0 ? `${workingSet.spawnedTaskSummaryLines.length} 条子任务线索` : "",
     ].filter(Boolean),
     nextSteps: [
       "先阅读 Dialog 最近讨论与工作集，再继续执行或收束结论",
+      visualAttachmentPaths.length > 0 ? "先结合视觉参考图理解界面/截图，再决定具体实现或修改" : "",
       workingSet.openSessionCount > 0 ? `注意当前仍有 ${workingSet.openSessionCount} 个开放子会话线索` : "",
     ].filter(Boolean),
     contextSections: [
+      visualAttachmentPaths.length > 0 && visualSummary
+        ? { title: "视觉参考", items: [visualSummary] }
+        : null,
       workingSet.spawnedTaskSummaryLines.length > 0
         ? { title: "子任务概览", items: workingSet.spawnedTaskSummaryLines }
         : null,
@@ -1059,9 +1071,12 @@ function buildDialogAgentHandoff(params: {
         ? { title: "产物线索", items: workingSet.artifactSummaryLines }
         : null,
     ].filter((section): section is { title: string; items: string[] } => Boolean(section)),
-    files: [
-      ...(buildAICenterHandoffFileRefs(attachmentPaths, "Dialog 工作集文件") || []),
-    ],
+    files: buildAICenterHandoffScopedFileRefs({
+      attachmentPaths,
+      visualAttachmentPaths,
+      visualReason: "Dialog 视觉参考图",
+      attachmentReason: "Dialog 工作集文件",
+    }),
     sourceMode: "dialog",
     ...(sourceSessionId ? { sourceSessionId } : {}),
     sourceLabel: "Dialog 房间",
@@ -2958,9 +2973,9 @@ function DialogWorkspaceDock({
 
             <div className="rounded-xl border border-[var(--color-border)]/80 bg-[var(--color-bg)] px-3 py-3">
               <div className="flex items-center justify-between gap-2">
-                <div className="text-[11px] font-medium text-[var(--color-text)]">Agent 专属预算与运行现场</div>
+                <div className="text-[11px] font-medium text-[var(--color-text)]">Agent 估算上下文与运行现场</div>
                 <div className="text-[10px] text-[var(--color-text-tertiary)]">
-                  默认预算按 8k 估算
+                  总估算 = 共享工作集 + 专属记忆 + 运行现场
                 </div>
               </div>
               <div className="mt-2 space-y-2">
@@ -2992,19 +3007,23 @@ function DialogWorkspaceDock({
                         </div>
                         <div className="mt-2">
                           <div className="flex items-center justify-between gap-2 text-[10px] text-[var(--color-text-tertiary)]">
-                            <span>专属预算占用</span>
+                            <span>预计总上下文占用</span>
                             <span>
-                              ~{formatTokenCount(actor.budgetUsageTokens)} / {formatTokenCount(actor.budgetTokens)} · {formatRatioAsPercent(actor.budgetUsageRatio)}
+                              ~{formatTokenCount(actor.estimatedTotalTokens)} / {formatTokenCount(actor.budgetTokens)} · {formatRatioAsPercent(actor.estimatedTotalRatio)}
                             </span>
                           </div>
                           <div className="mt-1 h-2 overflow-hidden rounded-full bg-[var(--color-bg)]">
                             <div
                               className={`h-full rounded-full ${statusMeta.bar}`}
-                              style={{ width: `${Math.min(actor.budgetUsageRatio * 100, 100)}%` }}
+                              style={{ width: `${Math.min(actor.estimatedTotalRatio * 100, 100)}%` }}
                             />
                           </div>
                         </div>
-                        <div className="mt-2 grid gap-2 md:grid-cols-3">
+                        <div className="mt-2 grid gap-2 md:grid-cols-4">
+                          <div className="rounded-lg bg-[var(--color-bg)] px-2.5 py-2">
+                            <div className="text-[10px] text-[var(--color-text-tertiary)]">共享工作集</div>
+                            <div className="mt-1 text-[12px] text-[var(--color-text)]">~{formatTokenCount(actor.sharedTokens)}</div>
+                          </div>
                           <div className="rounded-lg bg-[var(--color-bg)] px-2.5 py-2">
                             <div className="text-[10px] text-[var(--color-text-tertiary)]">历史记忆</div>
                             <div className="mt-1 text-[12px] text-[var(--color-text)]">~{formatTokenCount(actor.memoryTokens)}</div>
@@ -3291,11 +3310,9 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
         });
       }
 
-      if (payload.attachmentPaths?.length) {
-        for (const path of payload.attachmentPaths) {
+      for (const path of getAICenterHandoffImportPaths(payload)) {
           if (cancelled) return;
           await addAttachmentFromPath(path);
-        }
       }
     };
 

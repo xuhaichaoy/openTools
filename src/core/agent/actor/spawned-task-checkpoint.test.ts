@@ -21,6 +21,7 @@ const TASK: SpawnedTaskRecord = {
   sessionHistoryStartIndex: 0,
   sessionOpen: true,
   lastActiveAt: 1800,
+  images: ["/repo/assets/mockup.png"],
 };
 
 const SESSION_HISTORY = [
@@ -134,7 +135,9 @@ describe("spawned-task-checkpoint", () => {
     expect(handoff?.sourceMode).toBe("dialog");
     expect(handoff?.sourceSessionId).toBe("dialog-session-1");
     expect(handoff?.attachmentPaths).toContain("/repo/src/app.tsx");
+    expect(handoff?.visualAttachmentPaths).toEqual(["/repo/assets/mockup.png"]);
     expect(handoff?.contextSections?.some((section) => section.title === "活跃待办")).toBe(true);
+    expect(handoff?.contextSections?.some((section) => section.title === "视觉参考")).toBe(true);
     expect(handoff?.summary).toContain("验证中");
   });
 });

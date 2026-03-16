@@ -28,8 +28,9 @@ import { modelSupportsImageInput } from "@/core/ai/model-capabilities";
 import { buildAskAgentHandoff } from "@/core/ai/ask-agent-handoff";
 import { inferCodingExecutionProfile } from "@/core/agent/coding-profile";
 import {
-  buildAICenterHandoffFileRefs,
+  buildAICenterHandoffScopedFileRefs,
   normalizeAICenterHandoff,
+  pickVisualAttachmentPaths,
 } from "@/core/ai/ai-center-handoff";
 import { useInputAttachments } from "@/hooks/use-input-attachments";
 import { ModelSelector } from "./ModelSelector";
@@ -190,6 +191,7 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
           .filter((path): path is string => typeof path === "string" && path.trim().length > 0),
       ),
     );
+    const draftVisualAttachmentPaths = pickVisualAttachmentPaths(draftAttachmentPaths, 12) ?? [];
     const hasDraft = !!draftText || draftAttachmentPaths.length > 0;
     if (!conversationHandoff && !hasDraft) return null;
 
@@ -211,25 +213,30 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
       return normalizeAICenterHandoff({
         query: draftQuery,
         ...(draftAttachmentPaths.length > 0 ? { attachmentPaths: draftAttachmentPaths } : {}),
+        ...(draftVisualAttachmentPaths.length > 0 ? { visualAttachmentPaths: draftVisualAttachmentPaths } : {}),
         title: "延续 Ask 草稿",
         goal: draftText || "继续处理 Ask 草稿里的当前任务",
         intent: inferredDraftCoding.profile.codingMode ? "coding" : "general",
         keyPoints: [
           draftText ? "带入尚未发送的 Ask 草稿" : "带入尚未发送的 Ask 附件",
           draftAttachmentPaths.length > 0 ? `包含 ${draftAttachmentPaths.length} 个草稿附件` : "",
+          draftVisualAttachmentPaths.length > 0 ? `包含 ${draftVisualAttachmentPaths.length} 张视觉参考图` : "",
         ].filter(Boolean),
         nextSteps: [
           "先阅读 Ask 草稿，再决定直接回答、继续执行，还是切换工作方式",
+          draftVisualAttachmentPaths.length > 0 ? "优先利用草稿里已带入的视觉参考图" : "",
         ],
-        files: buildAICenterHandoffFileRefs(
-          draftAttachmentPaths,
-          draftAttachmentPaths.length > 0 ? "Ask 草稿附件" : undefined,
-        ),
+        files: buildAICenterHandoffScopedFileRefs({
+          attachmentPaths: draftAttachmentPaths,
+          visualAttachmentPaths: draftVisualAttachmentPaths,
+          visualReason: "Ask 草稿视觉参考图",
+          attachmentReason: draftAttachmentPaths.length > 0 ? "Ask 草稿附件" : undefined,
+        }),
         sourceMode: "ask" as const,
         ...(conversation?.id ? { sourceSessionId: conversation.id } : {}),
         sourceLabel: "Ask 草稿",
         summary: draftAttachmentPaths.length > 0
-          ? `Ask 草稿，附带 ${draftAttachmentPaths.length} 个文件/图片/目录`
+          ? `Ask 草稿，附带 ${draftAttachmentPaths.length} 个文件/图片/目录${draftVisualAttachmentPaths.length > 0 ? `，其中 ${draftVisualAttachmentPaths.length} 张为视觉参考图` : ""}`
           : "Ask 草稿",
       });
     }
@@ -242,6 +249,12 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
         ...draftAttachmentPaths,
       ]),
     );
+    const visualAttachmentPaths = Array.from(
+      new Set([
+        ...(conversationHandoff.visualAttachmentPaths || []),
+        ...draftVisualAttachmentPaths,
+      ]),
+    );
     const draftBlock = [
       "以下是我在 Ask 中尚未发送、但希望一起带过去的当前草稿/附件：",
       "",
@@ -252,6 +265,7 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
       ...conversationHandoff,
       query: `${conversationHandoff.query}\n\n---\n\n${draftBlock}`,
       ...(attachmentPaths.length > 0 ? { attachmentPaths } : {}),
+      ...(visualAttachmentPaths.length > 0 ? { visualAttachmentPaths } : {}),
       title: conversationHandoff.title || "延续 Ask 对话与草稿",
       goal: draftText || conversationHandoff.goal,
       intent: conversationHandoff.intent === "coding" || inferredDraftCoding.profile.codingMode
@@ -261,20 +275,21 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
         ...(conversationHandoff.keyPoints || []),
         "额外带入了当前未发送草稿",
         draftAttachmentPaths.length > 0 ? `新增 ${draftAttachmentPaths.length} 个草稿附件` : "",
+        draftVisualAttachmentPaths.length > 0 ? `新增 ${draftVisualAttachmentPaths.length} 张视觉参考图` : "",
       ].filter(Boolean),
       nextSteps: [
         ...(conversationHandoff.nextSteps || []),
         "结合最新草稿一起继续处理，不要忽略未发送部分",
+        draftVisualAttachmentPaths.length > 0 ? "先查看新带入的视觉参考图，再继续执行" : "",
       ],
-      files: [
-        ...(conversationHandoff.files || []),
-        ...(buildAICenterHandoffFileRefs(
-          draftAttachmentPaths,
-          draftAttachmentPaths.length > 0 ? "Ask 草稿附件" : undefined,
-        ) || []),
-      ],
+      files: buildAICenterHandoffScopedFileRefs({
+        attachmentPaths,
+        visualAttachmentPaths,
+        visualReason: "Ask 视觉参考图",
+        attachmentReason: "Ask 附件/目录上下文",
+      }),
       summary: attachmentPaths.length > 0
-        ? `Ask 对话上下文 + 当前草稿，附带 ${attachmentPaths.length} 个文件/图片/目录`
+        ? `Ask 对话上下文 + 当前草稿，附带 ${attachmentPaths.length} 个文件/图片/目录${visualAttachmentPaths.length > 0 ? `，其中 ${visualAttachmentPaths.length} 张为视觉参考图` : ""}`
         : "Ask 对话上下文 + 当前草稿",
     });
   }, [attachmentSummary, attachments, conversation, fileContextBlock, imagePaths.length, input]);

@@ -12,6 +12,7 @@ export interface ActorRunContext {
   // ── Input (set by caller, read-only for middlewares) ──
   readonly query: string;
   readonly images?: string[];
+  readonly getCurrentImages?: () => string[] | undefined;
   readonly onStep?: (step: AgentStep) => void;
 
   // ── Actor identity (set by caller) ──

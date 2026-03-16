@@ -34,6 +34,7 @@ export function AICenterHandoffCard({
   const nextSteps = handoff.nextSteps?.slice(0, 4) ?? [];
   const sections = handoff.contextSections?.slice(0, 3) ?? [];
   const files = handoff.files?.slice(0, 6) ?? [];
+  const visualCount = handoff.visualAttachmentPaths?.length ?? 0;
   const tone = variant === "active"
     ? "border-indigo-500/15 bg-[linear-gradient(135deg,rgba(99,102,241,0.12),rgba(99,102,241,0.04))] text-[var(--color-text-secondary)]"
     : "border-cyan-500/15 bg-[linear-gradient(135deg,rgba(6,182,212,0.12),rgba(6,182,212,0.04))] text-[var(--color-text-secondary)]";
@@ -52,6 +53,11 @@ export function AICenterHandoffCard({
             {sourceLabel && (
               <span className="rounded-full border border-current/15 px-1.5 py-0.5 text-[10px] opacity-80">
                 来自 {sourceLabel}
+              </span>
+            )}
+            {visualCount > 0 && (
+              <span className="rounded-full border border-current/15 px-1.5 py-0.5 text-[10px] opacity-80">
+                视觉参考 {visualCount} 张
               </span>
             )}
           </div>

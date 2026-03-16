@@ -1,8 +1,9 @@
 import type { ChatMessage, Conversation } from "@/core/ai/types";
 import type { AICenterHandoff } from "@/store/app-store";
 import {
-  buildAICenterHandoffFileRefs,
+  buildAICenterHandoffScopedFileRefs,
   normalizeAICenterHandoff,
+  pickVisualAttachmentPaths,
 } from "@/core/ai/ai-center-handoff";
 import { inferCodingExecutionProfile } from "@/core/agent/coding-profile";
 import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
@@ -75,6 +76,7 @@ export function buildAskAgentHandoff(
       conversation.messages.flatMap((message) => collectMessageAttachmentPaths(message)),
     ),
   );
+  const visualAttachmentPaths = pickVisualAttachmentPaths(attachmentPaths, 12) ?? [];
   const contextBlocks = Array.from(
     new Set(
       recentMessages
@@ -89,8 +91,10 @@ export function buildAskAgentHandoff(
         : context;
       return `### 原始附件上下文 ${index + 1}\n${clipped}`;
     });
-  const intro = attachmentPaths.length > 0
-    ? "以下是之前的对话上下文，并已附带相关图片、文件或目录，请基于此继续执行任务："
+  const intro = visualAttachmentPaths.length > 0
+    ? "以下是之前的对话上下文，并已附带相关视觉参考图、文件或目录，请基于此继续执行任务："
+    : attachmentPaths.length > 0
+      ? "以下是之前的对话上下文，并已附带相关图片、文件或目录，请基于此继续执行任务："
     : "以下是之前的对话上下文，请基于此继续执行任务：";
   const querySections = [`${intro}\n\n${transcriptSummary}`];
   if (contextBlocks.length > 0) {
@@ -98,7 +102,7 @@ export function buildAskAgentHandoff(
   }
 
   const summary = attachmentPaths.length > 0
-    ? `Ask 对话上下文，附带 ${attachmentPaths.length} 个文件/图片/目录`
+    ? `Ask 对话上下文，附带 ${attachmentPaths.length} 个文件/图片/目录${visualAttachmentPaths.length > 0 ? `，其中 ${visualAttachmentPaths.length} 张为视觉参考图` : ""}`
     : "Ask 对话上下文";
   const latestUserMessage = [...recentMessages]
     .reverse()
@@ -106,6 +110,7 @@ export function buildAskAgentHandoff(
   const keyPoints = [
     `带入最近 ${recentMessages.length} 条 Ask 消息`,
     attachmentPaths.length > 0 ? `包含 ${attachmentPaths.length} 个附件路径` : "",
+    visualAttachmentPaths.length > 0 ? `包含 ${visualAttachmentPaths.length} 张视觉参考图` : "",
     contextBlocks.length > 0 ? `附带 ${contextBlocks.length} 段原始附件上下文摘录` : "",
   ].filter(Boolean);
   const inferredCoding = inferCodingExecutionProfile({
@@ -116,12 +121,14 @@ export function buildAskAgentHandoff(
   return normalizeAICenterHandoff({
     query: querySections.join("\n\n---\n\n"),
     ...(attachmentPaths.length > 0 ? { attachmentPaths } : {}),
+    ...(visualAttachmentPaths.length > 0 ? { visualAttachmentPaths } : {}),
     title: conversation.title ? `延续 Ask 对话：${conversation.title}` : "延续 Ask 对话",
     goal: summarizeAISessionRuntimeText(latestUserMessage?.content, 120) || "延续 Ask 对话里的当前任务",
     intent: inferredCoding.profile.codingMode ? "coding" : "general",
     keyPoints,
     nextSteps: [
       "先阅读 Ask 对话与附件上下文，再继续处理任务",
+      visualAttachmentPaths.length > 0 ? "优先查看已带入的视觉参考图，不必重新描述界面或截图" : "",
       attachmentPaths.length > 0 ? "优先利用已带入的图片、文件或目录，不必重新索要" : "",
     ].filter(Boolean),
     contextSections: contextBlocks.length > 0
@@ -132,10 +139,12 @@ export function buildAskAgentHandoff(
           },
         ]
       : undefined,
-    files: buildAICenterHandoffFileRefs(
+    files: buildAICenterHandoffScopedFileRefs({
       attachmentPaths,
-      attachmentPaths.length > 0 ? "Ask 附件/目录上下文" : undefined,
-    ),
+      visualAttachmentPaths,
+      visualReason: "Ask 视觉参考图",
+      attachmentReason: attachmentPaths.length > 0 ? "Ask 附件/目录上下文" : undefined,
+    }),
     sourceMode: "ask",
     sourceSessionId: conversation.id,
     sourceLabel: "Ask 对话",

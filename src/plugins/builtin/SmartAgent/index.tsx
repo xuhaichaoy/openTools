@@ -13,6 +13,7 @@ import { useAppStore } from "@/store/app-store";
 import { AICenterHandoffCard } from "@/components/ai/AICenterHandoffCard";
 import type { RuntimeFallbackContext } from "@/core/agent/runtime";
 import { describeCodingExecutionProfile } from "@/core/agent/coding-profile";
+import { getAICenterHandoffImportPaths } from "@/core/ai/ai-center-handoff";
 
 import { AgentInputBar } from "./components/AgentInputBar";
 import { useToolTrustStore } from "@/store/command-allowlist-store";
@@ -313,11 +314,9 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
         clearAttachments();
         setPendingSourceHandoff(null);
 
-        if (payload.attachmentPaths?.length) {
-          for (const path of payload.attachmentPaths) {
+        for (const path of getAICenterHandoffImportPaths(payload)) {
             if (cancelled) return;
             await addAttachmentFromPath(path);
-          }
         }
 
         if (!cancelled && payload.sourceMode) {

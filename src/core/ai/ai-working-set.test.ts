@@ -63,11 +63,16 @@ describe("buildDialogWorkingSetSnapshot", () => {
       "/tmp/project/docs/spec.md",
       "/tmp/project/assets/hero.png",
     ]);
+    expect(snapshot.visualAttachmentPaths).toEqual([
+      "/tmp/project/assets/hero.png",
+    ]);
     expect(snapshot.artifactSummaryLines[0]).toContain("App.tsx");
     expect(snapshot.spawnedTaskSummaryLines[0]).toContain("开放子会话");
     expect(snapshot.uploadSummaryLine).toContain("spec.md");
+    expect(snapshot.visualSummaryLine).toContain("hero.png");
     expect(snapshot.summary).toContain("Dialog 协作上下文");
     expect(snapshot.summary).toContain("附带 3 个文件/图片");
+    expect(snapshot.summary).toContain("1 张视觉参考图");
     expect(snapshot.summary).toContain("1 个产物线索");
     expect(snapshot.summary).toContain("1 个开放子会话");
   });

@@ -1,4 +1,8 @@
-import { buildAICenterHandoffFileRefs, normalizeAICenterHandoff } from "@/core/ai/ai-center-handoff";
+import {
+  buildAICenterHandoffScopedFileRefs,
+  normalizeAICenterHandoff,
+  pickVisualAttachmentPaths,
+} from "@/core/ai/ai-center-handoff";
 import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
 import { inferCodingExecutionProfile } from "@/core/agent/coding-profile";
 import type { AICenterHandoff } from "@/store/app-store";
@@ -312,6 +316,7 @@ export function buildDialogSpawnedTaskHandoff(params: {
       .filter((message) => message.relatedRunId === task.runId)
       .flatMap((message) => message.images || []),
   ], 12);
+  const visualAttachmentPaths = pickVisualAttachmentPaths(artifactPaths, 8) ?? [];
   const actorName = actorNameById?.get(task.targetActorId) ?? targetActor?.roleName ?? task.targetActorId;
 
   const intro = [
@@ -339,15 +344,20 @@ export function buildDialogSpawnedTaskHandoff(params: {
     keyPoints: [
       checkpoint ? `当前阶段：${checkpoint.stageLabel}` : "",
       checkpoint?.activeTodoCount ? `${checkpoint.activeTodoCount} 个活跃待办` : "",
+      visualAttachmentPaths.length ? `${visualAttachmentPaths.length} 张视觉参考图` : "",
       checkpoint?.relatedArtifactPaths.length ? `${checkpoint.relatedArtifactPaths.length} 个相关文件` : "",
       task.mode === "session" && task.sessionOpen ? "原始子会话仍可继续交互" : "",
     ].filter(Boolean),
     nextSteps: [
       checkpoint?.nextStep || "",
       checkpoint?.activeTodoCount ? "先检查活跃待办，再继续实施或验证" : "",
+      visualAttachmentPaths.length ? "先查看已带入的视觉参考图，再继续实现或分析" : "",
       checkpoint?.relatedArtifactPaths.length ? "先阅读相关文件与最近产物，再决定下一步改动" : "",
     ].filter(Boolean),
     contextSections: [
+      visualAttachmentPaths.length
+        ? { title: "视觉参考", items: [`已带入 ${visualAttachmentPaths.length} 张当前相关图片`] }
+        : null,
       checkpoint?.activeTodos.length
         ? { title: "活跃待办", items: checkpoint.activeTodos }
         : null,
@@ -356,7 +366,13 @@ export function buildDialogSpawnedTaskHandoff(params: {
         : null,
     ].filter((section): section is { title: string; items: string[] } => Boolean(section)),
     attachmentPaths: artifactPaths,
-    files: buildAICenterHandoffFileRefs(artifactPaths, "Dialog 子任务相关文件"),
+    ...(visualAttachmentPaths.length ? { visualAttachmentPaths } : {}),
+    files: buildAICenterHandoffScopedFileRefs({
+      attachmentPaths: artifactPaths,
+      visualAttachmentPaths,
+      visualReason: "Dialog 子任务视觉参考图",
+      attachmentReason: "Dialog 子任务相关文件",
+    }),
     sourceMode: "dialog",
     ...(sourceSessionId ? { sourceSessionId } : {}),
     sourceLabel: `Dialog 子任务 · ${actorName}`,

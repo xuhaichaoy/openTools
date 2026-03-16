@@ -2,6 +2,7 @@ import type {
   SessionUploadRecord,
   SpawnedTaskRecord,
 } from "@/core/agent/actor/types";
+import { pickVisualAttachmentPaths } from "@/core/ai/ai-center-handoff";
 
 export interface DialogWorkingSetArtifactEntry {
   path: string;
@@ -11,9 +12,11 @@ export interface DialogWorkingSetArtifactEntry {
 
 export interface DialogWorkingSetSnapshot {
   attachmentPaths: string[];
+  visualAttachmentPaths: string[];
   artifactSummaryLines: string[];
   spawnedTaskSummaryLines: string[];
   uploadSummaryLine?: string;
+  visualSummaryLine?: string;
   summary: string;
   openSessionCount: number;
 }
@@ -58,6 +61,10 @@ export function buildDialogWorkingSetSnapshot(params: {
       ].filter((path): path is string => typeof path === "string" && path.trim().length > 0),
     ),
   ).slice(0, maxAttachmentPaths);
+  const visualAttachmentPaths = pickVisualAttachmentPaths(
+    attachmentPaths,
+    Math.min(maxAttachmentPaths, 12),
+  ) ?? [];
 
   const artifactSummaryLines = artifacts
     .slice(0, maxArtifacts)
@@ -92,6 +99,12 @@ export function buildDialogWorkingSetSnapshot(params: {
       .map((upload) => upload.name)
       .join("、")}。`
     : undefined;
+  const visualSummaryLine = visualAttachmentPaths.length > 0
+    ? `当前工作集附带 ${visualAttachmentPaths.length} 张视觉参考图：${visualAttachmentPaths
+      .slice(0, 4)
+      .map((path) => basename(path))
+      .join("、")}。`
+    : undefined;
 
   const openSessionCount = spawnedTasks.filter(
     (task) => task.mode === "session" && task.sessionOpen,
@@ -100,15 +113,18 @@ export function buildDialogWorkingSetSnapshot(params: {
   const summaryParts = [
     "Dialog 协作上下文",
     attachmentPaths.length > 0 ? `附带 ${attachmentPaths.length} 个文件/图片` : "",
+    visualAttachmentPaths.length > 0 ? `${visualAttachmentPaths.length} 张视觉参考图` : "",
     artifacts.length > 0 ? `${Math.min(artifacts.length, maxArtifacts)} 个产物线索` : "",
     openSessionCount > 0 ? `${openSessionCount} 个开放子会话` : "",
   ].filter(Boolean);
 
   return {
     attachmentPaths,
+    visualAttachmentPaths,
     artifactSummaryLines,
     spawnedTaskSummaryLines,
     uploadSummaryLine,
+    visualSummaryLine,
     summary: summaryParts.join("，"),
     openSessionCount,
   };

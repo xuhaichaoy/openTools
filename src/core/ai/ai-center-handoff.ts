@@ -7,6 +7,10 @@ import type {
   AICenterSourceRef,
 } from "@/store/app-store";
 
+const VISUAL_ATTACHMENT_EXTENSIONS = new Set([
+  "jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "ico", "avif", "tiff", "tif",
+]);
+
 function cleanText(value?: string | null): string | undefined {
   const normalized = String(value ?? "").replace(/\s+/g, " ").trim();
   return normalized || undefined;
@@ -56,6 +60,25 @@ function normalizeFiles(
   return result.length ? result : undefined;
 }
 
+export function isLikelyVisualAttachmentPath(path?: string | null): boolean {
+  const normalized = String(path ?? "").trim().split(/[?#]/)[0]?.toLowerCase() ?? "";
+  if (!normalized) return false;
+  const filename = normalized.split("/").pop() || normalized;
+  const ext = filename.includes(".") ? filename.split(".").pop() : "";
+  return Boolean(ext && VISUAL_ATTACHMENT_EXTENSIONS.has(ext));
+}
+
+export function pickVisualAttachmentPaths(
+  paths?: readonly string[] | null,
+  limit = 12,
+): string[] | undefined {
+  if (!paths?.length) return undefined;
+  return dedupeStrings(
+    paths.filter((path) => isLikelyVisualAttachmentPath(path)),
+    limit,
+  );
+}
+
 export function buildAICenterHandoffFileRefs(
   paths?: readonly string[] | null,
   reason?: string,
@@ -69,9 +92,51 @@ export function buildAICenterHandoffFileRefs(
   }));
 }
 
+export function buildAICenterHandoffScopedFileRefs(params: {
+  attachmentPaths?: readonly string[] | null;
+  visualAttachmentPaths?: readonly string[] | null;
+  visualReason?: string;
+  attachmentReason?: string;
+}): AICenterHandoffFileRef[] | undefined {
+  const visualAttachmentPaths = pickVisualAttachmentPaths([
+    ...(params.visualAttachmentPaths ?? []),
+    ...(params.attachmentPaths ?? []),
+  ], 12) ?? [];
+  const visualSet = new Set(visualAttachmentPaths);
+  const nonVisualAttachmentPaths = (params.attachmentPaths ?? []).filter((path) => {
+    const normalized = String(path ?? "").trim();
+    return normalized.length > 0 && !visualSet.has(normalized);
+  });
+
+  const scopedRefs = [
+    ...(buildAICenterHandoffFileRefs(visualAttachmentPaths, params.visualReason) ?? []),
+    ...(buildAICenterHandoffFileRefs(nonVisualAttachmentPaths, params.attachmentReason) ?? []),
+  ];
+  return scopedRefs.length ? scopedRefs : undefined;
+}
+
+export function getAICenterHandoffImportPaths(
+  handoff?: Partial<AICenterHandoff> | null,
+): string[] {
+  if (!handoff) return [];
+  const visualAttachmentPaths = pickVisualAttachmentPaths([
+    ...(handoff.visualAttachmentPaths ?? []),
+    ...(handoff.attachmentPaths ?? []),
+  ], 24) ?? [];
+  return dedupeStrings([
+    ...visualAttachmentPaths,
+    ...(handoff.attachmentPaths ?? []),
+    ...(handoff.visualAttachmentPaths ?? []),
+  ], 24) ?? [];
+}
+
 export function normalizeAICenterHandoff(handoff: AICenterHandoff): AICenterHandoff {
   const query = String(handoff.query ?? "").trim();
   const attachmentPaths = dedupeStrings(handoff.attachmentPaths, 24);
+  const visualAttachmentPaths = pickVisualAttachmentPaths([
+    ...(handoff.visualAttachmentPaths ?? []),
+    ...(attachmentPaths ?? []),
+  ], 12);
   const keyPoints = dedupeStrings(handoff.keyPoints, 6);
   const nextSteps = dedupeStrings(handoff.nextSteps, 6);
   const contextSections = handoff.contextSections
@@ -83,6 +148,7 @@ export function normalizeAICenterHandoff(handoff: AICenterHandoff): AICenterHand
   return {
     query,
     ...(attachmentPaths ? { attachmentPaths } : {}),
+    ...(visualAttachmentPaths ? { visualAttachmentPaths } : {}),
     ...(cleanText(handoff.title) ? { title: cleanText(handoff.title) } : {}),
     ...(cleanText(handoff.goal) ? { goal: cleanText(handoff.goal) } : {}),
     ...(handoff.intent ? { intent: handoff.intent } : {}),

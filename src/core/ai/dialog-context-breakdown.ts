@@ -44,6 +44,9 @@ export interface DialogActorContextMetric {
   budgetTokens: number;
   budgetUsageTokens: number;
   budgetUsageRatio: number;
+  sharedTokens: number;
+  estimatedTotalTokens: number;
+  estimatedTotalRatio: number;
   memoryTokens: number;
   promptTokens: number;
   runtimeTokens: number;
@@ -154,6 +157,10 @@ function getActorStatus(ratio: number): DialogActorContextMetric["status"] {
   return "comfortable";
 }
 
+function normalizeImageKey(input: string): string {
+  return String(input ?? "").trim().replace(/\\/g, "/").toLowerCase();
+}
+
 export function buildDialogContextBreakdown(params: {
   actors: readonly DialogContextActorState[];
   dialogHistory: readonly DialogMessage[];
@@ -244,8 +251,23 @@ export function buildDialogContextBreakdown(params: {
     .filter((section) => section.tokens > 0 || section.itemCount > 0);
 
   const totalSharedTokens = sharedSections.reduce((sum, section) => sum + section.tokens, 0);
-  const imageCount = sessionUploads.filter((upload) => upload.type === "image").length
-    + dialogHistory.reduce((sum, message) => sum + (message.images?.length ?? 0), 0);
+  const uniqueImageRefs = new Set<string>();
+  sessionUploads
+    .filter((upload) => upload.type === "image")
+    .forEach((upload) => {
+      if (upload.path) {
+        uniqueImageRefs.add(normalizeImageKey(upload.path));
+      } else {
+        uniqueImageRefs.add(`upload:${normalizeImageKey(upload.name)}:${upload.addedAt}`);
+      }
+    });
+  dialogHistory.forEach((message) => {
+    for (const image of message.images ?? []) {
+      const normalized = normalizeImageKey(image);
+      if (normalized) uniqueImageRefs.add(normalized);
+    }
+  });
+  const imageCount = uniqueImageRefs.size;
 
   const actorMetrics: DialogActorContextMetric[] = actors
     .map((actor) => {
@@ -255,6 +277,9 @@ export function buildDialogContextBreakdown(params: {
       const budgetUsageTokens = promptTokens + memoryTokens;
       const budgetUsageRatio = budgetTokens > 0 ? budgetUsageTokens / budgetTokens : 0;
       const runtimeTokens = estimateRuntimeTokens(actor.currentTask);
+      const sharedTokens = totalSharedTokens;
+      const estimatedTotalTokens = sharedTokens + budgetUsageTokens + runtimeTokens;
+      const estimatedTotalRatio = budgetTokens > 0 ? estimatedTotalTokens / budgetTokens : 0;
       return {
         actorId: actor.id,
         roleName: actor.roleName,
@@ -262,17 +287,20 @@ export function buildDialogContextBreakdown(params: {
         budgetTokens,
         budgetUsageTokens,
         budgetUsageRatio,
+        sharedTokens,
+        estimatedTotalTokens,
+        estimatedTotalRatio,
         memoryTokens,
         promptTokens,
         runtimeTokens,
         workspaceLabel: actor.workspace,
         thinkingLevel: actor.thinkingLevel,
-        status: getActorStatus(budgetUsageRatio),
+        status: getActorStatus(estimatedTotalRatio),
       };
     })
     .sort((a, b) => {
-      if (b.budgetUsageRatio !== a.budgetUsageRatio) return b.budgetUsageRatio - a.budgetUsageRatio;
-      return b.runtimeTokens - a.runtimeTokens;
+      if (b.estimatedTotalRatio !== a.estimatedTotalRatio) return b.estimatedTotalRatio - a.estimatedTotalRatio;
+      return b.estimatedTotalTokens - a.estimatedTotalTokens;
     });
 
   const warnings: string[] = [];

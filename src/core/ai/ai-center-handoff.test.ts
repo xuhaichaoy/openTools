@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildAICenterHandoffFileRefs,
+  buildAICenterHandoffScopedFileRefs,
   describeAICenterHandoffIntent,
+  getAICenterHandoffImportPaths,
+  isLikelyVisualAttachmentPath,
   normalizeAICenterHandoff,
 } from "./ai-center-handoff";
 
@@ -11,6 +14,7 @@ describe("ai-center-handoff", () => {
     const handoff = normalizeAICenterHandoff({
       query: "  继续处理这个任务  ",
       attachmentPaths: ["/tmp/a.ts", "/tmp/a.ts", " "],
+      visualAttachmentPaths: ["/tmp/screenshot.png", "/tmp/screenshot.png"],
       title: "  从 Ask 接力  ",
       goal: "  完成最终落地  ",
       intent: "delivery",
@@ -33,6 +37,7 @@ describe("ai-center-handoff", () => {
     expect(handoff).toEqual({
       query: "继续处理这个任务",
       attachmentPaths: ["/tmp/a.ts"],
+      visualAttachmentPaths: ["/tmp/screenshot.png"],
       title: "从 Ask 接力",
       goal: "完成最终落地",
       intent: "delivery",
@@ -55,6 +60,24 @@ describe("ai-center-handoff", () => {
     expect(buildAICenterHandoffFileRefs(["/tmp/demo.ts"], "上下文")).toEqual([
       { path: "/tmp/demo.ts", label: "demo.ts", reason: "上下文" },
     ]);
+    expect(buildAICenterHandoffScopedFileRefs({
+      attachmentPaths: ["/tmp/demo.ts", "/tmp/mockup.png"],
+      visualAttachmentPaths: ["/tmp/mockup.png"],
+      visualReason: "视觉参考图",
+      attachmentReason: "上下文",
+    })).toEqual([
+      { path: "/tmp/mockup.png", label: "mockup.png", reason: "视觉参考图" },
+      { path: "/tmp/demo.ts", label: "demo.ts", reason: "上下文" },
+    ]);
+    expect(getAICenterHandoffImportPaths({
+      attachmentPaths: ["/tmp/demo.ts", "/tmp/mockup.png"],
+      visualAttachmentPaths: ["/tmp/mockup.png"],
+    })).toEqual([
+      "/tmp/mockup.png",
+      "/tmp/demo.ts",
+    ]);
+    expect(isLikelyVisualAttachmentPath("/tmp/mockup.png")).toBe(true);
+    expect(isLikelyVisualAttachmentPath("/tmp/demo.ts")).toBe(false);
     expect(describeAICenterHandoffIntent("coding")).toBe("编码任务");
     expect(describeAICenterHandoffIntent(undefined)).toBeNull();
   });

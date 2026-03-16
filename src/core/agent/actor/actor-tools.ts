@@ -16,6 +16,7 @@ export function createActorCommunicationTools(
   system: ActorSystem,
   opts?: {
     inheritedImages?: string[];
+    getInheritedImages?: () => string[] | undefined;
   },
 ): AgentTool[] {
   const tools: AgentTool[] = [];
@@ -115,6 +116,7 @@ export function createActorCommunicationTools(
     },
     readonly: false,
     execute: async (params) => {
+      const currentInheritedImages = opts?.getInheritedImages?.() ?? opts?.inheritedImages;
       const targetInput = String(params.target_agent);
       const target = resolveTarget(targetInput);
       const task = String(params.task);
@@ -151,7 +153,7 @@ export function createActorCommunicationTools(
         context,
         timeoutSeconds,
         attachments,
-        images: opts?.inheritedImages,
+        images: currentInheritedImages,
         mode,
         cleanup,
         expectsCompletionMessage,

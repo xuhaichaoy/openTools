@@ -51,6 +51,8 @@ export interface AICenterHandoff extends Partial<AICenterSourceRef> {
   query: string
   /** 传递的文件/文件夹附件绝对路径 */
   attachmentPaths?: string[]
+  /** 传递的视觉参考附件绝对路径，会被目标模式优先按图片工作集导入 */
+  visualAttachmentPaths?: string[]
   /** 任务包标题，用于跨模式展示 */
   title?: string
   /** 当前接力最想完成的目标 */

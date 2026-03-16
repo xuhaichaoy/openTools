@@ -23,7 +23,8 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AICenterHandoffCard } from "@/components/ai/AICenterHandoffCard";
 import {
-  buildAICenterHandoffFileRefs,
+  buildAICenterHandoffScopedFileRefs,
+  getAICenterHandoffImportPaths,
   normalizeAICenterHandoff,
 } from "@/core/ai/ai-center-handoff";
 import { AttachDropdown } from "@/components/ui/AttachDropdown";
@@ -245,18 +246,26 @@ function SessionCard({
       source: "cluster_continue_to_agent",
       handoff: normalizeAICenterHandoff({
         query: prefilled,
+        attachmentPaths: session.images,
+        visualAttachmentPaths: session.images,
         title: "基于 Cluster 报告继续落地",
         goal: session.query.slice(0, 140) || "根据 Cluster 报告继续执行",
         intent: inferredCoding.profile.codingMode ? "coding" : "delivery",
         keyPoints: [
           "已带入 Cluster 最终报告",
+          session.images.length > 0 ? `附带 ${session.images.length} 张视觉参考图` : "",
           session.plan?.steps?.length ? `本轮计划共 ${session.plan.steps.length} 个步骤` : "",
         ].filter(Boolean),
         nextSteps: [
           "先阅读 Cluster 报告，再决定修改、验证或产出最终文件",
+          session.images.length > 0 ? "先查看带入的视觉参考图，再继续实现或修复" : "",
           "如果报告已指出问题，优先按问题清单逐项落地",
         ],
-        files: buildAICenterHandoffFileRefs(session.images, "Cluster 相关图片"),
+        files: buildAICenterHandoffScopedFileRefs({
+          attachmentPaths: session.images,
+          visualAttachmentPaths: session.images,
+          visualReason: "Cluster 视觉参考图",
+        }),
         sourceMode: "cluster",
         sourceSessionId: session.id,
         sourceLabel: "Cluster 报告",
@@ -283,20 +292,28 @@ function SessionCard({
       source: "cluster_continue_to_dialog",
       handoff: normalizeAICenterHandoff({
         query: prefilled,
+        attachmentPaths: session.images,
+        visualAttachmentPaths: session.images,
         title: "围绕 Cluster 报告继续协作",
         goal: session.query.slice(0, 140) || "基于 Cluster 报告继续讨论",
         intent: inferredCoding.profile.codingMode ? "coding" : "research",
         keyPoints: [
           "已带入 Cluster 最终报告",
+          session.images.length > 0 ? `附带 ${session.images.length} 张视觉参考图` : "",
           session.result.agentInstances.length > 0
             ? `Cluster 中共有 ${session.result.agentInstances.length} 个 Agent 参与`
             : "",
         ].filter(Boolean),
         nextSteps: [
           "围绕报告中的争议点、风险和后续动作继续讨论",
+          session.images.length > 0 ? "先结合视觉参考图理解现状，再继续讨论分工" : "",
           "必要时把需要落地的部分再接力给 Agent",
         ],
-        files: buildAICenterHandoffFileRefs(session.images, "Cluster 相关图片"),
+        files: buildAICenterHandoffScopedFileRefs({
+          attachmentPaths: session.images,
+          visualAttachmentPaths: session.images,
+          visualReason: "Cluster 视觉参考图",
+        }),
         sourceMode: "cluster",
         sourceSessionId: session.id,
         sourceLabel: "Cluster 报告",
@@ -566,11 +583,9 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
       clearAttachments();
       setIncomingHandoff(payload);
 
-      if (payload.attachmentPaths?.length) {
-        for (const path of payload.attachmentPaths) {
+      for (const path of getAICenterHandoffImportPaths(payload)) {
           if (cancelled) return;
           await addAttachmentFromPath(path);
-        }
       }
     };
 

@@ -364,9 +364,10 @@ describe("ReActAgent FC compatibility cache", () => {
     expect(fcCalls).toBe(2);
   });
 
-  it("should prune already-processed user images from later FC rounds", async () => {
+  it("should preserve the latest visual context while pruning older image turns", async () => {
     let fcCalls = 0;
     const snapshots: Array<Array<{ role: string; content: string | null; images?: string[]; name?: string }>> = [];
+    let drained = false;
 
     const ai = createMockAI(async ({ messages }) => {
       snapshots.push(
@@ -402,17 +403,31 @@ describe("ReActAgent FC compatibility cache", () => {
     const agent = new ReActAgent(ai, noopTools, {
       maxIterations: 4,
       fcCompatibilityKey: "prune-processed-images",
+      inboxDrain: () => {
+        if (drained) return [];
+        drained = true;
+        return [
+          {
+            id: "msg-image-update",
+            from: "Coordinator",
+            content: "补充一张更新后的设计稿，请以这张为准。",
+            images: ["/tmp/revised-design.png"],
+          },
+        ];
+      },
     });
 
     const answer = await agent.run("请根据这张图继续分析", undefined, ["/tmp/demo.png"]);
 
     expect(answer).toContain("图片信息已处理完成");
     expect(fcCalls).toBe(2);
-    const firstUserWithImage = snapshots[0].find((message) => message.role === "user" && message.images?.length);
-    expect(firstUserWithImage?.images).toEqual(["/tmp/demo.png"]);
+    const firstRoundImageMessages = snapshots[0].filter((message) => message.role === "user" && message.images?.length);
+    expect(firstRoundImageMessages).toHaveLength(1);
+    expect(firstRoundImageMessages[0]?.images).toEqual(["/tmp/revised-design.png"]);
 
-    const secondRoundHasImage = snapshots[1].some((message) => message.images?.length);
-    expect(secondRoundHasImage).toBe(false);
+    const secondRoundImageMessages = snapshots[1].filter((message) => message.role === "user" && message.images?.length);
+    expect(secondRoundImageMessages).toHaveLength(1);
+    expect(secondRoundImageMessages[0]?.images).toEqual(["/tmp/revised-design.png"]);
     const prunedUserMessage = snapshots[1].find(
       (message) => message.role === "user" && typeof message.content === "string" && message.content.includes("历史图片已处理"),
     );

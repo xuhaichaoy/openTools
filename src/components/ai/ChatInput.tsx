@@ -514,9 +514,9 @@ export function ChatInput({
         </div>
         <div className="flex items-center justify-between text-[10px] text-[var(--color-text-secondary)] mt-1 opacity-60 px-1">
           <span className="w-full text-center">Enter 发送 · Shift+Enter 换行 · ⌘N 新对话 · ⌘F 搜索</span>
-          {input.length > 0 && (
+          {/* {input.length > 0 && (
             <span>{input.length} 字符</span>
-          )}
+          )} */}
         </div>
       </div>
 

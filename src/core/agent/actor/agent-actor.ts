@@ -917,6 +917,14 @@ export class AgentActor {
     onStep?: (step: AgentStep) => void,
     runOverrides?: ActorRunOverrides,
   ): Promise<string> {
+    const activeImageRefs = new Set<string>((images ?? []).filter(Boolean));
+    const mergeActiveImages = (nextImages?: string[]) => {
+      if (!nextImages?.length) return;
+      for (const image of nextImages) {
+        const normalized = String(image ?? "").trim();
+        if (normalized) activeImageRefs.add(normalized);
+      }
+    };
     const effectiveModelOverride = runOverrides?.model ?? this.modelOverride;
     const globalMaxIterations = Math.max(
       5,
@@ -948,6 +956,7 @@ export class AgentActor {
     const ctx: ActorRunContext = {
       query,
       images,
+      getCurrentImages: () => (activeImageRefs.size > 0 ? [...activeImageRefs] : undefined),
       onStep,
       actorId: this.id,
       role: this.role,
@@ -999,6 +1008,7 @@ export class AgentActor {
           const drained = this.drainInbox();
           if (drained.length > 0) {
             actorDebugLog(this.role.name, `inboxDrain: ${drained.length} messages drained`);
+            drained.forEach((message) => mergeActiveImages(message.images));
             if (!this._capturedInboxUserQuery) {
               const userMsgs = drained.filter((m) => m.from === "user");
               if (userMsgs.length > 0) {

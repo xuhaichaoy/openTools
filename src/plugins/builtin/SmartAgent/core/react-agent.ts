@@ -186,6 +186,7 @@ const TOOL_CONTEXT_TRUNCATION_NOTICE = "[工具输出已按上下文预算压缩
 const TOOL_CONTEXT_COMPACTION_PLACEHOLDER = "[较早工具输出已移出上下文以节省空间，必要时请重新执行该工具查看详情]";
 const SINGLE_TOOL_RESULT_CONTEXT_SHARE = 0.18;
 const TOTAL_TOOL_RESULT_CONTEXT_SHARE = 0.35;
+const PRESERVED_IMAGE_CONTEXT_COUNT = 1;
 
 function summarizeDiscardedMiddle<
   T extends { role: string; content: string | null; tool_calls?: unknown; [k: string]: unknown },
@@ -318,20 +319,24 @@ function cloneMessages<
 function pruneProcessedHistoryImages<
   T extends { role: string; content: string | null; images?: string[]; [k: string]: unknown },
 >(messages: T[]): T[] {
-  let lastAssistantIndex = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i]?.role === "assistant") {
-      lastAssistantIndex = i;
-      break;
+  const imageMessageIndexes: number[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i];
+    if (message.role === "user" && message.images?.length) {
+      imageMessageIndexes.push(i);
     }
   }
 
-  if (lastAssistantIndex < 0) return messages;
+  if (imageMessageIndexes.length <= PRESERVED_IMAGE_CONTEXT_COUNT) return messages;
+
+  const preservedIndexes = new Set(
+    imageMessageIndexes.slice(-PRESERVED_IMAGE_CONTEXT_COUNT),
+  );
 
   let nextMessages: T[] | null = null;
-  for (let i = 0; i < lastAssistantIndex; i++) {
+  for (const i of imageMessageIndexes) {
+    if (preservedIndexes.has(i)) continue;
     const message = messages[i];
-    if (message.role !== "user" || !message.images?.length) continue;
     if (!nextMessages) nextMessages = cloneMessages(messages);
 
     nextMessages[i] = {
