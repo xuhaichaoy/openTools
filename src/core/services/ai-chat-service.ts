@@ -39,6 +39,8 @@ export interface StreamCallbacks {
   }) => void;
   /** 触发防抖持久化 */
   onPersist: () => void;
+  /** 最终回答完成后触发 */
+  onDone?: (assistantContent: string) => void;
 }
 
 // ── ID 生成器 ──
@@ -359,11 +361,13 @@ export async function startStreamingChat(opts: {
           }
           const thinkingRemaining = _thinkingBuffer + remaining.thinking;
           _thinkingBuffer = "";
+          let completedAssistantContent = "";
           updateAssistant((m) => {
             const shouldSuggestUpgrade = (m.toolCalls?.length ?? 0) >= 2;
+            completedAssistantContent = remainingVisible ? m.content + remainingVisible : m.content;
             return {
               ...m,
-              content: remainingVisible ? m.content + remainingVisible : m.content,
+              content: completedAssistantContent,
               streaming: false,
               thinkingContent: thinkingRemaining
                 ? (m.thinkingContent || "") + thinkingRemaining
@@ -375,6 +379,7 @@ export async function startStreamingChat(opts: {
           setState({ isStreaming: false });
           cleanup();
           onPersist();
+          callbacks.onDone?.(completedAssistantContent);
         }
       },
     ),

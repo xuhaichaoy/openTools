@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
+import type { CodingExecutionProfile } from "@/core/agent/coding-profile";
 import type { AgentStep } from "@/plugins/builtin/SmartAgent/core/react-agent";
 import type {
   AgentScheduledTask,
@@ -22,6 +23,9 @@ export interface AgentTask {
   query: string;
   /** 用户附带的图片路径 */
   images?: string[];
+  /** 非图片附件或显式工作集路径 */
+  attachmentPaths?: string[];
+  createdAt?: number;
   steps: AgentStep[];
   answer: string | null;
   status?: AgentTaskStatus;
@@ -36,6 +40,31 @@ export interface AgentTask {
   last_result_status?: "success" | "error" | "skipped";
 }
 
+export interface AgentQueuedFollowUp {
+  id: string;
+  query: string;
+  images?: string[];
+  attachmentPaths?: string[];
+  systemHint?: string;
+  codingHint?: string;
+  runProfile?: CodingExecutionProfile;
+  sourceHandoff?: AICenterHandoff;
+  createdAt: number;
+}
+
+export interface AgentSessionCompaction {
+  summary: string;
+  compactedTaskCount: number;
+  lastCompactedAt: number;
+  reason?: "task_count" | "step_count" | "context_recovery";
+}
+
+export interface AgentSessionForkMeta {
+  parentSessionId: string;
+  parentVisibleTaskCount: number;
+  createdAt: number;
+}
+
 export interface AgentSession {
   id: string;
   title: string;
@@ -43,6 +72,88 @@ export interface AgentSession {
   createdAt: number;
   /** 跨模式 handoff 来源信息（如从 Ask 切换到 Agent） */
   sourceHandoff?: AICenterHandoff;
+  /** 当前可见的任务数量；未设置表示全部可见 */
+  visibleTaskCount?: number;
+  followUpQueue?: AgentQueuedFollowUp[];
+  forkMeta?: AgentSessionForkMeta;
+  compaction?: AgentSessionCompaction;
+}
+
+function clampVisibleTaskCount(
+  tasksLength: number,
+  visibleTaskCount?: number,
+): number {
+  if (typeof visibleTaskCount !== "number" || Number.isNaN(visibleTaskCount)) {
+    return tasksLength;
+  }
+  return Math.max(0, Math.min(tasksLength, Math.floor(visibleTaskCount)));
+}
+
+export function getAgentSessionVisibleTaskCount(
+  session: Pick<AgentSession, "tasks" | "visibleTaskCount">,
+): number {
+  return clampVisibleTaskCount(session.tasks.length, session.visibleTaskCount);
+}
+
+export function getVisibleAgentTasks(
+  session: Pick<AgentSession, "tasks" | "visibleTaskCount">,
+): AgentTask[] {
+  return session.tasks.slice(0, getAgentSessionVisibleTaskCount(session));
+}
+
+export function getHiddenAgentTasks(
+  session: Pick<AgentSession, "tasks" | "visibleTaskCount">,
+): AgentTask[] {
+  return session.tasks.slice(getAgentSessionVisibleTaskCount(session));
+}
+
+export function hasAgentSessionHiddenTasks(
+  session: Pick<AgentSession, "tasks" | "visibleTaskCount">,
+): boolean {
+  return getAgentSessionVisibleTaskCount(session) < session.tasks.length;
+}
+
+export function getAgentSessionCompactedTaskCount(
+  session: Pick<AgentSession, "tasks" | "visibleTaskCount" | "compaction">,
+): number {
+  const visibleCount = getAgentSessionVisibleTaskCount(session);
+  const compactedTaskCount = session.compaction?.compactedTaskCount ?? 0;
+  return Math.max(0, Math.min(visibleCount, compactedTaskCount));
+}
+
+export function getAgentSessionLiveTasks(
+  session: Pick<AgentSession, "tasks" | "visibleTaskCount" | "compaction">,
+): AgentTask[] {
+  const visibleTasks = getVisibleAgentTasks(session);
+  return visibleTasks.slice(getAgentSessionCompactedTaskCount(session));
+}
+
+function normalizeSessionState(session: AgentSession): AgentSession {
+  const visibleTaskCount = clampVisibleTaskCount(
+    session.tasks.length,
+    session.visibleTaskCount,
+  );
+  const compactedTaskCount = Math.max(
+    0,
+    Math.min(visibleTaskCount, session.compaction?.compactedTaskCount ?? 0),
+  );
+
+  return {
+    ...session,
+    ...(visibleTaskCount >= session.tasks.length
+      ? { visibleTaskCount: undefined }
+      : { visibleTaskCount }),
+    followUpQueue: session.followUpQueue?.filter(
+      (item) => typeof item.query === "string" && item.query.trim().length > 0,
+    ) ?? [],
+    compaction:
+      session.compaction?.summary?.trim() && compactedTaskCount > 0
+        ? {
+            ...session.compaction,
+            compactedTaskCount,
+          }
+        : undefined,
+  };
 }
 
 interface AgentState {
@@ -66,11 +177,20 @@ interface AgentState {
   upsertScheduledTask: (task: AgentScheduledTask) => void;
   applyScheduledTaskPatch: (patch: AgentTaskStatusPatch) => void;
   applyScheduledTaskSkipped: (event: AgentTaskSkippedEvent) => void;
-  createSession: (query: string, sourceHandoff?: AgentSession["sourceHandoff"]) => string;
+  createSession: (
+    query: string,
+    sourceHandoff?: AgentSession["sourceHandoff"],
+    initialTask?: Pick<AgentTask, "images" | "attachmentPaths">,
+  ) => string;
   getCurrentSession: () => AgentSession | null;
   setCurrentSession: (id: string) => void;
   /** 向会话追加一个新任务，返回新任务的 id */
-  addTask: (sessionId: string, query: string, images?: string[]) => string;
+  addTask: (
+    sessionId: string,
+    query: string,
+    images?: string[],
+    attachmentPaths?: string[],
+  ) => string;
   /** 更新指定任务的 steps / answer（按 taskId 查找） */
   updateTask: (
     sessionId: string,
@@ -92,7 +212,29 @@ interface AgentState {
     >,
   ) => void;
   /** 更新会话级字段（如清空 tasks） */
-  updateSession: (id: string, updates: Partial<Pick<AgentSession, "tasks" | "title">>) => void;
+  updateSession: (
+    id: string,
+    updates: Partial<
+      Pick<
+        AgentSession,
+        "tasks" | "title" | "visibleTaskCount" | "followUpQueue" | "forkMeta" | "compaction"
+      >
+    >,
+  ) => void;
+  revertCurrentSessionToPreviousTask: () => void;
+  redoCurrentSession: () => void;
+  restoreCurrentSession: () => void;
+  forkSession: (
+    sessionId: string,
+    options?: { title?: string; visibleOnly?: boolean },
+  ) => string | null;
+  enqueueFollowUp: (
+    sessionId: string,
+    followUp: Omit<AgentQueuedFollowUp, "id" | "createdAt">,
+  ) => string;
+  dequeueFollowUp: (sessionId: string) => AgentQueuedFollowUp | null;
+  removeFollowUp: (sessionId: string, followUpId: string) => void;
+  clearFollowUpQueue: (sessionId: string) => void;
   deleteSession: (id: string) => void;
   deleteAllSessions: () => void;
   renameSession: (id: string, title: string) => void;
@@ -132,6 +274,7 @@ function buildAgentRuntimeSummary(task: Partial<AgentTask>): string | undefined 
 function migrateSession(raw: Record<string, unknown>): AgentSession {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const r = raw as any;
+  const createdAt = typeof r.createdAt === "number" ? r.createdAt : Date.now();
   if (Array.isArray(r.tasks)) {
     // 为旧数据中缺少 id 的 task 补充 id
     const tasks = r.tasks.map((t: AgentTask) => {
@@ -140,23 +283,32 @@ function migrateSession(raw: Record<string, unknown>): AgentSession {
         id: t.id || generateId(),
         status: t.status || (t.answer ? "success" : "pending"),
         retry_count: t.retry_count ?? 0,
+        createdAt: t.createdAt ?? createdAt,
       };
       return {
         ...baseTask,
         ...(buildRecoveredAgentTaskPatch(baseTask) ?? {}),
       };
     });
-    return {
+    return normalizeSessionState({
       id: r.id,
       title: r.title,
       tasks,
-      createdAt: r.createdAt,
+      createdAt,
       ...(r.sourceHandoff ? { sourceHandoff: r.sourceHandoff } : {}),
-    };
+      ...(typeof r.visibleTaskCount === "number"
+        ? { visibleTaskCount: r.visibleTaskCount }
+        : {}),
+      ...(Array.isArray(r.followUpQueue)
+        ? { followUpQueue: r.followUpQueue }
+        : {}),
+      ...(r.forkMeta ? { forkMeta: r.forkMeta } : {}),
+      ...(r.compaction ? { compaction: r.compaction } : {}),
+    });
   }
   // Legacy: query / steps / answer 作为唯一一个 task
   const hasContent = r.query || (Array.isArray(r.steps) && r.steps.length > 0) || r.answer;
-  return {
+  return normalizeSessionState({
     id: r.id,
     title: r.title || "新任务",
     tasks: hasContent
@@ -169,6 +321,7 @@ function migrateSession(raw: Record<string, unknown>): AgentSession {
               answer: r.answer ?? null,
               status: r.answer ? "success" : "pending",
               retry_count: 0,
+              createdAt,
             };
             return {
               ...task,
@@ -177,9 +330,9 @@ function migrateSession(raw: Record<string, unknown>): AgentSession {
           })(),
         ]
       : [],
-    createdAt: r.createdAt ?? Date.now(),
+    createdAt,
     ...(r.sourceHandoff ? { sourceHandoff: r.sourceHandoff } : {}),
-  };
+  });
 }
 
 let _lastPersistedHash = 0;
@@ -213,14 +366,18 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       const sessions = rawSessions.map(migrateSession);
       useAISessionRuntimeStore.getState().syncSessions(
         sessions.map((session) => ({
-          mode: "agent" as const,
           externalSessionId: session.id,
+          mode: "agent" as const,
           title: session.title,
           createdAt: session.createdAt,
-          updatedAt: session.tasks[session.tasks.length - 1]?.last_finished_at
-            ?? session.tasks[session.tasks.length - 1]?.last_started_at
+          updatedAt: getVisibleAgentTasks(session)[getVisibleAgentTasks(session).length - 1]?.last_finished_at
+            ?? getVisibleAgentTasks(session)[getVisibleAgentTasks(session).length - 1]?.last_started_at
             ?? session.createdAt,
-          summary: buildAgentRuntimeSummary(session.tasks[session.tasks.length - 1] ?? {}),
+          summary: buildAgentRuntimeSummary(
+            getVisibleAgentTasks(session)[getVisibleAgentTasks(session).length - 1]
+              ?? session.tasks[session.tasks.length - 1]
+              ?? {},
+          ),
           source: session.sourceHandoff,
         })),
       );
@@ -391,10 +548,14 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }));
   },
 
-  createSession: (query: string, sourceHandoff?: AgentSession["sourceHandoff"]) => {
+  createSession: (
+    query: string,
+    sourceHandoff?: AgentSession["sourceHandoff"],
+    initialTask?: Pick<AgentTask, "images" | "attachmentPaths">,
+  ) => {
     const id = generateId();
     const now = Date.now();
-    const session: AgentSession = {
+    const session = normalizeSessionState({
       id,
       title: query.slice(0, 30) || "新任务",
       tasks: query
@@ -402,6 +563,9 @@ export const useAgentStore = create<AgentState>((set, get) => ({
             {
               id: generateId(),
               query,
+              images: initialTask?.images,
+              attachmentPaths: initialTask?.attachmentPaths,
+              createdAt: now,
               steps: [],
               answer: null,
               status: "pending",
@@ -410,8 +574,9 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           ]
         : [],
       createdAt: now,
+      followUpQueue: [],
       ...(sourceHandoff ? { sourceHandoff } : {}),
-    };
+    });
     set((state) => ({
       sessions: [session, ...state.sessions],
       currentSessionId: id,
@@ -435,8 +600,14 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   setCurrentSession: (id) => set({ currentSessionId: id }),
 
-  addTask: (sessionId: string, query: string, images?: string[]) => {
+  addTask: (
+    sessionId: string,
+    query: string,
+    images?: string[],
+    attachmentPaths?: string[],
+  ) => {
     const taskId = generateId();
+    const createdAt = Date.now();
     set((state) => ({
       sessions: state.sessions.map((s) => {
         if (s.id !== sessionId) return s;
@@ -444,12 +615,18 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           id: taskId,
           query,
           images,
+          attachmentPaths,
+          createdAt,
           steps: [],
           answer: null,
           status: "pending",
           retry_count: 0,
         };
-        return { ...s, tasks: [...s.tasks, newTask] };
+        return normalizeSessionState({
+          ...s,
+          tasks: [...s.tasks, newTask],
+          visibleTaskCount: undefined,
+        });
       }),
     }));
     useAISessionRuntimeStore.getState().touchSession("agent", sessionId, {
@@ -473,7 +650,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           const newTasks = s.tasks.map((t) =>
             t.id === taskId ? { ...t, ...updates } : t,
           );
-          return { ...s, tasks: newTasks };
+          return normalizeSessionState({ ...s, tasks: newTasks });
         }),
       };
     });
@@ -506,7 +683,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   updateSession: (id, updates) => {
     set((state) => ({
       sessions: state.sessions.map((s) =>
-        s.id === id ? { ...s, ...updates } : s,
+        s.id === id ? normalizeSessionState({ ...s, ...updates }) : s,
       ),
     }));
     if (updates.title !== undefined) {
@@ -514,6 +691,147 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         title: updates.title,
       });
     }
+    debouncedPersist();
+  },
+
+  revertCurrentSessionToPreviousTask: () => {
+    const session = get().getCurrentSession();
+    if (!session) return;
+    const visibleTaskCount = getAgentSessionVisibleTaskCount(session);
+    if (visibleTaskCount <= 0) return;
+    get().updateSession(session.id, {
+      visibleTaskCount: visibleTaskCount - 1,
+    });
+  },
+
+  redoCurrentSession: () => {
+    const session = get().getCurrentSession();
+    if (!session) return;
+    const visibleTaskCount = getAgentSessionVisibleTaskCount(session);
+    if (visibleTaskCount >= session.tasks.length) return;
+    get().updateSession(session.id, {
+      visibleTaskCount: visibleTaskCount + 1,
+    });
+  },
+
+  restoreCurrentSession: () => {
+    const session = get().getCurrentSession();
+    if (!session) return;
+    get().updateSession(session.id, {
+      visibleTaskCount: undefined,
+    });
+  },
+
+  forkSession: (sessionId, options) => {
+    const session = get().sessions.find((item) => item.id === sessionId);
+    if (!session) return null;
+    const visibleOnly = options?.visibleOnly !== false;
+    const sourceTasks = visibleOnly ? getVisibleAgentTasks(session) : session.tasks;
+    const now = Date.now();
+    const clonedTasks = sourceTasks.map((task, index) => ({
+      ...task,
+      id: generateId(),
+      createdAt: task.createdAt ?? now + index,
+      steps: task.steps.map((step) => ({
+        ...step,
+        ...(step.toolInput ? { toolInput: { ...step.toolInput } } : {}),
+      })),
+      images: task.images ? [...task.images] : undefined,
+      attachmentPaths: task.attachmentPaths ? [...task.attachmentPaths] : undefined,
+    }));
+    const forked: AgentSession = normalizeSessionState({
+      id: generateId(),
+      title: options?.title ?? `${session.title || "新任务"} · 分支`,
+      tasks: clonedTasks,
+      createdAt: now,
+      sourceHandoff: session.sourceHandoff,
+      forkMeta: {
+        parentSessionId: session.id,
+        parentVisibleTaskCount: getAgentSessionVisibleTaskCount(session),
+        createdAt: now,
+      },
+      compaction: session.compaction,
+      followUpQueue: [],
+    });
+    set((state) => ({
+      sessions: [forked, ...state.sessions],
+      currentSessionId: forked.id,
+    }));
+    useAISessionRuntimeStore.getState().ensureSession({
+      mode: "agent",
+      externalSessionId: forked.id,
+      title: forked.title,
+      createdAt: now,
+      updatedAt: now,
+      summary: buildAgentRuntimeSummary(clonedTasks[clonedTasks.length - 1] ?? {}),
+      source: forked.sourceHandoff,
+    });
+    debouncedPersist();
+    return forked.id;
+  },
+
+  enqueueFollowUp: (sessionId, followUp) => {
+    const queued: AgentQueuedFollowUp = {
+      ...followUp,
+      id: generateId(),
+      createdAt: Date.now(),
+    };
+    set((state) => ({
+      sessions: state.sessions.map((session) =>
+        session.id === sessionId
+          ? normalizeSessionState({
+              ...session,
+              followUpQueue: [...(session.followUpQueue ?? []), queued],
+            })
+          : session,
+      ),
+    }));
+    debouncedPersist();
+    return queued.id;
+  },
+
+  dequeueFollowUp: (sessionId) => {
+    const session = get().sessions.find((item) => item.id === sessionId);
+    const next = session?.followUpQueue?.[0] ?? null;
+    if (!next) return null;
+    set((state) => ({
+      sessions: state.sessions.map((item) =>
+        item.id === sessionId
+          ? normalizeSessionState({
+              ...item,
+              followUpQueue: (item.followUpQueue ?? []).slice(1),
+            })
+          : item,
+      ),
+    }));
+    debouncedPersist();
+    return next;
+  },
+
+  removeFollowUp: (sessionId, followUpId) => {
+    set((state) => ({
+      sessions: state.sessions.map((item) =>
+        item.id === sessionId
+          ? normalizeSessionState({
+              ...item,
+              followUpQueue: (item.followUpQueue ?? []).filter(
+                (followUp) => followUp.id !== followUpId,
+              ),
+            })
+          : item,
+      ),
+    }));
+    debouncedPersist();
+  },
+
+  clearFollowUpQueue: (sessionId) => {
+    set((state) => ({
+      sessions: state.sessions.map((item) =>
+        item.id === sessionId
+          ? normalizeSessionState({ ...item, followUpQueue: [] })
+          : item,
+      ),
+    }));
     debouncedPersist();
   },
 
@@ -552,12 +870,13 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   clearCurrentSession: () => {
     const id = generateId();
     const now = Date.now();
-    const session: AgentSession = {
+    const session = normalizeSessionState({
       id,
       title: "新任务",
       tasks: [],
       createdAt: now,
-    };
+      followUpQueue: [],
+    });
     set((state) => ({
       sessions: [session, ...state.sessions],
       currentSessionId: id,

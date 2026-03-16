@@ -98,6 +98,53 @@ vi.mock("@/store/ai-store", () => ({
 }));
 
 vi.mock("@/store/agent-store", () => ({
+  getVisibleAgentTasks: (session: {
+    tasks: Array<unknown>;
+    visibleTaskCount?: number;
+  }) => {
+    const visibleCount =
+      typeof session.visibleTaskCount === "number"
+        ? Math.min(session.visibleTaskCount, session.tasks.length)
+        : session.tasks.length;
+    return session.tasks.slice(0, visibleCount);
+  },
+  getAgentSessionCompactedTaskCount: (session: {
+    tasks: Array<unknown>;
+    visibleTaskCount?: number;
+    compaction?: { compactedTaskCount?: number };
+  }) => {
+    const visibleCount =
+      typeof session.visibleTaskCount === "number"
+        ? Math.min(session.visibleTaskCount, session.tasks.length)
+        : session.tasks.length;
+    return Math.max(
+      0,
+      Math.min(visibleCount, session.compaction?.compactedTaskCount ?? 0),
+    );
+  },
+  getAgentSessionLiveTasks: (session: {
+    tasks: Array<unknown>;
+    visibleTaskCount?: number;
+    compaction?: { compactedTaskCount?: number };
+  }) => {
+    const visibleCount =
+      typeof session.visibleTaskCount === "number"
+        ? Math.min(session.visibleTaskCount, session.tasks.length)
+        : session.tasks.length;
+    const compacted =
+      Math.max(
+        0,
+        Math.min(visibleCount, session.compaction?.compactedTaskCount ?? 0),
+      );
+    return session.tasks.slice(compacted, visibleCount);
+  },
+  hasAgentSessionHiddenTasks: (session: {
+    tasks: Array<unknown>;
+    visibleTaskCount?: number;
+  }) =>
+    typeof session.visibleTaskCount === "number"
+      ? session.visibleTaskCount < session.tasks.length
+      : false,
   useAgentStore: Object.assign(() => ({}), {
     getState: () => hoisted.fakeStoreState,
   }),
@@ -186,6 +233,8 @@ describe("useAgentExecution", () => {
             createSession: vi.fn(() => "new_session"),
             addTask: vi.fn(() => "new_task"),
             updateTask,
+            updateSession: vi.fn(),
+            forkSession: vi.fn(() => null),
             inputRef: { current: document.createElement("textarea") },
             scrollRef: {
               current: {
@@ -242,6 +291,8 @@ describe("useAgentExecution", () => {
             createSession: vi.fn(() => "target"),
             addTask: vi.fn(() => "task_abort"),
             updateTask,
+            updateSession: vi.fn(),
+            forkSession: vi.fn(() => null),
             inputRef: { current: document.createElement("textarea") },
             scrollRef: {
               current: {
@@ -296,6 +347,8 @@ describe("useAgentExecution", () => {
             createSession: vi.fn(() => "target"),
             addTask: vi.fn(() => "task_stream"),
             updateTask,
+            updateSession: vi.fn(),
+            forkSession: vi.fn(() => null),
             inputRef: { current: document.createElement("textarea") },
             scrollRef: {
               current: {
@@ -355,6 +408,8 @@ describe("useAgentExecution", () => {
             createSession: vi.fn(() => "target"),
             addTask: vi.fn(() => "task_timeout"),
             updateTask,
+            updateSession: vi.fn(),
+            forkSession: vi.fn(() => null),
             inputRef: { current: document.createElement("textarea") },
             scrollRef: {
               current: {
@@ -417,6 +472,8 @@ describe("useAgentExecution", () => {
             createSession: vi.fn(() => "target"),
             addTask: vi.fn(() => "task_tool_round"),
             updateTask,
+            updateSession: vi.fn(),
+            forkSession: vi.fn(() => null),
             inputRef: { current: document.createElement("textarea") },
             scrollRef: {
               current: {

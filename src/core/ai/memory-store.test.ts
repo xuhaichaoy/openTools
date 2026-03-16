@@ -3,6 +3,7 @@ import {
   buildMemoryPromptBlock,
   composeAgentMemoryContent,
   extractMemoryCandidates,
+  planAutomaticStructuredMemorySave,
   rankMemoriesForRecall,
   sanitizeCandidateStrict,
   type AIMemoryItem,
@@ -49,6 +50,39 @@ describe("memory-store", () => {
     expect(candidates[0]?.kind).toBe("preference");
     expect(candidates[0]?.scope).toBe("global");
     expect(candidates[0]?.source).toBe("user");
+    expect(candidates[0]?.review_surface).toBe("inline");
+  });
+
+  it("keeps implicit durable preference as background review", () => {
+    const candidates = extractMemoryCandidates(
+      "以后默认用中文回答，先给结论再展开步骤。",
+      { conversationId: "conv-1" },
+    );
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]?.review_surface).toBe("background");
+  });
+
+  it("plans automatic structured save for explicit answer preference", () => {
+    const plan = planAutomaticStructuredMemorySave(
+      "请记住我以后默认用中文回答，并且先给结论再展开。",
+      { conversationId: "conv-1" },
+    );
+    expect(plan).not.toBeNull();
+    expect(plan?.slot).toBe("language");
+    expect(plan?.content).toBe("默认回答语言：中文");
+    expect(plan?.kind).toBe("preference");
+    expect(plan?.tags).toContain("slot:language");
+  });
+
+  it("plans automatic structured save for explicit home location", () => {
+    const plan = planAutomaticStructuredMemorySave(
+      "帮我记住，我的常驻地是杭州，以后查天气默认按这里来。",
+    );
+    expect(plan).not.toBeNull();
+    expect(plan?.slot).toBe("home_location");
+    expect(plan?.content).toBe("用户常驻地：杭州");
+    expect(plan?.kind).toBe("fact");
+    expect(plan?.tags).toContain("slot:home_location");
   });
 
   it("does not extract generic short-term task instructions as memory", () => {
@@ -116,6 +150,47 @@ describe("memory-store", () => {
     expect(ranked[0]?.id).toBe("mem-cn-a");
   });
 
+  it("recalls explicit structured defaults even when query wording is generic", () => {
+    const memories: AIMemoryItem[] = [
+      mockMemory({
+        id: "mem-pref-language",
+        content: "默认回答语言：中文",
+        kind: "preference",
+        tags: ["slot:language", "structured_memory"],
+        importance: 0.9,
+      }),
+    ];
+
+    const ranked = rankMemoriesForRecall(memories, "帮我整理一个方案", {
+      topK: 3,
+    });
+    expect(ranked[0]?.id).toBe("mem-pref-language");
+  });
+
+  it("boosts home location recall for weather queries", () => {
+    const memories: AIMemoryItem[] = [
+      mockMemory({
+        id: "mem-home-location",
+        content: "用户常驻地：杭州",
+        kind: "fact",
+        tags: ["slot:home_location", "location"],
+        importance: 0.85,
+      }),
+      mockMemory({
+        id: "mem-other",
+        content: "用户偏好简洁回答",
+        kind: "preference",
+        tags: ["slot:verbosity"],
+        importance: 0.7,
+      }),
+    ];
+
+    const ranked = rankMemoriesForRecall(memories, "今天天气怎么样", {
+      topK: 3,
+    });
+    expect(ranked[0]?.id).toBe("mem-home-location");
+  });
+
   it("prefers workspace-scoped project memory when workspace matches", () => {
     const memories: AIMemoryItem[] = [
       mockMemory({
@@ -144,14 +219,34 @@ describe("memory-store", () => {
     expect(ranked[0]?.id).toBe("mem-workspace-a");
   });
 
+  it("does not globally recall session notes without matching scope", () => {
+    const memories: AIMemoryItem[] = [
+      mockMemory({
+        id: "mem-note",
+        kind: "session_note",
+        scope: "conversation",
+        conversation_id: "conv-a",
+        content: "任务：修复登录问题；进展：已定位到 token 刷新逻辑。",
+        importance: 0.4,
+      }),
+    ];
+
+    const ranked = rankMemoriesForRecall(memories, "登录问题", {
+      topK: 3,
+    });
+    expect(ranked).toHaveLength(0);
+  });
+
   it("builds grouped prompt block from recalled memories", () => {
     const prompt = buildMemoryPromptBlock([
       mockMemory({ id: "mem-rule", content: "禁止直接删除用户文件", kind: "constraint" }),
+      mockMemory({ id: "mem-note", content: "任务：继续整理 AI 记忆体验", kind: "session_note", scope: "conversation", conversation_id: "conv-1" }),
       mockMemory({ id: "mem-x", content: "默认用中文回答", kind: "preference" }),
     ]);
     expect(prompt).toContain("长期记忆");
     expect(prompt).toContain("【必须遵守】");
     expect(prompt).toContain("【用户偏好】");
+    expect(prompt).toContain("【当前目标与上下文】");
     expect(prompt).toContain("默认用中文回答");
   });
 

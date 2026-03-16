@@ -61,7 +61,25 @@ export async function quickChat(
     }
   }
 
-  return invoke<string>('ai_chat', { messages: enriched, config: routedConfig })
+  const result = await invoke<string>('ai_chat', { messages: enriched, config: routedConfig })
+
+  if (config.enable_long_term_memory && config.enable_memory_auto_save) {
+    const lastUser = [...messages].reverse().find((m) => m.role === 'user' && m.content?.trim())
+    if (lastUser?.content?.trim()) {
+      Promise.resolve().then(async () => {
+        try {
+          const { autoExtractMemories } = await import('@/core/agent/actor/actor-memory')
+          await autoExtractMemories(`${lastUser.content.trim()}\n${result}`, undefined, {
+            sourceMode: 'ask',
+          })
+        } catch {
+          // best-effort only
+        }
+      })
+    }
+  }
+
+  return result
 }
 
 /** 流式 AI 对话（带 Function Calling） */

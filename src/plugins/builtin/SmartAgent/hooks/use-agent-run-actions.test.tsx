@@ -108,8 +108,9 @@ describe("useAgentRunActions", () => {
     );
   });
 
-  it("allows follow-up while busy (no busy guard)", async () => {
+  it("queues follow-up while busy instead of starting a new run", async () => {
     const executeAgentTask = vi.fn(async () => undefined);
+    const enqueueFollowUp = vi.fn(() => "queued-1");
     let hookValue: ReturnType<typeof useAgentRunActions> | null = null;
 
     act(() => {
@@ -120,10 +121,13 @@ describe("useAgentRunActions", () => {
           }}
           params={{
             ai: {} as never,
+            busy: true,
+            currentSessionId: "session-1",
             input: "追问内容",
             imagePaths: [],
             fileContextBlock: "",
             attachmentSummary: "",
+            enqueueFollowUp,
             setInput: vi.fn(),
             clearAssets: vi.fn(),
             executeAgentTask,
@@ -137,10 +141,13 @@ describe("useAgentRunActions", () => {
       await hookValue!.handleRun();
     });
 
-    expect(executeAgentTask).toHaveBeenCalledTimes(1);
-    expect(executeAgentTask).toHaveBeenCalledWith("追问内容", {
+    expect(executeAgentTask).not.toHaveBeenCalled();
+    expect(enqueueFollowUp).toHaveBeenCalledTimes(1);
+    expect(enqueueFollowUp).toHaveBeenCalledWith("session-1", {
+      query: "追问内容",
       images: undefined,
       systemHint: undefined,
+      codingHint: undefined,
     });
   });
 

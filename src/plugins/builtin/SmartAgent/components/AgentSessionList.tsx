@@ -32,6 +32,10 @@ interface AgentSessionItemProps {
     title: string;
     tasks: AgentTask[];
     createdAt: number;
+    visibleTaskCount?: number;
+    followUpQueue?: Array<unknown>;
+    forkMeta?: { parentSessionId: string; parentVisibleTaskCount: number; createdAt: number };
+    compaction?: { compactedTaskCount: number };
   };
   isActive: boolean;
   isEditing: boolean;
@@ -65,6 +69,11 @@ const AgentSessionItem = memo(function AgentSessionItem({
     () => session.tasks.reduce((sum, t) => sum + t.steps.length, 0),
     [session.tasks]
   );
+  const visibleTaskCount =
+    typeof session.visibleTaskCount === "number"
+      ? Math.min(session.visibleTaskCount, session.tasks.length)
+      : session.tasks.length;
+  const hiddenTaskCount = Math.max(0, session.tasks.length - visibleTaskCount);
   const isCompleted = lastTask?.answer != null;
   const timeStr = formatTime(session.createdAt);
 
@@ -149,8 +158,28 @@ const AgentSessionItem = memo(function AgentSessionItem({
             {timeStr}
           </span>
           <span className="text-[10px] text-[var(--color-text-secondary)] opacity-40">
-            {session.tasks.length} 个任务 · {totalSteps} 步
+            {visibleTaskCount} / {session.tasks.length} 个任务 · {totalSteps} 步
           </span>
+          {hiddenTaskCount > 0 && (
+            <span className="text-[10px] text-amber-600 opacity-70">
+              +{hiddenTaskCount} 收起
+            </span>
+          )}
+          {session.forkMeta && (
+            <span className="text-[10px] text-sky-600 opacity-70">
+              分支
+            </span>
+          )}
+          {session.compaction?.compactedTaskCount ? (
+            <span className="text-[10px] text-emerald-600 opacity-70">
+              摘要 {session.compaction.compactedTaskCount}
+            </span>
+          ) : null}
+          {session.followUpQueue?.length ? (
+            <span className="text-[10px] text-violet-600 opacity-70">
+              跟进 {session.followUpQueue.length}
+            </span>
+          ) : null}
           {isCompleted && (
             <span className="text-[10px] text-emerald-500 opacity-60">
               已完成
@@ -168,6 +197,10 @@ interface AgentSessionListProps {
     title: string;
     tasks: AgentTask[];
     createdAt: number;
+    visibleTaskCount?: number;
+    followUpQueue?: Array<unknown>;
+    forkMeta?: { parentSessionId: string; parentVisibleTaskCount: number; createdAt: number };
+    compaction?: { compactedTaskCount: number };
   }>;
   currentSessionId: string | null;
   onSelect: (id: string) => void;

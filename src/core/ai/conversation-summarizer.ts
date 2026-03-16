@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { addMemoryFromAgent } from "./memory-store";
+import { saveSessionMemoryNote } from "./memory-store";
 
 interface ChatMessage {
   role: "user" | "assistant" | "system";
@@ -50,16 +50,10 @@ ${transcript}
       return null;
     }
 
-    await addMemoryFromAgent(
-      `对话摘要 (${new Date().toLocaleDateString()})`,
-      summary.slice(0, 500),
-      "conversation_summary",
-      {
-        scope: conversationId ? "conversation" : "global",
-        conversationId,
-        source: "system",
-      },
-    );
+    await saveSessionMemoryNote(summary.slice(0, 500), {
+      conversationId,
+      source: "system",
+    });
 
     return summary;
   } catch {

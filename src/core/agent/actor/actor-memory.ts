@@ -6,6 +6,7 @@ import {
   listConfirmedMemories,
   llmExtractMemories,
   queueMemoryCandidateFromAgent,
+  saveSessionMemoryNote,
   type AIMemoryCandidateMode,
   type AIMemoryItem,
 } from "@/core/ai/memory-store";
@@ -18,6 +19,7 @@ import {
   appendAssistantMemoryCandidates,
   buildAssistantMemoryPromptForQuery,
 } from "@/core/ai/assistant-memory";
+import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
 
 const MAX_SEARCH_RESULTS = 8;
 const MAX_EXTRACT_CONTENT_LENGTH = 2000;
@@ -143,9 +145,8 @@ function formatMemoryItem(m: AIMemoryItem) {
 }
 
 /**
- * Extract memories from conversation using LLM-based extraction (primary)
- * with regex-based fallback. Results are queued as memory candidates and
- * require user confirmation before entering the long-term memory store.
+ * Extract durable session context from a finished run.
+ * Automatic runs now prefer silent session notes over noisy long-term candidates.
  */
 export async function autoExtractMemories(
   conversationContent: string,
@@ -163,8 +164,23 @@ export async function autoExtractMemories(
   if (!conversationContent || conversationContent.length < 20) return 0;
 
   const truncated = conversationContent.slice(0, MAX_EXTRACT_CONTENT_LENGTH);
+  const note = buildSessionNoteSummary(truncated);
+  let savedCount = 0;
 
-  // Try LLM-based extraction first for richer results
+  if (note) {
+    const saved = await saveSessionMemoryNote(note, {
+      conversationId,
+      workspaceId: opts?.workspaceId,
+      source: "assistant",
+    }).catch(() => null);
+    if (saved) {
+      savedCount += 1;
+    }
+  }
+
+  // Keep automatic long-term extraction very conservative.
+  // Silent session notes carry most transient context; only explicit durable signals
+  // should still surface as candidate memories.
   const llmCandidates = await llmExtractMemories(truncated, {
     conversationId,
     workspaceId: opts?.workspaceId,
@@ -174,8 +190,12 @@ export async function autoExtractMemories(
   }).catch(() => []);
 
   if (llmCandidates.length > 0) {
-    await appendAssistantMemoryCandidates(llmCandidates);
-    return llmCandidates.length;
+    const inlineCandidates = llmCandidates.filter((candidate) => candidate.review_surface !== "background");
+    if (inlineCandidates.length > 0) {
+      await appendAssistantMemoryCandidates(inlineCandidates);
+      return savedCount + inlineCandidates.length;
+    }
+    return savedCount;
   }
 
   // Fallback to regex-based heuristic
@@ -187,10 +207,25 @@ export async function autoExtractMemories(
     reason: "从对话中匹配到明确的长期记忆提示词",
     evidence: truncated,
   });
-  if (candidates.length === 0) return 0;
+  const inlineCandidates = candidates.filter((candidate) => candidate.review_surface !== "background");
+  if (inlineCandidates.length === 0) return savedCount;
 
-  await appendAssistantMemoryCandidates(candidates);
-  return candidates.length;
+  await appendAssistantMemoryCandidates(inlineCandidates);
+  return savedCount + inlineCandidates.length;
+}
+
+function buildSessionNoteSummary(conversationContent: string): string | null {
+  const normalized = conversationContent.trim();
+  if (!normalized) return null;
+
+  const [queryPart, ...restParts] = normalized.split(/\n+/);
+  const query = summarizeAISessionRuntimeText(queryPart, 100);
+  const result = summarizeAISessionRuntimeText(restParts.join(" "), 140);
+
+  if (query && result) {
+    return `任务：${query}；进展：${result}`;
+  }
+  return summarizeAISessionRuntimeText(normalized, 200) ?? null;
 }
 
 /**

@@ -3,6 +3,7 @@
 
 /* Default (Light) Theme */
 :root {
+  --app-font-scale: 1;
   --color-bg: #f8fafc;
   --color-bg-secondary: #ffffff;
   --color-bg-hover: #f1f5f9;
@@ -20,6 +21,10 @@
   --space-compact-2: 0.5rem;
   --space-compact-3: 0.75rem;
   --space-compact-4: 1rem;
+}
+
+html {
+  font-size: calc(16px * var(--app-font-scale));
 }
 
 /* Dark Theme overrides */

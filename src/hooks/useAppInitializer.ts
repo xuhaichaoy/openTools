@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, emit } from "@tauri-apps/api/event";
 import { useAIStore } from "@/store/ai-store";
@@ -9,7 +9,6 @@ import { useBookmarkStore } from "@/store/bookmark-store";
 import { useAppStore } from "@/store/app-store";
 import { agentRunnerService } from "@/core/agent/agent-runner-service";
 import { handleError, ErrorLevel } from "@/core/errors";
-import { WINDOW_HEIGHT_EXPANDED } from "@/core/constants";
 import { registry } from "@/core/plugin-system/registry";
 import { getMToolsAI } from "@/core/ai/mtools-ai";
 import {
@@ -22,6 +21,12 @@ import type {
   AgentTaskSkippedEvent,
   AgentTaskStatusPatch,
 } from "@/core/ai/types";
+import {
+  applyGlobalFontScale,
+  getPreferredWindowHeight,
+  loadLocalFontScalePreference,
+} from "@/core/ui/local-ui-preferences";
+import { resizeManagedWindowHeight } from "@/shell/WindowSizeManager";
 
 /**
  * App-level initialization: loads stores, starts schedulers,
@@ -34,6 +39,8 @@ export function useAppInitializer(
   // ── Store loading & scheduler startup (once) ──
   useEffect(() => {
     let cancelled = false;
+
+    applyGlobalFontScale(loadLocalFontScalePreference());
 
     useAIStore
       .getState()
@@ -146,7 +153,7 @@ export function useAppInitializer(
     listen<{ text: string }>("context-action", (event) => {
       setContextText(event.payload.text);
       pushView(CONTEXT_ACTION_VIEW_ID);
-      invoke("resize_window", { height: WINDOW_HEIGHT_EXPANDED });
+      void resizeManagedWindowHeight(getPreferredWindowHeight("expanded"));
     }).then((fn) => {
       unlisten = fn;
     });

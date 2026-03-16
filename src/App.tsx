@@ -6,6 +6,7 @@ import { GlobalAskUserDialog } from "@/components/global/GlobalAskUserDialog";
 import { GlobalConfirmDialog } from "@/components/global/GlobalConfirmDialog";
 import { GlobalClusterPlanApprovalDialog } from "@/components/global/GlobalClusterPlanApprovalDialog";
 import { MainViewRouter } from "@/components/app/MainViewRouter";
+import { WindowResizeHandles } from "@/components/app/WindowResizeHandles";
 import { useAppStore } from "@/store/app-store";
 import { routeToAICenter } from "@/core/ai/ai-center-routing";
 
@@ -24,6 +25,7 @@ import { useColorPicker } from "@/hooks/useColorPicker";
 import { useAppInitializer } from "@/hooks/useAppInitializer";
 import { useSearchResults } from "@/hooks/useSearchResults";
 import { usePluginLifecycle } from "@/hooks/usePluginLifecycle";
+import { resolveWindowResizeBucket } from "@/core/ui/local-ui-preferences";
 
 // 初始化：注册所有内置插件
 registry.registerAll(resolveBuiltinPlugins());
@@ -62,6 +64,11 @@ function MainApp() {
     searchValue,
     pushView,
     handleDirectColorPicker,
+  );
+  const resizeBucket = resolveWindowResizeBucket(
+    view,
+    searchValue,
+    filteredResults.length,
   );
 
   const { activePlugin, pluginContext } = usePluginLifecycle(view, resetToMain);
@@ -137,7 +144,9 @@ function MainApp() {
   }, [view, viewDepth, openLauncher, popView, resetSearchState]);
 
   return (
-    <div className="w-full h-full flex flex-col bg-[var(--color-bg)] text-[var(--color-text)] overflow-hidden rounded-xl border border-[var(--color-border)] shadow-2xl">
+    <div className="relative w-full h-full flex flex-col bg-[var(--color-bg)] text-[var(--color-text)] overflow-hidden rounded-xl border border-[var(--color-border)] shadow-2xl">
+      <WindowResizeHandles bucket={resizeBucket} />
+
       <MainViewRouter
         view={view}
         searchValue={searchValue}

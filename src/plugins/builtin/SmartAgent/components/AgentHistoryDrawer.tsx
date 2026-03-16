@@ -9,6 +9,10 @@ interface AgentHistoryDrawerProps {
     title: string;
     tasks: AgentTask[];
     createdAt: number;
+    visibleTaskCount?: number;
+    followUpQueue?: Array<unknown>;
+    forkMeta?: { parentSessionId: string; parentVisibleTaskCount: number; createdAt: number };
+    compaction?: { compactedTaskCount: number };
   }>;
   currentSessionId: string | null;
   onSelect: (id: string) => void;

@@ -1,12 +1,14 @@
 import { JsonCollection, SyncableCollection, type SyncMeta } from "@/core/database/index";
 import { invoke } from "@tauri-apps/api/core";
+import { summarizeAISessionRuntimeText } from "./ai-session-runtime";
 import { estimateTokens } from "./token-utils";
 
-export type AIMemoryKind = "preference" | "fact" | "goal" | "constraint" | "project_context" | "conversation_summary" | "knowledge" | "behavior";
+export type AIMemoryKind = "preference" | "fact" | "goal" | "constraint" | "project_context" | "conversation_summary" | "session_note" | "knowledge" | "behavior";
 export type AIMemoryScope = "global" | "conversation" | "workspace";
 export type AIMemorySource = "user" | "assistant" | "system" | "agent";
 export type AIMemoryCandidateMode = "ask" | "agent" | "cluster" | "dialog" | "system";
 export type AIMemoryArchiveReason = "deleted" | "replaced" | "limit_trimmed";
+export type AIMemoryCandidateReviewSurface = "inline" | "background";
 
 export interface AIMemoryItem extends SyncMeta {
   id: string;
@@ -46,6 +48,7 @@ export interface AIMemoryCandidate {
   evidence?: string;
   conflict_memory_ids?: string[];
   conflict_summary?: string;
+  review_surface?: AIMemoryCandidateReviewSurface;
 }
 
 export interface CandidateSanitizeResult {
@@ -73,6 +76,7 @@ interface MemoryCandidateBuildOptions {
   source?: AIMemorySource;
   sourceMode?: AIMemoryCandidateMode;
   evidence?: string;
+  reviewSurface?: AIMemoryCandidateReviewSurface;
 }
 
 const DEFAULT_RECALL_TOP_K = 6;
@@ -83,6 +87,7 @@ const MAX_MEMORIES_IN_PROMPT = 6;
 const MAX_INJECTION_TOKENS = 2000;
 const FACT_CONFIDENCE_THRESHOLD = 0.7;
 const MAX_FACTS = 100;
+const MAX_SESSION_NOTES_PER_SCOPE = 12;
 
 const SENSITIVE_PATTERNS: RegExp[] = [
   /\b(sk|rk|pk)-[a-z0-9]{10,}\b/i,
@@ -132,6 +137,9 @@ const VERBOSITY_SLOT_HINTS = /(简洁|简短|精简|详细|全面|展开)/;
 const FORMAT_SLOT_HINTS = /(markdown|md|表格|代码块|纯文本|json)/i;
 const STRUCTURE_SLOT_HINTS = /(先给结论|先说结论|先给答案|先给结果|先总结)/;
 const CODING_STYLE_SLOT_HINTS = /(代码风格|命名风格|注释风格|测试风格)/;
+const HOME_LOCATION_SLOT_HINTS = /(常驻地|常住地|常驻城市|所在城市|居住地|住在|长期所在地|默认城市|默认地点|天气默认地点|本地城市|用户常驻地)/;
+const WEATHER_LOCATION_QUERY_HINTS = /(天气|气温|温度|预报|下雨|降雨|空气质量|湿度|紫外线|穿什么|本地时间|时差|附近|周边|餐厅|咖啡|酒店|路线|通勤)/;
+const CODING_QUERY_HINTS = /(代码|编程|实现|函数|组件|修复|重构|typescript|javascript|rust|python|bug|测试|脚本|前端|后端|api)/i;
 const AUTO_EXTRACT_TRANSIENT_PATTERNS: RegExp[] = [
   /^用户(?:正在|刚刚|当前|本次|这次|这一轮|尝试|想让|希望|要求|询问|请求|计划|打算)/,
   /当前(?:任务|会话|对话|房间)/,
@@ -282,12 +290,40 @@ type MemoryPreferenceSlot =
   | "verbosity"
   | "format"
   | "structure"
-  | "coding_style";
+  | "coding_style"
+  | "home_location";
+
+export interface AutomaticStructuredMemoryPlan {
+  slot: MemoryPreferenceSlot;
+  content: string;
+  kind: AIMemoryKind;
+  scope: AIMemoryScope;
+  conversationId?: string;
+  workspaceId?: string;
+  tags: string[];
+}
+
+const AUTO_CONFIRM_MEMORY_SLOTS = new Set<MemoryPreferenceSlot>([
+  "language",
+  "verbosity",
+  "format",
+  "structure",
+  "coding_style",
+  "home_location",
+]);
+
+const STABLE_RESPONSE_MEMORY_SLOTS = new Set<MemoryPreferenceSlot>([
+  "language",
+  "verbosity",
+  "format",
+  "structure",
+]);
 
 function inferMemorySlot(
   text: string,
   kind: AIMemoryKind,
 ): MemoryPreferenceSlot | null {
+  if (HOME_LOCATION_SLOT_HINTS.test(text)) return "home_location";
   if (kind !== "preference" && kind !== "constraint" && kind !== "behavior") {
     return null;
   }
@@ -311,9 +347,163 @@ function describeMemorySlot(slot: MemoryPreferenceSlot): string {
       return "回答结构";
     case "coding_style":
       return "代码风格";
+    case "home_location":
+      return "常驻地";
     default:
       return "偏好槽位";
   }
+}
+
+function extractLocationValue(text: string): string | null {
+  const patterns = [
+    /(?:常驻地|常住地|常驻城市|所在城市|居住地|长期所在地)(?:是|为|在)?[:：]?\s*([^，。；,\n]{2,24})/,
+    /我(?:住在|常驻在|长期在)[:：]?\s*([^，。；,\n]{2,24})/,
+    /(?:查|问).{0,8}(?:天气|气温|预报).{0,10}(?:默认|按|用)[:：]?\s*([^，。；,\n]{2,24})/,
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (!match?.[1]) continue;
+    const value = match[1]
+      .replace(/^(是|为|在|按|用)\s*/u, "")
+      .replace(/\s*(查天气|天气|气温|预报|回答|处理|查询|记住|保存).*$/u, "")
+      .trim();
+    if (value.length >= 2 && value.length <= 24) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function normalizeLanguageValue(text: string): string | null {
+  if (/双语/.test(text)) return "双语";
+  if (/(中文|汉语|普通话)/.test(text)) return "中文";
+  if (/(英文|英语)/.test(text)) return "英文";
+  return null;
+}
+
+function normalizeVerbosityValue(text: string): string | null {
+  if (/(简洁|简短|精简)/.test(text)) return "简洁";
+  if (/(详细|全面|展开)/.test(text)) return "详细";
+  return null;
+}
+
+function normalizeFormatValue(text: string): string | null {
+  if (/(markdown|md)/i.test(text)) return "Markdown";
+  if (/表格/.test(text)) return "表格";
+  if (/json/i.test(text)) return "JSON";
+  if (/纯文本/.test(text)) return "纯文本";
+  if (/代码块/.test(text)) return "代码块";
+  return null;
+}
+
+function normalizeStructureValue(text: string): string | null {
+  if (/(先给结论|先说结论|先给答案|先给结果|先总结)/.test(text)) {
+    return "先给结论，再展开";
+  }
+  return null;
+}
+
+function buildStructuredMemoryContent(
+  slot: MemoryPreferenceSlot,
+  text: string,
+): string | null {
+  switch (slot) {
+    case "language": {
+      const value = normalizeLanguageValue(text);
+      return value ? `默认回答语言：${value}` : null;
+    }
+    case "verbosity": {
+      const value = normalizeVerbosityValue(text);
+      return value ? `默认回答详略：${value}` : null;
+    }
+    case "format": {
+      const value = normalizeFormatValue(text);
+      return value ? `默认输出格式：${value}` : null;
+    }
+    case "structure": {
+      const value = normalizeStructureValue(text);
+      return value ? `默认回答结构：${value}` : null;
+    }
+    case "coding_style":
+      return text;
+    case "home_location": {
+      const value = extractLocationValue(text);
+      return value ? `用户常驻地：${value}` : null;
+    }
+    default:
+      return null;
+  }
+}
+
+function inferQueryMemorySlots(query: string): Set<MemoryPreferenceSlot> {
+  const normalized = normalizeWhitespace(query);
+  const slots = new Set<MemoryPreferenceSlot>();
+  if (WEATHER_LOCATION_QUERY_HINTS.test(normalized)) {
+    slots.add("home_location");
+  }
+  if (CODING_QUERY_HINTS.test(normalized)) {
+    slots.add("coding_style");
+  }
+  return slots;
+}
+
+function planAutomaticStructuredMemorySaves(
+  text: string,
+  opts?: { conversationId?: string; workspaceId?: string },
+): AutomaticStructuredMemoryPlan[] {
+  const normalized = normalizeWhitespace(text);
+  if (!normalized) return [];
+  if (!containsAnyPattern(normalized, EXPLICIT_CAPTURE_HINTS)) return [];
+
+  const inferredKind = inferKind(normalized);
+  const slots: MemoryPreferenceSlot[] = [
+    "home_location",
+    "language",
+    "verbosity",
+    "format",
+    "structure",
+    "coding_style",
+  ];
+
+  return slots
+    .filter((slot) => AUTO_CONFIRM_MEMORY_SLOTS.has(slot))
+    .map((slot) => {
+      const content = buildStructuredMemoryContent(slot, normalized);
+      if (!content) return null;
+      if (slot === "coding_style" && !CODING_STYLE_SLOT_HINTS.test(normalized)) {
+        return null;
+      }
+
+      const kind = slot === "home_location"
+        ? "fact"
+        : inferredKind === "constraint"
+          ? "constraint"
+          : "preference";
+      const scope = inferScope(normalized, kind, opts?.conversationId, opts?.workspaceId);
+
+      return {
+        slot,
+        content,
+        kind,
+        scope,
+        conversationId: opts?.conversationId,
+        workspaceId: opts?.workspaceId,
+        tags: uniqueStrings([
+          `slot:${slot}`,
+          slot === "home_location" ? "location" : undefined,
+          "structured_memory",
+          "auto_confirmed",
+        ]),
+      } satisfies AutomaticStructuredMemoryPlan;
+    })
+    .filter((plan): plan is AutomaticStructuredMemoryPlan => !!plan);
+}
+
+export function planAutomaticStructuredMemorySave(
+  text: string,
+  opts?: { conversationId?: string; workspaceId?: string },
+): AutomaticStructuredMemoryPlan | null {
+  return planAutomaticStructuredMemorySaves(text, opts)[0] ?? null;
 }
 
 function buildMemoryCandidate(
@@ -341,7 +531,18 @@ function buildMemoryCandidate(
     source: options.source ?? "user",
     source_mode: options.sourceMode,
     evidence: trimCandidateEvidence(options.evidence ?? text),
+    review_surface: options.reviewSurface ?? inferCandidateReviewSurface(text, options.source),
   };
+}
+
+function inferCandidateReviewSurface(
+  text: string,
+  source?: AIMemorySource,
+): AIMemoryCandidateReviewSurface {
+  if ((source ?? "user") !== "user") {
+    return "background";
+  }
+  return containsAnyPattern(text, EXPLICIT_CAPTURE_HINTS) ? "inline" : "background";
 }
 
 function detectCandidateConflicts(
@@ -410,6 +611,7 @@ function enrichMemoryCandidate(
     source: candidate.source,
     sourceMode: candidate.source_mode,
     evidence: candidate.evidence,
+    reviewSurface: candidate.review_surface,
   });
   if (!rebuilt) return null;
 
@@ -441,6 +643,10 @@ function mergeMemoryCandidates(
     ]),
     evidence: newer.evidence || older.evidence,
     conflict_summary: newer.conflict_summary || older.conflict_summary,
+    review_surface:
+      current.review_surface === "inline" || incoming.review_surface === "inline"
+        ? "inline"
+        : newer.review_surface ?? older.review_surface,
   };
 }
 
@@ -621,6 +827,57 @@ export async function confirmMemoryCandidate(
   return saved;
 }
 
+export async function saveAutomaticStructuredMemory(
+  text: string,
+  opts?: { conversationId?: string; workspaceId?: string },
+): Promise<AIMemoryItem | null> {
+  const plans = planAutomaticStructuredMemorySaves(text, opts);
+  if (plans.length === 0) return null;
+
+  let firstSaved: AIMemoryItem | null = null;
+  for (const plan of plans) {
+    const confirmedMemories = (await aiMemoryDb.getAll()).filter((item) => !item.deleted);
+    const probe = buildMemoryCandidate(plan.content, {
+      conversationId: plan.conversationId,
+      workspaceId: plan.workspaceId,
+      kind: plan.kind,
+      scope: plan.scope,
+      source: "user",
+      tags: plan.tags,
+      confidence: 0.94,
+      reviewSurface: "inline",
+    });
+    const conflicts = probe
+      ? detectCandidateConflicts(probe, confirmedMemories).ids
+      : [];
+
+    const saved = await saveConfirmedMemory(plan.content, {
+      kind: plan.kind,
+      source: "user",
+      conversationId: plan.conversationId,
+      workspaceId: plan.workspaceId,
+      scope: plan.scope,
+      confidence: 0.94,
+      importance: slotImportance(plan.slot),
+      tags: plan.tags,
+    });
+    if (saved && conflicts.length > 0) {
+      await applyReplacementAudit(saved.id, conflicts);
+      invalidateMemoryVectorIndex();
+    }
+    if (!firstSaved && saved) {
+      firstSaved = saved;
+    }
+  }
+  return firstSaved;
+}
+
+function slotImportance(slot: MemoryPreferenceSlot): number {
+  if (slot === "home_location") return 0.82;
+  if (slot === "coding_style") return 0.84;
+  return 0.88;
+}
+
 export async function saveConfirmedMemory(
   content: string,
   options?: {
@@ -717,8 +974,12 @@ export async function saveConfirmedMemory(
 function scoreMemory(
   memory: AIMemoryItem,
   queryTokens: string[],
+  queryText: string,
   options?: RecallOptions,
 ): number {
+  if (memory.kind === "session_note" && !options?.conversationId && !options?.workspaceId) {
+    return -1;
+  }
   if (
     memory.scope === "conversation"
     && options?.conversationId
@@ -746,9 +1007,9 @@ function scoreMemory(
         0.1
       : 0;
 
-  const queryText = queryTokens.join(" ");
+  const queryPhrase = queryTokens.join(" ");
   const fullTextMatch =
-    queryText && normalizeForCompare(memory.content).includes(queryText) ? 0.15 : 0;
+    queryPhrase && normalizeForCompare(memory.content).includes(queryPhrase) ? 0.15 : 0;
 
   const conversationBoost =
     options?.conversationId &&
@@ -764,10 +1025,24 @@ function scoreMemory(
       : 0;
 
   const kindBoost = memory.kind === "preference" || memory.kind === "constraint" ? 0.08 : 0;
+  const slot = inferMemorySlot(memory.content, memory.kind);
+  const querySlotHints = inferQueryMemorySlots(queryText);
+  const stableStructuredBoost = slot && STABLE_RESPONSE_MEMORY_SLOTS.has(slot) && memory.scope === "global"
+    ? 0.06
+    : 0;
+  const slotQueryBoost = slot && querySlotHints.has(slot)
+    ? (slot === "home_location" ? 0.34 : 0.18)
+    : 0;
+  const sessionNoteBoost = memory.kind === "session_note"
+    ? (
+        (options?.conversationId && memory.conversation_id === options.conversationId ? 0.22 : 0)
+        + (options?.workspaceId && memory.workspace_id === options.workspaceId ? 0.18 : 0)
+      )
+    : 0;
   const usageBoost = Math.min(memory.use_count || 0, 15) * 0.01;
   const importanceBoost = clamp(memory.importance ?? 0.5, 0, 1) * 0.2;
 
-  return overlapScore * 0.45 + tagScore + fullTextMatch + conversationBoost + workspaceBoost + kindBoost + usageBoost + importanceBoost;
+  return overlapScore * 0.45 + tagScore + fullTextMatch + conversationBoost + workspaceBoost + kindBoost + stableStructuredBoost + slotQueryBoost + sessionNoteBoost + usageBoost + importanceBoost;
 }
 
 export function rankMemoriesForRecall(
@@ -776,11 +1051,12 @@ export function rankMemoriesForRecall(
   options?: RecallOptions,
 ): AIMemoryItem[] {
   const queryTokens = tokenize(query);
+  const normalizedQuery = normalizeWhitespace(query);
   const topK = options?.topK ?? DEFAULT_RECALL_TOP_K;
 
   const ranked = memories
     .filter((item) => !item.deleted)
-    .map((item) => ({ item, score: scoreMemory(item, queryTokens, options) }))
+    .map((item) => ({ item, score: scoreMemory(item, queryTokens, normalizedQuery, options) }))
     .filter(({ score }) => score > 0.08 || (queryTokens.length === 0 && score >= 0))
     .sort((a, b) => {
       if (b.score !== a.score) return b.score - a.score;
@@ -828,6 +1104,7 @@ const KIND_LABELS: Record<AIMemoryKind, string> = {
   behavior: "行为",
   project_context: "项目",
   conversation_summary: "摘要",
+  session_note: "会话笔记",
   fact: "事实",
 };
 
@@ -848,7 +1125,8 @@ const PROMPT_GROUPS: Array<{
     match: (memory) =>
       memory.kind === "goal"
       || memory.kind === "project_context"
-      || memory.kind === "conversation_summary",
+      || memory.kind === "conversation_summary"
+      || memory.kind === "session_note",
   },
   {
     title: "相关知识与事实",
@@ -862,7 +1140,7 @@ export function buildMemoryPromptBlock(
 ): string {
   if (!memories.length) return "";
 
-  const header = "以下是用户确认过的长期记忆，请在回答中优先遵循（如与当前明确指令冲突，以当前指令为准）：";
+  const header = "以下是已保存的用户长期记忆与当前会话笔记，请在回答中优先利用（如与当前明确指令冲突，以当前指令为准）：";
   let tokenBudget = maxTokens - estimateTokens(header);
   let usedMemoryCount = 0;
   const lines: string[] = [];
@@ -912,10 +1190,91 @@ const AGENT_KIND_MAP: Record<string, AIMemoryKind> = {
   context: "project_context",
   project_context: "project_context",
   conversation_summary: "conversation_summary",
+  session_note: "session_note",
   behavior: "behavior",
   goal: "goal",
   constraint: "constraint",
 };
+
+function buildSessionNoteScope(options?: {
+  conversationId?: string;
+  workspaceId?: string;
+}): AIMemoryScope | null {
+  if (options?.workspaceId) return "workspace";
+  if (options?.conversationId) return "conversation";
+  return null;
+}
+
+async function trimExcessSessionNotes(
+  scope: AIMemoryScope,
+  options?: {
+    conversationId?: string;
+    workspaceId?: string;
+  },
+): Promise<void> {
+  const all = await aiMemoryDb.getAll();
+  const scopedNotes = all
+    .filter((item) => {
+      if (item.deleted || item.kind !== "session_note" || item.scope !== scope) return false;
+      if (scope === "conversation") {
+        return item.conversation_id === options?.conversationId;
+      }
+      if (scope === "workspace") {
+        return item.workspace_id === options?.workspaceId;
+      }
+      return false;
+    })
+    .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+
+  const overflow = scopedNotes.slice(MAX_SESSION_NOTES_PER_SCOPE);
+  if (overflow.length === 0) return;
+
+  const now = Date.now();
+  await Promise.all(
+    overflow.map((item) =>
+      aiMemoryDb.update(item.id, {
+        deleted: true,
+        updated_at: now,
+        archived_at: now,
+        archived_reason: "limit_trimmed",
+      }),
+    ),
+  );
+}
+
+export async function saveSessionMemoryNote(
+  content: string,
+  options?: {
+    conversationId?: string;
+    workspaceId?: string;
+    source?: AIMemorySource;
+  },
+): Promise<AIMemoryItem | null> {
+  const scope = buildSessionNoteScope(options);
+  if (!scope) return null;
+
+  const normalized = normalizeWhitespace(content);
+  const summarized = summarizeAISessionRuntimeText(normalized, 220);
+  if (!summarized || summarized.length < 12) return null;
+
+  const saved = await saveConfirmedMemory(summarized, {
+    kind: "session_note",
+    source: options?.source ?? "assistant",
+    conversationId: options?.conversationId,
+    workspaceId: options?.workspaceId,
+    scope,
+    confidence: 0.72,
+    importance: 0.45,
+    tags: ["session_note"],
+  });
+
+  if (saved) {
+    await trimExcessSessionNotes(scope, options);
+    invalidateMemoryVectorIndex();
+  }
+
+  return saved;
+}
 
 export function composeAgentMemoryContent(key: string, value: string): string {
   const normalizedKey = normalizeWhitespace(String(key || ""));
@@ -1036,6 +1395,7 @@ export async function queueMemoryCandidateFromAgent(
     reason: opts?.reason ?? "Agent 建议保存用户长期记忆，等待确认后才会生效",
     confidence: 0.85,
     evidence: opts?.evidence ?? content,
+    reviewSurface: "inline",
   });
   if (!candidate) return null;
   await appendMemoryCandidates([candidate]);
@@ -1297,6 +1657,23 @@ function shouldSkipLLMExtractedFact(content: string, kind: AIMemoryKind): boolea
   return false;
 }
 
+function shouldAttemptAutomaticMemoryExtraction(
+  content: string,
+  source?: AIMemorySource,
+): boolean {
+  const normalized = normalizeWhitespace(content);
+  if (!normalized || normalized.length < 20) return false;
+  if (containsAnyPattern(normalized, MEMORY_PROMPT_LEAK_PATTERNS)) return false;
+  if (containsAnyPattern(normalized, SENSITIVE_PATTERNS)) return false;
+  if (containsAnyPattern(normalized, EPHEMERAL_PATTERNS)) return false;
+  if (containsAnyPattern(normalized, AUTO_EXTRACT_TRANSIENT_PATTERNS)) return false;
+  if (containsAnyPattern(normalized, EXPLICIT_CAPTURE_HINTS)) return true;
+  if (containsAnyPattern(normalized, LONG_TERM_CAPTURE_HINTS)) return true;
+  if (containsAnyPattern(normalized, USER_BACKGROUND_PATTERNS)) return true;
+  if (containsAnyPattern(normalized, PROJECT_CONTEXT_SIGNAL_PATTERNS)) return true;
+  return (source ?? "assistant") === "user" && shouldCapture(normalized);
+}
+
 const MEMORY_EXTRACTION_PROMPT = `You are a memory extraction system. Analyze this conversation and extract only stable, reusable long-term facts about the user.
 
 Conversation:
@@ -1347,6 +1724,11 @@ export async function llmExtractMemories(
 ): Promise<AIMemoryCandidate[]> {
   if (!conversationContent || conversationContent.length < 30) return [];
   const truncated = conversationContent.slice(0, 3000);
+  const source = opts?.source ?? "assistant";
+
+  if (!shouldAttemptAutomaticMemoryExtraction(truncated, source)) {
+    return [];
+  }
 
   try {
     const { getMToolsAI } = await import("@/core/ai/mtools-ai");
@@ -1379,17 +1761,20 @@ export async function llmExtractMemories(
         conversationId: opts?.conversationId,
         workspaceId: opts?.workspaceId,
         kind,
-        source: opts?.source ?? "assistant",
+        source,
         sourceMode: opts?.sourceMode,
         reason: `AI 从对话中提取出 ${KIND_LABELS[kind] ?? fact.category} 候选`,
         confidence: clamp(fact.confidence, 0, 1),
         evidence: opts?.evidence ?? fact.content,
+        reviewSurface: "background",
       });
       if (candidate) {
         candidates.push(candidate);
       }
     }
-    return candidates;
+    return candidates
+      .sort((a, b) => b.confidence - a.confidence)
+      .slice(0, 2);
   } catch {
     return fallbackExtract(truncated, opts);
   }

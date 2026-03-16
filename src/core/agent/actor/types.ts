@@ -155,6 +155,24 @@ export interface SessionUploadRecord {
   multimodalEligible?: boolean;
 }
 
+export interface DialogQueuedFollowUp {
+  id: string;
+  displayText: string;
+  content: string;
+  briefContent?: string;
+  images?: string[];
+  attachmentPaths?: string[];
+  uploadRecords?: SessionUploadRecord[];
+  routingMode: "direct" | "coordinator" | "smart" | "broadcast";
+  createdAt: number;
+}
+
+export interface DialogContextSummary {
+  summary: string;
+  summarizedMessageCount: number;
+  updatedAt: number;
+}
+
 // ── Agent Configuration ──
 
 /** Agent 协作能力标签（用于智能路由） */

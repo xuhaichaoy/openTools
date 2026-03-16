@@ -11,7 +11,7 @@ vi.mock("@/core/errors", () => ({
   handleError: vi.fn(),
 }));
 
-import { useAgentStore } from "./agent-store";
+import { getHiddenAgentTasks, getVisibleAgentTasks, useAgentStore } from "./agent-store";
 
 function mkTask(id: string, status: AgentScheduledTask["status"] = "pending"): AgentScheduledTask {
   const now = Date.now();
@@ -129,5 +129,37 @@ describe("agent-store orchestrator", () => {
     expect(useAgentStore.getState().scheduledTasks[0]?.last_result_status).toBe("skipped");
     expect(useAgentStore.getState().scheduledTasks[0]?.last_skip_reason).toBe("overlap_running");
     expect(useAgentStore.getState().scheduledTasks[0]?.next_run_at).toBe(999999);
+  });
+
+  it("should support revert, fork and follow-up queue on sessions", () => {
+    vi.useFakeTimers();
+
+    const store = useAgentStore.getState();
+    const sessionId = store.createSession("第一步");
+    store.addTask(sessionId, "第二步");
+    store.setCurrentSession(sessionId);
+
+    store.revertCurrentSessionToPreviousTask();
+    const reverted = useAgentStore.getState().getCurrentSession();
+    expect(getVisibleAgentTasks(reverted!)).toHaveLength(1);
+    expect(getHiddenAgentTasks(reverted!)).toHaveLength(1);
+
+    store.enqueueFollowUp(sessionId, {
+      query: "完成后继续第三步",
+      systemHint: "继续上下文",
+    });
+    expect(useAgentStore.getState().getCurrentSession()?.followUpQueue).toHaveLength(1);
+
+    const forkedId = store.forkSession(sessionId, { visibleOnly: true });
+    expect(forkedId).toBeTruthy();
+    const forked = useAgentStore
+      .getState()
+      .sessions.find((session) => session.id === forkedId);
+    expect(forked?.forkMeta?.parentSessionId).toBe(sessionId);
+    expect(getVisibleAgentTasks(forked!)).toHaveLength(1);
+    expect(forked?.followUpQueue).toEqual([]);
+
+    vi.runOnlyPendingTimers();
+    vi.useRealTimers();
   });
 });

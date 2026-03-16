@@ -80,6 +80,8 @@ import type {
     ApprovalDecisionOption,
     ApprovalLevel,
     DialogArtifactRecord,
+    DialogContextSummary,
+    DialogQueuedFollowUp,
     DialogExecutionPlan,
     DialogMessage,
     MiddlewareOverrides,
@@ -100,10 +102,12 @@ import {
   type DialogPreset,
   type DialogRoutingMode,
 } from "@/core/agent/actor/dialog-presets";
+import { buildDialogContextSummary } from "@/core/agent/actor/dialog-session-summary";
 import type { AgentStep } from "@/plugins/builtin/SmartAgent/core/react-agent";
 import type { ClusterPlan } from "@/core/agent/cluster/types";
 import { useInputAttachments, FILE_ACCEPT_ALL, type InputAttachment } from "@/hooks/use-input-attachments";
 import { AttachDropdown } from "@/components/ui/AttachDropdown";
+import { DialogFollowUpDock } from "./DialogFollowUpDock";
 
 const TaskCenterPanel = lazy(() => import("../TaskCenterPanel"));
 const KnowledgeGraphView = lazy(() => import("../KnowledgeGraphView"));
@@ -951,6 +955,7 @@ function buildDialogAgentHandoff(params: {
   artifacts: DialogArtifact[];
   sessionUploads: SessionUploadRecord[];
   spawnedTasks: SpawnedTaskRecord[];
+  dialogContextSummary?: DialogContextSummary | null;
   sourceSessionId?: string;
   maxMessages?: number;
   maxCharsPerMessage?: number;
@@ -964,6 +969,7 @@ function buildDialogAgentHandoff(params: {
     artifacts,
     sessionUploads,
     spawnedTasks,
+    dialogContextSummary,
     sourceSessionId,
     maxMessages = 10,
     maxCharsPerMessage = 500,
@@ -1011,6 +1017,9 @@ function buildDialogAgentHandoff(params: {
     : attachmentPaths.length > 0
       ? "以下是之前 Dialog 协作房间的最近上下文，并已附带相关图片/文件，请继续落地执行："
     : "以下是之前 Dialog 协作房间的最近上下文，请继续落地执行：";
+  const earlySummary = dialogContextSummary
+    ? `已整理更早的 ${dialogContextSummary.summarizedMessageCount} 条房间消息：\n${dialogContextSummary.summary}`
+    : "";
   const visualSummary = workingSet.visualSummaryLine ?? "";
   const uploadSummary = workingSet.uploadSummaryLine ?? "";
   const artifactSummary = workingSet.artifactSummaryLines.length > 0
@@ -1022,6 +1031,7 @@ function buildDialogAgentHandoff(params: {
   const query = [
     intro,
     "",
+    earlySummary ? `---\n\n${earlySummary}` : "",
     transcript,
     spawnedTaskSummary ? `---\n\n${spawnedTaskSummary}` : "",
     artifactSummary ? `---\n\n${artifactSummary}` : "",
@@ -1050,6 +1060,7 @@ function buildDialogAgentHandoff(params: {
     ) || "延续 Dialog 房间中的当前协作任务",
     intent: inferredCoding.profile.codingMode ? "coding" : "delivery",
     keyPoints: [
+      dialogContextSummary ? `已整理更早的 ${dialogContextSummary.summarizedMessageCount} 条房间消息` : "",
       `带入最近 ${recentMessages.length} 条 Dialog 消息`,
       visualAttachmentPaths.length > 0 ? `${visualAttachmentPaths.length} 张视觉参考图` : "",
       workingSet.artifactSummaryLines.length > 0 ? `${workingSet.artifactSummaryLines.length} 条产物线索` : "",
@@ -1061,6 +1072,9 @@ function buildDialogAgentHandoff(params: {
       workingSet.openSessionCount > 0 ? `注意当前仍有 ${workingSet.openSessionCount} 个开放子会话线索` : "",
     ].filter(Boolean),
     contextSections: [
+      dialogContextSummary
+        ? { title: "早期协作摘要", items: [dialogContextSummary.summary] }
+        : null,
       visualAttachmentPaths.length > 0 && visualSummary
         ? { title: "视觉参考", items: [visualSummary] }
         : null,
@@ -2168,6 +2182,7 @@ function DialogWorkspaceDock({
   draftPlan,
   draftInsight,
   contextBreakdown,
+  dialogContextSummary,
   requirePlanApproval,
   onTogglePlanApproval,
   lastPlanReview,
@@ -2191,6 +2206,7 @@ function DialogWorkspaceDock({
   draftPlan: ClusterPlan | null;
   draftInsight: DialogDispatchPlanBundle["insight"] | null;
   contextBreakdown: DialogContextBreakdown;
+  dialogContextSummary: DialogContextSummary | null;
   requirePlanApproval: boolean;
   onTogglePlanApproval: (value: boolean) => void;
   lastPlanReview: { status: "approved" | "rejected"; timestamp: number; plan: ClusterPlan } | null;
@@ -2874,6 +2890,23 @@ function DialogWorkspaceDock({
 
         {panel === "context" && (
           <div className="p-3 space-y-2.5">
+            {dialogContextSummary && (
+              <div className="rounded-xl border border-cyan-500/15 bg-cyan-500/5 px-3 py-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="text-[10px] uppercase tracking-[0.12em] text-cyan-700">早期协作摘要</div>
+                  <span className="rounded-full border border-cyan-500/20 bg-white/70 px-1.5 py-0.5 text-[10px] text-cyan-700">
+                    已整理 {dialogContextSummary.summarizedMessageCount} 条消息
+                  </span>
+                  <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                    更新于 {formatShortTime(dialogContextSummary.updatedAt)}
+                  </span>
+                </div>
+                <div className="mt-2 whitespace-pre-wrap break-words text-[11px] leading-6 text-[var(--color-text-secondary)]">
+                  {dialogContextSummary.summary}
+                </div>
+              </div>
+            )}
+
             <div className="rounded-xl border border-[var(--color-border)]/80 bg-[var(--color-bg)] px-3 py-3">
               <div className="grid gap-2 md:grid-cols-3">
                 <div className="rounded-lg bg-[var(--color-bg-secondary)]/70 px-3 py-2">
@@ -3159,13 +3192,15 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   const dialogUserScrolledUpRef = useRef(false);
   const dialogScrollThrottleRef = useRef(0);
   const actorThinkingAnchorRef = useRef<Record<string, { taskId: string; startedAt: number }>>({});
+  const queuedFollowUpDispatchRef = useRef(false);
 
   const {
     active: systemActive, actors, dialogHistory, pendingUserInteractions, spawnedTasks, artifacts: structuredArtifacts,
-    sessionUploads, focusedSpawnedSessionRunId,
+    sessionUploads, queuedFollowUps, focusedSpawnedSessionRunId,
     coordinatorActorId, actorTodos,
     init, spawnActor, killActor, destroyAll, sendMessage, broadcastMessage, broadcastAndResolve,
-    abortAll, steer, focusSpawnedSession, closeSpawnedSession, resetSession, sync, routeTask, replyToMessage, getSystem,
+    abortAll, steer, focusSpawnedSession, closeSpawnedSession, resetSession, enqueueFollowUp, removeFollowUp, clearFollowUps,
+    sync, routeTask, replyToMessage, getSystem,
   } = useActorSystemStore();
 
   const models = useAvailableModels();
@@ -3431,6 +3466,16 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     () => collectArtifacts(dialogHistory, actorById, structuredArtifacts),
     [dialogHistory, actorById, structuredArtifacts],
   );
+  const dialogContextSummary = useMemo(
+    () => buildDialogContextSummary({
+      dialogHistory,
+      artifacts: structuredArtifacts,
+      sessionUploads,
+      spawnedTasks,
+      actorNameById: new Map(actors.map((actor) => [actor.id, actor.roleName])),
+    }),
+    [actors, dialogHistory, sessionUploads, spawnedTasks, structuredArtifacts],
+  );
 
   const pendingUserReplySet = useMemo(
     () => new Set(pendingUserInteractions.map((interaction) => interaction.messageId)),
@@ -3623,6 +3668,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       artifacts,
       sessionUploads,
       spawnedTasks,
+      dialogContextSummary,
       sourceSessionId: getSystem()?.sessionId,
     });
     if (!handoff) return;
@@ -3632,7 +3678,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       handoff,
       navigate: false,
     });
-  }, [actorById, artifacts, dialogHistory, getSystem, sessionUploads, spawnedTasks]);
+  }, [actorById, artifacts, dialogContextSummary, dialogHistory, getSystem, sessionUploads, spawnedTasks]);
   const handleContinueSpawnedTaskWithAgent = useCallback((runId: string) => {
     const task = spawnedTasks.find((item) => item.runId === runId);
     if (!task) return;
@@ -3690,6 +3736,144 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       }
     });
   }, [config, dialogMemoryWorkspaceId, getSystem]);
+
+  const dispatchQueuedTopLevelMessage = useCallback(async (item: DialogQueuedFollowUp) => {
+    ensureSystem();
+    const system = useActorSystemStore.getState().getSystem() ?? getSystem();
+    if (!system) {
+      setInputNotice("Dialog 房间尚未准备好，请稍后再试。");
+      inputRef.current?.focus();
+      return false;
+    }
+    if (system.size === 0) {
+      setInputNotice("当前房间还没有可执行的 Agent，请先检查 Agent 阵容。");
+      inputRef.current?.focus();
+      return false;
+    }
+
+    const dispatchInsight = inferDialogDispatchInsight({
+      content: item.content,
+      attachmentSummary: item.briefContent,
+      attachmentPaths: item.attachmentPaths ?? [],
+    });
+    const smartRoute = item.routingMode === "smart"
+      ? routeTask(item.content, dispatchInsight.preferredCapabilities)[0] ?? null
+      : null;
+
+    let runtimePlan: DialogExecutionPlan | null = null;
+    if (requirePlanApproval) {
+      const planBundle = buildDialogDispatchPlanBundle({
+        actors,
+        routingMode: item.routingMode,
+        content: item.content,
+        attachmentSummary: item.briefContent,
+        attachmentPaths: item.attachmentPaths ?? [],
+        selectedRoute: smartRoute,
+        coordinatorActorId,
+      });
+      if (planBundle) {
+        const approvalResult = await openPlanApprovalDialog({
+          plan: planBundle.clusterPlan,
+          sessionId: system.sessionId,
+        });
+        if (approvalResult.status !== "approved") {
+          setLastPlanReview({ status: "rejected", timestamp: Date.now(), plan: planBundle.clusterPlan });
+          setInputNotice("排队消息的执行计划已取消，消息会继续保留在队列里。");
+          inputRef.current?.focus();
+          return false;
+        }
+        runtimePlan = planBundle.runtimePlan;
+        setLastPlanReview({ status: "approved", timestamp: Date.now(), plan: planBundle.clusterPlan });
+      }
+    }
+
+    if (runtimePlan) {
+      system.armDialogExecutionPlan(runtimePlan);
+    } else {
+      system.clearDialogExecutionPlan();
+    }
+
+    try {
+      setLastCommittedDispatchInsight(dispatchInsight);
+      queueDialogUserMemoryCapture(item.displayText || item.content);
+      if (item.routingMode === "smart" && smartRoute) {
+        sendMessage("user", smartRoute.agentId, item.content, {
+          _briefContent: item.briefContent,
+          images: item.images,
+        });
+      } else if (item.routingMode === "broadcast") {
+        broadcastMessage("user", item.content, {
+          _briefContent: item.briefContent,
+          images: item.images,
+        });
+      } else {
+        broadcastAndResolve("user", item.content, {
+          _briefContent: item.briefContent,
+          images: item.images,
+        });
+      }
+      if (item.uploadRecords?.length) {
+        system.registerSessionUploads(item.uploadRecords, { actorId: "user" });
+      }
+      return true;
+    } catch (error) {
+      system.clearDialogExecutionPlan();
+      const message = error instanceof Error ? error.message : String(error);
+      setInputNotice(message || "队列消息发送失败，请稍后重试。");
+      inputRef.current?.focus();
+      return false;
+    }
+  }, [
+    actors,
+    broadcastAndResolve,
+    broadcastMessage,
+    coordinatorActorId,
+    ensureSystem,
+    getSystem,
+    openPlanApprovalDialog,
+    queueDialogUserMemoryCapture,
+    requirePlanApproval,
+    routeTask,
+    sendMessage,
+  ]);
+
+  const handleRunNextQueuedFollowUp = useCallback(async () => {
+    const nextItem = queuedFollowUps[0];
+    if (!nextItem || queuedFollowUpDispatchRef.current) return;
+
+    queuedFollowUpDispatchRef.current = true;
+    try {
+      const sent = await dispatchQueuedTopLevelMessage(nextItem);
+      if (sent) {
+        removeFollowUp(nextItem.id);
+        setInputNotice(null);
+      }
+    } finally {
+      window.setTimeout(() => {
+        queuedFollowUpDispatchRef.current = false;
+      }, 180);
+    }
+  }, [dispatchQueuedTopLevelMessage, queuedFollowUps, removeFollowUp]);
+
+  useEffect(() => {
+    if (queuedFollowUps.length === 0) {
+      queuedFollowUpDispatchRef.current = false;
+    }
+  }, [queuedFollowUps.length]);
+
+  useEffect(() => {
+    if (hasRunningActors) return;
+    if (pendingUserInteractions.length > 0) return;
+    if (queuedFollowUps.length === 0) return;
+    if (queuedFollowUpDispatchRef.current) return;
+
+    void handleRunNextQueuedFollowUp();
+  }, [
+    handleRunNextQueuedFollowUp,
+    hasRunningActors,
+    pendingUserInteractions.length,
+    queuedFollowUps.length,
+  ]);
 
   const handleSend = useCallback(async () => {
     const trimmed = input.trim();
@@ -3803,6 +3987,32 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
 
     const system = currentSystem;
     let runtimePlan: DialogExecutionPlan | null = null;
+
+    if (
+      hasRunningActors
+      && !effectiveReplyTarget
+      && !targetId
+      && !isSteerCommand
+      && !shouldRouteToFocusedSession
+    ) {
+      enqueueFollowUp({
+        displayText: cleanContent || trimmed || userText,
+        content: finalContent,
+        briefContent: finalBrief,
+        images: imagesToSend,
+        attachmentPaths: inputAttachmentPaths,
+        uploadRecords,
+        routingMode,
+      });
+      setLastCommittedDispatchInsight(dispatchInsight);
+      setInput("");
+      setInputNotice("当前房间仍在处理上一轮协作，这条消息已加入队列，待房间空闲后继续。");
+      setShowMention(false);
+      clearAttachments();
+      setIncomingHandoff(null);
+      inputRef.current?.focus();
+      return;
+    }
 
     if (!effectiveReplyTarget && requirePlanApproval && !isSteerCommand) {
       if (shouldRouteToFocusedSession) {
@@ -4160,7 +4370,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   return (
     <div className="relative flex h-full flex-col overflow-hidden bg-[var(--color-bg)]">
       <div className="shrink-0 border-b border-[var(--color-border)] bg-[var(--color-bg)]">
-        <div className="mx-auto flex w-full max-w-6xl flex-col gap-2 px-3 py-2">
+        <div className="flex w-full min-w-0 flex-col gap-2 px-3 py-2 sm:px-4 lg:px-5">
           <div className="flex flex-wrap items-center gap-1.5">
             <div className="flex min-w-0 flex-wrap items-center gap-1.5">
               <Users className="h-4 w-4 text-[var(--color-accent)]" />
@@ -4228,7 +4438,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
             </div>
           </div>
 
-          {(pendingUserInteractions.length > 0 || hasRunningActors || openSessionCount > 0 || activeTodoCount > 0 || dialogHistory.length > 0) && (
+          {(pendingUserInteractions.length > 0 || hasRunningActors || openSessionCount > 0 || activeTodoCount > 0 || queuedFollowUps.length > 0 || dialogHistory.length > 0) && (
             <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-[var(--color-text-secondary)]">
               {pendingUserInteractions.length > 0 && (
                 <span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-amber-700">
@@ -4248,6 +4458,11 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
               {activeTodoCount > 0 && (
                 <span className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5">
                   {activeTodoCount} 个活跃待办
+                </span>
+              )}
+              {queuedFollowUps.length > 0 && (
+                <span className="rounded-full bg-cyan-500/10 px-2 py-0.5 text-cyan-700">
+                  {queuedFollowUps.length} 条排队消息
                 </span>
               )}
               <div className="ml-auto flex flex-wrap items-center gap-1.5">
@@ -4295,6 +4510,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                 draftPlan={draftDispatchPlan}
                 draftInsight={draftDispatchInsight}
                 contextBreakdown={contextBreakdown}
+                dialogContextSummary={dialogContextSummary}
                 requirePlanApproval={requirePlanApproval}
                 onTogglePlanApproval={setRequirePlanApproval}
                 lastPlanReview={lastPlanReview}
@@ -4306,8 +4522,8 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
         </div>
       </div>
 
-      <div ref={chatScrollRef} className="min-h-0 flex-1 overflow-y-auto px-3 py-2.5">
-        <div className="mx-auto flex w-full max-w-6xl flex-col gap-3.5">
+      <div ref={chatScrollRef} className="min-h-0 flex-1 overflow-y-auto px-3 py-2.5 sm:px-4 lg:px-5">
+        <div className="flex w-full min-w-0 flex-col gap-3.5">
           {dialogHistory.length === 0 && (
             <div className="rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-secondary)]/20 px-4 py-4 text-center">
               <div className="flex flex-col items-center gap-1.5">
@@ -4603,7 +4819,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
         onDrop={handleDrop}
         onDragOver={handleDragOver}
       >
-        <div className="mx-auto w-full max-w-6xl px-3 py-2">
+        <div className="w-full px-3 py-2 sm:px-4 lg:px-5">
           <input
             ref={fileInputRef}
             type="file"
@@ -4614,7 +4830,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
           />
 
           <div className="overflow-visible rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-[0_12px_32px_-24px_rgba(15,23,42,0.35)]">
-            {(incomingHandoff || focusedSessionTask || pendingUserInteractions.length > 0 || attachments.length > 0 || inputNotice) && (
+            {(incomingHandoff || focusedSessionTask || queuedFollowUps.length > 0 || pendingUserInteractions.length > 0 || attachments.length > 0 || inputNotice) && (
               <div className="space-y-2 border-b border-[var(--color-border)] bg-[linear-gradient(135deg,rgba(15,23,42,0.02),transparent_45%)] px-3 py-2.5">
                 {incomingHandoff?.sourceMode && (
                   <AICenterHandoffCard
@@ -4638,6 +4854,18 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                       退出聚焦
                     </button>
                   </div>
+                )}
+
+                {queuedFollowUps.length > 0 && (
+                  <DialogFollowUpDock
+                    items={queuedFollowUps}
+                    disabled={hasRunningActors || pendingUserInteractions.length > 0 || queuedFollowUpDispatchRef.current}
+                    onRunNext={() => {
+                      void handleRunNextQueuedFollowUp();
+                    }}
+                    onRemove={removeFollowUp}
+                    onClear={clearFollowUps}
+                  />
                 )}
 
                 {pendingUserInteractions.length > 0 && pendingAgentNames && (

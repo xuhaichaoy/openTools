@@ -23,7 +23,6 @@ import {
   listArchivedMemories,
   deleteMemory,
   updateMemoryContent,
-  getMemoryStats,
   migrateAgentMemory,
   saveConfirmedMemory,
   type AIMemoryCandidate,
@@ -45,6 +44,7 @@ const KIND_LABELS: Record<AIMemoryKind, { label: string; color: string }> = {
   constraint: { label: "约束", color: "#ef4444" },
   project_context: { label: "项目", color: "#8b5cf6" },
   conversation_summary: { label: "摘要", color: "#06b6d4" },
+  session_note: { label: "会话笔记", color: "#64748b" },
   knowledge: { label: "知识", color: "#14b8a6" },
   behavior: { label: "行为", color: "#f97316" },
 };
@@ -79,6 +79,9 @@ const ARCHIVE_REASON_LABELS: Record<"deleted" | "replaced" | "limit_trimmed", st
 const KIND_OPTIONS = Object.entries(KIND_LABELS) as Array<
   [AIMemoryKind, { label: string; color: string }]
 >;
+const MANUAL_KIND_OPTIONS = KIND_OPTIONS.filter(
+  ([kind]) => kind !== "session_note" && kind !== "conversation_summary",
+);
 const SOURCE_OPTIONS = Object.entries(SOURCE_LABELS) as Array<
   [AIMemorySource, string]
 >;
@@ -123,6 +126,36 @@ function formatScopeTarget(scope: AIMemoryScope, target?: string | null): string
     return value.split("/").filter(Boolean).pop() || value;
   }
   return value;
+}
+
+function buildCountMap<T extends string>(values: T[]): Record<string, number> {
+  return values.reduce<Record<string, number>>((acc, value) => {
+    acc[value] = (acc[value] || 0) + 1;
+    return acc;
+  }, {});
+}
+
+function matchesMemoryFilters(
+  memory: AIMemoryItem,
+  filters: {
+    filterKind: string;
+    filterSource: string;
+    searchQuery: string;
+  },
+): boolean {
+  if (filters.filterKind !== "all" && memory.kind !== filters.filterKind) return false;
+  if (filters.filterSource !== "all" && memory.source !== filters.filterSource) return false;
+  if (!filters.searchQuery.trim()) return true;
+  const q = filters.searchQuery.toLowerCase();
+  return (
+    memory.content.toLowerCase().includes(q)
+    || memory.tags.some((t) => t.toLowerCase().includes(q))
+    || (SOURCE_LABELS[memory.source] ?? memory.source).toLowerCase().includes(q)
+    || (KIND_LABELS[memory.kind]?.label ?? memory.kind).toLowerCase().includes(q)
+    || (memory.workspace_id || "").toLowerCase().includes(q)
+    || (memory.conversation_id || "").toLowerCase().includes(q)
+    || (memory.replaced_by_memory_id || "").toLowerCase().includes(q)
+  );
 }
 
 function SummaryCard({
@@ -174,27 +207,20 @@ export function MemoryTab() {
   const [draftScope, setDraftScope] = useState<AIMemoryScope>("global");
   const [draftScopeTarget, setDraftScopeTarget] = useState("");
   const [showAllArchived, setShowAllArchived] = useState(false);
-  const [stats, setStats] = useState<{
-    total: number;
-    byKind: Record<string, number>;
-    bySource: Record<string, number>;
-  } | null>(null);
   const [showStats, setShowStats] = useState(false);
 
   const loadMemories = useCallback(async (options?: { silent?: boolean }) => {
     const silent = options?.silent ?? false;
     if (!silent) setIsLoading(true);
     try {
-      const [items, archivedItems, candidateItems, nextStats] = await Promise.all([
+      const [items, archivedItems, candidateItems] = await Promise.all([
         listConfirmedMemories(),
         listArchivedMemories(),
         listMemoryCandidates(),
-        getMemoryStats(),
       ]);
       setMemories(items);
       setArchivedMemories(archivedItems);
       setCandidates(candidateItems);
-      setStats(nextStats);
       await syncMemoryCandidatesToStore().catch(() => undefined);
     } catch (e) {
       handleError(e, { context: "加载 AI 记忆", silent: true });
@@ -211,10 +237,10 @@ export function MemoryTab() {
     setDeletingMemoryId(id);
     try {
       await deleteMemory(id);
-      toast("success", "已删除长期记忆");
+      toast("success", "已删除记忆");
       await loadMemories({ silent: true });
     } catch (e) {
-      handleError(e, { context: "删除长期记忆" });
+      handleError(e, { context: "删除 AI 记忆" });
     } finally {
       setDeletingMemoryId(null);
     }
@@ -355,23 +381,45 @@ export function MemoryTab() {
     }
   };
 
-  const filtered = useMemo(() => memories.filter((m) => {
-    if (filterKind !== "all" && m.kind !== filterKind) return false;
-    if (filterSource !== "all" && m.source !== filterSource) return false;
-    if (!searchQuery.trim()) return true;
-    const q = searchQuery.toLowerCase();
-    return (
-      m.content.toLowerCase().includes(q)
-      || m.tags.some((t) => t.toLowerCase().includes(q))
-      || (SOURCE_LABELS[m.source] ?? m.source).toLowerCase().includes(q)
-      || (KIND_LABELS[m.kind]?.label ?? m.kind).toLowerCase().includes(q)
-      || (m.workspace_id || "").toLowerCase().includes(q)
-      || (m.replaced_by_memory_id || "").toLowerCase().includes(q)
-    );
-  }), [filterKind, filterSource, memories, searchQuery]);
+  const confirmedLongTermMemories = useMemo(
+    () => memories.filter((memory) => memory.kind !== "session_note"),
+    [memories],
+  );
+  const sessionNotes = useMemo(
+    () => memories.filter((memory) => memory.kind === "session_note"),
+    [memories],
+  );
+  const memoryFilters = useMemo(
+    () => ({ filterKind, filterSource, searchQuery }),
+    [filterKind, filterSource, searchQuery],
+  );
+  const filteredLongTermMemories = useMemo(
+    () => confirmedLongTermMemories.filter((memory) => matchesMemoryFilters(memory, memoryFilters)),
+    [confirmedLongTermMemories, memoryFilters],
+  );
+  const filteredSessionNotes = useMemo(
+    () => sessionNotes.filter((memory) => matchesMemoryFilters(memory, memoryFilters)),
+    [memoryFilters, sessionNotes],
+  );
   const activeMemoryMap = useMemo(
     () => new Map(memories.map((memory) => [memory.id, memory])),
     [memories],
+  );
+  const longTermByKind = useMemo(
+    () => buildCountMap(confirmedLongTermMemories.map((memory) => memory.kind)),
+    [confirmedLongTermMemories],
+  );
+  const sessionNoteByScope = useMemo(
+    () => buildCountMap(sessionNotes.map((memory) => memory.scope)),
+    [sessionNotes],
+  );
+  const confirmedBySource = useMemo(
+    () => buildCountMap(memories.map((memory) => memory.source)),
+    [memories],
+  );
+  const legacySummaryCount = useMemo(
+    () => confirmedLongTermMemories.filter((memory) => memory.kind === "conversation_summary").length,
+    [confirmedLongTermMemories],
   );
   const memoryEnabled = config.enable_long_term_memory !== false;
   const autoCandidateEnabled = memoryEnabled && config.enable_memory_auto_save !== false;
@@ -417,6 +465,165 @@ export function MemoryTab() {
     return [];
   }, [conversationSuggestions, draftScope, workspaceSuggestions]);
   const archivedPreview = showAllArchived ? archivedMemories : archivedMemories.slice(0, 6);
+  const hasMemoryFilters = !!searchQuery.trim() || filterKind !== "all" || filterSource !== "all";
+
+  const renderMemoryList = (
+    items: AIMemoryItem[],
+    options: {
+      emptyTitle: string;
+      emptyDescription: string;
+      accent?: "default" | "muted";
+    },
+  ) => {
+    if (items.length === 0) {
+      return (
+        <div className="rounded-xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-6 text-center">
+          <Brain className="mx-auto mb-2 h-7 w-7 text-[var(--color-text-secondary)] opacity-20" />
+          <div className="text-xs text-[var(--color-text-secondary)]">{options.emptyTitle}</div>
+          <div className="mt-1 text-[10px] text-[var(--color-text-secondary)]/80">
+            {options.emptyDescription}
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="space-y-2">
+        {items.map((memory) => {
+          const kindInfo = KIND_LABELS[memory.kind] ?? { label: memory.kind, color: "#666" };
+          const isEditing = editingId === memory.id;
+          const editBusy = savingEdit && editingId === memory.id;
+          const deleteBusy = deletingMemoryId === memory.id;
+          const scopeLabel = memory.scope === "workspace"
+            ? `工作区记忆${memory.workspace_id ? ` · ${formatScopeTarget("workspace", memory.workspace_id)}` : ""}`
+            : memory.scope === "conversation"
+              ? `会话记忆${memory.conversation_id ? ` · ${formatScopeTarget("conversation", memory.conversation_id)}` : ""}`
+              : "全局记忆";
+
+          return (
+            <div
+              key={memory.id}
+              className={`rounded-lg border px-3 py-2.5 ${
+                options.accent === "muted"
+                  ? "border-slate-200/80 bg-slate-50/70 dark:border-slate-800 dark:bg-slate-950/40"
+                  : "border-[var(--color-border)] bg-[var(--color-bg)]"
+              }`}
+            >
+              <div className="flex items-start gap-2">
+                <div className="min-w-0 flex-1">
+                  {isEditing ? (
+                    <div className="space-y-2">
+                      <textarea
+                        value={editContent}
+                        onChange={(e) => setEditContent(e.target.value)}
+                        rows={3}
+                        className="w-full resize-none rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2.5 py-2 text-xs text-[var(--color-text)] outline-none"
+                        autoFocus
+                      />
+                      <div className="flex justify-end gap-2">
+                        <button
+                          onClick={() => {
+                            setEditingId(null);
+                            setEditContent("");
+                          }}
+                          className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] px-2 py-1 text-[10px] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)]"
+                        >
+                          <X className="h-3 w-3" />
+                          取消
+                        </button>
+                        <button
+                          onClick={() => void handleSaveEdit()}
+                          disabled={editBusy}
+                          className="inline-flex items-center gap-1 rounded-md bg-emerald-500 px-2 py-1 text-[10px] text-white hover:bg-emerald-600 disabled:opacity-50"
+                        >
+                          {editBusy ? (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          ) : (
+                            <Check className="h-3 w-3" />
+                          )}
+                          保存
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="break-words text-xs leading-relaxed text-[var(--color-text)]">
+                      {memory.content}
+                    </p>
+                  )}
+
+                  <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                    <span
+                      className="rounded px-1 py-0.5 text-[9px] font-medium"
+                      style={{
+                        background: `${kindInfo.color}20`,
+                        color: kindInfo.color,
+                      }}
+                    >
+                      {kindInfo.label}
+                    </span>
+                    <span className="text-[9px] text-[var(--color-text-secondary)]">
+                      {SOURCE_LABELS[memory.source] ?? memory.source}
+                    </span>
+                    <span className="text-[9px] text-[var(--color-text-secondary)]">
+                      {scopeLabel}
+                    </span>
+                    <span className="text-[9px] text-[var(--color-text-secondary)]">
+                      使用 {memory.use_count} 次
+                    </span>
+                    {!!memory.supersedes_memory_ids?.length && (
+                      <span className="text-[9px] text-amber-700 dark:text-amber-300">
+                        替换了 {memory.supersedes_memory_ids.length} 条旧记忆
+                      </span>
+                    )}
+                    <span className="text-[9px] text-[var(--color-text-secondary)]">
+                      更新于 {formatRelativeTime(memory.updated_at)}
+                    </span>
+                    {memory.last_used_at ? (
+                      <span className="text-[9px] text-[var(--color-text-secondary)]">
+                        最近命中 {formatRelativeTime(memory.last_used_at)}
+                      </span>
+                    ) : null}
+                    {memory.tags.map((tag) => (
+                      <span
+                        key={tag}
+                        className="rounded bg-[var(--color-bg-secondary)] px-1 py-0.5 text-[9px] text-[var(--color-text-secondary)]"
+                      >
+                        {tag}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+
+                {!isEditing && (
+                  <div className="shrink-0 flex items-center gap-0.5">
+                    <button
+                      onClick={() => handleEdit(memory)}
+                      className="rounded p-1 hover:bg-[var(--color-bg-secondary)]"
+                      title="编辑"
+                    >
+                      <Edit2 className="h-3 w-3 text-[var(--color-text-secondary)]" />
+                    </button>
+                    <button
+                      onClick={() => void handleDelete(memory.id)}
+                      disabled={deleteBusy}
+                      className="rounded p-1 hover:bg-red-500/10 disabled:opacity-50"
+                      title="删除"
+                    >
+                      {deleteBusy ? (
+                        <Loader2 className="h-3 w-3 animate-spin text-red-400" />
+                      ) : (
+                        <Trash2 className="h-3 w-3 text-red-400" />
+                      )}
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
 
   if (isLoading) {
     return (
@@ -468,41 +675,43 @@ export function MemoryTab() {
       <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
         <SummaryCard
           icon={Brain}
-          label="正式记忆"
-          value={String(memories.length)}
-          detail={memories.length > 0 ? "已确认、可参与召回" : "还没有正式记忆"}
+          label="长期记忆"
+          value={String(confirmedLongTermMemories.length)}
+          detail={confirmedLongTermMemories.length > 0 ? "偏好、约束、项目背景等稳定记忆" : "还没有稳定长期记忆"}
+        />
+        <SummaryCard
+          icon={Clock3}
+          label="会话笔记"
+          value={String(sessionNotes.length)}
+          detail={sessionNotes.length > 0 ? "静默沉淀，用于同会话/工作区召回" : "当前没有沉淀会话笔记"}
         />
         <SummaryCard
           icon={Sparkles}
           label="待确认候选"
           value={String(candidates.length)}
-          detail={candidates.length > 0 ? "需要手动确认后生效" : "当前没有待处理候选"}
+          detail={candidates.length > 0 ? "只有高价值候选才需要你确认" : "当前没有待处理候选"}
         />
         <SummaryCard
           icon={ShieldCheck}
-          label="自动提取候选"
-          value={autoCandidateEnabled ? "开启" : (memoryEnabled ? "关闭" : "停用")}
-          detail={memoryEnabled ? "只生成候选，不直接写入正式记忆" : "长期记忆总开关关闭"}
-        />
-        <SummaryCard
-          icon={Clock3}
           label="自动召回"
           value={autoRecallEnabled ? "开启" : (memoryEnabled ? "关闭" : "停用")}
-          detail={memoryEnabled ? "发送消息前按相关性注入正式记忆" : "当前不会参与召回"}
+          detail={memoryEnabled ? "长期记忆和会话笔记会按相关性注入" : "当前不会参与召回"}
         />
       </div>
 
-      {showStats && stats && (
+      {showStats && (
         <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-3">
           <div className="mb-2 text-[10px] text-[var(--color-text-secondary)]">
-            当前正式记忆 {stats.total} 条，待确认候选 {candidates.length} 条
+            当前已确认记忆 {memories.length} 条，其中长期记忆 {confirmedLongTermMemories.length} 条、会话笔记 {sessionNotes.length} 条，待确认候选 {candidates.length} 条
           </div>
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
             <div>
               <div className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1">
-                按类型
+                长期记忆类型
               </div>
-              {Object.entries(stats.byKind).map(([kind, count]) => {
+              {Object.keys(longTermByKind).length === 0 ? (
+                <div className="text-[10px] text-[var(--color-text-secondary)]">暂无长期记忆</div>
+              ) : Object.entries(longTermByKind).map(([kind, count]) => {
                 const kindMeta = KIND_LABELS[kind as AIMemoryKind];
                 return (
                   <div key={kind} className="flex items-center justify-between py-0.5">
@@ -522,9 +731,24 @@ export function MemoryTab() {
             </div>
             <div>
               <div className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1">
-                按来源
+                会话笔记作用域
               </div>
-              {Object.entries(stats.bySource).map(([source, count]) => (
+              {Object.keys(sessionNoteByScope).length === 0 ? (
+                <div className="text-[10px] text-[var(--color-text-secondary)]">暂无会话笔记</div>
+              ) : Object.entries(sessionNoteByScope).map(([scope, count]) => (
+                <div key={scope} className="flex items-center justify-between py-0.5">
+                  <span className="text-[10px] text-[var(--color-text-secondary)]">
+                    {SCOPE_LABELS[scope as AIMemoryScope] ?? scope}
+                  </span>
+                  <span className="text-xs font-mono">{count}</span>
+                </div>
+              ))}
+            </div>
+            <div>
+              <div className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1">
+                已确认来源
+              </div>
+              {Object.entries(confirmedBySource).map(([source, count]) => (
                 <div key={source} className="flex items-center justify-between py-0.5">
                   <span className="text-[10px] text-[var(--color-text-secondary)]">
                     {SOURCE_LABELS[source as AIMemorySource] ?? source}
@@ -539,17 +763,20 @@ export function MemoryTab() {
 
       <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-3 text-[10px] text-[var(--color-text-secondary)] space-y-1.5">
         <div>
-          当前流程是“自动提取候选 → 人工确认 → 正式记忆召回 → 可选云同步”。
-          也就是说，现在的记忆是自动提取、半自动入库，不是自动直接写进长期记忆。
+          当前流程已经拆成两层：“会话笔记静默沉淀” + “长期记忆候选确认”。
+          自动运行结果更偏向写入会话笔记；大多数长期记忆仍走候选确认，但像回答语言、输出格式、回答结构、常驻地这类明确结构化规则，会直接升级为正式记忆。
         </div>
         <div>
           总开关：{memoryEnabled ? "已开启" : "已关闭"}；云同步：{memorySyncEnabled ? "开启，仅同步正式记忆" : "关闭，仅保留本地正式记忆"}。
         </div>
         <div>
-          例外项会直接写入正式记忆：系统生成的项目上下文、会话摘要，以及你在本页手动添加的正式记忆。
+          例外项会直接写入已确认记忆：系统生成的项目上下文，以及你在本页手动添加的正式记忆。会话笔记主要服务于当前会话/工作区召回，不再强行占用长期记忆确认流。
         </div>
         <div>
           `memory-graph` 这一类图谱数据目前不参与主召回链路，现阶段重点仍是这套稳定的候选/正式记忆体系。
+        </div>
+        <div>
+          自动提取候选：{autoCandidateEnabled ? "已开启，只会上浮高置信度长期信号" : (memoryEnabled ? "已关闭，仅保留手动确认" : "停用")}。
         </div>
       </div>
 
@@ -577,7 +804,7 @@ export function MemoryTab() {
               onChange={(e) => setDraftKind(e.target.value as AIMemoryKind)}
               className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2.5 py-2 text-xs text-[var(--color-text)] outline-none"
             >
-              {KIND_OPTIONS.map(([kind, info]) => (
+              {MANUAL_KIND_OPTIONS.map(([kind, info]) => (
                 <option key={kind} value={kind}>
                   {info.label}
                 </option>
@@ -751,6 +978,9 @@ export function MemoryTab() {
                           {MODE_LABELS[candidate.source_mode] ?? candidate.source_mode}
                         </span>
                       )}
+                      <span className="rounded-full bg-[var(--color-bg)] px-1.5 py-0.5">
+                        {candidate.review_surface === "background" ? "后台候选" : "建议确认"}
+                      </span>
                       {!!candidate.conflict_memory_ids?.length && (
                         <span className="rounded-full bg-amber-500/10 px-1.5 py-0.5 text-amber-700 dark:text-amber-300">
                           冲突 {candidate.conflict_memory_ids.length}
@@ -794,9 +1024,9 @@ export function MemoryTab() {
       <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-3 space-y-3">
         <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
           <div>
-            <div className="text-xs font-semibold text-[var(--color-text)]">正式记忆列表</div>
+            <div className="text-xs font-semibold text-[var(--color-text)]">已确认记忆</div>
             <div className="text-[10px] text-[var(--color-text-secondary)]">
-              支持搜索、筛选、编辑和删除；这里只展示已确认并生效的条目。
+              搜索和筛选会同时作用在“长期记忆”和“会话笔记”两组列表上。
             </div>
           </div>
           {!config.enable_long_term_memory && (
@@ -842,143 +1072,64 @@ export function MemoryTab() {
           </select>
         </div>
 
-        {filtered.length === 0 ? (
-          <div className="text-center py-8 bg-[var(--color-bg)] rounded-xl border border-dashed border-[var(--color-border)]">
-            <Brain className="w-8 h-8 text-[var(--color-text-secondary)] mx-auto mb-2 opacity-20" />
+        {filteredLongTermMemories.length === 0 && filteredSessionNotes.length === 0 && (
+          <div className="rounded-xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg)] py-8 text-center">
+            <Brain className="mx-auto mb-2 h-8 w-8 text-[var(--color-text-secondary)] opacity-20" />
             <p className="text-xs text-[var(--color-text-secondary)]">
-              {searchQuery || filterKind !== "all" || filterSource !== "all"
-                ? "没有匹配的正式记忆"
-                : "尚无正式记忆条目"}
+              {hasMemoryFilters ? "当前筛选下没有匹配的已确认记忆" : "尚无已确认记忆"}
             </p>
           </div>
-        ) : (
+        )}
+
+        {(filteredLongTermMemories.length > 0 || !hasMemoryFilters || filterKind !== "session_note") && (
           <div className="space-y-2">
-            {filtered.map((memory) => {
-              const kindInfo = KIND_LABELS[memory.kind] ?? { label: memory.kind, color: "#666" };
-              const isEditing = editingId === memory.id;
-              const editBusy = savingEdit && editingId === memory.id;
-              const deleteBusy = deletingMemoryId === memory.id;
-
-              return (
-                <div
-                  key={memory.id}
-                  className="bg-[var(--color-bg)] rounded-lg border border-[var(--color-border)] px-3 py-2.5"
-                >
-                  <div className="flex items-start gap-2">
-                    <div className="flex-1 min-w-0">
-                      {isEditing ? (
-                        <div className="space-y-2">
-                          <textarea
-                            value={editContent}
-                            onChange={(e) => setEditContent(e.target.value)}
-                            rows={3}
-                            className="w-full resize-none rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2.5 py-2 text-xs text-[var(--color-text)] outline-none"
-                            autoFocus
-                          />
-                          <div className="flex justify-end gap-2">
-                            <button
-                              onClick={() => {
-                                setEditingId(null);
-                                setEditContent("");
-                              }}
-                              className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] px-2 py-1 text-[10px] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)]"
-                            >
-                              <X className="w-3 h-3" />
-                              取消
-                            </button>
-                            <button
-                              onClick={() => void handleSaveEdit()}
-                              disabled={editBusy}
-                              className="inline-flex items-center gap-1 rounded-md bg-emerald-500 px-2 py-1 text-[10px] text-white hover:bg-emerald-600 disabled:opacity-50"
-                            >
-                              {editBusy ? (
-                                <Loader2 className="w-3 h-3 animate-spin" />
-                              ) : (
-                                <Check className="w-3 h-3" />
-                              )}
-                              保存
-                            </button>
-                          </div>
-                        </div>
-                      ) : (
-                        <p className="text-xs leading-relaxed text-[var(--color-text)] break-words">
-                          {memory.content}
-                        </p>
-                      )}
-
-                      <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                        <span
-                          className="text-[9px] px-1 py-0.5 rounded font-medium"
-                          style={{
-                            background: `${kindInfo.color}20`,
-                            color: kindInfo.color,
-                          }}
-                        >
-                          {kindInfo.label}
-                        </span>
-                        <span className="text-[9px] text-[var(--color-text-secondary)]">
-                          {SOURCE_LABELS[memory.source] ?? memory.source}
-                        </span>
-                        <span className="text-[9px] text-[var(--color-text-secondary)]">
-                          {memory.scope === "workspace"
-                            ? `工作区记忆${memory.workspace_id ? ` · ${formatScopeTarget("workspace", memory.workspace_id)}` : ""}`
-                            : memory.scope === "conversation"
-                              ? `会话记忆${memory.conversation_id ? ` · ${formatScopeTarget("conversation", memory.conversation_id)}` : ""}`
-                              : "全局记忆"}
-                        </span>
-                        <span className="text-[9px] text-[var(--color-text-secondary)]">
-                          使用 {memory.use_count} 次
-                        </span>
-                        {!!memory.supersedes_memory_ids?.length && (
-                          <span className="text-[9px] text-amber-700 dark:text-amber-300">
-                            替换了 {memory.supersedes_memory_ids.length} 条旧记忆
-                          </span>
-                        )}
-                        <span className="text-[9px] text-[var(--color-text-secondary)]">
-                          更新于 {formatRelativeTime(memory.updated_at)}
-                        </span>
-                        {memory.last_used_at ? (
-                          <span className="text-[9px] text-[var(--color-text-secondary)]">
-                            最近命中 {formatRelativeTime(memory.last_used_at)}
-                          </span>
-                        ) : null}
-                        {memory.tags.map((tag) => (
-                          <span
-                            key={tag}
-                            className="text-[9px] px-1 py-0.5 rounded bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]"
-                          >
-                            {tag}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-
-                    {!isEditing && (
-                      <div className="flex items-center gap-0.5 shrink-0">
-                        <button
-                          onClick={() => handleEdit(memory)}
-                          className="p-1 rounded hover:bg-[var(--color-bg-secondary)]"
-                          title="编辑"
-                        >
-                          <Edit2 className="w-3 h-3 text-[var(--color-text-secondary)]" />
-                        </button>
-                        <button
-                          onClick={() => void handleDelete(memory.id)}
-                          disabled={deleteBusy}
-                          className="p-1 rounded hover:bg-red-500/10 disabled:opacity-50"
-                          title="删除"
-                        >
-                          {deleteBusy ? (
-                            <Loader2 className="w-3 h-3 animate-spin text-red-400" />
-                          ) : (
-                            <Trash2 className="w-3 h-3 text-red-400" />
-                          )}
-                        </button>
-                      </div>
-                    )}
-                  </div>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-xs font-semibold text-[var(--color-text)]">长期记忆</div>
+                <div className="text-[10px] text-[var(--color-text-secondary)]">
+                  稳定偏好、长期约束、项目背景等会优先保留在这里，并跨模式参与召回。
                 </div>
-              );
+              </div>
+              <div className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-1 text-[10px] text-[var(--color-text-secondary)]">
+                {filteredLongTermMemories.length} / {confirmedLongTermMemories.length}
+              </div>
+            </div>
+            {legacySummaryCount > 0 && (
+              <div className="rounded-lg border border-sky-500/20 bg-sky-500/10 px-2.5 py-1.5 text-[10px] text-sky-700 dark:text-sky-300">
+                兼容保留了 {legacySummaryCount} 条旧版“对话摘要”记忆；新流程默认改为沉淀到“会话笔记”。
+              </div>
+            )}
+            {renderMemoryList(filteredLongTermMemories, {
+              emptyTitle: hasMemoryFilters ? "当前筛选下没有长期记忆" : "还没有长期记忆",
+              emptyDescription: hasMemoryFilters
+                ? "可以调整搜索词、类型或来源筛选后再看。"
+                : "确认候选或手动录入稳定偏好后，这里会开始积累。",
+            })}
+          </div>
+        )}
+
+        {(filteredSessionNotes.length > 0 || !hasMemoryFilters || filterKind === "session_note" || filterKind === "all") && (
+          <div className="space-y-2 pt-1">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-xs font-semibold text-[var(--color-text)]">会话笔记</div>
+                <div className="text-[10px] text-[var(--color-text-secondary)]">
+                  运行过程中的阶段性上下文会静默沉淀到这里，主要在同会话或同工作区内回补上下文。
+                </div>
+              </div>
+              <div className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-1 text-[10px] text-[var(--color-text-secondary)]">
+                {filteredSessionNotes.length} / {sessionNotes.length}
+              </div>
+            </div>
+            <div className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[10px] text-slate-600 dark:border-slate-800 dark:bg-slate-950/40 dark:text-slate-300">
+              会话笔记不会进入待确认流，也不适合作为全局偏好使用；它更像自动整理的“当前上下文缓存”。
+            </div>
+            {renderMemoryList(filteredSessionNotes, {
+              emptyTitle: hasMemoryFilters ? "当前筛选下没有会话笔记" : "当前还没有会话笔记",
+              emptyDescription: hasMemoryFilters
+                ? "可以切换筛选条件，或者把类型改回“全部类型”。"
+                : "当 AI 在会话中持续工作时，重要阶段信息会逐步沉淀到这里。",
+              accent: "muted",
             })}
           </div>
         )}

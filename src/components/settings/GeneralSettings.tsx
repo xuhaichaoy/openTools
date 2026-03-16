@@ -6,6 +6,7 @@ import {
   Loader2,
   Sun,
   Moon,
+  Type,
   RefreshCw,
   Download,
   CheckCircle,
@@ -17,6 +18,12 @@ import { APP_NAME, APP_TECH_STACK } from "@/config/app-branding";
 import { getVersion } from "@tauri-apps/api/app";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import {
+  FONT_SCALE_OPTIONS,
+  applyGlobalFontScale,
+  loadLocalFontScalePreference,
+  saveLocalFontScalePreference,
+} from "@/core/ui/local-ui-preferences";
 
 interface AppSettings {
   hideOnBlur: boolean;
@@ -168,6 +175,7 @@ export function GeneralSettings() {
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [updateError, setUpdateError] = useState("");
   const [shortcutSaveMsg, setShortcutSaveMsg] = useState("");
+  const [fontScale, setFontScale] = useState(loadLocalFontScalePreference);
 
   useEffect(() => {
     loadSettings().then((s) => {
@@ -244,6 +252,12 @@ export function GeneralSettings() {
       setShortcutSaveMsg(`更新失败: ${e}`);
     }
     setTimeout(() => setShortcutSaveMsg(""), 2500);
+  };
+
+  const handleFontScaleChange = (value: number) => {
+    const next = saveLocalFontScalePreference(value);
+    setFontScale(next);
+    applyGlobalFontScale(next);
   };
 
   if (loading) {
@@ -368,6 +382,34 @@ export function GeneralSettings() {
             深色模式
           </button>
         </div>
+      </div>
+
+      <div className="pt-3 border-t border-[var(--color-border)]">
+        <label className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)] mb-2">
+          <Type className="w-3.5 h-3.5" />
+          显示设置
+        </label>
+        <div className="flex flex-wrap gap-2">
+          {FONT_SCALE_OPTIONS.map((option) => {
+            const active = fontScale === option;
+            return (
+              <button
+                key={option}
+                onClick={() => handleFontScaleChange(option)}
+                className={`px-3 py-2 rounded-lg border text-xs transition-colors ${
+                  active
+                    ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-white"
+                    : "border-[var(--color-border)] bg-[var(--color-bg-secondary)] text-[var(--color-text)] hover:bg-[var(--color-bg-hover)]"
+                }`}
+              >
+                {option}x
+              </button>
+            );
+          })}
+        </div>
+        <p className="mt-2 text-[10px] text-[var(--color-text-secondary)]">
+          仅当前设备生效并保存在本地。窗口右侧或右下角拖拽后，也会自动记住本机尺寸。
+        </p>
       </div>
 
       {/* 快捷键说明 */}

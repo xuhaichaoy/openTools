@@ -691,6 +691,22 @@ export const useAIStore = create<AIState>((set, get) => ({
           _streamCleanup = null;
           triggerPersist();
         },
+        onDone: (assistantContent) => {
+          const currentConfig = useAIStore.getState().config;
+          if (!currentConfig.enable_long_term_memory || !currentConfig.enable_memory_auto_save) {
+            return;
+          }
+          Promise.resolve().then(async () => {
+            try {
+              const { autoExtractMemories } = await import("@/core/agent/actor/actor-memory");
+              await autoExtractMemories(`${content}\n${assistantContent}`, conversationId, {
+                sourceMode: "ask",
+              });
+            } catch (e) {
+              handleError(e, { context: "沉淀 Ask 会话记忆", silent: true });
+            }
+          });
+        },
       },
     });
     _streamCleanup = cleanup;

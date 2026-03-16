@@ -63,6 +63,7 @@ const MEMORY_KIND_META: Record<string, { label: string; className: string }> = {
   constraint: { label: "约束", className: "bg-red-500/10 text-red-600 dark:text-red-300" },
   project_context: { label: "项目", className: "bg-violet-500/10 text-violet-600 dark:text-violet-300" },
   conversation_summary: { label: "摘要", className: "bg-cyan-500/10 text-cyan-600 dark:text-cyan-300" },
+  session_note: { label: "会话笔记", className: "bg-slate-500/10 text-slate-600 dark:text-slate-300" },
   knowledge: { label: "知识", className: "bg-teal-500/10 text-teal-600 dark:text-teal-300" },
   behavior: { label: "行为", className: "bg-orange-500/10 text-orange-600 dark:text-orange-300" },
 };
@@ -72,6 +73,8 @@ const MEMORY_SCOPE_LABELS: Record<string, string> = {
   conversation: "会话",
   workspace: "工作区",
 };
+
+const ASK_MEMORY_DOCK_COLLAPSED_KEY = "ask_memory_candidate_dock_collapsed";
 
 export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideModelSelector?: boolean; headless?: boolean }>(function ChatView({ onBack, hideModelSelector, headless }, ref) {
   const [input, setInput] = useState("");
@@ -97,6 +100,13 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [currentMatchIdx, setCurrentMatchIdx] = useState(0);
+  const [memoryDockCollapsed, setMemoryDockCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(ASK_MEMORY_DOCK_COLLAPSED_KEY) !== "0";
+    } catch {
+      return true;
+    }
+  });
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -162,10 +172,12 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
     el?.scrollIntoView({ behavior: "smooth", block: "center" });
   }, [currentMatchIdx, matchedIndices]);
 
-  const visibleMemoryCandidates = useMemo(() => {
+  const relevantMemoryCandidates = useMemo(() => {
     const filtered = memoryCandidates.filter(
       (candidate) =>
-        candidate.scope !== "workspace"
+        candidate.review_surface !== "background"
+        && candidate.kind !== "session_note"
+        && candidate.scope !== "workspace"
         && (
           !candidate.conversation_id
           || candidate.conversation_id === currentConversationId
@@ -173,6 +185,25 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
     );
     return filtered.slice(0, 3);
   }, [currentConversationId, memoryCandidates]);
+  const backgroundMemoryCandidateCount = useMemo(() => {
+    return memoryCandidates.filter(
+      (candidate) =>
+        candidate.review_surface === "background"
+        && (
+          !candidate.conversation_id
+          || candidate.conversation_id === currentConversationId
+        ),
+    ).length;
+  }, [currentConversationId, memoryCandidates]);
+  const memoryDockPreview = relevantMemoryCandidates[0]?.content ?? "";
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(ASK_MEMORY_DOCK_COLLAPSED_KEY, memoryDockCollapsed ? "1" : "0");
+    } catch {
+      // ignore local preference write failures
+    }
+  }, [memoryDockCollapsed]);
 
   const lastAssistantIdx = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -767,72 +798,102 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
         </div>
 
         {/* 输入区域 — 提取为独立组件 */}
-        {visibleMemoryCandidates.length > 0 && (
+        {relevantMemoryCandidates.length > 0 && (
           <div className="px-2 pb-1">
-            <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-2 space-y-2">
-              <div className="text-[10px] text-[var(--color-text-secondary)]">
-                检测到可保存的长期记忆（需你确认）
-              </div>
-              {visibleMemoryCandidates.map((candidate) => (
-                <div
-                  key={candidate.id}
-                  className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5"
-                >
-                  <div className="text-xs text-[var(--color-text)] break-words">
-                    {candidate.content}
+            <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)]">
+              <button
+                type="button"
+                onClick={() => setMemoryDockCollapsed((value) => !value)}
+                className="flex w-full items-center gap-2 px-3 py-2 text-left"
+              >
+                <span className="shrink-0 text-[11px] font-medium text-[var(--color-text)]">
+                  长期记忆候选 {relevantMemoryCandidates.length}
+                </span>
+                {backgroundMemoryCandidateCount > 0 && (
+                  <span className="rounded-full bg-[var(--color-bg)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
+                    后台 {backgroundMemoryCandidateCount}
+                  </span>
+                )}
+                {memoryDockCollapsed && memoryDockPreview && (
+                  <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--color-text-secondary)]">
+                    {memoryDockPreview}
+                  </span>
+                )}
+                <span className="ml-auto shrink-0 text-[var(--color-text-tertiary)]">
+                  {memoryDockCollapsed ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
+                </span>
+              </button>
+
+              {!memoryDockCollapsed && (
+                <div className="space-y-2 px-2 pb-2">
+                  <div className="px-1 text-[10px] text-[var(--color-text-secondary)]">
+                    自动提取的候选会先收在这里，确认后才会进入正式长期记忆。
                   </div>
-                  <div className="mt-1 flex flex-wrap items-center gap-1">
-                    {candidate.kind && MEMORY_KIND_META[candidate.kind] && (
-                      <span className={`rounded-full px-1.5 py-0.5 text-[10px] ${MEMORY_KIND_META[candidate.kind].className}`}>
-                        {MEMORY_KIND_META[candidate.kind].label}
-                      </span>
-                    )}
-                    <span className="rounded-full bg-[var(--color-bg-secondary)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
-                      {(candidate.scope && MEMORY_SCOPE_LABELS[candidate.scope]) || (candidate.conversation_id ? "会话" : "全局")}
-                    </span>
-                    {candidate.conflict_memory_ids && candidate.conflict_memory_ids.length > 0 && (
-                      <span className="rounded-full bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-700 dark:text-amber-300">
-                        有冲突
-                      </span>
-                    )}
-                  </div>
-                  {candidate.conflict_summary && (
-                    <div className="mt-1 text-[10px] text-amber-700 dark:text-amber-300">
-                      {candidate.conflict_summary}
+                  {relevantMemoryCandidates.map((candidate) => (
+                    <div
+                      key={candidate.id}
+                      className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5"
+                    >
+                      <div className="text-xs text-[var(--color-text)] break-words">
+                        {candidate.content}
+                      </div>
+                      <div className="mt-1 flex flex-wrap items-center gap-1">
+                        {candidate.kind && MEMORY_KIND_META[candidate.kind] && (
+                          <span className={`rounded-full px-1.5 py-0.5 text-[10px] ${MEMORY_KIND_META[candidate.kind].className}`}>
+                            {MEMORY_KIND_META[candidate.kind].label}
+                          </span>
+                        )}
+                        <span className="rounded-full bg-[var(--color-bg-secondary)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
+                          {(candidate.scope && MEMORY_SCOPE_LABELS[candidate.scope]) || (candidate.conversation_id ? "会话" : "全局")}
+                        </span>
+                        <span className="rounded-full bg-[var(--color-bg-secondary)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
+                          {candidate.review_surface === "inline" ? "建议确认" : "后台候选"}
+                        </span>
+                        {candidate.conflict_memory_ids && candidate.conflict_memory_ids.length > 0 && (
+                          <span className="rounded-full bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-700 dark:text-amber-300">
+                            有冲突
+                          </span>
+                        )}
+                      </div>
+                      {candidate.conflict_summary && (
+                        <div className="mt-1 text-[10px] text-amber-700 dark:text-amber-300">
+                          {candidate.conflict_summary}
+                        </div>
+                      )}
+                      <div className="mt-1 flex justify-end gap-2">
+                        <button
+                          onClick={async () => {
+                            await dismissMemoryCandidate(candidate.id);
+                          }}
+                          className="rounded-md border border-[var(--color-border)] px-2 py-0.5 text-[10px] hover:bg-[var(--color-bg-hover)]"
+                        >
+                          忽略
+                        </button>
+                        {!!candidate.conflict_memory_ids?.length && (
+                          <button
+                            onClick={async () => {
+                              await confirmMemoryCandidate(candidate.id, { replaceConflicts: true });
+                              toast("success", "已替换旧记忆并保存新记忆");
+                            }}
+                            className="rounded-md bg-amber-500 px-2 py-0.5 text-[10px] text-white hover:bg-amber-600"
+                          >
+                            替换旧项
+                          </button>
+                        )}
+                        <button
+                          onClick={async () => {
+                            await confirmMemoryCandidate(candidate.id);
+                            toast("success", "已保存为长期记忆");
+                          }}
+                          className="rounded-md bg-indigo-500 px-2 py-0.5 text-[10px] text-white hover:bg-indigo-600"
+                        >
+                          {!!candidate.conflict_memory_ids?.length ? "保留并记住" : "记住"}
+                        </button>
+                      </div>
                     </div>
-                  )}
-                  <div className="flex justify-end gap-2 mt-1">
-                    <button
-                      onClick={async () => {
-                        await dismissMemoryCandidate(candidate.id);
-                      }}
-                      className="text-[10px] px-2 py-0.5 rounded-md border border-[var(--color-border)] hover:bg-[var(--color-bg-hover)]"
-                    >
-                      忽略
-                    </button>
-                    {!!candidate.conflict_memory_ids?.length && (
-                      <button
-                        onClick={async () => {
-                          await confirmMemoryCandidate(candidate.id, { replaceConflicts: true });
-                          toast("success", "已替换旧记忆并保存新记忆");
-                        }}
-                        className="text-[10px] px-2 py-0.5 rounded-md bg-amber-500 text-white hover:bg-amber-600"
-                      >
-                        替换旧项
-                      </button>
-                    )}
-                    <button
-                      onClick={async () => {
-                        await confirmMemoryCandidate(candidate.id);
-                        toast("success", "已保存为长期记忆");
-                      }}
-                      className="text-[10px] px-2 py-0.5 rounded-md bg-indigo-500 text-white hover:bg-indigo-600"
-                    >
-                      {!!candidate.conflict_memory_ids?.length ? "保留并记住" : "记住"}
-                    </button>
-                  </div>
+                  ))}
                 </div>
-              ))}
+              )}
             </div>
           </div>
         )}

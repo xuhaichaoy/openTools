@@ -3,6 +3,7 @@ import {
   buildMemoryPromptBlock,
   extractMemoryCandidates,
   recallMemories,
+  saveAutomaticStructuredMemory,
   semanticRecall,
   type AIMemoryCandidate,
   type AIMemoryCandidateMode,
@@ -45,6 +46,14 @@ export async function queueAssistantMemoryCandidates(
 ): Promise<number> {
   const normalized = String(text || "").trim();
   if (!normalized) return 0;
+
+  const autoSaved = await saveAutomaticStructuredMemory(normalized, {
+    conversationId: opts?.conversationId,
+    workspaceId: opts?.workspaceId,
+  });
+  if (autoSaved) {
+    return 1;
+  }
 
   const candidates = extractMemoryCandidates(normalized, {
     conversationId: opts?.conversationId,

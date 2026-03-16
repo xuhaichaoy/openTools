@@ -22,6 +22,7 @@ import {
   Plug,
   Brain,
   Sparkles,
+  Type,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
@@ -43,6 +44,12 @@ import { ServerConfigTab } from "./components/ServerConfigTab";
 import { CredentialSettings } from "@/components/data-forge/CredentialSettings";
 import { SkillsManager } from "@/components/ai/SkillsManager";
 import { useDragWindow } from "@/hooks/useDragWindow";
+import {
+  FONT_SCALE_OPTIONS,
+  applyGlobalFontScale,
+  loadLocalFontScalePreference,
+  saveLocalFontScalePreference,
+} from "@/core/ui/local-ui-preferences";
 
 const BRAND = "#F28F36";
 
@@ -561,6 +568,7 @@ function GeneralSettingsTab() {
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [loading, setLoading] = useState(true);
   const [shortcutMsg, setShortcutMsg] = useState("");
+  const [fontScale, setFontScale] = useState(loadLocalFontScalePreference);
 
   useEffect(() => {
     (async () => {
@@ -600,6 +608,12 @@ function GeneralSettingsTab() {
       setShortcutMsg(`更新失败: ${e}`);
     }
     setTimeout(() => setShortcutMsg(""), 2500);
+  };
+
+  const handleFontScaleChange = (value: number) => {
+    const next = saveLocalFontScalePreference(value);
+    setFontScale(next);
+    applyGlobalFontScale(next);
   };
 
   if (loading) {
@@ -703,6 +717,39 @@ function GeneralSettingsTab() {
             深色模式
           </button>
         </div>
+      </div>
+
+      <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-[var(--space-compact-3)]">
+        <div className="flex items-center gap-2 mb-3">
+          <Type className="w-3.5 h-3.5" style={{ color: BRAND }} />
+          <span className="text-xs font-medium">显示设置</span>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {FONT_SCALE_OPTIONS.map((option) => {
+            const active = fontScale === option;
+            return (
+              <button
+                key={option}
+                onClick={() => handleFontScaleChange(option)}
+                className={`px-3 py-2 rounded-lg border text-xs transition-colors ${
+                  active
+                    ? "text-white"
+                    : "border-[var(--color-border)] bg-[var(--color-bg-secondary)] text-[var(--color-text)] hover:bg-[var(--color-bg-hover)]"
+                }`}
+                style={
+                  active
+                    ? { background: BRAND, borderColor: BRAND }
+                    : undefined
+                }
+              >
+                {option}x
+              </button>
+            );
+          })}
+        </div>
+        <p className="mt-2 text-[10px] text-[var(--color-text-secondary)] opacity-70">
+          字体倍率仅当前设备生效并保存在本地。窗口右侧或右下角拖拽后，会自动记住本机尺寸。
+        </p>
       </div>
 
       {/* 全局快捷键 */}

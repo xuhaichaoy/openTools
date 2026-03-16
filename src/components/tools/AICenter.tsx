@@ -66,6 +66,7 @@ const MEMORY_CANDIDATE_KIND_LABELS: Record<string, string> = {
   constraint: "约束",
   project_context: "项目",
   conversation_summary: "摘要",
+  session_note: "会话笔记",
   knowledge: "知识",
   behavior: "行为",
 };
@@ -235,9 +236,12 @@ export function AICenter({
         skill: modeMeta.skillScopeShort,
       }
       : null;
+  const foregroundMemoryCandidates = memoryCandidates.filter(
+    (candidate) => candidate.review_surface !== "background",
+  );
   const pendingMemoryCandidates = mode === "ask"
     ? []
-    : memoryCandidates.slice(0, 2);
+    : foregroundMemoryCandidates.slice(0, 2);
 
   const modeBtn = (m: AICenterMode, icon: React.ReactNode, label: string) => (
     <button
@@ -493,8 +497,8 @@ export function AICenter({
           <div className="px-3 py-2">
             <div className="mb-1.5 flex items-center justify-between gap-2 text-[10px] text-[var(--color-text-secondary)]">
               <span>检测到待确认的长期记忆候选</span>
-              {memoryCandidates.length > pendingMemoryCandidates.length && (
-                <span>还有 {memoryCandidates.length - pendingMemoryCandidates.length} 条</span>
+              {foregroundMemoryCandidates.length > pendingMemoryCandidates.length && (
+                <span>还有 {foregroundMemoryCandidates.length - pendingMemoryCandidates.length} 条</span>
               )}
             </div>
             <div className="flex flex-wrap gap-2">

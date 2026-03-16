@@ -7,6 +7,7 @@ import type {
   ActorConfig,
   ActorStatus,
   DialogArtifactRecord,
+  DialogQueuedFollowUp,
   DialogExecutionPlan,
   DialogMessage,
   MiddlewareOverrides,
@@ -93,6 +94,7 @@ interface PersistedSession {
   spawnedTasks?: PersistedSpawnedTask[];
   artifacts?: DialogArtifactRecord[];
   sessionUploads?: SessionUploadRecord[];
+  queuedFollowUps?: DialogQueuedFollowUp[];
   focusedSpawnedSessionRunId?: string | null;
   coordinatorActorId?: string | null;
   dialogExecutionPlan?: DialogExecutionPlan | null;
@@ -107,6 +109,7 @@ function buildSessionSnapshot(
   spawnedTasks?: Map<string, SpawnedTaskRecord>,
   artifacts?: readonly DialogArtifactRecord[],
   sessionUploads?: readonly SessionUploadRecord[],
+  queuedFollowUps?: readonly DialogQueuedFollowUp[],
   focusedSpawnedSessionRunId?: string | null,
   coordinatorActorId?: string | null,
   dialogExecutionPlan?: DialogExecutionPlan | null,
@@ -167,6 +170,16 @@ function buildSessionSnapshot(
     spawnedTasks: persistedTasks,
     artifacts: artifacts ? artifacts.map((artifact) => ({ ...artifact })) : undefined,
     sessionUploads: sessionUploads ? sessionUploads.map((upload) => ({ ...upload })) : undefined,
+    queuedFollowUps: queuedFollowUps
+      ? queuedFollowUps.map((item) => ({
+          ...item,
+          ...(item.images ? { images: [...item.images] } : {}),
+          ...(item.attachmentPaths ? { attachmentPaths: [...item.attachmentPaths] } : {}),
+          ...(item.uploadRecords
+            ? { uploadRecords: item.uploadRecords.map((record) => ({ ...record })) }
+            : {}),
+        }))
+      : undefined,
     focusedSpawnedSessionRunId,
     coordinatorActorId,
     dialogExecutionPlan,
@@ -523,6 +536,7 @@ async function saveSessionSnapshot(system: ActorSystem): Promise<void> {
     system.getSpawnedTasksMap(),
     system.getArtifactRecordsSnapshot(),
     system.getSessionUploadsSnapshot(),
+    useActorSystemStore.getState().queuedFollowUps,
     system.getFocusedSpawnedSessionRunId(),
     system.getCoordinatorId(),
     system.getDialogExecutionPlan(),
@@ -709,6 +723,8 @@ interface ActorSystemState {
   spawnedTaskEvents: SpawnedTaskEventDetail[];
   /** 当前待办快照 */
   actorTodos: Record<string, TodoItem[]>;
+  /** 当前排队等待发送的新消息 */
+  queuedFollowUps: DialogQueuedFollowUp[];
   /** 当前 ActorSystem 实例引用（不序列化） */
   _system: ActorSystem | null;
 
@@ -734,6 +750,9 @@ interface ActorSystemState {
   focusSpawnedSession: (runId: string | null) => void;
   closeSpawnedSession: (runId: string) => void;
   resetSession: (summary?: string) => void;
+  enqueueFollowUp: (payload: Omit<DialogQueuedFollowUp, "id" | "createdAt">) => string;
+  removeFollowUp: (id: string) => void;
+  clearFollowUps: () => void;
   /** 等待用户回复的交互列表 */
   pendingUserInteractions: PendingInteraction[];
   /** 从 ActorSystem 同步最新状态到 store（供 UI 使用） */
@@ -793,6 +812,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
   coordinatorActorId: null,
   spawnedTaskEvents: [],
   actorTodos: {},
+  queuedFollowUps: [],
   pendingUserInteractions: [],
   _system: null,
 
@@ -864,6 +884,16 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
       }
       if (persisted) {
         restoreSnapshot(system, persisted);
+        set({
+          queuedFollowUps: persisted.queuedFollowUps?.map((item) => ({
+            ...item,
+            ...(item.images ? { images: [...item.images] } : {}),
+            ...(item.attachmentPaths ? { attachmentPaths: [...item.attachmentPaths] } : {}),
+            ...(item.uploadRecords
+              ? { uploadRecords: item.uploadRecords.map((record) => ({ ...record })) }
+              : {}),
+          })) ?? [],
+        });
       } else if (system.getAll().length === 0) {
         spawnDefaultActors(system);
       }
@@ -876,6 +906,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
         spawnDefaultActors(system);
         get().sync();
       }
+      set({ queuedFollowUps: [] });
       syncDialogRuntimeSession(system.sessionId);
     });
     return system;
@@ -919,6 +950,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
       coordinatorActorId: null,
       spawnedTaskEvents: [],
       actorTodos: {},
+      queuedFollowUps: [],
       pendingUserInteractions: [],
     });
   },
@@ -1008,8 +1040,46 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
       focusedSpawnedSessionRunId: null,
       spawnedTaskEvents: [],
       actorTodos: {},
+      queuedFollowUps: [],
     });
     get().sync();
+  },
+
+  enqueueFollowUp: (payload) => {
+    const id = `dialog-follow-up-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    set((state) => ({
+      queuedFollowUps: [
+        ...state.queuedFollowUps,
+        {
+          ...payload,
+          id,
+          createdAt: Date.now(),
+        },
+      ],
+    }));
+    const system = get()._system;
+    if (system) {
+      debouncedSave(system);
+    }
+    return id;
+  },
+
+  removeFollowUp: (id) => {
+    set((state) => ({
+      queuedFollowUps: state.queuedFollowUps.filter((item) => item.id !== id),
+    }));
+    const system = get()._system;
+    if (system) {
+      debouncedSave(system);
+    }
+  },
+
+  clearFollowUps: () => {
+    set({ queuedFollowUps: [] });
+    const system = get()._system;
+    if (system) {
+      debouncedSave(system);
+    }
   },
 
   sync: () => {
@@ -1025,6 +1095,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
         coordinatorActorId: null,
         spawnedTaskEvents: [],
         actorTodos: {},
+        queuedFollowUps: [],
         pendingUserInteractions: [],
       });
       return;

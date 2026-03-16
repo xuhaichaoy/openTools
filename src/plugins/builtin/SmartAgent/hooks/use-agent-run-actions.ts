@@ -9,6 +9,8 @@ import type { AgentSession } from "@/store/agent-store";
 
 interface UseAgentRunActionsParams {
   ai?: MToolsAI;
+  busy?: boolean;
+  currentSessionId?: string | null;
   input: string;
   imagePaths: string[];
   attachmentPaths?: string[];
@@ -21,6 +23,18 @@ interface UseAgentRunActionsParams {
   pendingSourceHandoff?: AgentSession["sourceHandoff"] | null;
   setInput: Dispatch<SetStateAction<string>>;
   clearAssets: () => void;
+  enqueueFollowUp?: (
+    sessionId: string,
+    followUp: {
+      query: string;
+      images?: string[];
+      attachmentPaths?: string[];
+      systemHint?: string;
+      codingHint?: string;
+      runProfile?: CodingExecutionProfile;
+      sourceHandoff?: AgentSession["sourceHandoff"];
+    },
+  ) => string;
   executeAgentTask: (
     query: string,
     opts?: {
@@ -29,6 +43,7 @@ interface UseAgentRunActionsParams {
       systemHint?: string;
       codingHint?: string;
       images?: string[];
+      attachmentPaths?: string[];
       runProfile?: CodingExecutionProfile;
       sourceHandoff?: AgentSession["sourceHandoff"];
     },
@@ -44,6 +59,8 @@ interface UseAgentRunActionsResult {
 
 export function useAgentRunActions({
   ai,
+  busy = false,
+  currentSessionId,
   input,
   imagePaths,
   attachmentPaths,
@@ -55,6 +72,7 @@ export function useAgentRunActions({
   pendingSourceHandoff,
   setInput,
   clearAssets,
+  enqueueFollowUp,
   executeAgentTask,
   stopExecution,
 }: UseAgentRunActionsParams): UseAgentRunActionsResult {
@@ -81,8 +99,22 @@ export function useAgentRunActions({
     setInput("");
     clearAssets();
 
+    if (busy && currentSessionId && enqueueFollowUp) {
+      enqueueFollowUp(currentSessionId, {
+        query,
+        images: imagePaths.length > 0 ? imagePaths : undefined,
+        ...(attachmentPaths?.length ? { attachmentPaths } : {}),
+        systemHint,
+        codingHint: codingHint || undefined,
+        ...(runProfile ? { runProfile } : {}),
+        ...(pendingSourceHandoff ? { sourceHandoff: pendingSourceHandoff } : {}),
+      });
+      return;
+    }
+
     await executeAgentTask(query, {
       images: imagePaths.length > 0 ? imagePaths : undefined,
+      ...(attachmentPaths?.length ? { attachmentPaths } : {}),
       systemHint,
       codingHint: codingHint || undefined,
       ...(runProfile ? { runProfile } : {}),
@@ -92,8 +124,12 @@ export function useAgentRunActions({
     ai,
     input,
     imagePaths,
+    attachmentPaths,
     fileContextBlock,
     attachmentSummary,
+    busy,
+    currentSessionId,
+    enqueueFollowUp,
     pendingSourceHandoff,
     setInput,
     clearAssets,

@@ -2,7 +2,15 @@ import type { AgentScheduledTask, AgentTaskStatus } from "@/core/ai/types";
 
 export type ScheduledFilterMode = "all" | "attention" | AgentTaskStatus;
 export type ScheduledSortMode = "next_run_asc" | "updated_desc" | "created_desc";
-export type WorkbenchTab = "tools" | "orchestrator" | "skills" | "tasks" | "graph";
+export type WorkbenchTab =
+  | "review"
+  | "files"
+  | "context"
+  | "tools"
+  | "orchestrator"
+  | "skills"
+  | "tasks"
+  | "graph";
 
 export type RunningPhase = "executing";
 export type ExecutionWaitingStage =

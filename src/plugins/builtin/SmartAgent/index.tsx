@@ -8,7 +8,12 @@ import React, {
 } from "react";
 import type { AgentTool } from "./core/react-agent";
 import type { MToolsAI } from "@/core/plugin-system/plugin-interface";
-import { useAgentStore, type AgentTask } from "@/store/agent-store";
+import {
+  getHiddenAgentTasks,
+  getVisibleAgentTasks,
+  useAgentStore,
+  type AgentTask,
+} from "@/store/agent-store";
 import { useAppStore } from "@/store/app-store";
 import { AICenterHandoffCard } from "@/components/ai/AICenterHandoffCard";
 import type { RuntimeFallbackContext } from "@/core/agent/runtime";
@@ -19,11 +24,13 @@ import { AgentInputBar } from "./components/AgentInputBar";
 import { useToolTrustStore } from "@/store/command-allowlist-store";
 import { useAskUserStore } from "@/store/ask-user-store";
 import { useConfirmDialogStore } from "@/store/confirm-dialog-store";
-import type { AskUserQuestion, AskUserAnswers } from "./core/default-tools";
+import type { AskUserQuestion } from "./core/default-tools";
 import { AgentWorkbenchPanel } from "./components/AgentWorkbenchPanel";
 import { AgentHistoryDrawer } from "./components/AgentHistoryDrawer";
 import { AgentTaskTimeline } from "./components/AgentTaskTimeline";
 import { AgentHeaderBar } from "./components/AgentHeaderBar";
+import { AgentFollowUpDock } from "./components/AgentFollowUpDock";
+import { AgentSessionContextStrip } from "./components/AgentSessionContextStrip";
 import { useAgentExecution } from "./hooks/use-agent-execution";
 import { useInputAttachments } from "@/hooks/use-input-attachments";
 import { useAgentSessionActions } from "./hooks/use-agent-session-actions";
@@ -32,6 +39,11 @@ import { useAgentDerivedState } from "./hooks/use-agent-derived-state";
 import { useAgentRunActions } from "./hooks/use-agent-run-actions";
 import { useShallow } from "zustand/shallow";
 import { buildRecoveredAgentTaskPatch } from "./core/agent-task-state";
+import {
+  buildAgentSessionContextOutline,
+  buildAgentSessionReview,
+  deriveAgentSessionFiles,
+} from "./core/session-insights";
 import {
   type ExecutionWaitingStage,
   type RunningPhase,
@@ -102,7 +114,7 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
     const [resetPerRunState, setResetPerRunState] = useState<(() => void) | null>(null);
     const [notifyToolCalled, setNotifyToolCalled] = useState<((toolName: string) => void) | null>(null);
     const [showWorkbench, setShowWorkbench] = useState(false);
-    const [workbenchTab, setWorkbenchTab] = useState<WorkbenchTab>("tools");
+    const [workbenchTab, setWorkbenchTab] = useState<WorkbenchTab>("review");
     const [showHistory, setShowHistory] = useState(false);
     const [runningPhase, setRunningPhase] = useState<RunningPhase | null>(null);
     const [executionWaitingStage, setExecutionWaitingStage] =
@@ -183,6 +195,14 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       updateSession,
       addTask,
       updateTask,
+      revertCurrentSessionToPreviousTask,
+      redoCurrentSession,
+      restoreCurrentSession,
+      forkSession,
+      enqueueFollowUp,
+      dequeueFollowUp,
+      removeFollowUp,
+      clearFollowUpQueue,
       deleteSession,
       deleteAllSessions,
       renameSession,
@@ -204,6 +224,14 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
         updateSession: s.updateSession,
         addTask: s.addTask,
         updateTask: s.updateTask,
+        revertCurrentSessionToPreviousTask: s.revertCurrentSessionToPreviousTask,
+        redoCurrentSession: s.redoCurrentSession,
+        restoreCurrentSession: s.restoreCurrentSession,
+        forkSession: s.forkSession,
+        enqueueFollowUp: s.enqueueFollowUp,
+        dequeueFollowUp: s.dequeueFollowUp,
+        removeFollowUp: s.removeFollowUp,
+        clearFollowUpQueue: s.clearFollowUpQueue,
         deleteSession: s.deleteSession,
         deleteAllSessions: s.deleteAllSessions,
         renameSession: s.renameSession,
@@ -214,7 +242,8 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
 
     const askUser = useCallback(
       (questions: AskUserQuestion[]) => {
-        const currentQuery = getCurrentSession()?.tasks?.at(-1)?.query;
+        const session = getCurrentSession();
+        const currentQuery = session ? getVisibleAgentTasks(session).at(-1)?.query : undefined;
         return askUserOpen({
           questions,
           source: "agent",
@@ -225,7 +254,12 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
     );
 
     const currentSession = getCurrentSession();
-    const tasks = currentSession?.tasks ?? EMPTY_AGENT_TASKS;
+    const tasks = currentSession ? getVisibleAgentTasks(currentSession) : EMPTY_AGENT_TASKS;
+    const hiddenTasks = currentSession ? getHiddenAgentTasks(currentSession) : EMPTY_AGENT_TASKS;
+    const followUpQueue = currentSession?.followUpQueue ?? [];
+    const sessionReview = buildAgentSessionReview(currentSession);
+    const sessionFiles = deriveAgentSessionFiles(currentSession);
+    const sessionContextLines = buildAgentSessionContextOutline(currentSession);
     const {
       hasAnySteps,
       busy,
@@ -271,6 +305,8 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       createSession,
       addTask,
       updateTask,
+      updateSession,
+      forkSession,
       inputRef,
       scrollRef,
       openDangerConfirm: (toolName, params) => {
@@ -337,6 +373,8 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
 
     const { handleRun, handleStop, effectiveRunProfile } = useAgentRunActions({
       ai,
+      busy,
+      currentSessionId,
       input,
       imagePaths,
       attachmentPaths: attachments
@@ -350,6 +388,7 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       pendingSourceHandoff,
       setInput,
       clearAssets: clearAttachments,
+      enqueueFollowUp,
       executeAgentTask,
       stopExecution,
     });
@@ -380,6 +419,80 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
         updateTask(currentSessionId, task.id, patch);
       }
     }, [currentSessionId, running, tasks, updateTask]);
+
+    const queuedRunIdRef = useRef<string | null>(null);
+    const runQueuedFollowUp = useCallback(async () => {
+      if (running || !currentSession) return;
+
+      let targetSessionId = currentSession.id;
+      let next: ReturnType<typeof dequeueFollowUp> = null;
+
+      if (hiddenTasks.length > 0 && followUpQueue.length > 0) {
+        const forkedSessionId = forkSession(currentSession.id, {
+          visibleOnly: true,
+          title: `${currentSession.title || "新任务"} · 分支`,
+        });
+        if (forkedSessionId) {
+          for (const item of followUpQueue) {
+            enqueueFollowUp(forkedSessionId, {
+              query: item.query,
+              images: item.images,
+              attachmentPaths: item.attachmentPaths,
+              systemHint: item.systemHint,
+              codingHint: item.codingHint,
+              runProfile: item.runProfile,
+              sourceHandoff: item.sourceHandoff,
+            });
+          }
+          clearFollowUpQueue(currentSession.id);
+          targetSessionId = forkedSessionId;
+          next = dequeueFollowUp(forkedSessionId);
+        }
+      }
+
+      if (!next) {
+        next = dequeueFollowUp(targetSessionId);
+      }
+      if (!next) return;
+
+      queuedRunIdRef.current = next.id;
+      try {
+        await executeAgentTask(next.query, {
+          sessionId: targetSessionId,
+          images: next.images,
+          attachmentPaths: next.attachmentPaths,
+          systemHint: next.systemHint,
+          codingHint: next.codingHint,
+          runProfile: next.runProfile,
+          sourceHandoff: next.sourceHandoff,
+        });
+      } finally {
+        queuedRunIdRef.current = null;
+      }
+    }, [
+      clearFollowUpQueue,
+      currentSession,
+      dequeueFollowUp,
+      enqueueFollowUp,
+      executeAgentTask,
+      followUpQueue,
+      forkSession,
+      hiddenTasks.length,
+      running,
+    ]);
+
+    const lastTaskStatus = tasks[tasks.length - 1]?.status;
+    useEffect(() => {
+      if (
+        running
+        || queuedRunIdRef.current
+        || followUpQueue.length === 0
+        || lastTaskStatus !== "success"
+      ) {
+        return;
+      }
+      void runQueuedFollowUp();
+    }, [followUpQueue.length, lastTaskStatus, runQueuedFollowUp, running]);
 
     const toggleStep = useCallback((key: string) => {
       setExpandedSteps((prev) => {
@@ -463,10 +576,15 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
               sessionsCount={sessions.length}
               availableToolsCount={availableTools.length}
               scheduledTasksCount={scheduledTasks.length}
+              queuedFollowUpsCount={followUpQueue.length}
+              showReviewWorkbench={showWorkbench && workbenchTab === "review"}
               showToolsWorkbench={showWorkbench && workbenchTab === "tools"}
               showOrchestratorWorkbench={showWorkbench && workbenchTab === "orchestrator"}
               hasAnySteps={hasAnySteps}
+              canRevert={tasks.length > 0}
               onShowHistory={() => setShowHistory(true)}
+              onRevert={revertCurrentSessionToPreviousTask}
+              onToggleReviewWorkbench={() => toggleWorkbenchTab("review")}
               onToggleToolsWorkbench={() => toggleWorkbenchTab("tools")}
               onToggleOrchestratorWorkbench={() => toggleWorkbenchTab("orchestrator")}
               onClear={handleClear}
@@ -478,6 +596,11 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
             workbenchTab={workbenchTab}
             onSelectTab={setWorkbenchTab}
             onClose={() => setShowWorkbench(false)}
+            currentSessionTitle={currentSession?.title}
+            sessionReview={sessionReview}
+            sessionFiles={sessionFiles}
+            sessionContextLines={sessionContextLines}
+            sessionCompactionSummary={currentSession?.compaction?.summary}
             availableTools={availableTools}
             scheduledStats={scheduledStats}
             scheduledStatusFilter={scheduledStatusFilter}
@@ -524,6 +647,18 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
             </div>
           )}
 
+          {currentSession && (
+            <AgentSessionContextStrip
+              session={currentSession}
+              hiddenTaskCount={hiddenTasks.length}
+              onRedo={redoCurrentSession}
+              onRestore={restoreCurrentSession}
+              onFork={() => {
+                forkSession(currentSession.id, { visibleOnly: true });
+              }}
+            />
+          )}
+
           <AgentTaskTimeline
             tasks={tasks}
             busy={busy}
@@ -534,6 +669,24 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
             expandedSteps={expandedSteps}
             onToggleTaskProcess={toggleTaskProcess}
             onToggleStep={toggleStep}
+          />
+
+          <AgentFollowUpDock
+            items={followUpQueue}
+            running={running}
+            onRunNext={() => {
+              void runQueuedFollowUp();
+            }}
+            onRemove={(followUpId) => {
+              if (currentSessionId) {
+                removeFollowUp(currentSessionId, followUpId);
+              }
+            }}
+            onClear={() => {
+              if (currentSessionId) {
+                clearFollowUpQueue(currentSessionId);
+              }
+            }}
           />
 
           <AgentInputBar

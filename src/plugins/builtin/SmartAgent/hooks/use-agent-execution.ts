@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useRef, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
 import { ReActAgent, type AgentStep, type AgentTool } from "../core/react-agent";
 import type { MToolsAI } from "@/core/plugin-system/plugin-interface";
-import { useAgentStore } from "@/store/agent-store";
+import {
+  getAgentSessionCompactedTaskCount,
+  getAgentSessionLiveTasks,
+  hasAgentSessionHiddenTasks,
+  useAgentStore,
+} from "@/store/agent-store";
 import { useAIStore } from "@/store/ai-store";
 import { useAgentMemoryStore } from "@/store/agent-memory-store";
 import { buildAgentFCCompatibilityKey } from "@/core/agent/fc-compatibility";
@@ -17,6 +22,12 @@ import {
   type ExecutionWaitingStage,
   type RunningPhase,
 } from "../core/ui-state";
+import {
+  buildAgentSessionCompactionState,
+  buildAgentSessionContextMessages,
+  isAgentContextPressureError,
+  shouldAutoCompactAgentSession,
+} from "../core/session-compaction";
 import { useAgentRunningStore } from "@/store/agent-running-store";
 import { recordAIRouteEvent } from "@/store/ai-route-store";
 import { applyIncomingAgentStep } from "../core/agent-task-state";
@@ -46,6 +57,8 @@ interface UseAgentExecutionParams {
   createSession: AgentStoreState["createSession"];
   addTask: AgentStoreState["addTask"];
   updateTask: AgentStoreState["updateTask"];
+  updateSession: AgentStoreState["updateSession"];
+  forkSession: AgentStoreState["forkSession"];
   inputRef: MutableRefObject<HTMLTextAreaElement | null>;
   scrollRef: MutableRefObject<HTMLDivElement | null>;
   openDangerConfirm: (toolName: string, params: Record<string, unknown>) => Promise<boolean>;
@@ -59,11 +72,12 @@ interface UseAgentExecutionResult {
     opts?: {
       sessionId?: string;
       taskId?: string;
-      systemHint?: string;
-      codingHint?: string;
-      images?: string[];
-      runProfile?: CodingExecutionProfile;
-    },
+        systemHint?: string;
+        codingHint?: string;
+        images?: string[];
+        attachmentPaths?: string[];
+        runProfile?: CodingExecutionProfile;
+      },
   ) => Promise<void>;
   stopExecution: () => void;
 }
@@ -78,6 +92,8 @@ export function useAgentExecution({
   createSession,
   addTask,
   updateTask,
+  updateSession,
+  forkSession,
   inputRef,
   scrollRef,
   openDangerConfirm,
@@ -114,6 +130,7 @@ export function useAgentExecution({
         systemHint?: string;
         codingHint?: string;
         images?: string[];
+        attachmentPaths?: string[];
         runProfile?: CodingExecutionProfile;
         sourceHandoff?: import("@/store/agent-store").AgentSession["sourceHandoff"];
       },
@@ -130,44 +147,59 @@ export function useAgentExecution({
 
       let sessionId = opts?.sessionId || currentSessionId;
       let taskId = opts?.taskId || "";
-      const historySteps: AgentStep[] = [];
       const snapshot = useAgentStore.getState();
+      let session = sessionId
+        ? snapshot.sessions.find((item) => item.id === sessionId)
+        : undefined;
 
-      if (!sessionId || !snapshot.sessions.some((s) => s.id === sessionId)) {
-        sessionId = createSession(query, opts?.sourceHandoff);
+      if (session && !taskId && hasAgentSessionHiddenTasks(session)) {
+        const forkedSessionId = forkSession(session.id, {
+          visibleOnly: true,
+          title: `${session.title || "新任务"} · 分支`,
+        });
+        if (forkedSessionId) {
+          sessionId = forkedSessionId;
+          session = useAgentStore.getState().sessions.find(
+            (item) => item.id === forkedSessionId,
+          );
+        }
+      }
+
+      if (!sessionId || !session) {
+        sessionId = createSession(query, opts?.sourceHandoff, {
+          images: opts?.images,
+          attachmentPaths: opts?.attachmentPaths,
+        });
         const newSession = useAgentStore
           .getState()
           .sessions.find((s) => s.id === sessionId);
         taskId = taskId || newSession?.tasks[0]?.id || "";
+        session = newSession;
       } else if (!taskId) {
-        const session = snapshot.sessions.find((s) => s.id === sessionId);
-        if (session) {
-          for (const task of session.tasks) {
-            const steps = task.steps || [];
-            const keySteps = steps.filter(
-              (s) => s.type === "action" || s.type === "observation" || s.type === "answer",
-            );
-            for (const step of keySteps.slice(-6)) {
-              historySteps.push({
-                ...step,
-                timestamp: step.timestamp || session.createdAt,
-              });
-            }
-            if (task.answer) {
-              const alreadyHasAnswer = keySteps.some(
-                (s) => s.type === "answer" && s.content === task.answer,
-              );
-              if (!alreadyHasAnswer) {
-                historySteps.push({
-                  type: "answer",
-                  content: task.answer,
-                  timestamp: session.createdAt,
-                });
-              }
-            }
+        const compactDecision = shouldAutoCompactAgentSession(session);
+        if (compactDecision.shouldCompact) {
+          const compaction = buildAgentSessionCompactionState(session, {
+            reason: compactDecision.reason,
+          });
+          if (
+            compaction &&
+            compaction.compactedTaskCount > getAgentSessionCompactedTaskCount(session)
+          ) {
+            updateSession(session.id, { compaction });
+            session = useAgentStore.getState().sessions.find(
+              (item) => item.id === sessionId,
+            ) ?? session;
           }
         }
-        taskId = addTask(sessionId, query, opts?.images);
+        taskId = addTask(
+          sessionId,
+          query,
+          opts?.images,
+          opts?.attachmentPaths,
+        );
+        session = useAgentStore.getState().sessions.find(
+          (item) => item.id === sessionId,
+        );
       }
 
       if (!sessionId || !taskId) return;
@@ -316,47 +348,92 @@ export function useAgentExecution({
           false,
         );
       }
-
-      const agent = new ReActAgent(
-        ai,
-        toolsForRun,
-        {
-          maxIterations,
-          temperature: aiConfig.temperature ?? 0.7,
-          verbose: true,
-          fcCompatibilityKey,
-          userMemoryPrompt,
-          skillsPrompt,
-          extraSystemPrompt,
-          skipInternalCodingBlock: hasCodingWorkflowSkill,
-          codingHint: opts?.codingHint,
-          ...(contextLimit ? { contextLimit } : {}),
-          contextMessages: knowledgeContextMessages,
-          dangerousToolPatterns: [
-            "write_file",
-            "open_path",
-            "shell",
-            "run_shell",
-            "system-actions_",
-            "native_calendar_create",
-            "native_reminder_create",
-            "native_notes_create",
-            "native_mail_create",
-            "native_shortcuts_run",
-          ],
-          confirmDangerousAction: async (toolName, params) => {
-            setWaitingStageIfChanged("user_confirm");
-            const confirmed = await openDangerConfirm(toolName, params);
-            setWaitingStageIfChanged(confirmed ? "tool_waiting" : "model_first_token");
-            return confirmed;
+      const buildHistorySteps = (
+        currentSession:
+          | import("@/store/agent-store").AgentSession
+          | undefined,
+      ): AgentStep[] => {
+        if (!currentSession) return [];
+        const historySteps: AgentStep[] = [];
+        for (const task of getAgentSessionLiveTasks(currentSession)) {
+          const steps = task.steps || [];
+          const keySteps = steps.filter(
+            (step) =>
+              step.type === "action"
+              || step.type === "observation"
+              || step.type === "answer",
+          );
+          for (const step of keySteps.slice(-6)) {
+            historySteps.push({
+              ...step,
+              timestamp: step.timestamp || task.createdAt || currentSession.createdAt,
+            });
+          }
+          if (task.answer) {
+            const alreadyHasAnswer = keySteps.some(
+              (step) => step.type === "answer" && step.content === task.answer,
+            );
+            if (!alreadyHasAnswer) {
+              historySteps.push({
+                type: "answer",
+                content: task.answer,
+                timestamp: task.createdAt || currentSession.createdAt,
+              });
+            }
+          }
+        }
+        return historySteps;
+      };
+      const createAgent = (
+        currentSession:
+          | import("@/store/agent-store").AgentSession
+          | undefined,
+      ) =>
+        new ReActAgent(
+          ai,
+          toolsForRun,
+          {
+            maxIterations,
+            temperature: aiConfig.temperature ?? 0.7,
+            verbose: true,
+            fcCompatibilityKey,
+            userMemoryPrompt,
+            skillsPrompt,
+            extraSystemPrompt,
+            skipInternalCodingBlock: hasCodingWorkflowSkill,
+            codingHint: opts?.codingHint,
+            ...(contextLimit ? { contextLimit } : {}),
+            contextMessages: [
+              ...buildAgentSessionContextMessages(currentSession),
+              ...knowledgeContextMessages,
+            ],
+            dangerousToolPatterns: [
+              "write_file",
+              "open_path",
+              "shell",
+              "run_shell",
+              "system-actions_",
+              "native_calendar_create",
+              "native_reminder_create",
+              "native_notes_create",
+              "native_mail_create",
+              "native_shortcuts_run",
+            ],
+            confirmDangerousAction: async (toolName, params) => {
+              setWaitingStageIfChanged("user_confirm");
+              const confirmed = await openDangerConfirm(toolName, params);
+              setWaitingStageIfChanged(confirmed ? "tool_waiting" : "model_first_token");
+              return confirmed;
+            },
+            onToolExecuted: notifyToolCalled ?? undefined,
           },
-          onToolExecuted: notifyToolCalled ?? undefined,
-        },
-        (step) => {
-          applyStep(step, true);
-        },
-        historySteps,
-      );
+          (step) => {
+            applyStep(step, true);
+          },
+          buildHistorySteps(currentSession),
+        );
+
+      let agent = createAgent(session);
 
       heartbeatTimerRef.current = setInterval(() => {
         if (abortController.signal.aborted) return;
@@ -431,6 +508,7 @@ export function useAgentExecution({
           effectiveQuery += `\n\n[系统提示] 用户已附带 ${opts.images.length} 张图片，这些图片已自动包含在本次对话中，你可以直接看到并分析它们。请勿使用截图工具或其他方式重新获取图片，也不要对图片路径调用 read_file / read_file_range；直接基于已有图片进行分析即可。`;
         }
         let lastError: Error | null = null;
+        let contextRecovered = false;
 
         for (let attempt = 0; attempt <= retryMax; attempt++) {
           if (abortController.signal.aborted) throw new Error("Aborted");
@@ -478,6 +556,44 @@ export function useAgentExecution({
             } else {
               lastError = e as Error;
             }
+            if (
+              !contextRecovered
+              && isAgentContextPressureError(lastError)
+              && sessionId
+            ) {
+              const latestSession = useAgentStore.getState().sessions.find(
+                (item) => item.id === sessionId,
+              );
+              if (latestSession) {
+                const recoveredCompaction = buildAgentSessionCompactionState(
+                  latestSession,
+                  { reason: "context_recovery", aggressive: true },
+                );
+                if (
+                  recoveredCompaction
+                  && recoveredCompaction.compactedTaskCount
+                    > getAgentSessionCompactedTaskCount(latestSession)
+                ) {
+                  contextRecovered = true;
+                  updateSession(sessionId, { compaction: recoveredCompaction });
+                  session = useAgentStore.getState().sessions.find(
+                    (item) => item.id === sessionId,
+                  ) ?? latestSession;
+                  agent = createAgent(session);
+                  applyStep(
+                    {
+                      type: "observation",
+                      content:
+                        "检测到上下文压力过大，已自动整理早期历史摘要，并准备重试一次。",
+                      timestamp: Date.now(),
+                    },
+                    false,
+                  );
+                  resetPerRunState?.();
+                  continue;
+                }
+              }
+            }
             const isRetryable = isRetryableError(lastError);
             if (!isRetryable || attempt >= retryMax) {
               throw lastError;
@@ -523,10 +639,12 @@ export function useAgentExecution({
       createSession,
       addTask,
       clearTimers,
+      forkSession,
       setRunning,
       setRunningPhase,
       setExecutionWaitingStage,
       updateTask,
+      updateSession,
       inputRef,
       availableTools,
       openDangerConfirm,

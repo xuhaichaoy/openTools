@@ -1,15 +1,20 @@
 import React from "react";
-import { Bot, Trash2, Wrench } from "lucide-react";
+import { Bot, LayoutPanelLeft, Trash2, Wrench } from "lucide-react";
 
 interface AgentHeaderBarProps {
   onBack?: () => void;
   sessionsCount: number;
   availableToolsCount: number;
   scheduledTasksCount: number;
+  queuedFollowUpsCount: number;
+  showReviewWorkbench: boolean;
   showToolsWorkbench: boolean;
   showOrchestratorWorkbench: boolean;
   hasAnySteps: boolean;
+  canRevert: boolean;
   onShowHistory: () => void;
+  onRevert: () => void;
+  onToggleReviewWorkbench: () => void;
   onToggleToolsWorkbench: () => void;
   onToggleOrchestratorWorkbench: () => void;
   onClear: () => void;
@@ -20,10 +25,15 @@ export function AgentHeaderBar({
   sessionsCount,
   availableToolsCount,
   scheduledTasksCount,
+  queuedFollowUpsCount,
+  showReviewWorkbench,
   showToolsWorkbench,
   showOrchestratorWorkbench,
   hasAnySteps,
+  canRevert,
   onShowHistory,
+  onRevert,
+  onToggleReviewWorkbench,
   onToggleToolsWorkbench,
   onToggleOrchestratorWorkbench,
   onClear,
@@ -56,6 +66,24 @@ export function AgentHeaderBar({
               {sessionsCount}
             </span>
           )}
+        </button>
+        <button
+          onClick={onRevert}
+          disabled={!canRevert}
+          className="text-xs px-2 py-1 rounded bg-[var(--color-bg-secondary)] hover:bg-[var(--color-bg-tertiary)] disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          回退
+        </button>
+        <button
+          onClick={onToggleReviewWorkbench}
+          className={`text-xs px-2 py-1 rounded ${
+            showReviewWorkbench
+              ? "bg-sky-500/15 text-sky-700"
+              : "bg-[var(--color-bg-secondary)] hover:bg-[var(--color-bg-tertiary)]"
+          }`}
+        >
+          <LayoutPanelLeft className="w-3 h-3 inline mr-1" />
+          工作台 {queuedFollowUpsCount > 0 ? `(${queuedFollowUpsCount})` : ""}
         </button>
         <button
           onClick={onToggleToolsWorkbench}
