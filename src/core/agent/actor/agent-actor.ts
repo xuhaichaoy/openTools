@@ -185,7 +185,8 @@ export const DIALOG_FULL_ROLE: AgentRole = {
 - \`spawn_task\`：派发子任务给另一个 Agent（自动追踪，结果自动回送）
 - \`send_message\`：向指定 Agent 发送消息
 - \`agents\`：查看所有 Agent 状态和子任务进度（action="list"）或终止 Agent（action="kill"）
-- \`memory_search\`：搜索用户长期记忆（偏好、事实、约束），回答相关问题前先检索
+- \`memory_search\`：搜索 MEMORY.md 与 daily memory，回答相关问题前先检索
+- \`memory_get\`：按路径和行号精读命中的记忆片段
 - \`memory_save\`：保存用户偏好、约束等长期记忆`,
   capabilities: ["code_write", "code_analysis", "file_write", "shell_execute", "information_retrieval", "web_search", "code_review"],
   maxIterations: 20,

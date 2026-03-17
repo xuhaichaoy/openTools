@@ -28,6 +28,11 @@ import {
   isAgentContextPressureError,
   shouldAutoCompactAgentSession,
 } from "../core/session-compaction";
+import {
+  buildAgentPromptContextPrompt,
+  buildAgentPromptContextSnapshot,
+  type AgentPromptContextSnapshot,
+} from "../core/prompt-context";
 import { useAgentRunningStore } from "@/store/agent-running-store";
 import { recordAIRouteEvent } from "@/store/ai-route-store";
 import { applyIncomingAgentStep } from "../core/agent-task-state";
@@ -65,6 +70,7 @@ interface UseAgentExecutionParams {
   openDangerConfirm: (toolName: string, params: Record<string, unknown>) => Promise<boolean>;
   resetPerRunState: (() => void) | null;
   notifyToolCalled?: ((toolName: string) => void) | null;
+  onPromptContextSnapshot?: ((snapshot: AgentPromptContextSnapshot | null) => void) | null;
 }
 
 interface UseAgentExecutionResult {
@@ -102,6 +108,7 @@ export function useAgentExecution({
   openDangerConfirm,
   resetPerRunState,
   notifyToolCalled,
+  onPromptContextSnapshot,
 }: UseAgentExecutionParams): UseAgentExecutionResult {
   const abortControllerRef = useRef<AbortController | null>(null);
   const heartbeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -336,9 +343,17 @@ export function useAgentExecution({
       const knowledgeContextMessages = await buildKnowledgeContextMessages(query, {
         contextTokens: contextLimit,
       });
-      const extraSystemPrompt = buildAssistantSupplementalPrompt(
+      const supplementalSystemPrompt = buildAssistantSupplementalPrompt(
         aiConfig.system_prompt,
       );
+      const currentAttachmentSummary = [
+        opts?.attachmentPaths?.length
+          ? `附件 ${opts.attachmentPaths.length} 项`
+          : "",
+        opts?.images?.length
+          ? `图片 ${opts.images.length} 张`
+          : "",
+      ].filter(Boolean).join("，") || undefined;
       const maxIterations = getEnhancedAgentMaxIterations(
         aiConfig.agent_max_iterations ?? 25,
         runProfile,
@@ -404,8 +419,31 @@ export function useAgentExecution({
         currentSession:
           | import("@/store/agent-store").AgentSession
           | undefined,
-      ) =>
-        new ReActAgent(
+      ) => {
+        const sessionContextMessages = buildAgentSessionContextMessages(currentSession);
+        const promptContextSnapshot = buildAgentPromptContextSnapshot({
+          session: currentSession,
+          query,
+          runProfile,
+          forceNewSession: opts?.forceNewSession,
+          attachmentSummary: currentAttachmentSummary,
+          systemHint: opts?.systemHint,
+          sourceHandoff: opts?.sourceHandoff ?? currentSession?.sourceHandoff,
+          userMemoryPrompt,
+          skillsPrompt,
+          extraSystemPrompt: supplementalSystemPrompt,
+          codingHint: opts?.codingHint,
+          historyContextMessageCount: sessionContextMessages.length,
+          knowledgeContextMessageCount: knowledgeContextMessages.length,
+        });
+        onPromptContextSnapshot?.(promptContextSnapshot);
+
+        const promptContextPrompt = buildAgentPromptContextPrompt(promptContextSnapshot);
+        const extraSystemPrompt = [supplementalSystemPrompt, promptContextPrompt]
+          .filter((block): block is string => typeof block === "string" && block.trim().length > 0)
+          .join("\n\n");
+
+        return new ReActAgent(
           ai,
           toolsForRun,
           {
@@ -415,12 +453,12 @@ export function useAgentExecution({
             fcCompatibilityKey,
             userMemoryPrompt,
             skillsPrompt,
-            extraSystemPrompt,
+            extraSystemPrompt: extraSystemPrompt || undefined,
             skipInternalCodingBlock: hasCodingWorkflowSkill,
             codingHint: opts?.codingHint,
             ...(contextLimit ? { contextLimit } : {}),
             contextMessages: [
-              ...buildAgentSessionContextMessages(currentSession),
+              ...sessionContextMessages,
               ...knowledgeContextMessages,
             ],
             dangerousToolPatterns: [
@@ -448,6 +486,7 @@ export function useAgentExecution({
           },
           buildHistorySteps(currentSession),
         );
+      };
 
       let agent = createAgent(session);
 
@@ -667,6 +706,7 @@ export function useAgentExecution({
       availableTools,
       openDangerConfirm,
       notifyToolCalled,
+      onPromptContextSnapshot,
       scrollRef,
       resetPerRunState,
     ],

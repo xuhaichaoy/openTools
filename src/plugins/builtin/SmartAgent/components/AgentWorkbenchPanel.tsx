@@ -6,6 +6,7 @@ import type {
   ScheduledSortMode,
   WorkbenchTab,
 } from "../core/ui-state";
+import type { AgentPromptContextSnapshot } from "../core/prompt-context";
 import { SkillsManager } from "@/components/ai/SkillsManager";
 import type { AgentSessionFileInsight } from "../core/session-insights";
 
@@ -90,6 +91,7 @@ interface AgentWorkbenchPanelProps {
   };
   sessionFiles: AgentSessionFileInsight[];
   sessionContextLines: string[];
+  promptContextSnapshot?: AgentPromptContextSnapshot | null;
   sessionCompactionSummary?: string;
   availableTools: AgentTool[];
   scheduledStats: {
@@ -125,6 +127,7 @@ export function AgentWorkbenchPanel({
   sessionReview,
   sessionFiles,
   sessionContextLines,
+  promptContextSnapshot,
   sessionCompactionSummary,
   availableTools,
   scheduledStats,
@@ -318,8 +321,53 @@ export function AgentWorkbenchPanel({
 
           {workbenchTab === "context" && (
             <div className="p-3 space-y-3">
-              <div className="text-xs font-semibold">上下文边界</div>
-              {sessionContextLines.length === 0 ? (
+              <div className="text-xs font-semibold">当前上下文快照</div>
+              {promptContextSnapshot ? (
+                <>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/55 p-2">
+                      <div className="text-[10px] text-[var(--color-text-secondary)]">运行模式</div>
+                      <div className="mt-1 text-sm font-semibold">{promptContextSnapshot.runModeLabel}</div>
+                    </div>
+                    <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/55 p-2">
+                      <div className="text-[10px] text-[var(--color-text-secondary)]">召回记忆</div>
+                      <div className="mt-1 text-sm font-semibold">{promptContextSnapshot.memoryItemCount}</div>
+                    </div>
+                    <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/55 p-2">
+                      <div className="text-[10px] text-[var(--color-text-secondary)]">工作集文件</div>
+                      <div className="mt-1 text-sm font-semibold">{promptContextSnapshot.files.length}</div>
+                    </div>
+                    <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/55 p-2">
+                      <div className="text-[10px] text-[var(--color-text-secondary)]">补充上下文</div>
+                      <div className="mt-1 text-sm font-semibold">
+                        {promptContextSnapshot.historyContextMessageCount + promptContextSnapshot.knowledgeContextMessageCount}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    {promptContextSnapshot.queryPreview && (
+                      <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/55 p-2">
+                        <div className="text-[10px] text-[var(--color-text-secondary)]">本轮请求</div>
+                        <div className="mt-1 text-[12px] leading-5">{promptContextSnapshot.queryPreview}</div>
+                      </div>
+                    )}
+                    {promptContextSnapshot.attachmentSummary && (
+                      <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/55 p-2">
+                        <div className="text-[10px] text-[var(--color-text-secondary)]">当前工作集</div>
+                        <div className="mt-1 text-[12px] leading-5">{promptContextSnapshot.attachmentSummary}</div>
+                      </div>
+                    )}
+                    {promptContextSnapshot.systemHintPreview && (
+                      <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/55 p-2">
+                        <div className="text-[10px] text-[var(--color-text-secondary)]">显式文件/系统提示</div>
+                        <div className="mt-1 whitespace-pre-wrap text-[12px] leading-5">
+                          {promptContextSnapshot.systemHintPreview}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </>
+              ) : sessionContextLines.length === 0 ? (
                 <div className="text-[11px] text-[var(--color-text-secondary)]">
                   当前上下文仍是完整会话，没有额外的分支、摘要或待执行跟进。
                 </div>
@@ -335,6 +383,18 @@ export function AgentWorkbenchPanel({
                   ))}
                 </div>
               )}
+              {promptContextSnapshot?.contextLines?.length ? (
+                <div className="space-y-2">
+                  {promptContextSnapshot.contextLines.map((line) => (
+                    <div
+                      key={line}
+                      className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/55 p-2 text-[12px] leading-5"
+                    >
+                      {line}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
               {sessionCompactionSummary && (
                 <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/[0.07] p-2">
                   <div className="text-[10px] text-emerald-700">历史摘要</div>

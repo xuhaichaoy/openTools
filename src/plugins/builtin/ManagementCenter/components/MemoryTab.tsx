@@ -24,6 +24,7 @@ import {
   deleteMemory,
   updateMemoryContent,
   migrateAgentMemory,
+  organizeRecentFileMemories,
   saveConfirmedMemory,
   type AIMemoryCandidate,
   type AIMemoryItem,
@@ -31,6 +32,10 @@ import {
   type AIMemoryScope,
   type AIMemorySource,
 } from "@/core/ai/memory-store";
+import {
+  getFileMemorySnapshot,
+  type FileMemorySnapshot,
+} from "@/core/ai/file-memory";
 import { useAIStore } from "@/store/ai-store";
 import { useToast } from "@/components/ui/Toast";
 import { handleError } from "@/core/errors";
@@ -191,6 +196,7 @@ export function MemoryTab() {
   const [memories, setMemories] = useState<AIMemoryItem[]>([]);
   const [archivedMemories, setArchivedMemories] = useState<AIMemoryItem[]>([]);
   const [candidates, setCandidates] = useState<AIMemoryCandidate[]>([]);
+  const [fileMemorySnapshot, setFileMemorySnapshot] = useState<FileMemorySnapshot | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -208,6 +214,7 @@ export function MemoryTab() {
   const [draftScopeTarget, setDraftScopeTarget] = useState("");
   const [showAllArchived, setShowAllArchived] = useState(false);
   const [showStats, setShowStats] = useState(false);
+  const [showFileMemoryPreview, setShowFileMemoryPreview] = useState(false);
 
   const loadMemories = useCallback(async (options?: { silent?: boolean }) => {
     const silent = options?.silent ?? false;
@@ -221,6 +228,8 @@ export function MemoryTab() {
       setMemories(items);
       setArchivedMemories(archivedItems);
       setCandidates(candidateItems);
+      const fileSnapshot = await getFileMemorySnapshot({ recentDays: 3 }).catch(() => null);
+      setFileMemorySnapshot(fileSnapshot);
       await syncMemoryCandidatesToStore().catch(() => undefined);
     } catch (e) {
       handleError(e, { context: "加载 AI 记忆", silent: true });
@@ -292,6 +301,23 @@ export function MemoryTab() {
     setIsRefreshing(true);
     await loadMemories({ silent: true });
     setIsRefreshing(false);
+  };
+
+  const handleOrganizeRecentMemory = async () => {
+    setIsRefreshing(true);
+    try {
+      const candidates = await organizeRecentFileMemories(5);
+      if (candidates.length > 0) {
+        toast("success", `已从 recent daily memory 整理出 ${candidates.length} 条长期记忆候选`);
+      } else {
+        toast("info", "最近的 daily memory 里暂时没有适合提升为长期记忆的内容");
+      }
+      await loadMemories({ silent: true });
+    } catch (e) {
+      handleError(e, { context: "整理 recent daily memory" });
+    } finally {
+      setIsRefreshing(false);
+    }
   };
 
   const handleConfirmCandidate = async (
@@ -644,6 +670,14 @@ export function MemoryTab() {
         </div>
         <div className="flex items-center gap-1">
           <button
+            onClick={() => void handleOrganizeRecentMemory()}
+            className="rounded-lg border border-[var(--color-border)] px-2 py-1 text-[10px] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)] transition-colors"
+            title="整理 recent daily memory"
+            disabled={isRefreshing}
+          >
+            整理记忆
+          </button>
+          <button
             onClick={() => setShowStats((v) => !v)}
             className="p-1.5 rounded-lg hover:bg-[var(--color-bg-secondary)] transition-colors"
             title="统计"
@@ -698,6 +732,91 @@ export function MemoryTab() {
           detail={memoryEnabled ? "长期记忆和会话笔记会按相关性注入" : "当前不会参与召回"}
         />
       </div>
+
+      {fileMemorySnapshot && (
+        <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-3 space-y-2">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="text-xs font-semibold text-[var(--color-text)]">文件型记忆主干</div>
+              <div className="text-[10px] text-[var(--color-text-secondary)]">
+                正式长期记忆会同步到 `MEMORY.md`，静默会话笔记会写入 `memory/YYYY-MM-DD.md`。
+              </div>
+            </div>
+            <div className="text-[10px] text-[var(--color-text-secondary)]">
+              recent daily: {fileMemorySnapshot.recentDailyFiles.length} 天
+            </div>
+          </div>
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+            <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/55 p-2">
+              <div className="text-[10px] text-[var(--color-text-secondary)]">长期记忆文件</div>
+              <div className="mt-1 break-all text-[11px] leading-5 text-[var(--color-text)]">
+                {fileMemorySnapshot.longTermPath}
+              </div>
+              <div className="mt-1 text-[10px] text-[var(--color-text-secondary)]">
+                {fileMemorySnapshot.longTermContent.trim()
+                  ? `${fileMemorySnapshot.longTermContent.split("\n").filter((line) => line.trim().startsWith("- ")).length} 条已落盘`
+                  : "当前还没有正式长期记忆写入文件"}
+              </div>
+            </div>
+            <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/55 p-2">
+              <div className="text-[10px] text-[var(--color-text-secondary)]">今日日志文件</div>
+              <div className="mt-1 break-all text-[11px] leading-5 text-[var(--color-text)]">
+                {fileMemorySnapshot.todayPath}
+              </div>
+              <div className="mt-1 text-[10px] text-[var(--color-text-secondary)]">
+                {fileMemorySnapshot.todayContent.trim()
+                  ? `${fileMemorySnapshot.todayContent.split(/^##\s/m).filter(Boolean).length} 条今日沉淀`
+                  : "今天还没有写入 daily memory"}
+              </div>
+            </div>
+          </div>
+          {fileMemorySnapshot.recentDailyFiles.length > 0 && (
+            <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/55 p-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-[10px] text-[var(--color-text-secondary)]">最近 daily memory</div>
+                <button
+                  type="button"
+                  onClick={() => setShowFileMemoryPreview((prev) => !prev)}
+                  className="rounded-full border border-[var(--color-border)] px-2 py-1 text-[10px] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg)]"
+                >
+                  {showFileMemoryPreview ? "收起预览" : "展开预览"}
+                </button>
+              </div>
+              <div className="mt-1 flex flex-wrap gap-1.5">
+                {fileMemorySnapshot.recentDailyFiles.map((file) => (
+                  <span
+                    key={file.path}
+                    className="rounded-full border border-[var(--color-border)] px-2 py-1 text-[10px] text-[var(--color-text-secondary)]"
+                    title={file.path}
+                  >
+                    {file.name}
+                  </span>
+                ))}
+              </div>
+              {showFileMemoryPreview && (
+                <div className="mt-2 grid grid-cols-1 gap-2">
+                  <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] p-2">
+                    <div className="text-[10px] text-[var(--color-text-secondary)]">MEMORY.md 预览</div>
+                    <div className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap text-[11px] leading-5 text-[var(--color-text)]">
+                      {fileMemorySnapshot.longTermContent.trim() || "当前为空"}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] p-2">
+                    <div className="text-[10px] text-[var(--color-text-secondary)]">
+                      {fileMemorySnapshot.recentDailyFiles[0]?.name ?? "今日"} 预览
+                    </div>
+                    <div className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap text-[11px] leading-5 text-[var(--color-text)]">
+                      {fileMemorySnapshot.recentDailyFiles[0]?.content?.trim()
+                        || fileMemorySnapshot.todayContent.trim()
+                        || "当前为空"}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {showStats && (
         <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] p-3">

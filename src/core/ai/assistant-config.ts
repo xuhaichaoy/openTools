@@ -27,6 +27,7 @@ const NATIVE_TOOL_PATTERNS = [
 const MEMORY_TOOL_PATTERNS = [
   /^save_user_memory$/,
   /^memory_search$/,
+  /^memory_get$/,
   /^memory_save$/,
 ];
 

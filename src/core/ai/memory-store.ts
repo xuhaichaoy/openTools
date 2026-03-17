@@ -1,6 +1,11 @@
 import { JsonCollection, SyncableCollection, type SyncMeta } from "@/core/database/index";
 import { invoke } from "@tauri-apps/api/core";
 import { summarizeAISessionRuntimeText } from "./ai-session-runtime";
+import {
+  queueAppendDailyMemoryEntry,
+  queueSyncConfirmedMemoriesToFile,
+  readRecentDailyMemoryText,
+} from "./file-memory";
 import { estimateTokens } from "./token-utils";
 
 export type AIMemoryKind = "preference" | "fact" | "goal" | "constraint" | "project_context" | "conversation_summary" | "session_note" | "knowledge" | "behavior";
@@ -163,6 +168,15 @@ export const aiMemoryDb = new SyncableCollection<AIMemoryItem>("ai_memory");
 export const aiMemoryCandidateDb = new JsonCollection<AIMemoryCandidate>(
   "ai_memory_candidates",
 );
+
+async function syncConfirmedMemoriesToFile(): Promise<void> {
+  const all = await aiMemoryDb.getAll();
+  await queueSyncConfirmedMemoriesToFile(all.filter((item) => !item.deleted));
+}
+
+function scheduleConfirmedMemoriesFileSync(): void {
+  void syncConfirmedMemoriesToFile().catch(() => undefined);
+}
 
 function createId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -766,6 +780,7 @@ export async function deleteMemory(memoryId: string): Promise<void> {
     archived_reason: "deleted",
   });
   invalidateMemoryVectorIndex();
+  scheduleConfirmedMemoriesFileSync();
 }
 
 async function applyReplacementAudit(
@@ -798,6 +813,7 @@ async function applyReplacementAudit(
         replaced_by_memory_id: savedMemoryId,
       })),
   );
+  scheduleConfirmedMemoriesFileSync();
 }
 
 export async function confirmMemoryCandidate(
@@ -939,7 +955,10 @@ export async function saveConfirmedMemory(
         archived_reason: undefined,
         replaced_by_memory_id: undefined,
       })) ?? null;
-    if (updated) invalidateMemoryVectorIndex();
+    if (updated) {
+      invalidateMemoryVectorIndex();
+      scheduleConfirmedMemoriesFileSync();
+    }
     return updated;
   }
 
@@ -971,6 +990,7 @@ export async function saveConfirmedMemory(
     supersedes_memory_ids: [],
   });
   invalidateMemoryVectorIndex();
+  scheduleConfirmedMemoriesFileSync();
   return created;
 }
 
@@ -1274,6 +1294,15 @@ export async function saveSessionMemoryNote(
   if (saved) {
     await trimExcessSessionNotes(scope, options);
     invalidateMemoryVectorIndex();
+    void queueAppendDailyMemoryEntry({
+      content: saved.content,
+      kind: saved.kind,
+      source: options?.source ?? "assistant",
+      scope,
+      conversationId: options?.conversationId,
+      workspaceId: options?.workspaceId,
+      timestamp: saved.updated_at,
+    }).catch(() => undefined);
   }
 
   return saved;
@@ -1340,7 +1369,10 @@ export async function addMemoryFromAgent(
         replaced_by_memory_id: undefined,
       })) ?? null
     );
-    if (updated) invalidateMemoryVectorIndex();
+    if (updated) {
+      invalidateMemoryVectorIndex();
+      scheduleConfirmedMemoriesFileSync();
+    }
     return updated;
   }
 
@@ -1372,6 +1404,7 @@ export async function addMemoryFromAgent(
     supersedes_memory_ids: [],
   });
   invalidateMemoryVectorIndex();
+  scheduleConfirmedMemoriesFileSync();
   return created;
 }
 
@@ -1536,7 +1569,10 @@ export async function updateMemoryContent(
       updated_at: Date.now(),
     })) ?? null
   );
-  if (updated) invalidateMemoryVectorIndex();
+  if (updated) {
+    invalidateMemoryVectorIndex();
+    scheduleConfirmedMemoriesFileSync();
+  }
   return updated;
 }
 
@@ -1783,6 +1819,70 @@ export async function llmExtractMemories(
   }
 }
 
+export async function organizeRecentFileMemories(days: number = 5): Promise<AIMemoryCandidate[]> {
+  const recentText = (await readRecentDailyMemoryText(days)).trim();
+  if (!recentText) return [];
+
+  const truncated = recentText.slice(0, 4000);
+
+  try {
+    const { getMToolsAI } = await import("@/core/ai/mtools-ai");
+    const ai = getMToolsAI();
+    const prompt = MEMORY_EXTRACTION_PROMPT.replace("{conversation}", truncated);
+
+    const result = await ai.chat({
+      messages: [
+        {
+          role: "system",
+          content: "You extract structured long-term memory facts from recent daily notes. Respond with valid JSON only.",
+        },
+        { role: "user", content: prompt },
+      ],
+      temperature: 0.1,
+      skipTools: true,
+      skipMemory: true,
+    });
+
+    const parsed = parseLLMExtractedFacts(result.content);
+    if (!parsed?.facts?.length) return [];
+
+    const candidates: AIMemoryCandidate[] = [];
+    for (const fact of parsed.facts) {
+      if (fact.confidence < FACT_CONFIDENCE_THRESHOLD) continue;
+      const kind = normalizeLLMExtractedKind(fact.category, fact.content);
+      if (shouldSkipLLMExtractedFact(fact.content, kind)) continue;
+      const candidate = buildMemoryCandidate(fact.content, {
+        kind,
+        source: "assistant",
+        sourceMode: "system",
+        reason: "从最近的 daily memory 中整理出的长期记忆候选",
+        confidence: clamp(fact.confidence, 0, 1),
+        evidence: truncated,
+        reviewSurface: "background",
+      });
+      if (candidate) {
+        candidates.push(candidate);
+      }
+    }
+
+    if (candidates.length > 0) {
+      await appendMemoryCandidates(candidates);
+    }
+    return candidates;
+  } catch {
+    const fallback = extractMemoryCandidates(truncated, {
+      source: "assistant",
+      sourceMode: "system",
+      reason: "从最近的 daily memory 中整理出的长期记忆候选",
+      evidence: truncated,
+    });
+    if (fallback.length > 0) {
+      await appendMemoryCandidates(fallback);
+    }
+    return fallback;
+  }
+}
+
 function fallbackExtract(
   text: string,
   opts?: {
@@ -1821,6 +1921,7 @@ export async function mergeMemoryCandidatesIntoStore(
   let added = 0;
   let updated = 0;
   let skipped = 0;
+  let changed = false;
 
   for (const candidate of candidates) {
     const sanitized = sanitizeCandidateStrict(candidate.content);
@@ -1852,6 +1953,7 @@ export async function mergeMemoryCandidatesIntoStore(
         });
         updated++;
         invalidateMemoryVectorIndex();
+        changed = true;
       } else {
         skipped++;
       }
@@ -1882,6 +1984,7 @@ export async function mergeMemoryCandidatesIntoStore(
       });
       added++;
       invalidateMemoryVectorIndex();
+      changed = true;
     }
   }
 
@@ -1900,7 +2003,12 @@ export async function mergeMemoryCandidatesIntoStore(
         archived_reason: "limit_trimmed",
       });
       invalidateMemoryVectorIndex();
+      changed = true;
     }
+  }
+
+  if (changed) {
+    scheduleConfirmedMemoriesFileSync();
   }
 
   return { added, updated, skipped };

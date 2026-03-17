@@ -31,6 +31,7 @@ import { AgentHistoryDrawer } from "./components/AgentHistoryDrawer";
 import { AgentTaskTimeline } from "./components/AgentTaskTimeline";
 import { AgentHeaderBar } from "./components/AgentHeaderBar";
 import { AgentFollowUpDock } from "./components/AgentFollowUpDock";
+import { AgentPromptContextCard } from "./components/AgentPromptContextCard";
 import { AgentSessionContextStrip } from "./components/AgentSessionContextStrip";
 import { useAgentExecution } from "./hooks/use-agent-execution";
 import { useInputAttachments } from "@/hooks/use-input-attachments";
@@ -45,6 +46,10 @@ import {
   buildAgentSessionReview,
   deriveAgentSessionFiles,
 } from "./core/session-insights";
+import {
+  buildAgentPromptContextSnapshot,
+  type AgentPromptContextSnapshot,
+} from "./core/prompt-context";
 import {
   type ExecutionWaitingStage,
   type RunningPhase,
@@ -133,6 +138,8 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       useState<ScheduledFilterMode>("all");
     const [scheduledSortMode, setScheduledSortMode] =
       useState<ScheduledSortMode>("next_run_asc");
+    const [latestPromptContextSnapshot, setLatestPromptContextSnapshot] =
+      useState<AgentPromptContextSnapshot | null>(null);
     const [codingMode, setCodingMode] = useState(
       () => loadAgentSettings().codingMode,
     );
@@ -366,6 +373,7 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       },
       resetPerRunState,
       notifyToolCalled,
+      onPromptContextSnapshot: setLatestPromptContextSnapshot,
     });
 
     const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
@@ -441,6 +449,52 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
     const autoExecutionModeLabel = effectiveRunProfile.autoDetected
       ? describeCodingExecutionProfile(effectiveRunProfile.profile)
       : null;
+    const effectivePromptContextSnapshot = useMemo(() => {
+      if (
+        latestPromptContextSnapshot
+        && latestPromptContextSnapshot.sessionId
+        && latestPromptContextSnapshot.sessionId === currentSessionId
+      ) {
+        return latestPromptContextSnapshot;
+      }
+
+      const hasDraftContext = Boolean(
+        currentSession
+        || input.trim()
+        || attachmentSummary.trim()
+        || fileContextBlock.trim()
+        || pendingSourceHandoff,
+      );
+      if (!hasDraftContext) {
+        return null;
+      }
+
+      return buildAgentPromptContextSnapshot({
+        session: currentSession,
+        query: input,
+        runProfile: effectiveRunProfile.profile.codingMode
+          ? effectiveRunProfile.profile
+          : undefined,
+        attachmentSummary: attachmentSummary || undefined,
+        systemHint: fileContextBlock || undefined,
+        sourceHandoff: pendingSourceHandoff ?? currentSession?.sourceHandoff,
+        files: sessionFiles,
+        contextLines: sessionContextLines,
+        historyContextMessageCount: currentSession?.compaction?.summary ? 2 : 0,
+        knowledgeContextMessageCount: 0,
+      });
+    }, [
+      latestPromptContextSnapshot,
+      currentSessionId,
+      currentSession,
+      input,
+      attachmentSummary,
+      fileContextBlock,
+      pendingSourceHandoff,
+      effectiveRunProfile.profile,
+      sessionFiles,
+      sessionContextLines,
+    ]);
 
     useEffect(() => {
       saveAgentSettings({ codingMode, largeProjectMode, openClawMode });
@@ -651,6 +705,7 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
             sessionReview={sessionReview}
             sessionFiles={sessionFiles}
             sessionContextLines={sessionContextLines}
+            promptContextSnapshot={effectivePromptContextSnapshot}
             sessionCompactionSummary={currentSession?.compaction?.summary}
             availableTools={availableTools}
             scheduledStats={scheduledStats}
@@ -708,6 +763,10 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
                 forkSession(currentSession.id, { visibleOnly: true });
               }}
             />
+          )}
+
+          {effectivePromptContextSnapshot && (
+            <AgentPromptContextCard snapshot={effectivePromptContextSnapshot} />
           )}
 
           <AgentTaskTimeline

@@ -3,7 +3,7 @@ import type { ActorMiddleware, ActorRunContext } from "../actor-middleware";
 
 const COMM_TOOL_NAMES = new Set([
   "spawn_task", "send_message", "agents",
-  "memory_search", "memory_save",
+  "memory_search", "memory_get", "memory_save",
   "session_history", "session_list",
 ]);
 

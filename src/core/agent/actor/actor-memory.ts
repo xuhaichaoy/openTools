@@ -20,12 +20,16 @@ import {
   buildAssistantMemoryPromptForQuery,
 } from "@/core/ai/assistant-memory";
 import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
+import {
+  readFileMemorySnippet,
+  searchFileMemories,
+} from "@/core/ai/file-memory";
 
 const MAX_SEARCH_RESULTS = 8;
 const MAX_EXTRACT_CONTENT_LENGTH = 2000;
 
 /**
- * 创建 Actor 专用的记忆工具（memory_search / memory_save）。
+ * 创建 Actor 专用的记忆工具（memory_search / memory_get / memory_save）。
  * 让 Agent 能主动检索和存储记忆，对标 OpenClaw 的 memory_search / memory_get。
  */
 export function createActorMemoryTools(actorId: string, workspaceId?: string): AgentTool[] {
@@ -33,9 +37,9 @@ export function createActorMemoryTools(actorId: string, workspaceId?: string): A
     {
       name: "memory_search",
       description:
-        "搜索用户的长期记忆（偏好、事实、约束、目标等）。" +
+        "搜索 MEMORY.md 与 memory/*.md 中的长期记忆和 daily memory。" +
         "在回答涉及用户偏好、历史决策、待办事项、项目上下文等问题前，应先调用此工具检索。" +
-        "返回匹配的记忆条目列表。",
+        "如果命中的是文件片段，接着用 memory_get 按行读取需要的上下文。",
       parameters: {
         query: {
           type: "string",
@@ -65,6 +69,26 @@ export function createActorMemoryTools(actorId: string, workspaceId?: string): A
           return {
             results: visible.slice(0, maxResults).map(formatMemoryItem),
             total: visible.length,
+            mode: "structured",
+          };
+        }
+
+        const fileResults = await searchFileMemories(query, {
+          topK: maxResults,
+        }).catch(() => []);
+        if (fileResults.length > 0) {
+          return {
+            results: fileResults.map((result) => ({
+              path: result.path,
+              snippet: result.snippet,
+              start_line: result.startLine,
+              end_line: result.endLine,
+              citation: result.citation,
+              score: result.score,
+              source: result.source,
+            })),
+            total: fileResults.length,
+            mode: "file",
           };
         }
 
@@ -76,6 +100,8 @@ export function createActorMemoryTools(actorId: string, workspaceId?: string): A
           return {
             results: results.map(formatMemoryItem),
             total: results.length,
+            mode: "structured_fallback",
+            note: "文件型记忆未直接命中，已回退到结构化记忆召回。",
           };
         } catch {
           const fallback = await recallMemories(query, {
@@ -85,7 +111,56 @@ export function createActorMemoryTools(actorId: string, workspaceId?: string): A
           return {
             results: fallback.map(formatMemoryItem),
             total: fallback.length,
-            note: "使用关键词匹配（向量搜索不可用）",
+            mode: "keyword_fallback",
+            note: "文件型记忆未命中，且向量召回不可用，已退回关键词匹配。",
+          };
+        }
+      },
+    },
+    {
+      name: "memory_get",
+      description:
+        "按路径和行号读取 MEMORY.md 或 memory/*.md 中的精确片段。" +
+        "通常在 memory_search 命中之后使用，避免一次把整份记忆文件塞进上下文。",
+      parameters: {
+        path: {
+          type: "string",
+          description: "memory_search 返回的 path，例如 MEMORY.md 或 memory/2026-03-17.md",
+          required: true,
+        },
+        from: {
+          type: "number",
+          description: "起始行号，默认 1",
+          required: false,
+        },
+        lines: {
+          type: "number",
+          description: "读取行数，默认读取到文件结尾，最多 200 行",
+          required: false,
+        },
+      },
+      readonly: true,
+      execute: async (params) => {
+        try {
+          const result = await readFileMemorySnippet({
+            path: String(params.path ?? ""),
+            from: typeof params.from === "number" ? params.from : undefined,
+            lines: typeof params.lines === "number" ? params.lines : undefined,
+          });
+          return {
+            path: result.path,
+            text: result.text,
+            start_line: result.startLine,
+            end_line: result.endLine,
+            citation:
+              result.startLine === result.endLine
+                ? `${result.path}#L${result.startLine}`
+                : `${result.path}#L${result.startLine}-L${result.endLine}`,
+          };
+        } catch (error) {
+          return {
+            path: String(params.path ?? ""),
+            error: error instanceof Error ? error.message : String(error),
           };
         }
       },
