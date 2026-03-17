@@ -465,38 +465,41 @@ function planAutomaticStructuredMemorySaves(
     "coding_style",
   ];
 
-  return slots
-    .filter((slot) => AUTO_CONFIRM_MEMORY_SLOTS.has(slot))
-    .map((slot) => {
-      const content = buildStructuredMemoryContent(slot, normalized);
-      if (!content) return null;
-      if (slot === "coding_style" && !CODING_STYLE_SLOT_HINTS.test(normalized)) {
-        return null;
-      }
+  const plans: AutomaticStructuredMemoryPlan[] = [];
 
-      const kind = slot === "home_location"
-        ? "fact"
-        : inferredKind === "constraint"
-          ? "constraint"
-          : "preference";
-      const scope = inferScope(normalized, kind, opts?.conversationId, opts?.workspaceId);
+  for (const slot of slots) {
+    if (!AUTO_CONFIRM_MEMORY_SLOTS.has(slot)) continue;
 
-      return {
-        slot,
-        content,
-        kind,
-        scope,
-        conversationId: opts?.conversationId,
-        workspaceId: opts?.workspaceId,
-        tags: uniqueStrings([
-          `slot:${slot}`,
-          slot === "home_location" ? "location" : undefined,
-          "structured_memory",
-          "auto_confirmed",
-        ]),
-      } satisfies AutomaticStructuredMemoryPlan;
-    })
-    .filter((plan): plan is AutomaticStructuredMemoryPlan => !!plan);
+    const content = buildStructuredMemoryContent(slot, normalized);
+    if (!content) continue;
+    if (slot === "coding_style" && !CODING_STYLE_SLOT_HINTS.test(normalized)) {
+      continue;
+    }
+
+    const kind: AutomaticStructuredMemoryPlan["kind"] = slot === "home_location"
+      ? "fact"
+      : inferredKind === "constraint"
+        ? "constraint"
+        : "preference";
+    const scope = inferScope(normalized, kind, opts?.conversationId, opts?.workspaceId);
+
+    plans.push({
+      slot,
+      content,
+      kind,
+      scope,
+      conversationId: opts?.conversationId,
+      workspaceId: opts?.workspaceId,
+      tags: uniqueStrings([
+        `slot:${slot}`,
+        slot === "home_location" ? "location" : undefined,
+        "structured_memory",
+        "auto_confirmed",
+      ]),
+    });
+  }
+
+  return plans;
 }
 
 export function planAutomaticStructuredMemorySave(

@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { LoginModal } from "@/components/auth/LoginModal";
 import { SyncManager } from "@/components/auth/SyncManager";
 import { ClusterFloatingIndicator } from "@/components/cluster/ClusterFloatingIndicator";
@@ -8,6 +9,9 @@ import { GlobalClusterPlanApprovalDialog } from "@/components/global/GlobalClust
 import { MainViewRouter } from "@/components/app/MainViewRouter";
 import { WindowResizeHandles } from "@/components/app/WindowResizeHandles";
 import { useAppStore } from "@/store/app-store";
+import { useAskUserStore } from "@/store/ask-user-store";
+import { useConfirmDialogStore } from "@/store/confirm-dialog-store";
+import { useClusterPlanApprovalStore } from "@/store/cluster-plan-approval-store";
 import { routeToAICenter } from "@/core/ai/ai-center-routing";
 
 import { registry } from "@/core/plugin-system/registry";
@@ -50,6 +54,20 @@ function MainApp() {
   } = useAppStore();
 
   const [contextText, setContextText] = useState("");
+  const [windowFocused, setWindowFocused] = useState(() =>
+    typeof document !== "undefined"
+      ? document.visibilityState === "visible" && document.hasFocus()
+      : true,
+  );
+  const askDialog = useAskUserStore((s) => s.dialog);
+  const confirmPendingCount = useConfirmDialogStore(
+    (s) => (s.active ? 1 : 0) + s.queue.length,
+  );
+  const clusterPendingCount = useClusterPlanApprovalStore(
+    (s) => (s.active ? 1 : 0) + s.queue.length,
+  );
+  const pendingAttentionCount = (askDialog ? 1 : 0) + confirmPendingCount + clusterPendingCount;
+  const trayAttentionCount = windowFocused ? 0 : pendingAttentionCount;
 
   // ── Extracted hooks ──
   const { handleDirectColorPicker } = useColorPicker();
@@ -142,6 +160,28 @@ function MainApp() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [view, viewDepth, openLauncher, popView, resetSearchState]);
+
+  useEffect(() => {
+    const syncWindowFocus = () => {
+      setWindowFocused(document.visibilityState === "visible" && document.hasFocus());
+    };
+
+    syncWindowFocus();
+    window.addEventListener("focus", syncWindowFocus);
+    window.addEventListener("blur", syncWindowFocus);
+    document.addEventListener("visibilitychange", syncWindowFocus);
+    return () => {
+      window.removeEventListener("focus", syncWindowFocus);
+      window.removeEventListener("blur", syncWindowFocus);
+      document.removeEventListener("visibilitychange", syncWindowFocus);
+    };
+  }, []);
+
+  useEffect(() => {
+    invoke("set_tray_attention_count", {
+      count: trayAttentionCount,
+    }).catch(() => undefined);
+  }, [trayAttentionCount]);
 
   return (
     <div className="relative w-full h-full flex flex-col bg-[var(--color-bg)] text-[var(--color-text)] overflow-hidden rounded-xl border border-[var(--color-border)] shadow-2xl">

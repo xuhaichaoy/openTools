@@ -26,6 +26,12 @@ const hoisted = vi.hoisted(() => ({
   latestHistorySteps: [] as Array<{ type: string; content: string; timestamp: number }>,
   latestOnStep: null as null | ((step: { type: string; content: string; timestamp: number; streaming?: boolean }) => void),
   runMode: "success" as "success" | "abort" | "timeout" | "tool_round",
+  modelSupportsImageInput: true,
+  latestRunQuery: "",
+  runningStore: {
+    info: null as null | { sessionId: string; query: string; startedAt: number },
+    abortFn: null as null | (() => void),
+  },
 }));
 
 vi.mock("../core/react-agent", () => ({
@@ -42,6 +48,7 @@ vi.mock("../core/react-agent", () => ({
     }
 
     async run(_query: string, signal?: AbortSignal) {
+      hoisted.latestRunQuery = _query;
       if (hoisted.runMode === "abort") {
         throw new Error("Aborted");
       }
@@ -93,7 +100,31 @@ vi.mock("@/core/agent/fc-compatibility", () => ({
 
 vi.mock("@/store/ai-store", () => ({
   useAIStore: {
-    getState: () => ({ config: {} }),
+    getState: () => ({ config: { model: "mock-model", protocol: "openai" } }),
+  },
+}));
+
+vi.mock("@/core/ai/model-capabilities", () => ({
+  modelSupportsImageInput: () => hoisted.modelSupportsImageInput,
+}));
+
+vi.mock("@/store/agent-running-store", () => ({
+  useAgentRunningStore: {
+    getState: () => ({
+      info: hoisted.runningStore.info,
+      abortFn: hoisted.runningStore.abortFn,
+      start: (
+        info: { sessionId: string; query: string; startedAt: number },
+        abortFn?: () => void,
+      ) => {
+        hoisted.runningStore.info = info;
+        hoisted.runningStore.abortFn = abortFn ?? null;
+      },
+      stop: () => {
+        hoisted.runningStore.info = null;
+        hoisted.runningStore.abortFn = null;
+      },
+    }),
   },
 }));
 
@@ -171,9 +202,15 @@ describe("useAgentExecution", () => {
     hoisted.latestHistorySteps = [];
     hoisted.latestOnStep = null;
     hoisted.runMode = "success";
+    hoisted.modelSupportsImageInput = true;
+    hoisted.latestRunQuery = "";
     hoisted.fakeStoreState = {
       sessions: [],
       currentSessionId: null,
+    };
+    hoisted.runningStore = {
+      info: null,
+      abortFn: null,
     };
   });
 
@@ -259,6 +296,62 @@ describe("useAgentExecution", () => {
     expect(historyContents).not.toContain("CURRENT_ANSWER");
   });
 
+  it("injects an explicit text-only warning when images are attached but model lacks vision", async () => {
+    hoisted.modelSupportsImageInput = false;
+    hoisted.fakeStoreState = {
+      currentSessionId: "current",
+      sessions: [
+        {
+          id: "current",
+          createdAt: 1,
+          tasks: [],
+        },
+      ],
+    };
+    let hookValue: ReturnType<typeof useAgentExecution> | null = null;
+
+    act(() => {
+      root.render(
+        <HookHarness
+          onReady={(value) => {
+            hookValue = value;
+          }}
+          params={{
+            ai: {} as never,
+            setRunning: vi.fn(),
+            setRunningPhase: vi.fn(),
+            setExecutionWaitingStage: vi.fn(),
+            availableTools: [] as AgentTool[],
+            currentSessionId: "current",
+            createSession: vi.fn(() => "session-1"),
+            addTask: vi.fn(() => "task-1"),
+            updateTask: vi.fn(),
+            updateSession: vi.fn(),
+            forkSession: vi.fn(() => null),
+            inputRef: { current: document.createElement("textarea") },
+            scrollRef: {
+              current: {
+                scrollHeight: 100,
+                scrollTo: vi.fn(),
+              } as unknown as HTMLDivElement,
+            },
+            openDangerConfirm: vi.fn(async () => true),
+            resetPerRunState: null,
+          }}
+        />,
+      );
+    });
+
+    await act(async () => {
+      await hookValue!.executeAgentTask("根据图片实现页面", {
+        images: ["/tmp/mock.png"],
+      });
+    });
+
+    expect(hoisted.latestRunQuery).toContain("当前模型不支持直接识别图片内容");
+    expect(hoisted.latestRunQuery).toContain("不要假装自己看到了图片");
+  });
+
   it("marks task as cancelled when aborted by user", async () => {
     hoisted.runMode = "abort";
     hoisted.fakeStoreState = {
@@ -314,6 +407,65 @@ describe("useAgentExecution", () => {
     const lastCall = updateTask.mock.calls.at(-1);
     expect(lastCall?.[2]?.status).toBe("cancelled");
     expect(lastCall?.[2]?.answer).toContain("停止");
+  });
+
+  it("falls back to global running abort when local controller is gone", async () => {
+    const setRunning = vi.fn();
+    const setRunningPhase = vi.fn();
+    const setExecutionWaitingStage = vi.fn();
+    const globalAbort = vi.fn();
+    let hookValue: ReturnType<typeof useAgentExecution> | null = null;
+
+    hoisted.runningStore = {
+      info: {
+        sessionId: "target",
+        query: "query",
+        startedAt: Date.now(),
+      },
+      abortFn: globalAbort,
+    };
+
+    act(() => {
+      root.render(
+        <HookHarness
+          onReady={(value) => {
+            hookValue = value;
+          }}
+          params={{
+            ai: {} as never,
+            setRunning,
+            setRunningPhase,
+            setExecutionWaitingStage,
+            availableTools: [] as AgentTool[],
+            currentSessionId: "target",
+            createSession: vi.fn(() => "target"),
+            addTask: vi.fn(() => "task_abort"),
+            updateTask: vi.fn(),
+            updateSession: vi.fn(),
+            forkSession: vi.fn(() => null),
+            inputRef: { current: document.createElement("textarea") },
+            scrollRef: {
+              current: {
+                scrollHeight: 100,
+                scrollTo: vi.fn(),
+              } as unknown as HTMLDivElement,
+            },
+            openDangerConfirm: vi.fn(async () => true),
+            resetPerRunState: null,
+          }}
+        />,
+      );
+    });
+
+    act(() => {
+      hookValue!.stopExecution();
+    });
+
+    expect(globalAbort).toHaveBeenCalledTimes(1);
+    expect(setRunning).toHaveBeenCalledWith(false);
+    expect(setRunningPhase).toHaveBeenCalledWith(null);
+    expect(setExecutionWaitingStage).toHaveBeenCalledWith(null);
+    expect(hoisted.runningStore.abortFn).toBeNull();
   });
 
   it("does not overwrite final answer field during streaming answer steps", async () => {

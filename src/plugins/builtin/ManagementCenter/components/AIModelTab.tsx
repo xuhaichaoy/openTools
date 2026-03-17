@@ -2,7 +2,9 @@ import React, { useState, useEffect, lazy, Suspense, type CSSProperties } from "
 import { invoke } from "@tauri-apps/api/core";
 import { useAIStore } from "@/store/ai-store";
 import { useRAGStore } from "@/store/rag-store";
+import { useAppStore, type AICenterMode } from "@/store/app-store";
 import type { OwnKeyModelConfig } from "@/core/ai/types";
+import { buildAICenterModelScope } from "@/core/ai/ai-center-model-scope";
 import {
   saveAILocalConfigOverrides,
   type AILocalConfigOverrides,
@@ -15,6 +17,7 @@ import {
   type AIMemoryItem,
 } from "@/core/ai/memory-store";
 import { api } from "@/core/api/client";
+import { primeTeamModelCache } from "@/core/ai/router";
 import { handleError } from "@/core/errors";
 import { maskApiKey } from "@/utils/mask";
 import { APP_NAME } from "@/config/app-branding";
@@ -115,6 +118,7 @@ interface ContainerRuntimeAvailability {
 
 type AIModelSource = "own_key" | "team" | "platform";
 type AIConfigPanel = "source" | "assistant" | "knowledge" | "channels";
+const AI_CENTER_MODES: AICenterMode[] = ["ask", "agent", "cluster", "dialog"];
 
 function toTime(value?: string | null): number {
   if (!value) return 0;
@@ -159,6 +163,7 @@ function pickDefaultTeamId(
 export function AIModelTab() {
   const { config, setConfig, saveConfig, ownKeys, loadOwnKeys, saveOwnKeys, selectOwnKeyModel } =
     useAIStore();
+  const setAICenterModelScope = useAppStore((s) => s.setAICenterModelScope);
   const [savedMemories, setSavedMemories] = useState<AIMemoryItem[]>([]);
   const [pendingMemoryCount, setPendingMemoryCount] = useState(0);
   const [loadingMemories, setLoadingMemories] = useState(false);
@@ -228,15 +233,17 @@ export function AIModelTab() {
     void refreshContainerAvailability();
   }, [config.agent_runtime_mode]);
 
-  const handleSourceChange = (source: AIModelSource) => {
-    const newConfig = { ...config, source };
-    setConfig(newConfig);
-    saveConfig(newConfig);
+  const syncAllModeScopes = (nextConfig: typeof config) => {
+    const scope = buildAICenterModelScope(nextConfig);
+    for (const mode of AI_CENTER_MODES) {
+      setAICenterModelScope(mode, scope);
+    }
   };
 
   const updateAndSave = (
     partial: Partial<typeof config>,
     localOverrides?: AILocalConfigOverrides,
+    options?: { syncModelScopes?: boolean },
   ) => {
     if (localOverrides) {
       saveAILocalConfigOverrides(localOverrides);
@@ -244,6 +251,13 @@ export function AIModelTab() {
     const newConfig = { ...config, ...partial };
     setConfig(newConfig);
     saveConfig(newConfig);
+    if (options?.syncModelScopes) {
+      syncAllModeScopes(newConfig);
+    }
+  };
+
+  const handleSourceChange = (source: AIModelSource) => {
+    updateAndSave({ source }, undefined, { syncModelScopes: true });
   };
 
   const sources: {
@@ -404,8 +418,18 @@ export function AIModelTab() {
           {config.source === "team" && (
             <TeamSourceSection
               teamId={config.team_id}
+              teamConfigId={config.team_config_id}
+              model={config.model}
+              protocol={config.protocol}
               onTeamChange={(teamId) =>
-                updateAndSave({ team_id: teamId, team_config_id: undefined })
+                updateAndSave(
+                  { team_id: teamId, team_config_id: undefined },
+                  undefined,
+                  { syncModelScopes: true },
+                )
+              }
+              onTeamModelResolved={(partial) =>
+                updateAndSave(partial, undefined, { syncModelScopes: true })
               }
             />
           )}
@@ -1548,13 +1572,26 @@ function OwnKeySection({
 
 function TeamSourceSection({
   teamId,
+  teamConfigId,
+  model,
+  protocol,
   onTeamChange,
+  onTeamModelResolved,
 }: {
   teamId?: string;
+  teamConfigId?: string;
+  model?: string;
+  protocol?: "openai" | "anthropic";
   onTeamChange: (teamId: string) => void;
+  onTeamModelResolved: (partial: {
+    team_config_id: string;
+    model: string;
+    protocol: "openai" | "anthropic";
+  }) => void;
 }) {
   const { teams, loadTeams, reloadTeams, loaded, loadError } = useTeamStore();
   const [models, setModels] = useState<TeamModelInfo[]>([]);
+  const [modelsTeamId, setModelsTeamId] = useState<string | null>(null);
   const [loadingModels, setLoadingModels] = useState(false);
   const [reloading, setReloading] = useState(false);
 
@@ -1581,20 +1618,31 @@ function TeamSourceSection({
 
   // 加载团队模型
   useEffect(() => {
-    if (!teamId) return;
+    if (!teamId) {
+      setModels([]);
+      setModelsTeamId(null);
+      setLoadingModels(false);
+      return;
+    }
     let cancelled = false;
+    setModels([]);
+    setModelsTeamId(null);
+    setLoadingModels(true);
 
     const loadTeamModels = async () => {
-      setLoadingModels(true);
       try {
         const res = await api.get<{ models: TeamModelInfo[] }>(
           `/teams/${teamId}/ai-models`,
         );
         if (!cancelled) {
-          setModels(res.models || []);
+          const nextModels = res.models || [];
+          primeTeamModelCache(teamId, nextModels);
+          setModelsTeamId(teamId);
+          setModels(nextModels);
         }
       } catch (err) {
         if (!cancelled) {
+          setModelsTeamId(teamId);
           handleError(err, { context: "获取团队模型" });
         }
       } finally {
@@ -1604,14 +1652,49 @@ function TeamSourceSection({
       }
     };
 
-    queueMicrotask(() => {
-      void loadTeamModels();
-    });
+    void loadTeamModels();
 
     return () => {
       cancelled = true;
     };
   }, [teamId]);
+
+  useEffect(() => {
+    if (!teamId || modelsTeamId !== teamId || loadingModels || models.length === 0) return;
+
+    const selected = teamConfigId
+      ? models.find((item) => item.config_id === teamConfigId)
+      : models.find((item) => item.model_name === model);
+    const fallback = selected || models[0];
+    if (!fallback) return;
+
+    const nextProtocol = (fallback.protocol || "openai") === "anthropic"
+      ? "anthropic"
+      : "openai";
+
+    if (
+      teamConfigId === fallback.config_id &&
+      model === fallback.model_name &&
+      (protocol || "openai") === nextProtocol
+    ) {
+      return;
+    }
+
+    onTeamModelResolved({
+      team_config_id: fallback.config_id,
+      model: fallback.model_name,
+      protocol: nextProtocol,
+    });
+  }, [
+    loadingModels,
+    model,
+    models,
+    onTeamModelResolved,
+    protocol,
+    teamConfigId,
+    teamId,
+    modelsTeamId,
+  ]);
 
   return (
     <div className="bg-[var(--color-bg)] rounded-xl p-[var(--space-compact-3)] border border-[var(--color-border)] space-y-[var(--space-compact-2)]">

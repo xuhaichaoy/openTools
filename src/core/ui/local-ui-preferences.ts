@@ -46,7 +46,7 @@ function roundSize(value: number): number {
 
 function sanitizeFontScale(value: number): FontScaleOption {
   const normalized = Number(value);
-  let closest = FONT_SCALE_OPTIONS[0];
+  let closest: FontScaleOption = FONT_SCALE_OPTIONS[0];
   let closestDistance = Number.POSITIVE_INFINITY;
 
   for (const option of FONT_SCALE_OPTIONS) {

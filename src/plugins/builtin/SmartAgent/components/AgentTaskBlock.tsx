@@ -152,6 +152,37 @@ function summarizeStep(step?: AgentTask["steps"][number], maxLen = 56) {
   return summarizeStepText(raw, maxLen);
 }
 
+function splitTaskQueryDisplay(query: string): {
+  mainText: string;
+  attachmentMeta: string | null;
+} {
+  const normalized = query.replace(/\r\n/g, "\n").trim();
+  if (!normalized) {
+    return { mainText: "", attachmentMeta: null };
+  }
+
+  const marker = "\n\n已附：";
+  const markerIndex = normalized.indexOf(marker);
+  if (markerIndex >= 0) {
+    return {
+      mainText: normalized.slice(0, markerIndex).trim(),
+      attachmentMeta: normalized.slice(markerIndex + 2).trim(),
+    };
+  }
+
+  if (normalized.startsWith("已附：")) {
+    return {
+      mainText: "",
+      attachmentMeta: normalized,
+    };
+  }
+
+  return {
+    mainText: normalized,
+    attachmentMeta: null,
+  };
+}
+
 function AgentTaskBlockInner({
   task,
   taskIdx,
@@ -180,6 +211,7 @@ function AgentTaskBlockInner({
     (isRunningTask ? "running" : recoveredStatus) || (task.answer ? "success" : "pending");
   const shouldCollapseProcess = processCollapsed && effectiveStatus !== "running";
   const lastStep = task.steps[task.steps.length - 1];
+  const { mainText, attachmentMeta } = splitTaskQueryDisplay(task.query);
 
   const statusClassMap: Record<string, string> = {
     success: "text-[var(--color-text-secondary)] bg-[var(--color-bg-secondary)]/75",
@@ -222,7 +254,7 @@ function AgentTaskBlockInner({
 
   return (
     <div className="space-y-1.5">
-      <div className="rounded-lg bg-sky-500/[0.06] px-2.5 py-2">
+      <div className="rounded-2xl border border-[var(--color-border)] bg-linear-to-b from-sky-500/[0.05] to-transparent px-3 py-2.5 shadow-[0_1px_0_rgba(255,255,255,0.5)_inset]">
         <div className="flex items-center gap-2">
           <span className="text-[11px] text-sky-700 font-semibold shrink-0">
             任务 {taskIdx + 1}
@@ -263,16 +295,23 @@ function AgentTaskBlockInner({
             </button>
           </div>
         </div>
-        <p className="text-[15px] mt-1 leading-snug break-words text-[var(--color-text)]">
-          {task.query}
-        </p>
+        {mainText ? (
+          <p className="text-[16px] mt-1.5 leading-snug break-words whitespace-pre-wrap text-[var(--color-text)]">
+            {mainText}
+          </p>
+        ) : null}
+        {attachmentMeta ? (
+          <div className="mt-2 inline-flex max-w-full items-center rounded-full border border-[var(--color-border)] bg-[var(--color-bg)]/85 px-2.5 py-1 text-[11px] text-[var(--color-text-secondary)] break-all">
+            {attachmentMeta}
+          </div>
+        ) : null}
         {task.images && task.images.length > 0 && (
-          <div className="flex flex-wrap gap-2 mt-2">
+          <div className="flex flex-wrap gap-2 mt-2.5">
             {task.images.map((img) => (
               <ChatImage
                 key={img}
                 path={img}
-                className="w-16 h-16 object-cover rounded-md border border-[var(--color-border)] cursor-pointer hover:opacity-80 transition-opacity"
+                className="w-14 h-14 object-cover rounded-xl border border-[var(--color-border)] cursor-pointer hover:opacity-80 transition-opacity"
                 onClick={(blobUrl) => setPreviewImage(blobUrl)}
               />
             ))}
@@ -283,7 +322,7 @@ function AgentTaskBlockInner({
       {task.steps.length > 0 && effectiveStatus !== "running" && (
         <button
           onClick={handleToggleProcess}
-          className="w-full rounded-md bg-[var(--color-bg-secondary)]/45 px-2 py-1 text-left flex items-center gap-2"
+          className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)]/85 px-2.5 py-1.5 text-left flex items-center gap-2"
         >
           {shouldCollapseProcess ? (
             <ChevronRight className="w-3.5 h-3.5 text-[var(--color-text-secondary)]" />
@@ -300,22 +339,22 @@ function AgentTaskBlockInner({
       )}
 
       {task.steps.length > 0 && !shouldCollapseProcess && (
-        <div className="space-y-1.5">
+        <div className="space-y-1.5 rounded-2xl border border-[var(--color-border)]/80 bg-[var(--color-bg-secondary)]/30 p-2">
           {task.steps.map((step, stepIdx) => {
             const stepKey = `${task.id}-${stepIdx}`;
             const isError = step.type === "error";
             return (
               <div
                 key={stepKey}
-                className={`rounded-md transition-colors ${
+                className={`rounded-xl transition-colors ${
                   isError
                     ? "bg-red-500/[0.06]"
-                    : "bg-[var(--color-bg-secondary)]/55"
+                    : "bg-[var(--color-bg)]/85"
                 }`}
               >
                 <button
                   onClick={() => onToggleStep(stepKey)}
-                  className="w-full flex items-center gap-2 p-1.5 text-left"
+                  className="w-full flex items-center gap-2 p-2 text-left"
                 >
                   {expandedSteps.has(stepKey) ? (
                     <ChevronDown className="w-3 h-3 shrink-0 text-[var(--color-text-secondary)]" />
@@ -345,7 +384,7 @@ function AgentTaskBlockInner({
       )}
 
       {effectiveStatus === "running" && (
-        <div className="rounded-md bg-[var(--color-bg-secondary)]/65 px-2 py-1 text-[var(--color-text-secondary)] space-y-0.5">
+        <div className="rounded-xl border border-emerald-500/15 bg-emerald-500/[0.05] px-2.5 py-2 text-[var(--color-text-secondary)] space-y-1">
           <div className="flex items-center gap-2">
             <Loader2 className="w-4 h-4 animate-spin text-[var(--color-text-secondary)]" />
             <span className="text-[12px]">

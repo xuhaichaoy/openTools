@@ -49,6 +49,7 @@ export interface AgentQueuedFollowUp {
   codingHint?: string;
   runProfile?: CodingExecutionProfile;
   sourceHandoff?: AICenterHandoff;
+  forceNewSession?: boolean;
   createdAt: number;
 }
 

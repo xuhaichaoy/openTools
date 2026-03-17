@@ -1,30 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-
-interface AgentSession {
-  id: string;
-  title: string;
-  createdAt: number;
-  tasks: Array<{
-    id: string;
-    query: string;
-    steps: Array<{
-      type: "action" | "observation";
-      content: string;
-      toolName?: string;
-      timestamp: number;
-    }>;
-    answer: string | null;
-    status: string;
-    createdAt: number;
-  }>;
-  followUpQueue?: unknown[];
-  compaction?: {
-    summary: string;
-    compactedTaskCount: number;
-    lastCompactedAt: number;
-    reason?: "task_count" | "step_count" | "context_recovery";
-  };
-}
+import type { AgentSession } from "@/store/agent-store";
 
 vi.mock("@/core/ai/ai-session-runtime", () => ({
   summarizeAISessionRuntimeText: (text: string, max = 120) =>
@@ -77,7 +52,7 @@ function makeSession(taskCount = 8): AgentSession {
         },
       ],
       answer: `任务 ${index + 1} 已完成`,
-      status: "success",
+      status: "success" as const,
       createdAt: index + 1,
     })),
     followUpQueue: [],

@@ -62,6 +62,7 @@ import {
 import { routeToAICenter } from "@/core/ai/ai-center-routing";
 import { buildDialogContextBreakdown, type DialogContextBreakdown } from "@/core/ai/dialog-context-breakdown";
 import { buildDialogWorkingSetSnapshot } from "@/core/ai/ai-working-set";
+import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
 import { KnowledgeGraph } from "@/core/knowledge/knowledge-graph";
 import { primeTeamModelCache } from "@/core/ai/router";
 import { queueAssistantMemoryCandidates } from "@/core/ai/assistant-memory";
@@ -103,11 +104,19 @@ import {
   type DialogRoutingMode,
 } from "@/core/agent/actor/dialog-presets";
 import { buildDialogContextSummary } from "@/core/agent/actor/dialog-session-summary";
+import type { TodoItem } from "@/core/agent/actor/middlewares";
 import type { AgentStep } from "@/plugins/builtin/SmartAgent/core/react-agent";
 import type { ClusterPlan } from "@/core/agent/cluster/types";
-import { useInputAttachments, FILE_ACCEPT_ALL, type InputAttachment } from "@/hooks/use-input-attachments";
+import {
+  useInputAttachments,
+  FILE_ACCEPT_ALL,
+  composeInputWithAttachmentSummary,
+  type InputAttachment,
+} from "@/hooks/use-input-attachments";
 import { AttachDropdown } from "@/components/ui/AttachDropdown";
 import { DialogFollowUpDock } from "./DialogFollowUpDock";
+import { useToast } from "@/components/ui/Toast";
+import { modelSupportsImageInput } from "@/core/ai/model-capabilities";
 
 const TaskCenterPanel = lazy(() => import("../TaskCenterPanel"));
 const KnowledgeGraphView = lazy(() => import("../KnowledgeGraphView"));
@@ -343,7 +352,7 @@ function ThinkingBlock({
 }) {
   const [expanded, setExpanded] = useState(false);
   const [now, setNow] = useState(Date.now());
-  const containerRef = useRef<HTMLPreElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!isStreaming) return;
@@ -2192,7 +2201,7 @@ function DialogWorkspaceDock({
   panel: WorkspacePanel;
   onPanelChange: (panel: WorkspacePanel) => void;
   actors: ActorSnapshot[];
-  actorTodos: Record<string, Array<{ id: string; title: string; status: string; priority: string; notes?: string; updatedAt: number }>>;
+  actorTodos: Record<string, TodoItem[]>;
   dialogHistory: DialogMessage[];
   artifacts: DialogArtifact[];
   sessionUploads: SessionUploadRecord[];
@@ -3235,6 +3244,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   );
   const pendingAICenterHandoff = useAppStore((s) => s.pendingAICenterHandoff);
   const config = useAIStore((s) => s.config);
+  const { toast } = useToast();
 
   const runningActors = useMemo(() => actors.filter((a) => a.status === "running"), [actors]);
   const confirmDangerousAction = useCallback(
@@ -3251,6 +3261,13 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     [openConfirmDialog],
   );
   const hasRunningActors = runningActors.length > 0;
+  const actorSupportsImageInput = useCallback((actorId?: string | null) => {
+    if (!actorId) {
+      return modelSupportsImageInput(config.model || "", config.protocol);
+    }
+    const actor = actors.find((item) => item.id === actorId);
+    return modelSupportsImageInput(actor?.modelOverride || config.model || "", config.protocol);
+  }, [actors, config.model, config.protocol]);
   const runningActivityKey = useMemo(
     () =>
       runningActors
@@ -3276,7 +3293,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     for (const actor of runningActors) {
       activeActorIds.add(actor.id);
       const taskId = actor.currentTask?.id ?? "";
-      const taskStartedAt = actor.currentTask?.startedAt;
+      const taskStartedAt = actor.currentTask?.steps[0]?.timestamp;
       const firstStepTimestamp = actor.currentTask?.steps[0]?.timestamp;
       const existing = actorThinkingAnchorRef.current[actor.id];
       if (!existing || existing.taskId !== taskId) {
@@ -3762,9 +3779,11 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
 
     let runtimePlan: DialogExecutionPlan | null = null;
     if (requirePlanApproval) {
+      const planningRoutingMode: DialogRoutingMode =
+        item.routingMode === "direct" ? "coordinator" : item.routingMode;
       const planBundle = buildDialogDispatchPlanBundle({
         actors,
-        routingMode: item.routingMode,
+        routingMode: planningRoutingMode,
         content: item.content,
         attachmentSummary: item.briefContent,
         attachmentPaths: item.attachmentPaths ?? [],
@@ -3902,7 +3921,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     if (!content && !hasImages) return;
 
     const briefContent = hasContext
-      ? (attachmentSummary ? `${attachmentSummary}\n${userText}` : userText)
+      ? composeInputWithAttachmentSummary(userText, attachmentSummary)
       : undefined;
     const committedDispatchInsight = inferDialogDispatchInsight({
       content,
@@ -3964,7 +3983,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       ? `${fileContextBlock}\n\n${cleanContent || userText}`
       : (cleanContent || content);
     const finalBrief = hasContext
-      ? (attachmentSummary ? `${attachmentSummary}\n${cleanContent || userText}` : (cleanContent || userText))
+      ? composeInputWithAttachmentSummary(cleanContent || userText, attachmentSummary)
       : undefined;
     const planAttachmentSummary = finalBrief ?? attachmentSummary ?? undefined;
     const isSteerCommand = Boolean(targetId && finalContent.startsWith("!steer "));
@@ -3984,6 +4003,31 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       ? routeTask(finalContent, dispatchInsight.preferredCapabilities)
       : [];
     const selectedSmartRoute = smartRoutes.length > 0 ? smartRoutes[0] : null;
+
+    if (hasImages) {
+      const roomHasVisualModel = actors.some((actor) => actorSupportsImageInput(actor.id));
+      const targetSupportsImages = targetId ? actorSupportsImageInput(targetId) : null;
+      const smartRouteSupportsImages = selectedSmartRoute
+        ? actorSupportsImageInput(selectedSmartRoute.agentId)
+        : null;
+
+      if (targetId && targetSupportsImages === false) {
+        toast(
+          "warning",
+          "当前选中的 Dialog Agent 不支持图片识别，本次图片内容可能无法被正确理解；如需看图，请切换到支持视觉输入的模型。",
+        );
+      } else if (selectedSmartRoute && smartRouteSupportsImages === false) {
+        toast(
+          "warning",
+          "当前智能路由命中的 Agent 不支持图片识别，本次图片内容可能无法被正确理解；如需看图，请切换到支持视觉输入的模型。",
+        );
+      } else if (!roomHasVisualModel) {
+        toast(
+          "warning",
+          "当前 Dialog 房间内没有支持图片识别的模型，本次会忽略图片细节；如需看图，请切换到支持视觉输入的模型。",
+        );
+      }
+    }
 
     const system = currentSystem;
     let runtimePlan: DialogExecutionPlan | null = null;
@@ -4114,7 +4158,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     clearAttachments();
     setIncomingHandoff(null);
     inputRef.current?.focus();
-  }, [input, hasAttachments, imagePaths, attachments, fileContextBlock, attachmentSummary, ensureSystem, pendingUserInteractions, pendingInteractionByMessageId, selectedPendingMessageId, parseMention, actors, sendMessage, broadcastMessage, broadcastAndResolve, steer, replyToMessage, routingMode, routeTask, clearAttachments, requirePlanApproval, openPlanApprovalDialog, getSystem, coordinatorActorId, focusedSessionTask, messageById, queueDialogUserMemoryCapture, inputAttachmentPaths, incomingHandoff]);
+  }, [input, hasAttachments, imagePaths, attachments, fileContextBlock, attachmentSummary, ensureSystem, pendingUserInteractions, pendingInteractionByMessageId, selectedPendingMessageId, parseMention, actors, sendMessage, broadcastMessage, broadcastAndResolve, steer, replyToMessage, routingMode, routeTask, clearAttachments, requirePlanApproval, openPlanApprovalDialog, getSystem, coordinatorActorId, focusedSessionTask, messageById, queueDialogUserMemoryCapture, inputAttachmentPaths, incomingHandoff, actorSupportsImageInput, toast, enqueueFollowUp, hasRunningActors]);
 
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value;
@@ -4276,7 +4320,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     const userText = cleanContent || trimmed || (hasContext ? "请分析以上文件内容。" : (hasImages ? "请描述这张图片" : ""));
     const content = hasContext ? `${fileContextBlock}\n\n${userText}` : userText;
     const brief = hasContext
-      ? (attachmentSummary ? `${attachmentSummary}\n${userText}` : userText)
+      ? composeInputWithAttachmentSummary(userText, attachmentSummary)
       : attachmentSummary || undefined;
     const dispatchInsight = inferDialogDispatchInsight({
       content,
@@ -4723,7 +4767,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
               ?? Date.now();
             const thinkingStartedAt = latestThinkingStep?.timestamp
               ?? latestThoughtToolStep?.timestamp
-              ?? a.currentTask?.startedAt
+              ?? a.currentTask?.steps[0]?.timestamp
               ?? actorThinkingAnchorRef.current[a.id]?.startedAt
               ?? Date.now();
             const thinkingIsStreaming = showThinkingPlaceholder

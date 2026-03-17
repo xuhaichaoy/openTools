@@ -9,7 +9,9 @@ function isTextLikeImageUpload(upload: {
   originalExt?: string;
   multimodalEligible?: boolean;
 }): boolean {
-  return upload.type === "image" && upload.multimodalEligible && upload.originalExt?.toLowerCase() === ".svg";
+  return upload.type === "image"
+    && upload.multimodalEligible === true
+    && upload.originalExt?.toLowerCase() === ".svg";
 }
 
 function formatUploadLine(upload: {

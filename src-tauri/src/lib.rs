@@ -13,6 +13,8 @@ use tauri::{
     Manager, PhysicalPosition, Position,
 };
 
+const MAIN_TRAY_ID: &str = "main-tray";
+
 /// 当前生效的全局快捷键（用于 handler 比对与重载时 unregister）
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 struct CurrentShortcuts {
@@ -86,6 +88,36 @@ fn reload_global_shortcuts(app: tauri::AppHandle) -> Result<(), String> {
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[tauri::command]
 fn reload_global_shortcuts(_app: tauri::AppHandle) -> Result<(), String> {
+    Ok(())
+}
+
+#[tauri::command]
+fn set_tray_attention_count(app: tauri::AppHandle, count: u32) -> Result<(), String> {
+    let Some(tray) = app.tray_by_id(MAIN_TRAY_ID) else {
+        return Err("tray not found".to_string());
+    };
+
+    let display_count = count.min(99);
+    let tooltip = if count == 0 {
+        branding::APP_NAME.to_string()
+    } else {
+        format!("{} - {} 个待处理询问", branding::APP_NAME, count)
+    };
+
+    tray.set_tooltip(Some(tooltip)).map_err(|e| e.to_string())?;
+
+    #[cfg(target_os = "macos")]
+    tray
+        .set_title(if count == 0 {
+            None::<String>
+        } else {
+            Some(display_count.to_string())
+        })
+        .map_err(|e| e.to_string())?;
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = display_count;
+
     Ok(())
 }
 
@@ -324,6 +356,7 @@ pub fn run() {
             commands::window::show_window_cmd,
             commands::window::start_drag,
             commands::window::stop_drag,
+            set_tray_attention_count,
             // ── System / File ──
             commands::system::run_python_script,
             commands::system::get_python_path,
@@ -538,7 +571,7 @@ fn setup_tray(
 
     let suppress_for_menu = suppress_hide.clone();
     let suppress_for_tray = suppress_hide.clone();
-    let mut tray_builder = TrayIconBuilder::new()
+    let mut tray_builder = TrayIconBuilder::with_id(MAIN_TRAY_ID)
         .menu(&menu)
         .tooltip(branding::APP_NAME)
         .on_menu_event(move |app, event| match event.id.as_ref() {

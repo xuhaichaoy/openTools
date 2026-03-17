@@ -3,6 +3,7 @@ import { Network, Loader2, X, Bot, MessageCircle } from "lucide-react";
 import { useClusterStore } from "@/store/cluster-store";
 import { useAppStore } from "@/store/app-store";
 import { useAgentRunningStore } from "@/store/agent-running-store";
+import { useAgentStore } from "@/store/agent-store";
 import { useAskUserStore } from "@/store/ask-user-store";
 import {
   isClusterRunning,
@@ -38,9 +39,9 @@ export function ClusterFloatingIndicator() {
   const clusterSessions = useClusterStore((s) => s.sessions);
   const agentInfo = useAgentRunningStore((s) => s.info);
   const agentAbort = useAgentRunningStore((s) => s.abortFn);
+  const setAgentCurrentSession = useAgentStore((s) => s.setCurrentSession);
   const askDialog = useAskUserStore((s) => s.dialog);
-  const [now, setNow] = useState(Date.now());
-  const [dismissed, setDismissed] = useState<Set<string>>(new Set());
+  const [now, setNow] = useState(() => Date.now());
 
   const clusterRunning = isClusterRunning();
   const activeClusterSessionIds = getActiveSessionIds();
@@ -55,26 +56,6 @@ export function ClusterFloatingIndicator() {
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, [anyActive]);
-
-  useEffect(() => {
-    if (clusterRunning) {
-      setDismissed((prev) => {
-        const next = new Set(prev);
-        next.delete("cluster");
-        return next;
-      });
-    }
-  }, [clusterRunning]);
-
-  useEffect(() => {
-    if (agentInfo) {
-      setDismissed((prev) => {
-        const next = new Set(prev);
-        next.delete("agent");
-        return next;
-      });
-    }
-  }, [agentInfo]);
 
   const handleAbortCluster = useCallback(() => {
     void abortActiveOrchestrator(activeClusterSessionId ?? undefined);
@@ -94,23 +75,33 @@ export function ClusterFloatingIndicator() {
   }, [activeClusterSessionId, pushView]);
 
   const handleOpenAgent = useCallback(() => {
+    if (agentInfo?.sessionId) {
+      setAgentCurrentSession(agentInfo.sessionId);
+    }
     routeToAICenter({
       mode: "agent",
       source: "floating_indicator",
       taskId: agentInfo?.sessionId,
       pushView,
     });
-  }, [agentInfo?.sessionId, pushView]);
+  }, [agentInfo, pushView, setAgentCurrentSession]);
 
   const handleOpenAskSource = useCallback(() => {
-    const sourceMode = askDialog?.source === "cluster" ? "cluster" : "agent";
+    const sourceMode = askDialog?.source === "cluster"
+      ? "cluster"
+      : askDialog?.source === "actor_dialog"
+        ? "dialog"
+        : "agent";
+    if (sourceMode === "agent" && agentInfo?.sessionId) {
+      setAgentCurrentSession(agentInfo.sessionId);
+    }
     routeToAICenter({
       mode: sourceMode,
       source: "floating_indicator",
       pushView,
       note: "focus ask_user source",
     });
-  }, [askDialog?.source, pushView]);
+  }, [agentInfo, askDialog?.source, pushView, setAgentCurrentSession]);
 
   const items: Array<{
     key: string;
@@ -123,7 +114,7 @@ export function ClusterFloatingIndicator() {
     color: string;
   }> = [];
 
-  if (clusterRunning && !dismissed.has("cluster")) {
+  if (clusterRunning) {
     const elapsed = clusterSession?.createdAt
       ? formatElapsed(now - clusterSession.createdAt)
       : "";
@@ -144,7 +135,7 @@ export function ClusterFloatingIndicator() {
     });
   }
 
-  if (agentInfo && !dismissed.has("agent")) {
+  if (agentInfo) {
     const elapsed = formatElapsed(now - agentInfo.startedAt);
     const queryPreview = agentInfo.query.length > 30
       ? `${agentInfo.query.slice(0, 30)}…`
@@ -162,8 +153,12 @@ export function ClusterFloatingIndicator() {
     });
   }
 
-  if (askDialog && !dismissed.has("ask")) {
-    const sourceLabel = askDialog.source === "cluster" ? "集群" : "Agent";
+  if (askDialog) {
+    const sourceLabel = askDialog.source === "cluster"
+      ? "集群"
+      : askDialog.source === "actor_dialog"
+        ? "Dialog"
+        : "Agent";
     items.push({
       key: "ask",
       icon: <MessageCircle className="w-3.5 h-3.5" />,
@@ -174,11 +169,21 @@ export function ClusterFloatingIndicator() {
     });
   }
 
-  if (items.length === 0) return null;
-
   const isOnAiCenter = currentView === "ai-center";
-  if (isOnAiCenter && items.length === 1) {
-    const onlyItem = items[0];
+  const visibleItems = items.filter((item) => {
+    if (!isOnAiCenter || item.key !== "ask") return true;
+    const askSourceMode = askDialog?.source === "cluster"
+      ? "cluster"
+      : askDialog?.source === "actor_dialog"
+        ? "dialog"
+        : "agent";
+    return aiCenterMode !== askSourceMode;
+  });
+
+  if (visibleItems.length === 0) return null;
+
+  if (isOnAiCenter && visibleItems.length === 1) {
+    const onlyItem = visibleItems[0];
     if (
       (onlyItem.key === "cluster" && aiCenterMode === "cluster") ||
       (onlyItem.key === "agent" && aiCenterMode === "agent") ||
@@ -190,7 +195,7 @@ export function ClusterFloatingIndicator() {
 
   return (
     <div className="fixed bottom-4 right-4 z-[9999] flex flex-col gap-2">
-      {items.map((item) => (
+      {visibleItems.map((item) => (
         <div
           key={item.key}
           role="button"

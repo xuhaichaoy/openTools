@@ -65,11 +65,16 @@ import { useToolTrustStore } from "@/store/command-allowlist-store";
 import { useConfirmDialogStore } from "@/store/confirm-dialog-store";
 import { useClusterPlanApprovalStore } from "@/store/cluster-plan-approval-store";
 import type { AskUserQuestion, AskUserAnswers } from "../../core/default-tools";
-import { useInputAttachments, FILE_ACCEPT_ALL } from "@/hooks/use-input-attachments";
+import {
+  useInputAttachments,
+  FILE_ACCEPT_ALL,
+  composeInputWithAttachmentSummary,
+} from "@/hooks/use-input-attachments";
 import { useToast } from "@/components/ui/Toast";
 import { handleError } from "@/core/errors";
 import { routeToAICenter } from "@/core/ai/ai-center-routing";
 import { recordAIRouteEvent } from "@/store/ai-route-store";
+import { modelSupportsImageInput } from "@/core/ai/model-capabilities";
 
 const SETTINGS_KEY = "mtools-cluster-settings";
 const MAX_ACTIVE_CLUSTER_TASKS = 3;
@@ -233,12 +238,13 @@ function SessionCard({
   const handleContinueWithAgent = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (!session.result) return;
+    const sessionImages = session.images ?? [];
     const report = session.result.finalAnswer;
     const truncated = report.length > 2000 ? report.slice(0, 2000) + "\n\n...（完整内容见上方 Cluster 报告）" : report;
     const prefilled = `根据以下 Cluster 分析报告，请帮我改进/修复或按报告执行（可在此补充具体诉求，如：修复其中的问题、把建议落地为代码、保存为文档等）：\n\n${truncated}`;
     const inferredCoding = inferCodingExecutionProfile({
       query: `${session.query}\n\n${truncated}`,
-      attachmentPaths: session.images,
+      attachmentPaths: sessionImages,
       handoff: session.sourceHandoff,
     });
     routeToAICenter({
@@ -246,24 +252,24 @@ function SessionCard({
       source: "cluster_continue_to_agent",
       handoff: normalizeAICenterHandoff({
         query: prefilled,
-        attachmentPaths: session.images,
-        visualAttachmentPaths: session.images,
+        attachmentPaths: sessionImages,
+        visualAttachmentPaths: sessionImages,
         title: "基于 Cluster 报告继续落地",
         goal: session.query.slice(0, 140) || "根据 Cluster 报告继续执行",
         intent: inferredCoding.profile.codingMode ? "coding" : "delivery",
         keyPoints: [
           "已带入 Cluster 最终报告",
-          session.images.length > 0 ? `附带 ${session.images.length} 张视觉参考图` : "",
+          sessionImages.length > 0 ? `附带 ${sessionImages.length} 张视觉参考图` : "",
           session.plan?.steps?.length ? `本轮计划共 ${session.plan.steps.length} 个步骤` : "",
         ].filter(Boolean),
         nextSteps: [
           "先阅读 Cluster 报告，再决定修改、验证或产出最终文件",
-          session.images.length > 0 ? "先查看带入的视觉参考图，再继续实现或修复" : "",
+          sessionImages.length > 0 ? "先查看带入的视觉参考图，再继续实现或修复" : "",
           "如果报告已指出问题，优先按问题清单逐项落地",
         ],
         files: buildAICenterHandoffScopedFileRefs({
-          attachmentPaths: session.images,
-          visualAttachmentPaths: session.images,
+          attachmentPaths: sessionImages,
+          visualAttachmentPaths: sessionImages,
           visualReason: "Cluster 视觉参考图",
         }),
         sourceMode: "cluster",
@@ -279,12 +285,13 @@ function SessionCard({
   const handleContinueWithDialog = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (!session.result) return;
+    const sessionImages = session.images ?? [];
     const report = session.result.finalAnswer;
     const truncated = report.length > 2000 ? report.slice(0, 2000) + "\n\n...（完整内容见上方 Cluster 报告）" : report;
     const prefilled = `这是当前 Cluster 的分析报告。请让多个 Agent 基于它继续 review、争论方案、拆补细节或形成下一步执行共识：\n\n${truncated}`;
     const inferredCoding = inferCodingExecutionProfile({
       query: `${session.query}\n\n${truncated}`,
-      attachmentPaths: session.images,
+      attachmentPaths: sessionImages,
       handoff: session.sourceHandoff,
     });
     routeToAICenter({
@@ -292,26 +299,26 @@ function SessionCard({
       source: "cluster_continue_to_dialog",
       handoff: normalizeAICenterHandoff({
         query: prefilled,
-        attachmentPaths: session.images,
-        visualAttachmentPaths: session.images,
+        attachmentPaths: sessionImages,
+        visualAttachmentPaths: sessionImages,
         title: "围绕 Cluster 报告继续协作",
         goal: session.query.slice(0, 140) || "基于 Cluster 报告继续讨论",
         intent: inferredCoding.profile.codingMode ? "coding" : "research",
         keyPoints: [
           "已带入 Cluster 最终报告",
-          session.images.length > 0 ? `附带 ${session.images.length} 张视觉参考图` : "",
+          sessionImages.length > 0 ? `附带 ${sessionImages.length} 张视觉参考图` : "",
           session.result.agentInstances.length > 0
             ? `Cluster 中共有 ${session.result.agentInstances.length} 个 Agent 参与`
             : "",
         ].filter(Boolean),
         nextSteps: [
           "围绕报告中的争议点、风险和后续动作继续讨论",
-          session.images.length > 0 ? "先结合视觉参考图理解现状，再继续讨论分工" : "",
+          sessionImages.length > 0 ? "先结合视觉参考图理解现状，再继续讨论分工" : "",
           "必要时把需要落地的部分再接力给 Agent",
         ],
         files: buildAICenterHandoffScopedFileRefs({
-          attachmentPaths: session.images,
-          visualAttachmentPaths: session.images,
+          attachmentPaths: sessionImages,
+          visualAttachmentPaths: sessionImages,
           visualReason: "Cluster 视觉参考图",
         }),
         sourceMode: "cluster",
@@ -672,8 +679,24 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
       return;
     }
 
-    const userText = trimmed || (fileContextBlock.trim() ? "请了解项目结构，等待下一步指令。" : "（无文字描述）");
-    const displayQuery = attachmentSummary ? `${attachmentSummary}\n${userText}` : userText;
+    if (
+      imagePaths.length > 0
+      && !modelSupportsImageInput(aiConfig.model || "", aiConfig.protocol)
+    ) {
+      toast(
+        "warning",
+        "当前模型不支持图片识别，本次会忽略图片内容；如需看图，请切换到支持视觉输入的模型。",
+      );
+    }
+
+    const userText = trimmed || (
+      fileContextBlock.trim()
+        ? "请了解项目结构，等待下一步指令。"
+        : imagePaths.length > 0
+          ? "请描述这张图片"
+          : "（无文字描述）"
+    );
+    const displayQuery = composeInputWithAttachmentSummary(userText, attachmentSummary);
     const fullQuery = fileContextBlock.trim()
       ? `${fileContextBlock}\n\n---\n\n${userText}`
       : userText;
@@ -765,7 +788,7 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
         setRunningCount(getActiveOrchestratorCount());
       }
     }
-  }, [input, attachments, fileContextBlock, attachmentSummary, imagePaths, mode, autoReview, humanApproval, createSession, clearAttachments, incomingHandoff, aiConfig.model, handlePlanApproval, confirmDangerousAction, askUser, toast, effectiveCodingProfile]);
+  }, [input, attachments, fileContextBlock, attachmentSummary, imagePaths, mode, autoReview, humanApproval, createSession, clearAttachments, incomingHandoff, aiConfig.model, aiConfig.protocol, aiConfig.agent_max_concurrency, handlePlanApproval, confirmDangerousAction, askUser, toast, effectiveCodingProfile]);
 
   const handleAbort = useCallback(() => {
     const targetSessionId =

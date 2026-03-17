@@ -5,7 +5,25 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAgentRunActions } from "./use-agent-run-actions";
 
-(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+const hoisted = vi.hoisted(() => ({
+  toast: vi.fn(),
+  modelSupportsImageInput: vi.fn(() => true),
+}));
+
+vi.mock("@/components/ui/Toast", () => ({
+  useToast: () => ({ toast: hoisted.toast }),
+}));
+
+vi.mock("@/store/ai-store", () => ({
+  useAIStore: (selector: (state: { config: { model: string; protocol?: string } }) => unknown) =>
+    selector({ config: { model: "mock-model", protocol: "openai" } }),
+}));
+
+vi.mock("@/core/ai/model-capabilities", () => ({
+  modelSupportsImageInput: hoisted.modelSupportsImageInput,
+}));
 
 interface HarnessProps {
   onReady: (value: ReturnType<typeof useAgentRunActions>) => void;
@@ -25,6 +43,9 @@ describe("useAgentRunActions", () => {
   beforeEach(() => {
     container = document.createElement("div");
     root = createRoot(container);
+    hoisted.toast.mockReset();
+    hoisted.modelSupportsImageInput.mockReset();
+    hoisted.modelSupportsImageInput.mockReturnValue(true);
   });
 
   afterEach(() => {
@@ -152,7 +173,7 @@ describe("useAgentRunActions", () => {
   });
 
   it("passes image paths via execute options", async () => {
-    const executeAgentTask = vi.fn(async (_query: string) => undefined);
+    const executeAgentTask = vi.fn(async () => undefined);
     let hookValue: ReturnType<typeof useAgentRunActions> | null = null;
 
     act(() => {
@@ -187,8 +208,118 @@ describe("useAgentRunActions", () => {
     });
   });
 
+  it("warns immediately when current model does not support image input", async () => {
+    hoisted.modelSupportsImageInput.mockReturnValue(false);
+    const executeAgentTask = vi.fn(async () => undefined);
+    let hookValue: ReturnType<typeof useAgentRunActions> | null = null;
+
+    act(() => {
+      root.render(
+        <HookHarness
+          onReady={(value) => {
+            hookValue = value;
+          }}
+          params={{
+            ai: {} as never,
+            input: "按图片实现一下页面",
+            imagePaths: ["/tmp/mock.png"],
+            fileContextBlock: "",
+            attachmentSummary: "",
+            setInput: vi.fn(),
+            clearAssets: vi.fn(),
+            executeAgentTask,
+            stopExecution: vi.fn(),
+          }}
+        />,
+      );
+    });
+
+    await act(async () => {
+      await hookValue!.handleRun();
+    });
+
+    expect(hoisted.toast).toHaveBeenCalledWith(
+      "warning",
+      "当前模型不支持图片识别，本次会忽略图片内容；如需看图，请切换到支持视觉输入的模型。",
+    );
+    expect(executeAgentTask).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses image description prompt when only an image is provided", async () => {
+    const executeAgentTask = vi.fn(async () => undefined);
+    let hookValue: ReturnType<typeof useAgentRunActions> | null = null;
+
+    act(() => {
+      root.render(
+        <HookHarness
+          onReady={(value) => {
+            hookValue = value;
+          }}
+          params={{
+            ai: {} as never,
+            input: "",
+            imagePaths: ["/tmp/mock.png"],
+            fileContextBlock: "",
+            attachmentSummary: "",
+            setInput: vi.fn(),
+            clearAssets: vi.fn(),
+            executeAgentTask,
+            stopExecution: vi.fn(),
+          }}
+        />,
+      );
+    });
+
+    await act(async () => {
+      await hookValue!.handleRun();
+    });
+
+    expect(executeAgentTask).toHaveBeenCalledWith("请描述这张图片", {
+      images: ["/tmp/mock.png"],
+      systemHint: undefined,
+    });
+  });
+
+  it("places attachment summary after the main user intent", async () => {
+    const executeAgentTask = vi.fn(async () => undefined);
+    let hookValue: ReturnType<typeof useAgentRunActions> | null = null;
+
+    act(() => {
+      root.render(
+        <HookHarness
+          onReady={(value) => {
+            hookValue = value;
+          }}
+          params={{
+            ai: {} as never,
+            input: "实现一下网页，保存到 Downloads",
+            imagePaths: ["/tmp/mock.png"],
+            fileContextBlock: "",
+            attachmentSummary: "1 张图片",
+            setInput: vi.fn(),
+            clearAssets: vi.fn(),
+            executeAgentTask,
+            stopExecution: vi.fn(),
+          }}
+        />,
+      );
+    });
+
+    await act(async () => {
+      await hookValue!.handleRun();
+    });
+
+    expect(executeAgentTask).toHaveBeenCalledWith(
+      "实现一下网页，保存到 Downloads\n\n已附：1 张图片",
+      expect.objectContaining({
+        images: ["/tmp/mock.png"],
+        systemHint: undefined,
+      }),
+    );
+  });
+
   it("passes OpenClaw profile when enabled", async () => {
-    const executeAgentTask = vi.fn(async (_query: string, _opts?: unknown) => undefined);
+    const executeAgentTask = vi.fn(async () => undefined);
     let hookValue: ReturnType<typeof useAgentRunActions> | null = null;
 
     act(() => {
@@ -220,7 +351,15 @@ describe("useAgentRunActions", () => {
     });
 
     expect(executeAgentTask).toHaveBeenCalledTimes(1);
-    const call = executeAgentTask.mock.calls[0];
+    const call = executeAgentTask.mock.calls[0] as unknown as [string, {
+      runProfile?: {
+        codingMode: boolean;
+        largeProjectMode: boolean;
+        openClawMode: boolean;
+      };
+      systemHint?: string;
+      codingHint?: string;
+    }?] | undefined;
     const options = (call?.[1] ?? {}) as {
       runProfile?: {
         codingMode: boolean;
@@ -240,7 +379,7 @@ describe("useAgentRunActions", () => {
   });
 
   it("auto-detects coding profile from incoming handoff", async () => {
-    const executeAgentTask = vi.fn(async (_query: string, _opts?: unknown) => undefined);
+    const executeAgentTask = vi.fn(async () => undefined);
     let hookValue: ReturnType<typeof useAgentRunActions> | null = null;
 
     act(() => {
@@ -270,14 +409,25 @@ describe("useAgentRunActions", () => {
       );
     });
 
-    expect(hookValue?.effectiveRunProfile.profile.codingMode).toBe(true);
-    expect(hookValue?.effectiveRunProfile.autoDetected).toBe(true);
+    expect(hookValue).not.toBeNull();
+    const readyHookValue = hookValue!;
+
+    expect(readyHookValue.effectiveRunProfile.profile.codingMode).toBe(true);
+    expect(readyHookValue.effectiveRunProfile.autoDetected).toBe(true);
 
     await act(async () => {
-      await hookValue!.handleRun();
+      await readyHookValue.handleRun();
     });
 
-    const options = (executeAgentTask.mock.calls[0]?.[1] ?? {}) as {
+    const autoDetectedCall = executeAgentTask.mock.calls[0] as unknown as [string, {
+      runProfile?: {
+        codingMode: boolean;
+        largeProjectMode: boolean;
+        openClawMode: boolean;
+      };
+      codingHint?: string;
+    }?] | undefined;
+    const options = (autoDetectedCall?.[1] ?? {}) as {
       runProfile?: {
         codingMode: boolean;
         largeProjectMode: boolean;
@@ -287,5 +437,59 @@ describe("useAgentRunActions", () => {
     };
     expect(options.runProfile?.codingMode).toBe(true);
     expect(String(options.codingHint || "")).toContain("Coding Execution Policy");
+  });
+
+  it("starts a fresh session for standalone artifact tasks unrelated to a heavy project context", async () => {
+    const executeAgentTask = vi.fn(async () => undefined);
+    let hookValue: ReturnType<typeof useAgentRunActions> | null = null;
+
+    act(() => {
+      root.render(
+        <HookHarness
+          onReady={(value) => {
+            hookValue = value;
+          }}
+          params={{
+            ai: {} as never,
+            currentSessionId: "session-heavy",
+            currentSession: {
+              id: "session-heavy",
+              title: "大型项目分析",
+              createdAt: 1,
+              sourceHandoff: {
+                query: "分析这个大型项目",
+                sourceMode: "ask",
+                files: [{ path: "/tmp/project/src/App.tsx" }],
+              },
+              tasks: [
+                { id: "t1", query: "先分析仓库结构", createdAt: 1, steps: [], answer: "", attachmentPaths: ["/tmp/project"], status: "success" },
+                { id: "t2", query: "再看核心模块", createdAt: 2, steps: [], answer: "", status: "success" },
+                { id: "t3", query: "总结架构", createdAt: 3, steps: [], answer: "", status: "success" },
+              ],
+            },
+            input: "实现一个网页，保存到 Downloads",
+            imagePaths: ["/tmp/mock.png"],
+            fileContextBlock: "",
+            attachmentSummary: "1 张图片",
+            setInput: vi.fn(),
+            clearAssets: vi.fn(),
+            executeAgentTask,
+            stopExecution: vi.fn(),
+          }}
+        />,
+      );
+    });
+
+    await act(async () => {
+      await hookValue!.handleRun();
+    });
+
+    expect(executeAgentTask).toHaveBeenCalledWith(
+      "实现一个网页，保存到 Downloads\n\n已附：1 张图片",
+      expect.objectContaining({
+        forceNewSession: true,
+        images: ["/tmp/mock.png"],
+      }),
+    );
   });
 });

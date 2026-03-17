@@ -36,6 +36,7 @@ import {
   shouldAutoSaveAssistantMemory,
   shouldRecallAssistantMemory,
 } from "@/core/ai/assistant-config";
+import { modelSupportsImageInput } from "@/core/ai/model-capabilities";
 import { autoExtractMemories } from "@/core/agent/actor/actor-memory";
 import { buildKnowledgeContextMessages } from "@/core/agent/actor/middlewares/knowledge-base-middleware";
 import { isRetryableError } from "@/core/agent/actor/middlewares/model-retry-middleware";
@@ -72,12 +73,14 @@ interface UseAgentExecutionResult {
     opts?: {
       sessionId?: string;
       taskId?: string;
-        systemHint?: string;
-        codingHint?: string;
-        images?: string[];
-        attachmentPaths?: string[];
-        runProfile?: CodingExecutionProfile;
-      },
+      systemHint?: string;
+      codingHint?: string;
+      images?: string[];
+      attachmentPaths?: string[];
+      runProfile?: CodingExecutionProfile;
+      sourceHandoff?: import("@/store/agent-store").AgentSession["sourceHandoff"];
+      forceNewSession?: boolean;
+    },
   ) => Promise<void>;
   stopExecution: () => void;
 }
@@ -111,9 +114,17 @@ export function useAgentExecution({
 
   const stopExecution = useCallback(() => {
     clearTimers();
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
+    const localAbortController = abortControllerRef.current;
+    const globalAbortFn = useAgentRunningStore.getState().abortFn;
+
+    if (localAbortController) {
+      localAbortController.abort();
       abortControllerRef.current = null;
+    } else if (globalAbortFn) {
+      globalAbortFn();
+    }
+
+    if (localAbortController || globalAbortFn) {
       setRunning(false);
       setRunningPhase(null);
       setExecutionWaitingStage(null);
@@ -133,6 +144,7 @@ export function useAgentExecution({
         attachmentPaths?: string[];
         runProfile?: CodingExecutionProfile;
         sourceHandoff?: import("@/store/agent-store").AgentSession["sourceHandoff"];
+        forceNewSession?: boolean;
       },
     ) => {
       if (!ai || !query.trim()) return;
@@ -145,7 +157,7 @@ export function useAgentExecution({
         clearTimers();
       }
 
-      let sessionId = opts?.sessionId || currentSessionId;
+      let sessionId = opts?.forceNewSession ? null : (opts?.sessionId || currentSessionId);
       let taskId = opts?.taskId || "";
       const snapshot = useAgentStore.getState();
       let session = sessionId
@@ -295,6 +307,10 @@ export function useAgentExecution({
       );
 
       const aiConfig = useAIStore.getState().config;
+      const supportsImageInput = modelSupportsImageInput(
+        aiConfig.model || "",
+        aiConfig.protocol,
+      );
       const skillContext = await loadAndResolveSkills(query);
       const skillsPrompt = skillContext.mergedSystemPrompt || undefined;
       const hasCodingWorkflowSkill = skillContext.visibleSkillIds.includes("builtin-coding-workflow");
@@ -505,7 +521,9 @@ export function useAgentExecution({
       try {
         let effectiveQuery = opts?.systemHint ? `${opts.systemHint}\n\n---\n\n${query}` : query;
         if (opts?.images?.length) {
-          effectiveQuery += `\n\n[系统提示] 用户已附带 ${opts.images.length} 张图片，这些图片已自动包含在本次对话中，你可以直接看到并分析它们。请勿使用截图工具或其他方式重新获取图片，也不要对图片路径调用 read_file / read_file_range；直接基于已有图片进行分析即可。`;
+          effectiveQuery += supportsImageInput
+            ? `\n\n[系统提示] 用户已附带 ${opts.images.length} 张图片，这些图片已自动包含在本次对话中，你可以直接看到并分析它们。请勿使用截图工具或其他方式重新获取图片，也不要对图片路径调用 read_file / read_file_range；直接基于已有图片进行分析即可。`
+            : `\n\n[系统提示] 用户附带了 ${opts.images.length} 张图片，但当前模型不支持直接识别图片内容。不要假装自己看到了图片，也不要把图片路径当作文本文件去读取。若任务依赖图片细节，请明确提示用户切换到支持视觉输入的模型，或先提供 OCR / 文字描述后再继续。`;
         }
         let lastError: Error | null = null;
         let contextRecovered = false;

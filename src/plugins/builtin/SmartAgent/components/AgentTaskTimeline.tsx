@@ -45,7 +45,7 @@ export function AgentTaskTimeline({
   }, [scrollRef]);
 
   return (
-    <div ref={scrollRef} className="flex-1 overflow-auto p-4 space-y-4 relative">
+    <div ref={scrollRef} className="flex-1 overflow-auto px-4 py-3 space-y-3 relative bg-[radial-gradient(circle_at_top,_rgba(16,185,129,0.04),_transparent_34%)]">
       {tasks.length === 0 && !busy && (
         <div className="text-center text-[var(--color-text-secondary)] py-12">
           <Bot className="w-12 h-12 mx-auto mb-3 opacity-20" />

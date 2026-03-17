@@ -3,6 +3,7 @@ import React, {
   useCallback,
   useRef,
   useEffect,
+  useMemo,
   useImperativeHandle,
   forwardRef,
 } from "react";
@@ -51,6 +52,7 @@ import {
   type ScheduledSortMode,
   type WorkbenchTab,
 } from "./core/ui-state";
+import { useAgentRunningStore } from "@/store/agent-running-store";
 
 export interface SmartAgentHandle {
   clear: () => void;
@@ -69,6 +71,9 @@ interface SmartAgentProps {
 }
 
 const EMPTY_AGENT_TASKS: AgentTask[] = [];
+const EMPTY_FOLLOW_UP_QUEUE: NonNullable<
+  import("@/store/agent-store").AgentSession["followUpQueue"]
+> = [];
 const AGENT_SETTINGS_KEY = "mtools-agent-settings";
 
 interface AgentRuntimeSettings {
@@ -190,7 +195,6 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       resumeScheduledTask,
       cancelScheduledTask,
       createSession,
-      getCurrentSession,
       setCurrentSession,
       updateSession,
       addTask,
@@ -219,7 +223,6 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
         resumeScheduledTask: s.resumeScheduledTask,
         cancelScheduledTask: s.cancelScheduledTask,
         createSession: s.createSession,
-        getCurrentSession: s.getCurrentSession,
         setCurrentSession: s.setCurrentSession,
         updateSession: s.updateSession,
         addTask: s.addTask,
@@ -238,28 +241,38 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       })),
     );
 
+    const askUserDialog = useAskUserStore((s) => s.dialog);
     const askUserOpen = useAskUserStore((s) => s.open);
+    const activeAgentRun = useAgentRunningStore((s) => s.info);
 
-    const askUser = useCallback(
-      (questions: AskUserQuestion[]) => {
-        const session = getCurrentSession();
-        const currentQuery = session ? getVisibleAgentTasks(session).at(-1)?.query : undefined;
-        return askUserOpen({
-          questions,
-          source: "agent",
-          taskDescription: currentQuery,
-        });
-      },
-      [askUserOpen, getCurrentSession],
+    const currentSession = useMemo(
+      () => sessions.find((session) => session.id === currentSessionId) ?? null,
+      [currentSessionId, sessions],
     );
-
-    const currentSession = getCurrentSession();
-    const tasks = currentSession ? getVisibleAgentTasks(currentSession) : EMPTY_AGENT_TASKS;
-    const hiddenTasks = currentSession ? getHiddenAgentTasks(currentSession) : EMPTY_AGENT_TASKS;
-    const followUpQueue = currentSession?.followUpQueue ?? [];
+    // 避免本地 UI 状态变化时每次都重新 slice，导致自动折叠/恢复 effect 被误触发。
+    const tasks = useMemo(
+      () => (currentSession ? getVisibleAgentTasks(currentSession) : EMPTY_AGENT_TASKS),
+      [currentSession],
+    );
+    const hiddenTasks = useMemo(
+      () => (currentSession ? getHiddenAgentTasks(currentSession) : EMPTY_AGENT_TASKS),
+      [currentSession],
+    );
+    const followUpQueue = currentSession?.followUpQueue ?? EMPTY_FOLLOW_UP_QUEUE;
     const sessionReview = buildAgentSessionReview(currentSession);
     const sessionFiles = deriveAgentSessionFiles(currentSession);
     const sessionContextLines = buildAgentSessionContextOutline(currentSession);
+    const sessionRunningInBackground = activeAgentRun?.sessionId === currentSessionId;
+    const hasAnyAgentRun = Boolean(activeAgentRun);
+    const effectiveRunning = running || sessionRunningInBackground;
+    const effectiveRunningPhase = runningPhase ?? (effectiveRunning ? "executing" : null);
+    const effectiveWaitingStage =
+      executionWaitingStage
+      ?? (sessionRunningInBackground
+        ? askUserDialog?.source === "agent"
+          ? "user_confirm"
+          : "model_first_token"
+        : null);
     const {
       hasAnySteps,
       busy,
@@ -267,11 +280,43 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       scheduledStats,
     } = useAgentDerivedState({
       tasks,
-      running,
+      running: running || hasAnyAgentRun,
       scheduledTasks,
       scheduledStatusFilter,
       scheduledSortMode,
     });
+
+    const askUser = useCallback(
+      (questions: AskUserQuestion[]) => {
+        const currentQuery = tasks.at(-1)?.query;
+        return askUserOpen({
+          questions,
+          source: "agent",
+          taskDescription: currentQuery,
+        });
+      },
+      [askUserOpen, tasks],
+    );
+
+    const syncedBackgroundSessionRef = useRef<string | null>(null);
+
+    useEffect(() => {
+      if (!activeAgentRun?.sessionId) {
+        syncedBackgroundSessionRef.current = null;
+        return;
+      }
+      if (syncedBackgroundSessionRef.current === activeAgentRun.sessionId) {
+        return;
+      }
+      const targetSessionId = activeAgentRun.sessionId;
+      if (!sessions.some((session) => session.id === targetSessionId)) {
+        return;
+      }
+      syncedBackgroundSessionRef.current = targetSessionId;
+      if (currentSessionId !== targetSessionId) {
+        setCurrentSession(targetSessionId);
+      }
+    }, [activeAgentRun?.sessionId, currentSessionId, sessions, setCurrentSession]);
 
     const resetSessionVisualState = useCallback(() => {
       setInput("");
@@ -375,6 +420,7 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       ai,
       busy,
       currentSessionId,
+      currentSession,
       input,
       imagePaths,
       attachmentPaths: attachments
@@ -405,24 +451,24 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
     }, [handleRun]);
 
     useEffect(() => {
-      if (running && pendingSourceHandoff) {
+      if (effectiveRunning && pendingSourceHandoff) {
         setPendingSourceHandoff(null);
       }
-    }, [running, pendingSourceHandoff]);
+    }, [effectiveRunning, pendingSourceHandoff]);
 
     useEffect(() => {
-      if (running || !currentSessionId || tasks.length === 0) return;
+      if (effectiveRunning || !currentSessionId || tasks.length === 0) return;
       const finishedAt = Date.now();
       for (const task of tasks) {
         const patch = buildRecoveredAgentTaskPatch(task, finishedAt);
         if (!patch) continue;
         updateTask(currentSessionId, task.id, patch);
       }
-    }, [currentSessionId, running, tasks, updateTask]);
+    }, [currentSessionId, effectiveRunning, tasks, updateTask]);
 
     const queuedRunIdRef = useRef<string | null>(null);
     const runQueuedFollowUp = useCallback(async () => {
-      if (running || !currentSession) return;
+      if (busy || !currentSession) return;
 
       let targetSessionId = currentSession.id;
       let next: ReturnType<typeof dequeueFollowUp> = null;
@@ -442,6 +488,7 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
               codingHint: item.codingHint,
               runProfile: item.runProfile,
               sourceHandoff: item.sourceHandoff,
+              forceNewSession: item.forceNewSession,
             });
           }
           clearFollowUpQueue(currentSession.id);
@@ -459,6 +506,7 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       try {
         await executeAgentTask(next.query, {
           sessionId: targetSessionId,
+          ...(next.forceNewSession ? { forceNewSession: true } : {}),
           images: next.images,
           attachmentPaths: next.attachmentPaths,
           systemHint: next.systemHint,
@@ -478,13 +526,13 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       followUpQueue,
       forkSession,
       hiddenTasks.length,
-      running,
+      busy,
     ]);
 
     const lastTaskStatus = tasks[tasks.length - 1]?.status;
     useEffect(() => {
       if (
-        running
+        busy
         || queuedRunIdRef.current
         || followUpQueue.length === 0
         || lastTaskStatus !== "success"
@@ -492,7 +540,7 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
         return;
       }
       void runQueuedFollowUp();
-    }, [followUpQueue.length, lastTaskStatus, runQueuedFollowUp, running]);
+    }, [busy, followUpQueue.length, lastTaskStatus, runQueuedFollowUp]);
 
     const toggleStep = useCallback((key: string) => {
       setExpandedSteps((prev) => {
@@ -577,12 +625,15 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
               availableToolsCount={availableTools.length}
               scheduledTasksCount={scheduledTasks.length}
               queuedFollowUpsCount={followUpQueue.length}
+              currentSessionTitle={currentSession?.title}
+              busy={busy}
               showReviewWorkbench={showWorkbench && workbenchTab === "review"}
               showToolsWorkbench={showWorkbench && workbenchTab === "tools"}
               showOrchestratorWorkbench={showWorkbench && workbenchTab === "orchestrator"}
               hasAnySteps={hasAnySteps}
               canRevert={tasks.length > 0}
               onShowHistory={() => setShowHistory(true)}
+              onNewSession={handleNewSession}
               onRevert={revertCurrentSessionToPreviousTask}
               onToggleReviewWorkbench={() => toggleWorkbenchTab("review")}
               onToggleToolsWorkbench={() => toggleWorkbenchTab("tools")}
@@ -661,9 +712,9 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
 
           <AgentTaskTimeline
             tasks={tasks}
-            busy={busy}
-            runningPhase={runningPhase}
-            executionWaitingStage={executionWaitingStage}
+            busy={effectiveRunning}
+            runningPhase={effectiveRunningPhase}
+            executionWaitingStage={effectiveWaitingStage}
             scrollRef={scrollRef}
             collapsedTaskProcesses={collapsedTaskProcesses}
             expandedSteps={expandedSteps}
@@ -673,7 +724,7 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
 
           <AgentFollowUpDock
             items={followUpQueue}
-            running={running}
+            running={busy}
             onRunNext={() => {
               void runQueuedFollowUp();
             }}

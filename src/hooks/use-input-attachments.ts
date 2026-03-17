@@ -49,6 +49,56 @@ export interface InputAttachment {
   originalExt?: string;
 }
 
+function joinNaturalSegments(parts: string[]): string {
+  return parts.filter(Boolean).join("，");
+}
+
+export function buildAttachmentSummaryText(attachments: InputAttachment[]): string {
+  const folders = attachments.filter((a) => a.type === "folder");
+  const files = attachments.filter((a) => a.type === "text_file" || a.type === "document");
+  const images = attachments.filter((a) => a.type === "image");
+  const parts: string[] = [];
+
+  if (folders.length > 0) {
+    const folderNames = folders
+      .slice(0, 2)
+      .map((item) => item.path || item.name)
+      .filter(Boolean);
+    const extraCount = folders.length - folderNames.length;
+    const folderLabel = folderNames.join("、");
+    if (folderLabel) {
+      parts.push(
+        extraCount > 0
+          ? `目录 ${folderLabel} 等 ${folders.length} 项`
+          : `目录 ${folderLabel}`,
+      );
+    } else {
+      parts.push(`${folders.length} 项目录`);
+    }
+  }
+
+  if (files.length > 0) {
+    parts.push(`${files.length} 个文件`);
+  }
+
+  if (images.length > 0) {
+    parts.push(`${images.length} 张图片`);
+  }
+
+  return joinNaturalSegments(parts);
+}
+
+export function composeInputWithAttachmentSummary(
+  userText: string,
+  attachmentSummary?: string | null,
+): string {
+  const cleanText = userText.trim();
+  const cleanSummary = attachmentSummary?.trim();
+  if (!cleanSummary) return cleanText;
+  if (!cleanText) return `已附：${cleanSummary}`;
+  return `${cleanText}\n\n已附：${cleanSummary}`;
+}
+
 function ext(name: string): string {
   const i = name.lastIndexOf(".");
   return i >= 0 ? name.slice(i + 1).toLowerCase() : "";
@@ -286,7 +336,7 @@ export function useInputAttachments() {
   })();
 
   const fileItems = textAttachments
-    .map((a) => `### 📄 ${a.path || a.name}\n\`\`\`\n${a.textContent}\n\`\`\``)
+    .map((a) => `### 文件 ${a.path || a.name}\n\`\`\`\n${a.textContent}\n\`\`\``)
     .join("\n\n---\n\n");
 
   const hasFolders = folderRoots.length > 0;
@@ -304,7 +354,7 @@ export function useInputAttachments() {
 
   const fileContextBlock = [
     contextHeader,
-    folderTree ? `## 📂 目录结构\n\`\`\`\n${folderTree}\n\`\`\`` : "",
+    folderTree ? `## 目录结构\n\`\`\`\n${folderTree}\n\`\`\`` : "",
     fileItems,
   ].filter(Boolean).join("\n\n---\n\n");
 
@@ -735,16 +785,7 @@ export function useInputAttachments() {
     setFolderTree("");
   }, []);
 
-  const attachmentSummary = (() => {
-    const parts: string[] = [];
-    const folders = attachments.filter((a) => a.type === "folder");
-    const files = attachments.filter((a) => a.type === "text_file" || a.type === "document");
-    const images = attachments.filter((a) => a.type === "image");
-    for (const f of folders) parts.push(`📂 ${f.path || f.name}`);
-    if (files.length > 0) parts.push(`📄 ${files.length} 个文件`);
-    if (images.length > 0) parts.push(`🖼️ ${images.length} 张图片`);
-    return parts.join("  ");
-  })();
+  const attachmentSummary = buildAttachmentSummaryText(attachments);
 
   return {
     attachments,
