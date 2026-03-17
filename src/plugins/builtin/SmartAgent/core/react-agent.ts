@@ -1201,6 +1201,46 @@ export class ReActAgent {
     return tools;
   }
 
+  private buildMemoryPolicyBlock(): string {
+    const availableToolNames = new Set(this.getAvailableTools().map((tool) => tool.name));
+    const hasMemorySearch = availableToolNames.has("memory_search");
+    const hasMemoryGet = availableToolNames.has("memory_get");
+    const hasMemorySave =
+      availableToolNames.has("memory_save") || availableToolNames.has("save_user_memory");
+
+    if (!hasMemorySearch && !hasMemoryGet && !hasMemorySave) {
+      return "";
+    }
+
+    const lines = ["## 记忆与上下文延续"];
+    lines.push(
+      "- 若最新用户请求明显切换到新项目、新目录、新文件夹或新主题，立即重置工作范围，不要继续沿用旧项目假设。",
+    );
+
+    if (hasMemorySearch && hasMemoryGet) {
+      lines.push(
+        "- 回答涉及过往工作、决策、日期、人物、偏好、待办事项、项目历史时，先调用 memory_search 检索 MEMORY.md 与 memory/*.md，再用 memory_get 精读需要的行。",
+      );
+      lines.push(
+        "- 不要一次读取整份记忆文件；只拉取与当前问题直接相关的片段。",
+      );
+      lines.push(
+        "- 如果检索后仍然低置信，请明确说明你已经检查过记忆，不要假装记得。",
+      );
+    }
+
+    if (hasMemorySave) {
+      lines.push(
+        "- 当用户明确表达长期偏好、稳定约束、重要事实或持续目标时，使用 memory_save（或兼容别名 save_user_memory）记录候选。",
+      );
+      lines.push(
+        "- 不要把一次性指令、临时状态或会过期的信息写成长久记忆。",
+      );
+    }
+
+    return lines.join("\n");
+  }
+
   /** 带超时的工具执行 */
   private async executeWithTimeout(
     tool: AgentTool,
@@ -1535,8 +1575,9 @@ ${s.taskStrategy}
       { name: "extraSystem", content: s.extraSystemBlock, priority: 20, maxTokens: 500 },
       { name: "codingBlock", content: codingHint, priority: 30, maxTokens: 400 },
       { name: "skills", content: s.skillsBlock, priority: 40, maxTokens: 600 },
-      { name: "memory", content: s.memoryBlock ? `- **记住偏好**: 发现用户明确偏好时，用 save_user_memory 工具记录${s.memoryBlock}` : "", priority: 50, maxTokens: 400 },
-      { name: "codingHint", content: s.codingHintBlock, priority: 60, maxTokens: 500 },
+      { name: "memoryPolicy", content: s.memoryPolicyBlock, priority: 50, maxTokens: 500 },
+      { name: "memoryContext", content: s.memoryBlock, priority: 60, maxTokens: 500 },
+      { name: "codingHint", content: s.codingHintBlock, priority: 70, maxTokens: 500 },
     ];
 
     const budget = this.config.contextBudget ?? 0;
@@ -1755,6 +1796,7 @@ ${s.taskStrategy}
 - 命令输出被截断 → 用 run_shell_command 配合 grep/head/tail 过滤输出` : "";
 
     const skillsBlock = this.config.skillsPrompt || "";
+    const memoryPolicyBlock = this.buildMemoryPolicyBlock();
     const memoryBlock = this.config.userMemoryPrompt || "";
     const extraSystemBlock = this.config.extraSystemPrompt || "";
     const codingHintBlock = this.config.codingHint || "";
@@ -1767,6 +1809,7 @@ ${s.taskStrategy}
       modeSwitching,
       taskStrategy,
       skillsBlock,
+      memoryPolicyBlock,
       memoryBlock,
       extraSystemBlock,
       codingHintBlock,
@@ -1821,8 +1864,9 @@ ${s.taskStrategy}
       { name: "extraSystem", content: s.extraSystemBlock, priority: 20, maxTokens: 500 },
       { name: "codingBlock", content: s.codingBlock, priority: 30, maxTokens: 800 },
       { name: "skills", content: s.skillsBlock, priority: 40, maxTokens: 600 },
-      { name: "memory", content: s.memoryBlock ? `- 发现用户有明确偏好或习惯时，使用 save_user_memory 工具记录${s.memoryBlock}` : "", priority: 50, maxTokens: 400 },
-      { name: "codingHint", content: s.codingHintBlock, priority: 60, maxTokens: 500 },
+      { name: "memoryPolicy", content: s.memoryPolicyBlock, priority: 50, maxTokens: 500 },
+      { name: "memoryContext", content: s.memoryBlock, priority: 60, maxTokens: 500 },
+      { name: "codingHint", content: s.codingHintBlock, priority: 70, maxTokens: 500 },
     ];
 
     const budget = this.config.contextBudget ?? 0;

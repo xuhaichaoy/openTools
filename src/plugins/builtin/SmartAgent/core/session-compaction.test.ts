@@ -27,6 +27,7 @@ vi.mock("@/store/agent-store", () => ({
 import {
   buildAgentSessionCompactionState,
   buildAgentSessionContextMessages,
+  buildAgentSessionMemoryFlushText,
   shouldAutoCompactAgentSession,
 } from "./session-compaction";
 
@@ -43,6 +44,9 @@ function makeSession(taskCount = 8): AgentSession {
           type: "action" as const,
           content: "读取文件",
           toolName: "read_file",
+          toolInput: {
+            path: `/repo/src/task-${index + 1}.ts`,
+          },
           timestamp: index + 1,
         },
         {
@@ -69,7 +73,9 @@ describe("session-compaction", () => {
       reason: decision.reason,
     });
     expect(compaction?.compactedTaskCount).toBeGreaterThan(0);
-    expect(compaction?.summary).toContain("任务 1");
+    expect(compaction?.summary).toContain("## 最新用户目标");
+    expect(compaction?.summary).toContain("## 关键文件");
+    expect(compaction?.summary).toContain("task-1.ts");
   });
 
   it("emits context messages after compaction", () => {
@@ -78,5 +84,12 @@ describe("session-compaction", () => {
     const messages = buildAgentSessionContextMessages(session);
     expect(messages).toHaveLength(2);
     expect(messages[0]?.content).toContain("历史摘要");
+  });
+
+  it("builds memory flush text before compaction", () => {
+    const session = makeSession();
+    const flushText = buildAgentSessionMemoryFlushText(session, 4);
+    expect(flushText).toContain("压缩前目标");
+    expect(flushText).toContain("已读取文件");
   });
 });

@@ -23,6 +23,7 @@ import {
   type RunningPhase,
 } from "../core/ui-state";
 import {
+  buildAgentSessionMemoryFlushText,
   buildAgentSessionCompactionState,
   buildAgentSessionContextMessages,
   isAgentContextPressureError,
@@ -45,6 +46,9 @@ import { modelSupportsImageInput } from "@/core/ai/model-capabilities";
 import { autoExtractMemories } from "@/core/agent/actor/actor-memory";
 import { buildKnowledgeContextMessages } from "@/core/agent/actor/middlewares/knowledge-base-middleware";
 import { isRetryableError } from "@/core/agent/actor/middlewares/model-retry-middleware";
+import { buildBootstrapContextSnapshot } from "@/core/ai/bootstrap-context";
+import { saveSessionMemoryNote } from "@/core/ai/memory-store";
+import { deriveAgentSessionFiles } from "../core/session-insights";
 
 type AgentStoreState = ReturnType<typeof useAgentStore.getState>;
 export const AGENT_EXECUTION_HEARTBEAT_INTERVAL_MS = 10_000;
@@ -204,6 +208,16 @@ export function useAgentExecution({
             compaction &&
             compaction.compactedTaskCount > getAgentSessionCompactedTaskCount(session)
           ) {
+            const flushText = buildAgentSessionMemoryFlushText(
+              session,
+              compaction.compactedTaskCount,
+            );
+            if (flushText) {
+              void saveSessionMemoryNote(flushText, {
+                conversationId: session.id,
+                source: "system",
+              }).catch(() => undefined);
+            }
             updateSession(session.id, { compaction });
             session = useAgentStore.getState().sessions.find(
               (item) => item.id === sessionId,
@@ -415,12 +429,23 @@ export function useAgentExecution({
         }
         return historySteps;
       };
-      const createAgent = (
+      const createAgent = async (
         currentSession:
           | import("@/store/agent-store").AgentSession
           | undefined,
       ) => {
         const sessionContextMessages = buildAgentSessionContextMessages(currentSession);
+        const sessionFiles = deriveAgentSessionFiles(currentSession);
+        const bootstrapContext = await buildBootstrapContextSnapshot({
+          filePaths: sessionFiles.map((file) => file.path),
+          handoffPaths: [
+            ...(currentSession?.sourceHandoff?.attachmentPaths ?? []),
+            ...((currentSession?.sourceHandoff?.files ?? []).map((file) => file.path)),
+          ],
+          query,
+          includeMemory: true,
+          recentDailyFiles: 1,
+        }).catch(() => null);
         const promptContextSnapshot = buildAgentPromptContextSnapshot({
           session: currentSession,
           query,
@@ -433,13 +458,19 @@ export function useAgentExecution({
           skillsPrompt,
           extraSystemPrompt: supplementalSystemPrompt,
           codingHint: opts?.codingHint,
+          bootstrapContextFileNames: bootstrapContext?.files.map((file) => file.name) ?? [],
           historyContextMessageCount: sessionContextMessages.length,
           knowledgeContextMessageCount: knowledgeContextMessages.length,
+          files: sessionFiles,
         });
         onPromptContextSnapshot?.(promptContextSnapshot);
 
         const promptContextPrompt = buildAgentPromptContextPrompt(promptContextSnapshot);
-        const extraSystemPrompt = [supplementalSystemPrompt, promptContextPrompt]
+        const extraSystemPrompt = [
+          supplementalSystemPrompt,
+          bootstrapContext?.prompt || "",
+          promptContextPrompt,
+        ]
           .filter((block): block is string => typeof block === "string" && block.trim().length > 0)
           .join("\n\n");
 
@@ -488,7 +519,7 @@ export function useAgentExecution({
         );
       };
 
-      let agent = createAgent(session);
+      let agent = await createAgent(session);
 
       heartbeatTimerRef.current = setInterval(() => {
         if (abortController.signal.aborted) return;
@@ -636,7 +667,17 @@ export function useAgentExecution({
                   session = useAgentStore.getState().sessions.find(
                     (item) => item.id === sessionId,
                   ) ?? latestSession;
-                  agent = createAgent(session);
+                  const flushText = buildAgentSessionMemoryFlushText(
+                    latestSession,
+                    recoveredCompaction.compactedTaskCount,
+                  );
+                  if (flushText) {
+                    void saveSessionMemoryNote(flushText, {
+                      conversationId: latestSession.id,
+                      source: "system",
+                    }).catch(() => undefined);
+                  }
+                  agent = await createAgent(session);
                   applyStep(
                     {
                       type: "observation",

@@ -26,6 +26,8 @@ export interface AgentPromptContextSnapshot {
   attachmentSummary?: string;
   sourceHandoffSummary?: string;
   compactionSummaryPreview?: string;
+  bootstrapContextFileCount: number;
+  bootstrapContextFileNames: string[];
   memoryItemCount: number;
   historyContextMessageCount: number;
   knowledgeContextMessageCount: number;
@@ -70,6 +72,7 @@ export function buildAgentPromptContextSnapshot(params: {
   skillsPrompt?: string;
   extraSystemPrompt?: string;
   codingHint?: string;
+  bootstrapContextFileNames?: string[];
   historyContextMessageCount?: number;
   knowledgeContextMessageCount?: number;
   files?: AgentSessionFileInsight[];
@@ -95,6 +98,8 @@ export function buildAgentPromptContextSnapshot(params: {
     sourceHandoffSummary: buildSourceHandoffSummary(params.sourceHandoff ?? session?.sourceHandoff),
     compactionSummaryPreview:
       summarizeAISessionRuntimeText(session?.compaction?.summary || "", 220) || undefined,
+    bootstrapContextFileCount: Math.max(0, params.bootstrapContextFileNames?.length ?? 0),
+    bootstrapContextFileNames: params.bootstrapContextFileNames?.filter(Boolean) ?? [],
     memoryItemCount: countPromptItems(params.userMemoryPrompt),
     historyContextMessageCount: Math.max(0, params.historyContextMessageCount ?? 0),
     knowledgeContextMessageCount: Math.max(0, params.knowledgeContextMessageCount ?? 0),
@@ -129,6 +134,11 @@ export function buildAgentPromptContextReport(snapshot: AgentPromptContextSnapsh
       .map((file) => file.path)
       .join("、");
     lines.push(`已加载路径：${filePreview}${snapshot.files.length > 6 ? ` 等 ${snapshot.files.length} 项` : ""}`);
+  }
+  if (snapshot.bootstrapContextFileCount > 0) {
+    lines.push(
+      `Bootstrap 上下文：${snapshot.bootstrapContextFileNames.slice(0, 5).join("、")}${snapshot.bootstrapContextFileCount > 5 ? ` 等 ${snapshot.bootstrapContextFileCount} 个文件` : ""}`,
+    );
   }
   if (snapshot.memoryItemCount > 0) {
     lines.push(`已召回记忆：${snapshot.memoryItemCount} 条`);

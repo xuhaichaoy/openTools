@@ -28,11 +28,15 @@ import {
 const MAX_SEARCH_RESULTS = 8;
 const MAX_EXTRACT_CONTENT_LENGTH = 2000;
 
-/**
- * 创建 Actor 专用的记忆工具（memory_search / memory_get / memory_save）。
- * 让 Agent 能主动检索和存储记忆，对标 OpenClaw 的 memory_search / memory_get。
- */
-export function createActorMemoryTools(actorId: string, workspaceId?: string): AgentTool[] {
+export function createMemoryTools(options?: {
+  workspaceId?: string;
+  sourceMode?: AIMemoryCandidateMode;
+  saveReason?: string;
+}): AgentTool[] {
+  const workspaceId = options?.workspaceId;
+  const sourceMode = options?.sourceMode ?? "agent";
+  const saveReason = options?.saveReason ?? "Agent 提议将这条用户信息加入长期记忆候选";
+
   return [
     {
       name: "memory_search",
@@ -190,8 +194,8 @@ export function createActorMemoryTools(actorId: string, workspaceId?: string): A
 
         const result = await queueMemoryCandidateFromAgent(content, "", category, {
           workspaceId,
-          sourceMode: "agent",
-          reason: "Dialog / Agent 提议将这条用户信息加入长期记忆候选",
+          sourceMode,
+          reason: saveReason,
           evidence: content,
         });
         return result
@@ -206,6 +210,19 @@ export function createActorMemoryTools(actorId: string, workspaceId?: string): A
       },
     },
   ];
+}
+
+/**
+ * 创建 Actor 专用的记忆工具（memory_search / memory_get / memory_save）。
+ * 让 Agent 能主动检索和存储记忆，对标 OpenClaw 的 memory_search / memory_get。
+ */
+export function createActorMemoryTools(actorId: string, workspaceId?: string): AgentTool[] {
+  void actorId;
+  return createMemoryTools({
+    workspaceId,
+    sourceMode: "agent",
+    saveReason: "Dialog / Agent 提议将这条用户信息加入长期记忆候选",
+  });
 }
 
 function formatMemoryItem(m: AIMemoryItem) {

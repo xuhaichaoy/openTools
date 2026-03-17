@@ -19,6 +19,14 @@ function getPluginTools(): AgentTool[] {
   );
 }
 
+function dedupeToolsByName(tools: AgentTool[]): AgentTool[] {
+  const deduped = new Map<string, AgentTool>();
+  for (const tool of tools) {
+    deduped.set(tool.name, tool);
+  }
+  return [...deduped.values()];
+}
+
 /**
  * ToolResolverMiddleware — collects all available tools:
  * builtin, plugin, extra, actor-communication, and memory tools.
@@ -50,14 +58,14 @@ export class ToolResolverMiddleware implements ActorMiddleware {
       } catch { /* code index not available */ }
     }
 
-    const allTools = [
+    const allTools = dedupeToolsByName([
       ...getPluginTools(),
       ...builtinResult.tools,
       ...ctx.extraTools,
       ...commTools,
       ...memoryTools,
       ...codeSearchTools,
-    ];
+    ]);
     ctx.tools = filterAssistantToolsByConfig(allTools, useAIStore.getState().config);
 
     ctx.notifyToolCalled = builtinResult.notifyToolCalled;

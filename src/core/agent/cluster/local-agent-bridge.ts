@@ -12,6 +12,7 @@ import {
 } from "@/core/ai/assistant-config";
 import { autoExtractMemories } from "@/core/agent/actor/actor-memory";
 import { buildKnowledgeContextMessages } from "@/core/agent/actor/middlewares/knowledge-base-middleware";
+import { buildBootstrapContextSnapshot } from "@/core/ai/bootstrap-context";
 import { registry } from "@/core/plugin-system/registry";
 import {
   ReActAgent,
@@ -157,7 +158,17 @@ export class LocalAgentBridge implements AgentBridge {
     const hasCodingWorkflowSkill = skillCtx.visibleSkillIds.includes("builtin-coding-workflow");
     const toolsAfterSkills = applySkillToolFilter(tools, skillCtx.mergedToolFilter);
     const knowledgeContextMessages = await buildKnowledgeContextMessages(task);
-    const extraSystemPrompt = buildAssistantSupplementalPrompt(aiConfig.system_prompt);
+    const bootstrapContext = await buildBootstrapContextSnapshot({
+      query: fullQuery,
+      includeMemory: true,
+      recentDailyFiles: 1,
+    }).catch(() => null);
+    const extraSystemPrompt = [
+      buildAssistantSupplementalPrompt(aiConfig.system_prompt),
+      bootstrapContext?.prompt || "",
+    ]
+      .filter((block): block is string => typeof block === "string" && block.trim().length > 0)
+      .join("\n\n");
 
     const collectedSteps: AgentStep[] = [];
     this.abortController = new AbortController();
@@ -176,7 +187,7 @@ export class LocalAgentBridge implements AgentBridge {
         initialMode: role?.readonly ? "plan" : "execute",
         userMemoryPrompt,
         skillsPrompt,
-        extraSystemPrompt,
+        extraSystemPrompt: extraSystemPrompt || undefined,
         skipInternalCodingBlock: hasCodingWorkflowSkill,
         roleOverride: rolePrompt || undefined,
         dangerousToolPatterns: ["write_file", "run_shell_command", "native_"],

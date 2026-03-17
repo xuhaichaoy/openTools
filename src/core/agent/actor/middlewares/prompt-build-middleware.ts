@@ -1,4 +1,5 @@
 import { buildAssistantSupplementalPrompt } from "@/core/ai/assistant-config";
+import { buildBootstrapContextSnapshot } from "@/core/ai/bootstrap-context";
 import { useAIStore } from "@/store/ai-store";
 import type { ActorMiddleware, ActorRunContext } from "../actor-middleware";
 
@@ -16,9 +17,19 @@ export class PromptBuildMiddleware implements ActorMiddleware {
     const extraSystemPrompt = buildAssistantSupplementalPrompt(
       useAIStore.getState().config.system_prompt,
     );
+    const bootstrapContext = await buildBootstrapContextSnapshot({
+      workspaceRoot: ctx.workspace,
+      query: ctx.query,
+      includeMemory: true,
+      recentDailyFiles: 1,
+    }).catch(() => null);
 
     if (extraSystemPrompt) {
       prompt += `\n\n${extraSystemPrompt}`;
+    }
+
+    if (bootstrapContext?.prompt) {
+      prompt += `\n\n${bootstrapContext.prompt}`;
     }
 
     if (ctx.workspace) {

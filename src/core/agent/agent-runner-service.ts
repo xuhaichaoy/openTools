@@ -26,8 +26,12 @@ import {
   shouldRecallAssistantMemory,
 } from "@/core/ai/assistant-config";
 import { useAgentMemoryStore } from "@/store/agent-memory-store";
-import { autoExtractMemories } from "@/core/agent/actor/actor-memory";
+import {
+  autoExtractMemories,
+  createMemoryTools,
+} from "@/core/agent/actor/actor-memory";
 import { buildKnowledgeContextMessages } from "@/core/agent/actor/middlewares/knowledge-base-middleware";
+import { buildBootstrapContextSnapshot } from "@/core/ai/bootstrap-context";
 
 type QueueItem = {
   task: AgentScheduledTask;
@@ -75,6 +79,13 @@ function buildRunnerTools(): AgentTool[] {
       }
     },
   });
+
+  tools.push(
+    ...createMemoryTools({
+      sourceMode: "agent",
+      saveReason: "定时任务执行链建议记录这条长期记忆候选",
+    }),
+  );
 
   const runtimeOptions = { allowUnattendedHostFallback: true };
 
@@ -407,7 +418,17 @@ export class AgentRunnerService {
       }) || undefined;
     }
     const knowledgeContextMessages = await buildKnowledgeContextMessages(task.query);
-    const extraSystemPrompt = buildAssistantSupplementalPrompt(aiConfig.system_prompt);
+    const bootstrapContext = await buildBootstrapContextSnapshot({
+      query: task.query,
+      includeMemory: true,
+      recentDailyFiles: 1,
+    }).catch(() => null);
+    const extraSystemPrompt = [
+      buildAssistantSupplementalPrompt(aiConfig.system_prompt),
+      bootstrapContext?.prompt || "",
+    ]
+      .filter((block): block is string => typeof block === "string" && block.trim().length > 0)
+      .join("\n\n");
 
     const collectedSteps: AgentStep[] = [];
     const agent = new ReActAgent(
@@ -420,7 +441,7 @@ export class AgentRunnerService {
         temperature: aiConfig.temperature ?? 0.7,
         userMemoryPrompt,
         skillsPrompt,
-        extraSystemPrompt,
+        extraSystemPrompt: extraSystemPrompt || undefined,
         skipInternalCodingBlock: hasCodingWorkflowSkill,
         contextMessages: knowledgeContextMessages,
       },

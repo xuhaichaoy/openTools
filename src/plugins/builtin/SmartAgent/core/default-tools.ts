@@ -1,5 +1,6 @@
 import { agentRuntimeManager, type RuntimeFallbackContext } from "@/core/agent/runtime";
 import type { AgentTool } from "./react-agent";
+import { createMemoryTools } from "@/core/agent/actor/actor-memory";
 
 /**
  * 安全的数学表达式解析器（递归下降），不使用 eval/Function。
@@ -1416,6 +1417,13 @@ export function createBuiltinAgentTools(
       }
     },
   });
+
+  tools.push(
+    ...createMemoryTools({
+      sourceMode: "agent",
+      saveReason: "内置工具提议将这条用户信息加入长期记忆候选",
+    }),
+  );
 
   tools.push(...createLocalDevTools(confirmHostFallback));
   tools.push(createReminderTool());

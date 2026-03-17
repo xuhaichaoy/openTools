@@ -16,6 +16,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { useAIStore } from "@/store/ai-store";
 import { filterAssistantToolsByConfig } from "@/core/ai/assistant-config";
 
+function dedupeToolsByName(tools: AgentTool[]): AgentTool[] {
+  const deduped = new Map<string, AgentTool>();
+  for (const tool of tools) {
+    deduped.set(tool.name, tool);
+  }
+  return [...deduped.values()];
+}
+
 interface UseAgentEffectsParams {
   ai?: MToolsAI;
   historyLoaded: boolean;
@@ -146,7 +154,7 @@ export function useAgentEffects({
       });
     }
 
-    setAvailableTools(filterAssistantToolsByConfig(tools, aiConfig));
+    setAvailableTools(filterAssistantToolsByConfig(dedupeToolsByName(tools), aiConfig));
     setResetPerRunState(() => builtinResult.resetPerRunState);
     setNotifyToolCalled(() => builtinResult.notifyToolCalled);
   }, [
