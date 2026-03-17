@@ -6,6 +6,13 @@ vi.mock("@/core/ai/ai-session-runtime", () => ({
     String(text).slice(0, max),
 }));
 
+vi.mock("@/core/ai/bootstrap-context", () => ({
+  loadBootstrapReinjectionPreview: vi.fn(async () => [
+    "Session Startup：先确认工作区和约束",
+    "Red Lines：不要跳过现有规则",
+  ]),
+}));
+
 vi.mock("@/store/agent-store", () => ({
   getVisibleAgentTasks: (session: AgentSession) => {
     const visibleCount =
@@ -28,6 +35,7 @@ import {
   buildAgentSessionCompactionState,
   buildAgentSessionContextMessages,
   buildAgentSessionMemoryFlushText,
+  enrichAgentSessionCompactionState,
   shouldAutoCompactAgentSession,
 } from "./session-compaction";
 
@@ -75,7 +83,23 @@ describe("session-compaction", () => {
     expect(compaction?.compactedTaskCount).toBeGreaterThan(0);
     expect(compaction?.summary).toContain("## 最新用户目标");
     expect(compaction?.summary).toContain("## 关键文件");
+    expect(compaction?.summary).toContain("## 连续性护栏");
     expect(compaction?.summary).toContain("task-1.ts");
+    expect(compaction?.preservedIdentifiers).toContain("task-1.ts");
+    expect(compaction?.preservedToolNames).toContain("read_file");
+  });
+
+  it("reinjects AGENTS guardrails into compaction summary", async () => {
+    const session = makeSession();
+    session.workspaceRoot = "/repo";
+    const compaction = buildAgentSessionCompactionState(session);
+    const enriched = await enrichAgentSessionCompactionState(session, compaction);
+
+    expect(enriched?.summary).toContain("## AGENTS 关键规则回注");
+    expect(enriched?.bootstrapReinjectionPreview).toContain(
+      "Session Startup：先确认工作区和约束",
+    );
+    expect(enriched?.workspaceRootAtCompaction).toBe("/repo");
   });
 
   it("emits context messages after compaction", () => {
@@ -84,6 +108,7 @@ describe("session-compaction", () => {
     const messages = buildAgentSessionContextMessages(session);
     expect(messages).toHaveLength(2);
     expect(messages[0]?.content).toContain("历史摘要");
+    expect(messages[1]?.content).toContain("关键标识");
   });
 
   it("builds memory flush text before compaction", () => {
@@ -91,5 +116,6 @@ describe("session-compaction", () => {
     const flushText = buildAgentSessionMemoryFlushText(session, 4);
     expect(flushText).toContain("压缩前目标");
     expect(flushText).toContain("已读取文件");
+    expect(flushText).toContain("关键工具");
   });
 });

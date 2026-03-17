@@ -1938,6 +1938,47 @@ export class ActorSystem {
       return msg;
     }
 
+    const sourceInteractionType = sourceMessage?.interactionType
+      ?? (sourceMessage?.kind === "approval_request"
+        ? "approval"
+        : sourceMessage?.kind === "clarification_request"
+          ? "clarification"
+          : sourceMessage?.expectReply
+            ? "question"
+            : undefined);
+    const canResumePersistedInteraction = Boolean(
+      sourceMessage
+      && sourceMessage.from !== "user"
+      && sourceMessage.expectReply
+      && sourceMessage.interactionStatus === "pending"
+      && sourceInteractionType
+      && this.actors.has(sourceMessage.from),
+    );
+
+    if (canResumePersistedInteraction && sourceMessage && sourceInteractionType) {
+      const msg: DialogMessage = {
+        id: generateId(),
+        from: "user",
+        to: sourceMessage.from,
+        content,
+        timestamp: Date.now(),
+        priority: "normal",
+        replyTo: messageId,
+        _briefContent: opts?._briefContent,
+        kind: getInteractionResponseKind(sourceInteractionType),
+        interactionType: sourceInteractionType,
+        interactionId: sourceMessage.interactionId,
+        interactionStatus: "answered",
+        relatedRunId,
+        ...(opts?.images?.length ? { images: opts.images } : {}),
+      };
+      this.dialogHistory.push(msg);
+      appendDialogMessage(this.sessionId, msg);
+      this.emitEvent(msg);
+      this.updateDialogMessage(messageId, { interactionStatus: "answered" });
+      return msg;
+    }
+
     const fallbackActorId = sourceMessage?.from && sourceMessage.from !== "user" && this.actors.has(sourceMessage.from)
       ? sourceMessage.from
       : this.getCoordinator()?.id;

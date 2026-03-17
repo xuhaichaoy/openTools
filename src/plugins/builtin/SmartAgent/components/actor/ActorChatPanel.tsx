@@ -63,6 +63,10 @@ import { routeToAICenter } from "@/core/ai/ai-center-routing";
 import { buildDialogContextBreakdown, type DialogContextBreakdown } from "@/core/ai/dialog-context-breakdown";
 import { buildDialogWorkingSetSnapshot } from "@/core/ai/ai-working-set";
 import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
+import {
+  hasDialogContextSnapshotContent,
+  type DialogContextSnapshot,
+} from "@/plugins/builtin/SmartAgent/core/dialog-context-snapshot";
 import { KnowledgeGraph } from "@/core/knowledge/knowledge-graph";
 import { primeTeamModelCache } from "@/core/ai/router";
 import { queueAssistantMemoryCandidates } from "@/core/ai/assistant-memory";
@@ -115,6 +119,7 @@ import {
 } from "@/hooks/use-input-attachments";
 import { AttachDropdown } from "@/components/ui/AttachDropdown";
 import { DialogFollowUpDock } from "./DialogFollowUpDock";
+import { DialogContextStrip } from "./DialogContextStrip";
 import { useToast } from "@/components/ui/Toast";
 import { modelSupportsImageInput } from "@/core/ai/model-capabilities";
 
@@ -2191,6 +2196,7 @@ function DialogWorkspaceDock({
   draftPlan,
   draftInsight,
   contextBreakdown,
+  contextSnapshot,
   dialogContextSummary,
   requirePlanApproval,
   onTogglePlanApproval,
@@ -2215,6 +2221,7 @@ function DialogWorkspaceDock({
   draftPlan: ClusterPlan | null;
   draftInsight: DialogDispatchPlanBundle["insight"] | null;
   contextBreakdown: DialogContextBreakdown;
+  contextSnapshot: DialogContextSnapshot | null;
   dialogContextSummary: DialogContextSummary | null;
   requirePlanApproval: boolean;
   onTogglePlanApproval: (value: boolean) => void;
@@ -2916,6 +2923,31 @@ function DialogWorkspaceDock({
               </div>
             )}
 
+            {hasDialogContextSnapshotContent(contextSnapshot) && (
+              <div className="rounded-xl border border-[var(--color-border)]/80 bg-[var(--color-bg)] px-3 py-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
+                    当前上下文说明
+                  </div>
+                  {contextSnapshot?.generatedAt && (
+                    <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                      更新于 {formatShortTime(contextSnapshot.generatedAt)}
+                    </span>
+                  )}
+                </div>
+                <div className="mt-2 space-y-1.5">
+                  {contextSnapshot?.contextLines.map((line, index) => (
+                    <div
+                      key={`${index}-${line}`}
+                      className="text-[11px] leading-relaxed text-[var(--color-text-secondary)]"
+                    >
+                      {line}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="rounded-xl border border-[var(--color-border)]/80 bg-[var(--color-bg)] px-3 py-3">
               <div className="grid gap-2 md:grid-cols-3">
                 <div className="rounded-lg bg-[var(--color-bg-secondary)]/70 px-3 py-2">
@@ -3172,7 +3204,6 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   const [overlay, setOverlay] = useState<DialogOverlay>(null);
   const [workspacePanel, setWorkspacePanel] = useState<WorkspacePanel>(null);
   const [input, setInput] = useState("");
-  const [incomingHandoff, setIncomingHandoff] = useState<AICenterHandoff | null>(null);
   const [showMention, setShowMention] = useState(false);
   const [mentionFilter, setMentionFilter] = useState("");
   const [customPresets, setCustomPresets] = useState<DialogPreset[]>([]);
@@ -3206,10 +3237,10 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   const {
     active: systemActive, actors, dialogHistory, pendingUserInteractions, spawnedTasks, artifacts: structuredArtifacts,
     sessionUploads, queuedFollowUps, focusedSpawnedSessionRunId,
-    coordinatorActorId, actorTodos,
+    coordinatorActorId, actorTodos, sourceHandoff: incomingHandoff, contextSnapshot,
     init, spawnActor, killActor, destroyAll, sendMessage, broadcastMessage, broadcastAndResolve,
     abortAll, steer, focusSpawnedSession, closeSpawnedSession, resetSession, enqueueFollowUp, removeFollowUp, clearFollowUps,
-    sync, routeTask, replyToMessage, getSystem,
+    sync, routeTask, replyToMessage, getSystem, setSourceHandoff,
   } = useActorSystemStore();
 
   const models = useAvailableModels();
@@ -3345,7 +3376,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       ensureSystem();
       setInput(payload.query);
       clearAttachments();
-      setIncomingHandoff(payload);
+      setSourceHandoff(payload);
       const sessionId = getSystem()?.sessionId;
       if (sessionId && payload.sourceMode) {
         useAISessionRuntimeStore.getState().ensureSession({
@@ -3377,7 +3408,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     return () => {
       cancelled = true;
     };
-  }, [pendingAICenterHandoff, ensureSystem, clearAttachments, addAttachmentFromPath, getSystem]);
+  }, [pendingAICenterHandoff, ensureSystem, clearAttachments, addAttachmentFromPath, getSystem, setSourceHandoff]);
 
   // 加载自定义预设
   useEffect(() => {
@@ -3538,6 +3569,12 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       ? spawnedTasks.find((task) => task.runId === focusedSpawnedSessionRunId && task.mode === "session" && task.sessionOpen)
       : undefined,
     [spawnedTasks, focusedSpawnedSessionRunId],
+  );
+  const focusedSessionLabel = useMemo(
+    () => focusedSessionTask
+      ? focusedSessionTask.label || (actorById.get(focusedSessionTask.targetActorId)?.roleName ?? focusedSessionTask.targetActorId)
+      : null,
+    [actorById, focusedSessionTask],
   );
 
   useEffect(() => {
@@ -3718,13 +3755,13 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   }, [spawnedTasks, actorById, actorTodos, dialogHistory, artifacts, actors, getSystem]);
   const handleNewTopic = useCallback(() => {
     resetSession();
-    setIncomingHandoff(null);
-  }, [resetSession]);
+    setSourceHandoff(null);
+  }, [resetSession, setSourceHandoff]);
   const handleFullReset = useCallback(() => {
     destroyAll();
     initRef.current = false;
-    setIncomingHandoff(null);
-  }, [destroyAll]);
+    setSourceHandoff(null);
+  }, [destroyAll, setSourceHandoff]);
 
   const parseMention = useCallback((text: string): { targetId: string | null; cleanContent: string } => {
     if (!text.startsWith("@")) return { targetId: null, cleanContent: text };
@@ -3973,7 +4010,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       setInputNotice(null);
       setShowMention(false);
       clearAttachments();
-      setIncomingHandoff(null);
+      setSourceHandoff(null);
       inputRef.current?.focus();
       return;
     }
@@ -4053,7 +4090,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       setInputNotice("当前房间仍在处理上一轮协作，这条消息已加入队列，待房间空闲后继续。");
       setShowMention(false);
       clearAttachments();
-      setIncomingHandoff(null);
+      setSourceHandoff(null);
       inputRef.current?.focus();
       return;
     }
@@ -4127,7 +4164,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
             setInput("");
             setShowMention(false);
             clearAttachments();
-            setIncomingHandoff(null);
+            setSourceHandoff(null);
             inputRef.current?.focus();
             return;
           }
@@ -4156,9 +4193,9 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     setInputNotice(null);
     setShowMention(false);
     clearAttachments();
-    setIncomingHandoff(null);
+    setSourceHandoff(null);
     inputRef.current?.focus();
-  }, [input, hasAttachments, imagePaths, attachments, fileContextBlock, attachmentSummary, ensureSystem, pendingUserInteractions, pendingInteractionByMessageId, selectedPendingMessageId, parseMention, actors, sendMessage, broadcastMessage, broadcastAndResolve, steer, replyToMessage, routingMode, routeTask, clearAttachments, requirePlanApproval, openPlanApprovalDialog, getSystem, coordinatorActorId, focusedSessionTask, messageById, queueDialogUserMemoryCapture, inputAttachmentPaths, incomingHandoff, actorSupportsImageInput, toast, enqueueFollowUp, hasRunningActors]);
+  }, [input, hasAttachments, imagePaths, attachments, fileContextBlock, attachmentSummary, ensureSystem, pendingUserInteractions, pendingInteractionByMessageId, selectedPendingMessageId, parseMention, actors, sendMessage, broadcastMessage, broadcastAndResolve, steer, replyToMessage, routingMode, routeTask, clearAttachments, requirePlanApproval, openPlanApprovalDialog, getSystem, coordinatorActorId, focusedSessionTask, messageById, queueDialogUserMemoryCapture, inputAttachmentPaths, incomingHandoff, actorSupportsImageInput, toast, enqueueFollowUp, hasRunningActors, setSourceHandoff]);
 
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value;
@@ -4554,6 +4591,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                 draftPlan={draftDispatchPlan}
                 draftInsight={draftDispatchInsight}
                 contextBreakdown={contextBreakdown}
+                contextSnapshot={contextSnapshot}
                 dialogContextSummary={dialogContextSummary}
                 requirePlanApproval={requirePlanApproval}
                 onTogglePlanApproval={setRequirePlanApproval}
@@ -4874,13 +4912,15 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
           />
 
           <div className="overflow-visible rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-[0_12px_32px_-24px_rgba(15,23,42,0.35)]">
-            {(incomingHandoff || focusedSessionTask || queuedFollowUps.length > 0 || pendingUserInteractions.length > 0 || attachments.length > 0 || inputNotice) && (
+            {(incomingHandoff || dialogMemoryWorkspaceId || dialogContextSummary || dialogHistory.length > 0 || focusedSessionTask || queuedFollowUps.length > 0 || pendingUserInteractions.length > 0 || attachments.length > 0 || inputNotice) && (
               <div className="space-y-2 border-b border-[var(--color-border)] bg-[linear-gradient(135deg,rgba(15,23,42,0.02),transparent_45%)] px-3 py-2.5">
+                <DialogContextStrip snapshot={contextSnapshot} />
+
                 {incomingHandoff?.sourceMode && (
                   <AICenterHandoffCard
                     handoff={incomingHandoff}
                     dismissLabel="仅隐藏提示"
-                    onDismiss={() => setIncomingHandoff(null)}
+                    onDismiss={() => setSourceHandoff(null)}
                   />
                 )}
 
@@ -4889,7 +4929,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                     <Network className="w-3 h-3" />
                     <span>
                       当前正在聚焦子会话：
-                      {focusedSessionTask.label || (actorById.get(focusedSessionTask.targetActorId)?.roleName ?? focusedSessionTask.targetActorId)}
+                      {focusedSessionLabel}
                     </span>
                     <button
                       onClick={() => focusSpawnedSession(null)}
@@ -5016,8 +5056,8 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                   ? "作为新消息发送，不会绑定到待回复问题..."
                   : selectedPendingInteractionLabel
                     ? `回复${selectedPendingInteractionLabel}...`
-                    : focusedSessionTask
-                      ? `继续和 ${actorById.get(focusedSessionTask.targetActorId)?.roleName ?? focusedSessionTask.targetActorId} 的子会话...`
+                    : focusedSessionLabel
+                      ? `继续和 ${focusedSessionLabel} 的子会话...`
                       : pendingUserInteractions.length > 0
                         ? `有 ${pendingUserInteractions.length} 条待回复交互，先选择要回复的问题...`
                         : "输入消息，Shift+Enter 换行，输入 @ 可指定发送给某个 Agent"}

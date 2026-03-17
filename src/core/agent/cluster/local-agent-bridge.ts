@@ -13,6 +13,11 @@ import {
 import { autoExtractMemories } from "@/core/agent/actor/actor-memory";
 import { buildKnowledgeContextMessages } from "@/core/agent/actor/middlewares/knowledge-base-middleware";
 import { buildBootstrapContextSnapshot } from "@/core/ai/bootstrap-context";
+import {
+  buildAgentExecutionContextPlan,
+  collectContextPathHints,
+  uniqueContextPaths,
+} from "@/core/agent/context-runtime";
 import { registry } from "@/core/plugin-system/registry";
 import {
   ReActAgent,
@@ -81,6 +86,11 @@ function formatContextForAgent(context: Record<string, unknown>): string {
   return parts.join("\n\n");
 }
 
+function normalizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+}
+
 // ── Local Agent Bridge ──
 
 export type ConfirmDangerousAction = (
@@ -129,10 +139,23 @@ export class LocalAgentBridge implements AgentBridge {
       aiConfig,
     );
 
-    const { _images: contextImages, ...contextForText } = context;
+    const {
+      _images: contextImages,
+      _workspaceRoot: contextWorkspaceRoot,
+      _attachmentPaths: contextAttachmentPaths,
+      ...contextForText
+    } = context;
     const images = Array.isArray(contextImages) && contextImages.length > 0
       ? (contextImages as string[])
       : undefined;
+    const explicitWorkspaceRoot =
+      typeof options?.workspaceRoot === "string" && options.workspaceRoot.trim().length > 0
+        ? options.workspaceRoot
+        : (typeof contextWorkspaceRoot === "string" ? contextWorkspaceRoot : undefined);
+    const contextPathHints = uniqueContextPaths([
+      ...normalizeStringArray(contextAttachmentPaths),
+      ...collectContextPathHints(contextForText),
+    ]);
     const contextStr = Object.keys(contextForText).length > 0
       ? `\n\n## 前置步骤的输出结果\n${formatContextForAgent(contextForText)}`
       : "";
@@ -158,7 +181,20 @@ export class LocalAgentBridge implements AgentBridge {
     const hasCodingWorkflowSkill = skillCtx.visibleSkillIds.includes("builtin-coding-workflow");
     const toolsAfterSkills = applySkillToolFilter(tools, skillCtx.mergedToolFilter);
     const knowledgeContextMessages = await buildKnowledgeContextMessages(task);
+    const executionContextPlan = await buildAgentExecutionContextPlan({
+      query: fullQuery,
+      explicitWorkspaceRoot,
+      attachmentPaths: contextPathHints,
+      images,
+    });
+    const effectiveWorkspaceRoot = executionContextPlan.effectiveWorkspaceRoot;
     const bootstrapContext = await buildBootstrapContextSnapshot({
+      workspaceRoot: effectiveWorkspaceRoot,
+      filePaths: uniqueContextPaths([
+        ...contextPathHints,
+        ...executionContextPlan.scope.pathHints,
+      ]),
+      handoffPaths: executionContextPlan.scope.handoffPaths,
       query: fullQuery,
       includeMemory: true,
       recentDailyFiles: 1,
@@ -166,6 +202,9 @@ export class LocalAgentBridge implements AgentBridge {
     const extraSystemPrompt = [
       buildAssistantSupplementalPrompt(aiConfig.system_prompt),
       bootstrapContext?.prompt || "",
+      effectiveWorkspaceRoot
+        ? `## 工作目录\n你的工作目录为: ${effectiveWorkspaceRoot}\n执行 shell 命令和文件操作时，请在此目录下进行。`
+        : "",
     ]
       .filter((block): block is string => typeof block === "string" && block.trim().length > 0)
       .join("\n\n");

@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
+import type { AgentContextRuntimeDebugReport } from "@/core/agent/context-runtime/debug-types";
 import type { CodingExecutionProfile } from "@/core/agent/coding-profile";
 import type { AgentStep } from "@/plugins/builtin/SmartAgent/core/react-agent";
 import type {
@@ -58,6 +59,10 @@ export interface AgentSessionCompaction {
   compactedTaskCount: number;
   lastCompactedAt: number;
   reason?: "task_count" | "step_count" | "context_recovery";
+  preservedIdentifiers?: string[];
+  preservedToolNames?: string[];
+  bootstrapReinjectionPreview?: string[];
+  workspaceRootAtCompaction?: string;
 }
 
 export interface AgentSessionForkMeta {
@@ -71,6 +76,13 @@ export interface AgentSession {
   title: string;
   tasks: AgentTask[];
   createdAt: number;
+  workspaceRoot?: string;
+  lastContinuityStrategy?: string;
+  lastContinuityReason?: string;
+  lastContextResetAt?: number;
+  lastMemoryItemCount?: number;
+  lastSessionNotePreview?: string;
+  lastContextRuntimeReport?: AgentContextRuntimeDebugReport;
   /** 跨模式 handoff 来源信息（如从 Ask 切换到 Agent） */
   sourceHandoff?: AICenterHandoff;
   /** 当前可见的任务数量；未设置表示全部可见 */
@@ -218,7 +230,19 @@ interface AgentState {
     updates: Partial<
       Pick<
         AgentSession,
-        "tasks" | "title" | "visibleTaskCount" | "followUpQueue" | "forkMeta" | "compaction"
+        | "tasks"
+        | "title"
+        | "visibleTaskCount"
+        | "followUpQueue"
+        | "forkMeta"
+        | "compaction"
+        | "workspaceRoot"
+        | "lastContinuityStrategy"
+        | "lastContinuityReason"
+        | "lastContextResetAt"
+        | "lastMemoryItemCount"
+        | "lastSessionNotePreview"
+        | "lastContextRuntimeReport"
       >
     >,
   ) => void;
@@ -296,6 +320,25 @@ function migrateSession(raw: Record<string, unknown>): AgentSession {
       title: r.title,
       tasks,
       createdAt,
+      ...(typeof r.workspaceRoot === "string" && r.workspaceRoot.trim()
+        ? { workspaceRoot: r.workspaceRoot.trim() }
+        : {}),
+      ...(typeof r.lastContinuityStrategy === "string" && r.lastContinuityStrategy.trim()
+        ? { lastContinuityStrategy: r.lastContinuityStrategy.trim() }
+        : {}),
+      ...(typeof r.lastContinuityReason === "string" && r.lastContinuityReason.trim()
+        ? { lastContinuityReason: r.lastContinuityReason.trim() }
+        : {}),
+      ...(typeof r.lastContextResetAt === "number"
+        ? { lastContextResetAt: r.lastContextResetAt }
+        : {}),
+      ...(typeof r.lastMemoryItemCount === "number"
+        ? { lastMemoryItemCount: r.lastMemoryItemCount }
+        : {}),
+      ...(typeof r.lastSessionNotePreview === "string" && r.lastSessionNotePreview.trim()
+        ? { lastSessionNotePreview: r.lastSessionNotePreview.trim() }
+        : {}),
+      ...(r.lastContextRuntimeReport ? { lastContextRuntimeReport: r.lastContextRuntimeReport } : {}),
       ...(r.sourceHandoff ? { sourceHandoff: r.sourceHandoff } : {}),
       ...(typeof r.visibleTaskCount === "number"
         ? { visibleTaskCount: r.visibleTaskCount }
@@ -332,6 +375,25 @@ function migrateSession(raw: Record<string, unknown>): AgentSession {
         ]
       : [],
     createdAt,
+    ...(typeof r.workspaceRoot === "string" && r.workspaceRoot.trim()
+      ? { workspaceRoot: r.workspaceRoot.trim() }
+      : {}),
+    ...(typeof r.lastContinuityStrategy === "string" && r.lastContinuityStrategy.trim()
+      ? { lastContinuityStrategy: r.lastContinuityStrategy.trim() }
+      : {}),
+    ...(typeof r.lastContinuityReason === "string" && r.lastContinuityReason.trim()
+      ? { lastContinuityReason: r.lastContinuityReason.trim() }
+      : {}),
+    ...(typeof r.lastContextResetAt === "number"
+      ? { lastContextResetAt: r.lastContextResetAt }
+      : {}),
+    ...(typeof r.lastMemoryItemCount === "number"
+      ? { lastMemoryItemCount: r.lastMemoryItemCount }
+      : {}),
+    ...(typeof r.lastSessionNotePreview === "string" && r.lastSessionNotePreview.trim()
+      ? { lastSessionNotePreview: r.lastSessionNotePreview.trim() }
+      : {}),
+    ...(r.lastContextRuntimeReport ? { lastContextRuntimeReport: r.lastContextRuntimeReport } : {}),
     ...(r.sourceHandoff ? { sourceHandoff: r.sourceHandoff } : {}),
   });
 }
@@ -745,6 +807,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       title: options?.title ?? `${session.title || "新任务"} · 分支`,
       tasks: clonedTasks,
       createdAt: now,
+      workspaceRoot: session.workspaceRoot,
       sourceHandoff: session.sourceHandoff,
       forkMeta: {
         parentSessionId: session.id,

@@ -1,6 +1,13 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
+import type { ClusterContextRuntimeDebugReport } from "@/core/agent/context-runtime/debug-types";
+import type { AgentInstanceStatus } from "@/core/agent/cluster/types";
+import {
+  buildClusterContextSnapshot,
+  cloneClusterContextSnapshot,
+  type ClusterContextSnapshot,
+} from "@/plugins/builtin/SmartAgent/core/cluster-context-snapshot";
 import { tauriPersistStorage } from "@/core/storage";
 import type { AgentStep } from "@/plugins/builtin/SmartAgent/core/react-agent";
 import type { AICenterHandoff } from "@/store/app-store";
@@ -22,8 +29,12 @@ export interface ClusterSession {
   model?: string;
   /** 用户附带的图片路径 */
   images?: string[];
+  workspaceRoot?: string;
   /** 跨模式 handoff 来源信息 */
   sourceHandoff?: AICenterHandoff;
+  contextSnapshot?: ClusterContextSnapshot | null;
+  lastSessionNotePreview?: string;
+  lastContextRuntimeReport?: ClusterContextRuntimeDebugReport;
   status: ClusterSessionStatus;
   plan?: ClusterPlan;
   instances: AgentInstance[];
@@ -45,6 +56,7 @@ interface ClusterState {
     model?: string,
     images?: string[],
     sourceHandoff?: AICenterHandoff,
+    workspaceRoot?: string,
   ) => string;
   getCurrentSession: () => ClusterSession | null;
   setCurrentSession: (id: string) => void;
@@ -58,6 +70,41 @@ interface ClusterState {
 
 const generateId = () =>
   Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
+
+const RUNNING_INSTANCE_STATUSES: readonly AgentInstanceStatus[] = ["running", "reviewing"];
+
+function buildClusterSnapshotForSession(session: ClusterSession): ClusterContextSnapshot {
+  const runningInstanceCount = session.instances.filter((instance) =>
+    RUNNING_INSTANCE_STATUSES.includes(instance.status),
+  ).length;
+
+  return buildClusterContextSnapshot({
+    sessionId: session.id,
+    query: session.query,
+    mode: session.mode,
+    status: session.status,
+    workspaceRoot: session.workspaceRoot,
+    sourceHandoff: session.sourceHandoff,
+    imageCount: session.images?.length ?? 0,
+    messageCount: session.messages.length,
+    planStepCount: session.plan?.steps.length ?? 0,
+    instanceCount: session.instances.length,
+    runningInstanceCount,
+    completedInstanceCount: session.instances.filter((instance) => instance.status === "done").length,
+    errorInstanceCount: session.instances.filter((instance) => instance.status === "error").length,
+    finalAnswer: session.result?.finalAnswer,
+    lastSessionNotePreview: session.lastSessionNotePreview,
+    lastRunStatus: session.lastContextRuntimeReport?.execution.status,
+    lastRunDurationMs: session.lastContextRuntimeReport?.execution.durationMs,
+  });
+}
+
+function withClusterSnapshot(session: ClusterSession): ClusterSession {
+  return {
+    ...session,
+    contextSnapshot: buildClusterSnapshotForSession(session),
+  };
+}
 
 function buildClusterRuntimeSummary(session: ClusterSession): string | undefined {
   if (session.result?.finalAnswer?.trim()) {
@@ -89,7 +136,7 @@ export const useClusterStore = create<ClusterState>()(
       sessions: [],
       currentSessionId: null,
 
-      createSession: (query, mode, model, images, sourceHandoff) => {
+      createSession: (query, mode, model, images, sourceHandoff, workspaceRoot) => {
         const id = generateId();
         const now = Date.now();
         const session: ClusterSession = {
@@ -98,14 +145,16 @@ export const useClusterStore = create<ClusterState>()(
           mode,
           model,
           images,
+          ...(workspaceRoot ? { workspaceRoot } : {}),
           ...(sourceHandoff ? { sourceHandoff } : {}),
           status: "idle",
           instances: [],
           messages: [],
           createdAt: now,
         };
+        const nextSession = withClusterSnapshot(session);
         set((state) => ({
-          sessions: [session, ...state.sessions].slice(0, MAX_PERSISTED_SESSIONS),
+          sessions: [nextSession, ...state.sessions].slice(0, MAX_PERSISTED_SESSIONS),
           currentSessionId: id,
         }));
         useAISessionRuntimeStore.getState().ensureSession({
@@ -129,7 +178,7 @@ export const useClusterStore = create<ClusterState>()(
       updateSession: (id, patch) => {
         set((state) => ({
           sessions: state.sessions.map((s) =>
-            s.id === id ? { ...s, ...patch } : s,
+            s.id === id ? withClusterSnapshot({ ...s, ...patch }) : s,
           ),
         }));
         const session = get().sessions.find((item) => item.id === id);
@@ -153,7 +202,7 @@ export const useClusterStore = create<ClusterState>()(
             const instances = exists
               ? s.instances.map((i) => (i.id === instance.id ? instance : i))
               : [...s.instances, instance];
-            return { ...s, instances };
+            return withClusterSnapshot({ ...s, instances });
           }),
         }));
       },
@@ -162,13 +211,13 @@ export const useClusterStore = create<ClusterState>()(
         set((state) => ({
           sessions: state.sessions.map((s) => {
             if (s.id !== sessionId) return s;
-            return {
+            return withClusterSnapshot({
               ...s,
               instances: s.instances.map((i) => {
                 if (i.id !== instanceId) return i;
                 return { ...i, steps: [...i.steps, step] };
               }),
-            };
+            });
           }),
         }));
       },
@@ -176,7 +225,9 @@ export const useClusterStore = create<ClusterState>()(
       addMessage: (sessionId, message) => {
         set((state) => ({
           sessions: state.sessions.map((s) =>
-            s.id === sessionId ? { ...s, messages: [...s.messages, message] } : s,
+            s.id === sessionId
+              ? withClusterSnapshot({ ...s, messages: [...s.messages, message] })
+              : s,
           ),
         }));
       },
@@ -203,8 +254,22 @@ export const useClusterStore = create<ClusterState>()(
       storage: tauriPersistStorage("cluster-sessions.json", "集群会话"),
       onRehydrateStorage: () => (state) => {
         if (!state?.sessions?.length) return;
+        const normalizedSessions = state.sessions.map((session) =>
+          withClusterSnapshot({
+            ...session,
+            contextSnapshot: cloneClusterContextSnapshot(session.contextSnapshot),
+          }),
+        );
+        const nextCurrentSessionId =
+          state.currentSessionId && normalizedSessions.some((session) => session.id === state.currentSessionId)
+            ? state.currentSessionId
+            : normalizedSessions[0]?.id ?? null;
+        useClusterStore.setState({
+          sessions: normalizedSessions,
+          currentSessionId: nextCurrentSessionId,
+        });
         useAISessionRuntimeStore.getState().syncSessions(
-          state.sessions.map((session) => ({
+          normalizedSessions.map((session) => ({
             mode: "cluster" as const,
             externalSessionId: session.id,
             title: session.query.slice(0, 60) || "Cluster 会话",
@@ -219,29 +284,35 @@ export const useClusterStore = create<ClusterState>()(
         sessions: state.sessions
           .map((s) => {
             if (s.status !== "done" && s.status !== "error") {
-              return { ...s, status: "error" as const, finishedAt: s.finishedAt ?? Date.now() };
+              return withClusterSnapshot({
+                ...s,
+                status: "error" as const,
+                finishedAt: s.finishedAt ?? Date.now(),
+              });
             }
-            return s;
+            return withClusterSnapshot(s);
           })
           .slice(0, MAX_PERSISTED_SESSIONS)
-          .map((s) => ({
-            ...s,
-            instances: s.instances.map((inst) => ({
-              ...inst,
-              result: inst.result && inst.result.length > 2000
-                ? inst.result.slice(0, 2000) + "\n...(已截断)"
-                : inst.result,
-              steps: inst.steps.slice(-20),
-            })),
-            messages: s.messages.slice(-100),
-            result: s.result ? {
-              ...s.result,
-              finalAnswer: s.result.finalAnswer.length > 5000
-                ? s.result.finalAnswer.slice(0, 5000) + "\n...(已截断)"
-                : s.result.finalAnswer,
-              agentInstances: [],
-            } : undefined,
-          })),
+          .map((s) =>
+            withClusterSnapshot({
+              ...s,
+              instances: s.instances.map((inst) => ({
+                ...inst,
+                result: inst.result && inst.result.length > 2000
+                  ? inst.result.slice(0, 2000) + "\n...(已截断)"
+                  : inst.result,
+                steps: inst.steps.slice(-20),
+              })),
+              messages: s.messages.slice(-100),
+              result: s.result ? {
+                ...s.result,
+                finalAnswer: s.result.finalAnswer.length > 5000
+                  ? s.result.finalAnswer.slice(0, 5000) + "\n...(已截断)"
+                  : s.result.finalAnswer,
+                agentInstances: [],
+              } : undefined,
+            }),
+          ),
         currentSessionId: state.currentSessionId,
       }),
     },

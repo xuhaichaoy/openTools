@@ -59,24 +59,6 @@ const ActorChatPanel = lazy(() =>
   ),
 );
 
-const MEMORY_CANDIDATE_KIND_LABELS: Record<string, string> = {
-  preference: "偏好",
-  fact: "事实",
-  goal: "目标",
-  constraint: "约束",
-  project_context: "项目",
-  conversation_summary: "摘要",
-  session_note: "会话笔记",
-  knowledge: "知识",
-  behavior: "行为",
-};
-
-const MEMORY_CANDIDATE_SCOPE_LABELS: Record<string, string> = {
-  global: "全局",
-  conversation: "会话",
-  workspace: "工作区",
-};
-
 export function AICenter({
   onBack,
   context,
@@ -95,10 +77,6 @@ export function AICenter({
   const aiConfig = useAIStore((s) => s.config);
   const aiSourceLabel = getAIConfigSourceLabel(aiConfig.source);
   const assistantConfigBrief = describeAssistantConfigBrief(aiConfig);
-  const memoryCandidates = useAIStore((s) => s.memoryCandidates);
-  const loadMemoryCandidates = useAIStore((s) => s.loadMemoryCandidates);
-  const confirmMemoryCandidate = useAIStore((s) => s.confirmMemoryCandidate);
-  const dismissMemoryCandidate = useAIStore((s) => s.dismissMemoryCandidate);
   const ownKeys = useAIStore((s) => s.ownKeys);
   const saveConfig = useAIStore((s) => s.saveConfig);
   const selectOwnKeyModel = useAIStore((s) => s.selectOwnKeyModel);
@@ -128,10 +106,6 @@ export function AICenter({
       cancelled = true;
     };
   }, []);
-
-  useEffect(() => {
-    void loadMemoryCandidates();
-  }, [loadMemoryCandidates]);
 
   useEffect(() => {
     const scope = aiCenterModelScopes[mode];
@@ -236,13 +210,6 @@ export function AICenter({
         skill: modeMeta.skillScopeShort,
       }
       : null;
-  const foregroundMemoryCandidates = memoryCandidates.filter(
-    (candidate) => candidate.review_surface !== "background",
-  );
-  const pendingMemoryCandidates = mode === "ask"
-    ? []
-    : foregroundMemoryCandidates.slice(0, 2);
-
   const modeBtn = (m: AICenterMode, icon: React.ReactNode, label: string) => (
     <button
       onClick={() => {
@@ -491,73 +458,6 @@ export function AICenter({
           </div>
         </div>
       </div>
-
-      {pendingMemoryCandidates.length > 0 && (
-        <div className="shrink-0 border-b border-[var(--color-border)] bg-amber-500/5">
-          <div className="px-3 py-2">
-            <div className="mb-1.5 flex items-center justify-between gap-2 text-[10px] text-[var(--color-text-secondary)]">
-              <span>检测到待确认的长期记忆候选</span>
-              {foregroundMemoryCandidates.length > pendingMemoryCandidates.length && (
-                <span>还有 {foregroundMemoryCandidates.length - pendingMemoryCandidates.length} 条</span>
-              )}
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {pendingMemoryCandidates.map((candidate) => (
-                <div
-                  key={candidate.id}
-                  className="min-w-0 flex-1 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-2"
-                >
-                  <div className="line-clamp-2 text-[11px] text-[var(--color-text)]">
-                    {candidate.content}
-                  </div>
-                  <div className="mt-1 flex flex-wrap items-center gap-1">
-                    {candidate.kind && (
-                      <span className="rounded-full bg-amber-500/10 px-1.5 py-0.5 text-[9px] text-amber-700 dark:text-amber-300">
-                        {MEMORY_CANDIDATE_KIND_LABELS[candidate.kind] ?? candidate.kind}
-                      </span>
-                    )}
-                    <span className="rounded-full bg-[var(--color-bg-secondary)] px-1.5 py-0.5 text-[9px] text-[var(--color-text-secondary)]">
-                      {(candidate.scope && MEMORY_CANDIDATE_SCOPE_LABELS[candidate.scope]) || (candidate.conversation_id ? "会话" : "全局")}
-                    </span>
-                    {candidate.conflict_memory_ids && candidate.conflict_memory_ids.length > 0 && (
-                      <span className="rounded-full bg-red-500/10 px-1.5 py-0.5 text-[9px] text-red-600 dark:text-red-300">
-                        有冲突
-                      </span>
-                    )}
-                  </div>
-                  {candidate.conflict_summary && (
-                    <div className="mt-1 line-clamp-2 text-[10px] text-amber-700 dark:text-amber-300">
-                      {candidate.conflict_summary}
-                    </div>
-                  )}
-                  <div className="mt-2 flex items-center justify-end gap-2">
-                    <button
-                      onClick={() => { void dismissMemoryCandidate(candidate.id); }}
-                      className="rounded-md border border-[var(--color-border)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)]"
-                    >
-                      忽略
-                    </button>
-                    {!!candidate.conflict_memory_ids?.length && (
-                      <button
-                        onClick={() => { void confirmMemoryCandidate(candidate.id, { replaceConflicts: true }); }}
-                        className="rounded-md bg-amber-500 px-2 py-0.5 text-[10px] text-white transition-colors hover:bg-amber-600"
-                      >
-                        替换旧项
-                      </button>
-                    )}
-                    <button
-                      onClick={() => { void confirmMemoryCandidate(candidate.id); }}
-                      className="rounded-md bg-amber-500 px-2 py-0.5 text-[10px] text-white transition-colors hover:bg-amber-600"
-                    >
-                      {candidate.conflict_memory_ids?.length ? "保留并记住" : "记住"}
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* ====== 内容区 ====== */}
       <div className="flex-1 overflow-hidden relative">

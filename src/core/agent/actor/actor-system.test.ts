@@ -189,6 +189,32 @@ describe("ActorSystem.broadcastAndResolve", () => {
   });
 });
 
+describe("ActorSystem.replyToMessage", () => {
+  it("resumes a restored pending interaction from dialog history", async () => {
+    const sourceSystem = new ActorSystem();
+    sourceSystem.spawn(buildActorConfig("coordinator", "Coordinator"));
+
+    void sourceSystem.askUserInChat("coordinator", "请确认是否继续执行", { timeoutMs: 60_000 });
+    const pendingMessage = sourceSystem.getDialogHistory()[0];
+    expect(pendingMessage?.interactionStatus).toBe("pending");
+
+    const restoredHistory = sourceSystem.getDialogHistory().map((message) => ({ ...message }));
+    sourceSystem.cancelPendingInteractionsForActor("coordinator");
+    sourceSystem.killAll();
+
+    const restoredSystem = new ActorSystem();
+    restoredSystem.spawn(buildActorConfig("coordinator", "Coordinator"));
+    restoredSystem.restoreDialogHistory(restoredHistory);
+
+    const reply = restoredSystem.replyToMessage(pendingMessage!.id, "继续执行");
+
+    expect(reply.replyTo).toBe(pendingMessage!.id);
+    expect(reply.to).toBe("coordinator");
+    expect(reply.interactionStatus).toBe("answered");
+    expect(restoredSystem.getDialogHistory()[0]?.interactionStatus).toBe("answered");
+  });
+});
+
 describe("ActorSystem.spawnTask", () => {
   it("passes inherited images to the spawned actor task", () => {
     const system = new ActorSystem();

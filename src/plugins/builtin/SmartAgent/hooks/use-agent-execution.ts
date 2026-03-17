@@ -23,9 +23,9 @@ import {
   type RunningPhase,
 } from "../core/ui-state";
 import {
-  buildAgentSessionMemoryFlushText,
   buildAgentSessionCompactionState,
   buildAgentSessionContextMessages,
+  enrichAgentSessionCompactionState,
   isAgentContextPressureError,
   shouldAutoCompactAgentSession,
 } from "../core/session-compaction";
@@ -46,9 +46,21 @@ import { modelSupportsImageInput } from "@/core/ai/model-capabilities";
 import { autoExtractMemories } from "@/core/agent/actor/actor-memory";
 import { buildKnowledgeContextMessages } from "@/core/agent/actor/middlewares/knowledge-base-middleware";
 import { isRetryableError } from "@/core/agent/actor/middlewares/model-retry-middleware";
-import { buildBootstrapContextSnapshot } from "@/core/ai/bootstrap-context";
-import { saveSessionMemoryNote } from "@/core/ai/memory-store";
-import { deriveAgentSessionFiles } from "../core/session-insights";
+import {
+  buildBootstrapContextSnapshot,
+} from "@/core/ai/bootstrap-context";
+import {
+  buildAgentExecutionContextPlan,
+  collectHandoffPaths,
+  normalizeContextPath,
+  uniqueContextPaths,
+} from "@/core/agent/context-runtime";
+import { persistAgentTurnContextIngest } from "@/core/agent/context-runtime/context-ingest";
+import { persistAgentSessionCompactionArtifacts } from "@/core/agent/context-runtime/compaction-orchestrator";
+import {
+  deriveAgentSessionFiles,
+  type AgentSessionFileInsight,
+} from "../core/session-insights";
 
 type AgentStoreState = ReturnType<typeof useAgentStore.getState>;
 export const AGENT_EXECUTION_HEARTBEAT_INTERVAL_MS = 10_000;
@@ -56,6 +68,38 @@ export const AGENT_EXECUTION_TIMEOUT_MS = 600_000;
 export const AGENT_EXECUTION_TIMEOUT_LARGE_PROJECT_MS = 1_800_000;
 export const AGENT_MODEL_STALL_TIMEOUT_MS = 90_000;
 export const AGENT_MODEL_STALL_TIMEOUT_LARGE_PROJECT_MS = 180_000;
+
+function buildCurrentTurnFileInsights(params: {
+  attachmentPaths?: readonly string[];
+  images?: readonly string[];
+  handoffPaths?: readonly string[];
+}): AgentSessionFileInsight[] {
+  const map = new Map<string, AgentSessionFileInsight>();
+  const push = (
+    path: string,
+    source: AgentSessionFileInsight["source"],
+  ) => {
+    const normalized = normalizeContextPath(path);
+    if (!normalized) return;
+    const current = map.get(normalized);
+    if (current) {
+      current.mentions += 1;
+      if (current.source !== source) current.source = "tool";
+      return;
+    }
+    map.set(normalized, {
+      path: normalized,
+      source,
+      mentions: 1,
+    });
+  };
+
+  for (const path of params.attachmentPaths ?? []) push(path, "attachment");
+  for (const path of params.images ?? []) push(path, "image");
+  for (const path of params.handoffPaths ?? []) push(path, "handoff");
+
+  return [...map.values()];
+}
 
 interface UseAgentExecutionParams {
   ai?: MToolsAI;
@@ -174,8 +218,30 @@ export function useAgentExecution({
       let session = sessionId
         ? snapshot.sessions.find((item) => item.id === sessionId)
         : undefined;
+      const turnSourceHandoff = opts?.sourceHandoff;
+      const executionContextPlan = await buildAgentExecutionContextPlan({
+        query,
+        currentSession: session,
+        attachmentPaths: opts?.attachmentPaths,
+        images: opts?.images,
+        sourceHandoff: turnSourceHandoff,
+        forceNewSession: opts?.forceNewSession,
+      });
+      const continuityDecision = executionContextPlan.continuity;
+      const shouldStartIsolatedSession =
+        !taskId
+        && (
+          !sessionId
+          || !session
+          || continuityDecision.strategy === "fork_session"
+        );
 
-      if (session && !taskId && hasAgentSessionHiddenTasks(session)) {
+      if (
+        session
+        && !taskId
+        && continuityDecision.strategy !== "fork_session"
+        && hasAgentSessionHiddenTasks(session)
+      ) {
         const forkedSessionId = forkSession(session.id, {
           visibleOnly: true,
           title: `${session.title || "新任务"} · 分支`,
@@ -188,8 +254,8 @@ export function useAgentExecution({
         }
       }
 
-      if (!sessionId || !session) {
-        sessionId = createSession(query, opts?.sourceHandoff, {
+      if (shouldStartIsolatedSession) {
+        sessionId = createSession(query, executionContextPlan.promptSourceHandoff, {
           images: opts?.images,
           attachmentPaths: opts?.attachmentPaths,
         });
@@ -198,26 +264,24 @@ export function useAgentExecution({
           .sessions.find((s) => s.id === sessionId);
         taskId = taskId || newSession?.tasks[0]?.id || "";
         session = newSession;
-      } else if (!taskId) {
+      } else if (sessionId && session && !taskId) {
         const compactDecision = shouldAutoCompactAgentSession(session);
         if (compactDecision.shouldCompact) {
-          const compaction = buildAgentSessionCompactionState(session, {
+          const baseCompaction = buildAgentSessionCompactionState(session, {
             reason: compactDecision.reason,
           });
+          const compaction = await enrichAgentSessionCompactionState(
+            session,
+            baseCompaction,
+          ).catch(() => baseCompaction);
           if (
             compaction &&
             compaction.compactedTaskCount > getAgentSessionCompactedTaskCount(session)
           ) {
-            const flushText = buildAgentSessionMemoryFlushText(
+            void persistAgentSessionCompactionArtifacts({
               session,
-              compaction.compactedTaskCount,
-            );
-            if (flushText) {
-              void saveSessionMemoryNote(flushText, {
-                conversationId: session.id,
-                source: "system",
-              }).catch(() => undefined);
-            }
+              compaction,
+            }).catch(() => undefined);
             updateSession(session.id, { compaction });
             session = useAgentStore.getState().sessions.find(
               (item) => item.id === sessionId,
@@ -277,6 +341,7 @@ export function useAgentExecution({
         .sessions.find((s) => s.id === sessionId)
         ?.tasks.find((t) => t.id === taskId);
       const collectedSteps: AgentStep[] = existingTask?.steps ? [...existingTask.steps] : [];
+      let latestPromptContextSnapshot: AgentPromptContextSnapshot | null = null;
       const fcCompatibilityKey = buildAgentFCCompatibilityKey(useAIStore.getState().config);
       let scrollTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -368,6 +433,29 @@ export function useAgentExecution({
           ? `图片 ${opts.images.length} 张`
           : "",
       ].filter(Boolean).join("，") || undefined;
+      const sessionHandoffPaths = collectHandoffPaths(session?.sourceHandoff);
+      const turnHandoffPaths = executionContextPlan.scope.handoffPaths;
+      const currentTurnPaths = executionContextPlan.scope.pathHints;
+      const currentTurnFiles = buildCurrentTurnFileInsights({
+        attachmentPaths: executionContextPlan.scope.attachmentPaths,
+        images: executionContextPlan.scope.imagePaths,
+        handoffPaths: turnHandoffPaths,
+      });
+      const effectiveWorkspaceRoot = executionContextPlan.effectiveWorkspaceRoot;
+      const shouldResetInheritedContext =
+        executionContextPlan.shouldResetInheritedContext;
+      const promptSourceHandoff = executionContextPlan.promptSourceHandoff;
+      updateSession(sessionId, {
+        ...(executionContextPlan.workspaceRootToPersist
+          ? { workspaceRoot: executionContextPlan.workspaceRootToPersist }
+          : {}),
+        lastContinuityStrategy: continuityDecision.strategy,
+        lastContinuityReason: continuityDecision.reason,
+        lastContextResetAt: shouldResetInheritedContext ? Date.now() : undefined,
+      });
+      session = useAgentStore.getState().sessions.find(
+        (item) => item.id === sessionId,
+      ) ?? session;
       const maxIterations = getEnhancedAgentMaxIterations(
         aiConfig.agent_max_iterations ?? 25,
         runProfile,
@@ -388,6 +476,20 @@ export function useAgentExecution({
                 ? "已启用 OpenClaw（大项目强约束）：将按阶段推进、限定扫描范围并提高执行预算。"
                 : "已启用 Coding 模式（大项目）：将按阶段推进并提高迭代预算。"
               : "已启用 Coding 模式：将优先走先读后改、改后验证流程。",
+            timestamp: Date.now(),
+          },
+          false,
+        );
+      }
+      if (shouldResetInheritedContext) {
+        const resetMessage =
+          continuityDecision.reason === "workspace_switch"
+            ? `检测到工作区切换，本轮将按新工作区重置继承上下文：${effectiveWorkspaceRoot}`
+            : "检测到当前请求与上文工作线索不连续，本轮将按新任务重置继承上下文。";
+        applyStep(
+          {
+            type: "observation",
+            content: resetMessage,
             timestamp: Date.now(),
           },
           false,
@@ -434,14 +536,28 @@ export function useAgentExecution({
           | import("@/store/agent-store").AgentSession
           | undefined,
       ) => {
-        const sessionContextMessages = buildAgentSessionContextMessages(currentSession);
+        const sessionContextMessages = continuityDecision.carrySummary
+          ? buildAgentSessionContextMessages(currentSession)
+          : [];
         const sessionFiles = deriveAgentSessionFiles(currentSession);
+        const effectiveFiles = continuityDecision.carryFiles
+          ? sessionFiles
+          : currentTurnFiles;
+        const bootstrapFilePaths = uniqueContextPaths([
+          ...(continuityDecision.carryFiles
+            ? effectiveFiles.map((file) => file.path)
+            : currentTurnPaths),
+          ...currentTurnPaths,
+        ]);
+        const bootstrapHandoffPaths = uniqueContextPaths(
+          continuityDecision.carryHandoff
+            ? [...sessionHandoffPaths, ...turnHandoffPaths]
+            : turnHandoffPaths,
+        );
         const bootstrapContext = await buildBootstrapContextSnapshot({
-          filePaths: sessionFiles.map((file) => file.path),
-          handoffPaths: [
-            ...(currentSession?.sourceHandoff?.attachmentPaths ?? []),
-            ...((currentSession?.sourceHandoff?.files ?? []).map((file) => file.path)),
-          ],
+          workspaceRoot: effectiveWorkspaceRoot,
+          filePaths: bootstrapFilePaths,
+          handoffPaths: bootstrapHandoffPaths,
           query,
           includeMemory: true,
           recentDailyFiles: 1,
@@ -453,16 +569,29 @@ export function useAgentExecution({
           forceNewSession: opts?.forceNewSession,
           attachmentSummary: currentAttachmentSummary,
           systemHint: opts?.systemHint,
-          sourceHandoff: opts?.sourceHandoff ?? currentSession?.sourceHandoff,
+          sourceHandoff: promptSourceHandoff,
           userMemoryPrompt,
           skillsPrompt,
           extraSystemPrompt: supplementalSystemPrompt,
           codingHint: opts?.codingHint,
           bootstrapContextFileNames: bootstrapContext?.files.map((file) => file.name) ?? [],
+          workspaceRoot: bootstrapContext?.workspaceRoot ?? effectiveWorkspaceRoot,
+          workspaceReset: shouldResetInheritedContext,
+          continuityStrategy: continuityDecision.strategy,
+          continuityReason: continuityDecision.reason,
           historyContextMessageCount: sessionContextMessages.length,
           knowledgeContextMessageCount: knowledgeContextMessages.length,
-          files: sessionFiles,
+          files: effectiveFiles,
         });
+        updateSession(sessionId, {
+          lastContinuityStrategy: promptContextSnapshot.continuityStrategy,
+          lastContinuityReason: promptContextSnapshot.continuityReason,
+          lastContextResetAt: promptContextSnapshot.workspaceReset
+            ? (session?.lastContextResetAt ?? Date.now())
+            : undefined,
+          lastMemoryItemCount: promptContextSnapshot.memoryItemCount,
+        });
+        latestPromptContextSnapshot = promptContextSnapshot;
         onPromptContextSnapshot?.(promptContextSnapshot);
 
         const promptContextPrompt = buildAgentPromptContextPrompt(promptContextSnapshot);
@@ -515,11 +644,44 @@ export function useAgentExecution({
           (step) => {
             applyStep(step, true);
           },
-          buildHistorySteps(currentSession),
+          continuityDecision.carryRecentSteps ? buildHistorySteps(currentSession) : [],
         );
       };
 
       let agent = await createAgent(session);
+      const refreshPromptContextSnapshot = () => {
+        const refreshedSession = useAgentStore.getState().sessions.find(
+          (item) => item.id === sessionId,
+        ) ?? session;
+        const nextSnapshot = buildAgentPromptContextSnapshot({
+          session: refreshedSession,
+          query,
+          runProfile: runProfile.codingMode ? runProfile : undefined,
+          attachmentSummary: currentAttachmentSummary,
+          systemHint: opts?.systemHint,
+          sourceHandoff: promptSourceHandoff,
+          userMemoryPrompt,
+          skillsPrompt,
+          extraSystemPrompt: supplementalSystemPrompt,
+          codingHint: opts?.codingHint,
+          bootstrapContextFileNames:
+            latestPromptContextSnapshot?.bootstrapContextFileNames ?? [],
+          workspaceRoot:
+            latestPromptContextSnapshot?.workspaceRoot ?? effectiveWorkspaceRoot,
+          workspaceReset: shouldResetInheritedContext,
+          continuityStrategy: continuityDecision.strategy,
+          continuityReason: continuityDecision.reason,
+          memoryItemCount: refreshedSession?.lastMemoryItemCount,
+          historyContextMessageCount:
+            latestPromptContextSnapshot?.historyContextMessageCount ?? 0,
+          knowledgeContextMessageCount:
+            latestPromptContextSnapshot?.knowledgeContextMessageCount ?? 0,
+          files: latestPromptContextSnapshot?.files,
+          contextLines: latestPromptContextSnapshot?.contextLines,
+        });
+        latestPromptContextSnapshot = nextSnapshot;
+        onPromptContextSnapshot?.(nextSnapshot);
+      };
 
       heartbeatTimerRef.current = setInterval(() => {
         if (abortController.signal.aborted) return;
@@ -587,6 +749,7 @@ export function useAgentExecution({
 
       const retryMax = aiConfig.agent_retry_max ?? 3;
       const retryBackoffMs = aiConfig.agent_retry_backoff_ms ?? 5000;
+      let usedRetryCount = 0;
 
       try {
         let effectiveQuery = opts?.systemHint ? `${opts.systemHint}\n\n---\n\n${query}` : query;
@@ -604,6 +767,14 @@ export function useAgentExecution({
 
           if (attempt > 0) {
             const delay = retryBackoffMs * Math.pow(2, attempt - 1);
+            const nextRunAt = Date.now() + delay;
+            usedRetryCount = attempt;
+            updateTask(sessionId, taskId, {
+              retry_count: attempt,
+              last_error: lastError ? String(lastError) : undefined,
+              next_run_at: nextRunAt,
+              status: "running",
+            });
             applyStep({
               type: "observation",
               content: `API 错误，${Math.ceil(delay / 1000)} 秒后自动重试（第 ${attempt}/${retryMax} 次）...`,
@@ -611,6 +782,10 @@ export function useAgentExecution({
             }, false);
             await new Promise((r) => setTimeout(r, delay));
             if (abortController.signal.aborted) throw new Error("Aborted");
+            updateTask(sessionId, taskId, {
+              next_run_at: undefined,
+              status: "running",
+            });
             resetPerRunState?.();
           }
 
@@ -620,14 +795,42 @@ export function useAgentExecution({
             updateTask(sessionId, taskId, {
               answer: result,
               status: "success",
+              retry_count: 0,
+              next_run_at: undefined,
               last_error: undefined,
               last_finished_at: finishedAt,
               last_duration_ms: finishedAt - runStartedAt,
               last_result_status: "success",
             });
+            const latestSession = useAgentStore.getState().sessions.find(
+              (item) => item.id === sessionId,
+            ) ?? session;
+            const ingestResult = await persistAgentTurnContextIngest({
+              sessionId,
+              taskId,
+              query,
+              steps: collectedSteps,
+              status: "success",
+              durationMs: finishedAt - runStartedAt,
+              answer: result,
+              workspaceRoot: effectiveWorkspaceRoot,
+              workspaceReset: shouldResetInheritedContext,
+              scope: executionContextPlan.scope,
+              continuity: continuityDecision,
+              promptContextSnapshot: latestPromptContextSnapshot,
+              session: latestSession,
+              memoryAutoExtractionScheduled: shouldAutoSaveAssistantMemory(aiConfig),
+            });
+            updateSession(sessionId, {
+              lastSessionNotePreview: ingestResult.sessionNotePreview,
+              lastContextRuntimeReport: ingestResult.debugReport,
+            });
+            refreshPromptContextSnapshot();
             if (shouldAutoSaveAssistantMemory(aiConfig)) {
               void autoExtractMemories(`${query}\n${result}`, taskId, {
                 sourceMode: "agent",
+                workspaceId: effectiveWorkspaceRoot,
+                skipSessionNote: true,
               }).catch(() => undefined);
             }
             lastError = null;
@@ -653,10 +856,14 @@ export function useAgentExecution({
                 (item) => item.id === sessionId,
               );
               if (latestSession) {
-                const recoveredCompaction = buildAgentSessionCompactionState(
+                const recoveredBaseCompaction = buildAgentSessionCompactionState(
                   latestSession,
                   { reason: "context_recovery", aggressive: true },
                 );
+                const recoveredCompaction = await enrichAgentSessionCompactionState(
+                  latestSession,
+                  recoveredBaseCompaction,
+                ).catch(() => recoveredBaseCompaction);
                 if (
                   recoveredCompaction
                   && recoveredCompaction.compactedTaskCount
@@ -667,16 +874,10 @@ export function useAgentExecution({
                   session = useAgentStore.getState().sessions.find(
                     (item) => item.id === sessionId,
                   ) ?? latestSession;
-                  const flushText = buildAgentSessionMemoryFlushText(
-                    latestSession,
-                    recoveredCompaction.compactedTaskCount,
-                  );
-                  if (flushText) {
-                    void saveSessionMemoryNote(flushText, {
-                      conversationId: latestSession.id,
-                      source: "system",
-                    }).catch(() => undefined);
-                  }
+                  void persistAgentSessionCompactionArtifacts({
+                    session: latestSession,
+                    compaction: recoveredCompaction,
+                  }).catch(() => undefined);
                   agent = await createAgent(session);
                   applyStep(
                     {
@@ -711,14 +912,43 @@ export function useAgentExecution({
             ? "模型长时间无响应，已自动中断本次执行。请重试或切换模型后再试。"
             : `Agent 执行失败: ${e}`;
         const finishedAt = Date.now();
+        const finalStatus =
+          aborted && !timeoutAborted ? "cancelled" : "error";
         updateTask(sessionId, taskId, {
           answer: msg,
-          status: aborted && !timeoutAborted ? "cancelled" : "error",
+          status: finalStatus,
+          retry_count: aborted && !timeoutAborted ? 0 : usedRetryCount,
+          next_run_at: undefined,
           last_error: aborted && !timeoutAborted ? undefined : String(e),
           last_finished_at: finishedAt,
           last_duration_ms: finishedAt - runStartedAt,
           last_result_status: aborted && !timeoutAborted ? undefined : "error",
         });
+        const latestSession = useAgentStore.getState().sessions.find(
+          (item) => item.id === sessionId,
+        ) ?? session;
+        const ingestResult = await persistAgentTurnContextIngest({
+          sessionId,
+          taskId,
+          query,
+          steps: collectedSteps,
+          status: finalStatus,
+          durationMs: finishedAt - runStartedAt,
+          answer: msg,
+          error: aborted && !timeoutAborted ? undefined : String(e),
+          workspaceRoot: effectiveWorkspaceRoot,
+          workspaceReset: shouldResetInheritedContext,
+          scope: executionContextPlan.scope,
+          continuity: continuityDecision,
+          promptContextSnapshot: latestPromptContextSnapshot,
+          session: latestSession,
+          memoryAutoExtractionScheduled: false,
+        });
+        updateSession(sessionId, {
+          lastSessionNotePreview: ingestResult.sessionNotePreview,
+          lastContextRuntimeReport: ingestResult.debugReport,
+        });
+        refreshPromptContextSnapshot();
       } finally {
         if (abortControllerRef.current === abortController) {
           clearTimers();

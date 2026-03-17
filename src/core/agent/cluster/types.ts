@@ -122,6 +122,7 @@ export interface AgentBridgeRunOptions {
   onStep?: (step: AgentStep) => void;
   maxIterations?: number;
   timeoutMs?: number;
+  workspaceRoot?: string;
 }
 
 // ── Remote Agent ──

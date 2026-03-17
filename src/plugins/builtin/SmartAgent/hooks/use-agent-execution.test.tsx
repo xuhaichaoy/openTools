@@ -14,9 +14,27 @@ const hoisted = vi.hoisted(() => ({
   fakeStoreState: {
     sessions: [] as Array<{
       id: string;
+      title?: string;
       createdAt: number;
+      visibleTaskCount?: number;
+      workspaceRoot?: string;
+      sourceHandoff?: {
+        attachmentPaths?: string[];
+        visualAttachmentPaths?: string[];
+        files?: Array<{ path: string }>;
+      };
+      compaction?: {
+        summary?: string;
+        compactedTaskCount?: number;
+      };
       tasks: Array<{
         id: string;
+        query?: string;
+        createdAt?: number;
+        attachmentPaths?: string[];
+        images?: string[];
+        last_started_at?: number;
+        last_finished_at?: number;
         steps: Array<{ type: string; content: string; timestamp: number }>;
         answer: string | null;
       }>;
@@ -25,7 +43,8 @@ const hoisted = vi.hoisted(() => ({
   },
   latestHistorySteps: [] as Array<{ type: string; content: string; timestamp: number }>,
   latestOnStep: null as null | ((step: { type: string; content: string; timestamp: number; streaming?: boolean }) => void),
-  runMode: "success" as "success" | "abort" | "timeout" | "tool_round",
+  runMode: "success" as "success" | "abort" | "timeout" | "tool_round" | "retry_then_success",
+  runCallCount: 0,
   modelSupportsImageInput: true,
   latestRunQuery: "",
   runningStore: {
@@ -48,6 +67,7 @@ vi.mock("../core/react-agent", () => ({
     }
 
     async run(_query: string, signal?: AbortSignal) {
+      hoisted.runCallCount += 1;
       hoisted.latestRunQuery = _query;
       if (hoisted.runMode === "abort") {
         throw new Error("Aborted");
@@ -83,6 +103,17 @@ vi.mock("../core/react-agent", () => ({
         });
         return "最终稳定答案";
       }
+      if (hoisted.runMode === "retry_then_success") {
+        if (hoisted.runCallCount < 3) {
+          throw new Error("API 错误: 503 server error");
+        }
+        hoisted.latestOnStep?.({
+          type: "answer",
+          content: "retry-success-answer",
+          timestamp: Date.now(),
+        });
+        return "retry-success-answer";
+      }
       hoisted.latestOnStep?.({
         type: "answer",
         content: "streaming-answer",
@@ -102,6 +133,86 @@ vi.mock("@/store/ai-store", () => ({
   useAIStore: {
     getState: () => ({ config: { model: "mock-model", protocol: "openai" } }),
   },
+}));
+
+vi.mock("@/store/skill-store", () => ({
+  loadAndResolveSkills: async () => ({
+    mergedSystemPrompt: "",
+    visibleSkillIds: [],
+    mergedToolFilter: null,
+  }),
+}));
+
+vi.mock("@/core/ai/assistant-config", () => ({
+  buildAssistantSupplementalPrompt: () => "",
+  shouldAutoSaveAssistantMemory: () => false,
+  shouldRecallAssistantMemory: () => false,
+}));
+
+vi.mock("@/store/agent-memory-store", () => ({
+  useAgentMemoryStore: {
+    getState: () => ({
+      loaded: true,
+      load: vi.fn(async () => undefined),
+      getMemoriesForQueryPromptAsync: vi.fn(async () => ""),
+    }),
+  },
+}));
+
+vi.mock("@/core/agent/context-runtime/compaction-orchestrator", () => ({
+  persistAgentSessionCompactionArtifacts: vi.fn(async () => ({
+    flushText: null,
+    transcript: null,
+    noteSaved: false,
+    memoryIngest: { confirmed: 0, queued: 0 },
+  })),
+}));
+
+vi.mock("@/core/agent/context-runtime/context-ingest", () => ({
+  persistAgentTurnContextIngest: vi.fn(async () => ({
+    sessionNoteSaved: false,
+    sessionNotePreview: undefined,
+    referencedPaths: [],
+    debugReport: {
+      generatedAt: Date.now(),
+      sessionId: "mock-session",
+      taskId: "mock-task",
+      workspaceReset: false,
+      scope: {
+        queryIntent: "general",
+        attachmentCount: 0,
+        imageCount: 0,
+        handoffCount: 0,
+        pathHintCount: 0,
+        pathHintPreview: [],
+      },
+      prompt: {
+        bootstrapFileCount: 0,
+        bootstrapFileNames: [],
+        historyContextMessageCount: 0,
+        knowledgeContextMessageCount: 0,
+        memoryItemCount: 0,
+      },
+      compaction: {
+        compactedTaskCount: 0,
+        preservedIdentifiers: [],
+        bootstrapRules: [],
+      },
+      ingest: {
+        sessionNoteSaved: false,
+        referencedPaths: [],
+        memoryAutoExtractionScheduled: false,
+      },
+      execution: {
+        status: "success",
+        durationMs: 0,
+      },
+    },
+  })),
+}));
+
+vi.mock("@/core/agent/actor/middlewares/knowledge-base-middleware", () => ({
+  buildKnowledgeContextMessages: async () => [],
 }));
 
 vi.mock("@/core/ai/model-capabilities", () => ({
@@ -169,6 +280,16 @@ vi.mock("@/store/agent-store", () => ({
       );
     return session.tasks.slice(compacted, visibleCount);
   },
+  getHiddenAgentTasks: (session: {
+    tasks: Array<unknown>;
+    visibleTaskCount?: number;
+  }) => {
+    const visibleCount =
+      typeof session.visibleTaskCount === "number"
+        ? Math.min(session.visibleTaskCount, session.tasks.length)
+        : session.tasks.length;
+    return session.tasks.slice(visibleCount);
+  },
   hasAgentSessionHiddenTasks: (session: {
     tasks: Array<unknown>;
     visibleTaskCount?: number;
@@ -186,10 +307,84 @@ interface HarnessProps {
   onReady: (value: ReturnType<typeof useAgentExecution>) => void;
 }
 
+type MockSession = (typeof hoisted.fakeStoreState.sessions)[number];
+type MockTask = MockSession["tasks"][number];
+
 function HookHarness({ params, onReady }: HarnessProps) {
   const value = useAgentExecution(params);
   onReady(value);
   return null;
+}
+
+function upsertMockSession(session: MockSession) {
+  hoisted.fakeStoreState.sessions = [
+    session,
+    ...hoisted.fakeStoreState.sessions.filter((item) => item.id !== session.id),
+  ];
+  hoisted.fakeStoreState.currentSessionId = session.id;
+}
+
+function buildCreateSessionMock(prefix = "created-session") {
+  return vi.fn((
+    query: string,
+    sourceHandoff?: MockSession["sourceHandoff"],
+    initialTask?: Pick<MockTask, "images" | "attachmentPaths">,
+  ) => {
+    const id = `${prefix}-${hoisted.fakeStoreState.sessions.length + 1}`;
+    const createdAt = Date.now();
+    upsertMockSession({
+      id,
+      title: query.slice(0, 30) || "新任务",
+      createdAt,
+      sourceHandoff,
+      tasks: query
+        ? [
+            {
+              id: `${id}-task-1`,
+              query,
+              images: initialTask?.images,
+              attachmentPaths: initialTask?.attachmentPaths,
+              createdAt,
+              steps: [],
+              answer: null,
+            },
+          ]
+        : [],
+    });
+    return id;
+  });
+}
+
+function buildForkSessionMock(prefix = "forked-session") {
+  return vi.fn((sessionId: string, options?: { title?: string; visibleOnly?: boolean }) => {
+    const session = hoisted.fakeStoreState.sessions.find((item) => item.id === sessionId);
+    if (!session) return null;
+    const visibleCount =
+      typeof session.visibleTaskCount === "number"
+        ? Math.min(session.visibleTaskCount, session.tasks.length)
+        : session.tasks.length;
+    const sourceTasks =
+      options?.visibleOnly === false
+        ? session.tasks
+        : session.tasks.slice(0, visibleCount);
+    const createdAt = Date.now();
+    const forkedId = `${prefix}-${sessionId}`;
+    upsertMockSession({
+      ...session,
+      id: forkedId,
+      title: options?.title ?? session.title,
+      createdAt,
+      visibleTaskCount: undefined,
+      tasks: sourceTasks.map((task, index) => ({
+        ...task,
+        id: `${forkedId}-task-${index + 1}`,
+        steps: task.steps.map((step) => ({ ...step })),
+        images: task.images ? [...task.images] : undefined,
+        attachmentPaths: task.attachmentPaths ? [...task.attachmentPaths] : undefined,
+      })),
+    });
+    return forkedId;
+  });
 }
 
 describe("useAgentExecution", () => {
@@ -202,6 +397,7 @@ describe("useAgentExecution", () => {
     hoisted.latestHistorySteps = [];
     hoisted.latestOnStep = null;
     hoisted.runMode = "success";
+    hoisted.runCallCount = 0;
     hoisted.modelSupportsImageInput = true;
     hoisted.latestRunQuery = "";
     hoisted.fakeStoreState = {
@@ -294,6 +490,173 @@ describe("useAgentExecution", () => {
     expect(historyContents).toContain("TARGET_ANSWER");
     expect(historyContents).not.toContain("CURRENT_STEP");
     expect(historyContents).not.toContain("CURRENT_ANSWER");
+  });
+
+  it("creates an isolated session when execution switches to a new workspace", async () => {
+    hoisted.fakeStoreState = {
+      currentSessionId: "target",
+      sessions: [
+        {
+          id: "target",
+          title: "旧项目",
+          createdAt: 2,
+          workspaceRoot: "/prev-workspace",
+          tasks: [
+            {
+              id: "t_target",
+              query: "旧项目分析",
+              createdAt: 2,
+              steps: [{ type: "answer", content: "OLD_PROJECT_ANSWER", timestamp: 2 }],
+              answer: "OLD_PROJECT_ANSWER",
+            },
+          ],
+        },
+      ],
+    };
+
+    const createSession = buildCreateSessionMock("workspace-switch");
+    const addTask = vi.fn(() => "task_workspace_switch");
+    const updateSession = vi.fn();
+    let hookValue: ReturnType<typeof useAgentExecution> | null = null;
+
+    act(() => {
+      root.render(
+        <HookHarness
+          onReady={(value) => {
+            hookValue = value;
+          }}
+          params={{
+            ai: {} as never,
+            setRunning: vi.fn(),
+            setRunningPhase: vi.fn(),
+            setExecutionWaitingStage: vi.fn(),
+            availableTools: [] as AgentTool[],
+            currentSessionId: "target",
+            createSession,
+            addTask,
+            updateTask: vi.fn(),
+            updateSession,
+            forkSession: vi.fn(() => null),
+            inputRef: { current: document.createElement("textarea") },
+            scrollRef: {
+              current: {
+                scrollHeight: 100,
+                scrollTo: vi.fn(),
+              } as unknown as HTMLDivElement,
+            },
+            openDangerConfirm: vi.fn(async () => true),
+            resetPerRunState: null,
+          }}
+        />,
+      );
+    });
+
+    await act(async () => {
+      await hookValue!.executeAgentTask("请在新目录生成一个页面", {
+        sessionId: "target",
+        attachmentPaths: ["/next-workspace/index.html"],
+      });
+    });
+
+    expect(hoisted.latestHistorySteps).toEqual([]);
+    expect(createSession).toHaveBeenCalledTimes(1);
+    expect(addTask).not.toHaveBeenCalled();
+    expect(updateSession).toHaveBeenCalledWith(
+      "workspace-switch-2",
+      expect.objectContaining({
+        workspaceRoot: "/next-workspace",
+        lastContinuityStrategy: "fork_session",
+        lastContinuityReason: "workspace_switch",
+      }),
+    );
+  });
+
+  it("keeps visible-only fork behavior when the session contains hidden tasks", async () => {
+    hoisted.fakeStoreState = {
+      currentSessionId: "target",
+      sessions: [
+        {
+          id: "target",
+          title: "当前任务",
+          createdAt: 2,
+          visibleTaskCount: 1,
+          tasks: [
+            {
+              id: "t_visible",
+              query: "继续当前项目",
+              createdAt: 2,
+              steps: [{ type: "answer", content: "VISIBLE_STEP", timestamp: 2 }],
+              answer: "VISIBLE_ANSWER",
+            },
+            {
+              id: "t_hidden",
+              query: "隐藏任务",
+              createdAt: 3,
+              steps: [{ type: "answer", content: "HIDDEN_STEP", timestamp: 3 }],
+              answer: "HIDDEN_ANSWER",
+            },
+          ],
+        },
+      ],
+    };
+
+    const createSession = buildCreateSessionMock("hidden-fallback");
+    const forkSession = buildForkSessionMock("visible-branch");
+    const addTask = vi.fn(() => "task-visible-branch");
+    let hookValue: ReturnType<typeof useAgentExecution> | null = null;
+
+    act(() => {
+      root.render(
+        <HookHarness
+          onReady={(value) => {
+            hookValue = value;
+          }}
+          params={{
+            ai: {} as never,
+            setRunning: vi.fn(),
+            setRunningPhase: vi.fn(),
+            setExecutionWaitingStage: vi.fn(),
+            availableTools: [] as AgentTool[],
+            currentSessionId: "target",
+            createSession,
+            addTask,
+            updateTask: vi.fn(),
+            updateSession: vi.fn(),
+            forkSession,
+            inputRef: { current: document.createElement("textarea") },
+            scrollRef: {
+              current: {
+                scrollHeight: 100,
+                scrollTo: vi.fn(),
+              } as unknown as HTMLDivElement,
+            },
+            openDangerConfirm: vi.fn(async () => true),
+            resetPerRunState: null,
+          }}
+        />,
+      );
+    });
+
+    await act(async () => {
+      await hookValue!.executeAgentTask("继续修复当前项目里的按钮样式", {
+        sessionId: "target",
+      });
+    });
+
+    const historyContents = hoisted.latestHistorySteps.map((step) => step.content).join("\n");
+    expect(forkSession).toHaveBeenCalledWith("target", {
+      visibleOnly: true,
+      title: "当前任务 · 分支",
+    });
+    expect(createSession).not.toHaveBeenCalled();
+    expect(addTask).toHaveBeenCalledWith(
+      "visible-branch-target",
+      "继续修复当前项目里的按钮样式",
+      undefined,
+      undefined,
+    );
+    expect(historyContents).toContain("VISIBLE_ANSWER");
+    expect(historyContents).not.toContain("HIDDEN_ANSWER");
   });
 
   it("injects an explicit text-only warning when images are attached but model lacks vision", async () => {

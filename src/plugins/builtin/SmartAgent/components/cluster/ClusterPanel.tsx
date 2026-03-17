@@ -38,6 +38,10 @@ import {
   resolveCodingExecutionProfile,
 } from "@/core/agent/coding-profile";
 import {
+  buildAgentExecutionContextPlan,
+  persistClusterTurnContextIngest,
+} from "@/core/agent/context-runtime";
+import {
   AI_CENTER_MODE_META,
   describeAICenterSource,
 } from "@/core/ai/ai-center-mode-meta";
@@ -60,6 +64,7 @@ import type {
 import { ClusterPlanView } from "./ClusterPlanView";
 import { ClusterDAGView } from "./ClusterDAGView";
 import { AgentInstancePanel } from "./AgentInstancePanel";
+import { ClusterContextStrip } from "./ClusterContextStrip";
 import { useAskUserStore } from "@/store/ask-user-store";
 import { useToolTrustStore } from "@/store/command-allowlist-store";
 import { useConfirmDialogStore } from "@/store/confirm-dialog-store";
@@ -75,6 +80,9 @@ import { handleError } from "@/core/errors";
 import { routeToAICenter } from "@/core/ai/ai-center-routing";
 import { recordAIRouteEvent } from "@/store/ai-route-store";
 import { modelSupportsImageInput } from "@/core/ai/model-capabilities";
+import {
+  hasClusterContextSnapshotContent,
+} from "@/plugins/builtin/SmartAgent/core/cluster-context-snapshot";
 
 const SETTINGS_KEY = "mtools-cluster-settings";
 const MAX_ACTIVE_CLUSTER_TASKS = 3;
@@ -198,6 +206,7 @@ function SessionCard({
   const [copied, setCopied] = useState(false);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const { toast } = useToast();
+  const contextSnapshot = session.contextSnapshot;
 
   const handleCopyQuery = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -401,6 +410,33 @@ function SessionCard({
 
       {expanded && (
         <div className="border-t border-[var(--color-border)] px-3 py-3 space-y-3">
+          <ClusterContextStrip snapshot={contextSnapshot} />
+
+          {hasClusterContextSnapshotContent(contextSnapshot) && (
+            <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/45 px-3 py-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-medium text-[var(--color-text)]">
+                  当前上下文说明
+                </span>
+                {contextSnapshot?.generatedAt && (
+                  <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                    更新于 {new Date(contextSnapshot.generatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                  </span>
+                )}
+              </div>
+              <div className="mt-2 space-y-1">
+                {contextSnapshot?.contextLines.map((line, index) => (
+                  <div
+                    key={`${session.id}-cluster-context-${index}`}
+                    className="text-[11px] leading-5 text-[var(--color-text-secondary)]"
+                  >
+                    {line}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {session.sourceHandoff?.sourceMode && (
             <AICenterHandoffCard handoff={session.sourceHandoff} variant="active" />
           )}
@@ -700,6 +736,16 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
     const fullQuery = fileContextBlock.trim()
       ? `${fileContextBlock}\n\n---\n\n${userText}`
       : userText;
+    const attachmentPaths = attachments
+      .map((attachment) => attachment.path)
+      .filter((path): path is string => typeof path === "string" && path.trim().length > 0);
+    const executionContextPlan = await buildAgentExecutionContextPlan({
+      query: fullQuery,
+      attachmentPaths,
+      images: imagePaths.length > 0 ? imagePaths : undefined,
+      sourceHandoff: incomingHandoff?.sourceMode ? incomingHandoff : undefined,
+    });
+    const workspaceRoot = executionContextPlan.effectiveWorkspaceRoot;
     const sessionId = createSession(
       displayQuery,
       mode,
@@ -708,6 +754,7 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
       incomingHandoff?.sourceMode
         ? incomingHandoff
         : undefined,
+      workspaceRoot,
     );
     recordAIRouteEvent({
       mode: "cluster",
@@ -739,6 +786,7 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
       codingMode: effectiveCodingProfile.profile.codingMode,
       largeProjectMode: effectiveCodingProfile.profile.largeProjectMode,
       openClawMode: effectiveCodingProfile.profile.openClawMode,
+      workspaceRoot,
       confirmDangerousAction,
       askUser,
       onPlanApproval: humanApproval
@@ -765,6 +813,7 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
     }
     setActiveOrchestrator(sessionId, orchestrator, abortController);
     setRunningCount(getActiveOrchestratorCount());
+    const runStartedAt = Date.now();
 
     try {
       const result = await orchestrator.execute(fullQuery, mode, imagePaths.length > 0 ? imagePaths : undefined);
@@ -777,11 +826,42 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
         result,
         finishedAt: Date.now(),
       });
+      const latestSession = useClusterStore.getState().sessions.find(
+        (item) => item.id === sessionId,
+      );
+      if (latestSession) {
+        const ingestResult = await persistClusterTurnContextIngest({
+          session: latestSession,
+          status: result.finalAnswer.startsWith("集群执行失败") ? "error" : "success",
+          durationMs: Date.now() - runStartedAt,
+          answer: result.finalAnswer,
+          error: result.finalAnswer.startsWith("集群执行失败") ? result.finalAnswer : undefined,
+        });
+        useClusterStore.getState().updateSession(sessionId, {
+          lastSessionNotePreview: ingestResult.sessionNotePreview,
+          lastContextRuntimeReport: ingestResult.debugReport,
+        });
+      }
     } catch {
       useClusterStore.getState().updateSession(sessionId, {
         status: "error",
         finishedAt: Date.now(),
       });
+      const latestSession = useClusterStore.getState().sessions.find(
+        (item) => item.id === sessionId,
+      );
+      if (latestSession) {
+        const ingestResult = await persistClusterTurnContextIngest({
+          session: latestSession,
+          status: "error",
+          durationMs: Date.now() - runStartedAt,
+          error: "Cluster 执行失败",
+        });
+        useClusterStore.getState().updateSession(sessionId, {
+          lastSessionNotePreview: ingestResult.sessionNotePreview,
+          lastContextRuntimeReport: ingestResult.debugReport,
+        });
+      }
     } finally {
       clearActiveOrchestrator(sessionId);
       if (!unmountedRef.current) {

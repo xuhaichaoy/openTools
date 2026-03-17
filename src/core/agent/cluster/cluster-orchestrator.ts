@@ -91,6 +91,7 @@ async function retryChat(
 export interface ClusterOrchestratorOptions {
   maxConcurrency?: number;
   signal?: AbortSignal;
+  workspaceRoot?: string;
   /** 全局执行超时（ms），默认 1800s */
   timeoutMs?: number;
   onStatusChange?: (status: ClusterSessionStatus) => void;
@@ -717,6 +718,9 @@ ${forceMode ? `强制使用模式: ${forceMode}` : "根据任务复杂度自动�
     if (this.runImages?.length) {
       allContext._images = this.runImages;
     }
+    if (this.options.workspaceRoot) {
+      allContext._workspaceRoot = this.options.workspaceRoot;
+    }
     if (reviewFeedback) {
       allContext._review_feedback = {
         issues: reviewFeedback.issues,
@@ -776,6 +780,7 @@ ${forceMode ? `强制使用模式: ${forceMode}` : "根据任务复杂度自动�
         result = await bridge.run(task, allContext, {
           role: modelOverride ? { ...role, modelOverride } : role,
           signal: stepAbort.signal,
+          workspaceRoot: this.options.workspaceRoot,
           maxIterations: getEnhancedClusterRoleIterations(
             role.maxIterations,
             role.id,

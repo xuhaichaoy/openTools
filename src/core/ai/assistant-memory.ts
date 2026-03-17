@@ -1,7 +1,8 @@
 import {
-  appendMemoryCandidates,
   buildMemoryPromptBlock,
   extractMemoryCandidates,
+  ingestAutomaticMemorySignals,
+  ingestMemoryCandidates,
   recallMemories,
   saveAutomaticStructuredMemory,
   semanticRecall,
@@ -9,6 +10,7 @@ import {
   type AIMemoryCandidateMode,
   type AIMemoryItem,
 } from "./memory-store";
+import { summarizeAISessionRuntimeText } from "./ai-session-runtime";
 
 export interface AssistantMemoryRecallOptions {
   conversationId?: string;
@@ -16,6 +18,13 @@ export interface AssistantMemoryRecallOptions {
   topK?: number;
   timeoutMs?: number;
   preferSemantic?: boolean;
+}
+
+export interface AssistantMemoryPromptBundle {
+  prompt: string;
+  memories: AIMemoryItem[];
+  memoryIds: string[];
+  memoryPreview: string[];
 }
 
 async function syncAssistantMemoryCandidateStore(): Promise<void> {
@@ -35,9 +44,11 @@ export async function appendAssistantMemoryCandidates(
   );
   if (validCandidates.length === 0) return 0;
 
-  await appendMemoryCandidates(validCandidates);
+  const result = await ingestMemoryCandidates(validCandidates, {
+    autoConfirm: false,
+  });
   await syncAssistantMemoryCandidateStore();
-  return validCandidates.length;
+  return result.confirmed + result.queued;
 }
 
 export async function queueAssistantMemoryCandidates(
@@ -55,16 +66,31 @@ export async function queueAssistantMemoryCandidates(
     return 1;
   }
 
-  const candidates = extractMemoryCandidates(normalized, {
+  const explicitCandidates = extractMemoryCandidates(normalized, {
     conversationId: opts?.conversationId,
     workspaceId: opts?.workspaceId,
     source: "user",
     sourceMode: opts?.sourceMode ?? "ask",
     evidence: normalized,
   });
-  if (candidates.length === 0) return 0;
+  if (explicitCandidates.length > 0) {
+    const result = await ingestMemoryCandidates(explicitCandidates, {
+      autoConfirm: true,
+    });
+    await syncAssistantMemoryCandidateStore();
+    return result.confirmed + result.queued;
+  }
 
-  return appendAssistantMemoryCandidates(candidates);
+  const result = await ingestAutomaticMemorySignals(normalized, {
+    conversationId: opts?.conversationId,
+    workspaceId: opts?.workspaceId,
+    source: "user",
+    sourceMode: opts?.sourceMode ?? "ask",
+    evidence: normalized,
+    autoConfirm: true,
+  });
+  await syncAssistantMemoryCandidateStore();
+  return result.confirmed + result.queued;
 }
 
 async function recallAssistantMemoriesInternal(
@@ -109,6 +135,21 @@ export async function buildAssistantMemoryPromptForQuery(
   query: string,
   opts?: AssistantMemoryRecallOptions,
 ): Promise<string> {
+  const bundle = await buildAssistantMemoryPromptBundleForQuery(query, opts);
+  return bundle.prompt;
+}
+
+export async function buildAssistantMemoryPromptBundleForQuery(
+  query: string,
+  opts?: AssistantMemoryRecallOptions,
+): Promise<AssistantMemoryPromptBundle> {
   const recalled = await recallAssistantMemories(query, opts);
-  return buildMemoryPromptBlock(recalled);
+  return {
+    prompt: buildMemoryPromptBlock(recalled),
+    memories: recalled,
+    memoryIds: recalled.map((memory) => memory.id),
+    memoryPreview: recalled
+      .slice(0, 3)
+      .map((memory) => summarizeAISessionRuntimeText(memory.content, 60) || memory.content),
+  };
 }

@@ -67,15 +67,17 @@ export function AgentPromptContextCard({
       </div>
 
       {expanded && (
-        <div className="mt-3 space-y-2">
-          {reportLines.map((line) => (
-            <div
-              key={line}
-              className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-[12px] leading-5 text-[var(--color-text)]"
-            >
-              {line}
-            </div>
-          ))}
+        <div className="mt-3 rounded-2xl border border-[var(--color-border)]/70 bg-[var(--color-bg)]/35 p-2">
+          <div className="max-h-[min(42vh,28rem)] space-y-2 overflow-y-auto pr-1">
+            {reportLines.map((line) => (
+              <div
+                key={line}
+                className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-[12px] leading-5 text-[var(--color-text)]"
+              >
+                {line}
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>

@@ -1,5 +1,6 @@
 import { buildAssistantSupplementalPrompt } from "@/core/ai/assistant-config";
 import { buildBootstrapContextSnapshot } from "@/core/ai/bootstrap-context";
+import { buildAgentExecutionContextPlan } from "@/core/agent/context-runtime";
 import { useAIStore } from "@/store/ai-store";
 import type { ActorMiddleware, ActorRunContext } from "../actor-middleware";
 
@@ -17,8 +18,16 @@ export class PromptBuildMiddleware implements ActorMiddleware {
     const extraSystemPrompt = buildAssistantSupplementalPrompt(
       useAIStore.getState().config.system_prompt,
     );
+    const executionContextPlan = await buildAgentExecutionContextPlan({
+      query: ctx.query,
+      explicitWorkspaceRoot: ctx.workspace,
+      images: ctx.getCurrentImages?.() ?? ctx.images,
+    });
+    const effectiveWorkspaceRoot = executionContextPlan.effectiveWorkspaceRoot;
     const bootstrapContext = await buildBootstrapContextSnapshot({
-      workspaceRoot: ctx.workspace,
+      workspaceRoot: effectiveWorkspaceRoot,
+      filePaths: executionContextPlan.scope.pathHints,
+      handoffPaths: executionContextPlan.scope.handoffPaths,
       query: ctx.query,
       includeMemory: true,
       recentDailyFiles: 1,
@@ -32,8 +41,8 @@ export class PromptBuildMiddleware implements ActorMiddleware {
       prompt += `\n\n${bootstrapContext.prompt}`;
     }
 
-    if (ctx.workspace) {
-      prompt += `\n\n## 工作目录\n你的工作目录为: ${ctx.workspace}\n执行 shell 命令和文件操作时，请在此目录下进行。`;
+    if (effectiveWorkspaceRoot) {
+      prompt += `\n\n## 工作目录\n你的工作目录为: ${effectiveWorkspaceRoot}\n执行 shell 命令和文件操作时，请在此目录下进行。`;
     }
 
     if (ctx.actorSystem && ctx.actorSystem.size >= 2) {

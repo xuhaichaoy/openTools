@@ -52,15 +52,14 @@ export function routeToAICenter(params: RouteToAICenterParams): void {
   appStore.setAiInitialMode(mode);
   appStore.setAiCenterMode(mode);
 
-  if (mode === "ask" && query?.trim()) {
-    void useAIStore.getState().sendMessage(query, images);
-  }
-
   const normalizedHandoff = handoff
     ? normalizeAICenterHandoff(handoff)
     : agentHandoff
       ? normalizeAICenterHandoff(agentHandoff)
       : undefined;
+  if (mode === "ask" && query?.trim() && !normalizedHandoff) {
+    void useAIStore.getState().sendMessage(query, images);
+  }
   if (normalizedHandoff) {
     appStore.setPendingAICenterHandoff({
       mode,

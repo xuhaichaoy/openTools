@@ -81,6 +81,30 @@ const ARCHIVE_REASON_LABELS: Record<"deleted" | "replaced" | "limit_trimmed", st
   limit_trimmed: "超过上限被归档",
 };
 
+type MemoryCenterView = "durable" | "session_notes" | "review_queue";
+
+const MEMORY_CENTER_VIEWS: Array<{
+  id: MemoryCenterView;
+  label: string;
+  description: string;
+}> = [
+  {
+    id: "durable",
+    label: "长期记忆",
+    description: "稳定偏好、长期约束、项目背景",
+  },
+  {
+    id: "session_notes",
+    label: "会话笔记",
+    description: "静默沉淀的上下文缓存",
+  },
+  {
+    id: "review_queue",
+    label: "审查队列",
+    description: "少量后台候选，集中处理",
+  },
+];
+
 const KIND_OPTIONS = Object.entries(KIND_LABELS) as Array<
   [AIMemoryKind, { label: string; color: string }]
 >;
@@ -215,6 +239,7 @@ export function MemoryTab() {
   const [showAllArchived, setShowAllArchived] = useState(false);
   const [showStats, setShowStats] = useState(false);
   const [showFileMemoryPreview, setShowFileMemoryPreview] = useState(false);
+  const [activeView, setActiveView] = useState<MemoryCenterView>("durable");
 
   const loadMemories = useCallback(async (options?: { silent?: boolean }) => {
     const silent = options?.silent ?? false;
@@ -492,6 +517,14 @@ export function MemoryTab() {
   }, [conversationSuggestions, draftScope, workspaceSuggestions]);
   const archivedPreview = showAllArchived ? archivedMemories : archivedMemories.slice(0, 6);
   const hasMemoryFilters = !!searchQuery.trim() || filterKind !== "all" || filterSource !== "all";
+  const viewCountMap = useMemo<Record<MemoryCenterView, number>>(
+    () => ({
+      durable: confirmedLongTermMemories.length,
+      session_notes: sessionNotes.length,
+      review_queue: candidates.length,
+    }),
+    [candidates.length, confirmedLongTermMemories.length, sessionNotes.length],
+  );
 
   const renderMemoryList = (
     items: AIMemoryItem[],
@@ -733,6 +766,36 @@ export function MemoryTab() {
         />
       </div>
 
+      <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-2">
+        <div className="inline-flex flex-wrap gap-2">
+          {MEMORY_CENTER_VIEWS.map((view) => {
+            const active = activeView === view.id;
+            return (
+              <button
+                key={view.id}
+                type="button"
+                onClick={() => setActiveView(view.id)}
+                className={`rounded-xl border px-3 py-2 text-left transition-colors ${
+                  active
+                    ? "border-[#F28F36] bg-[#F28F36]/10 text-[#F28F36]"
+                    : "border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)]"
+                }`}
+              >
+                <div className="text-[11px] font-medium">
+                  {view.label}
+                  <span className="ml-1 text-[10px] opacity-80">
+                    {viewCountMap[view.id]}
+                  </span>
+                </div>
+                <div className="mt-0.5 text-[10px] opacity-80">
+                  {view.description}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       {fileMemorySnapshot && (
         <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-3 space-y-2">
           <div className="flex items-center justify-between gap-3">
@@ -882,8 +945,8 @@ export function MemoryTab() {
 
       <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-3 text-[10px] text-[var(--color-text-secondary)] space-y-1.5">
         <div>
-          当前流程已经拆成两层：“会话笔记静默沉淀” + “长期记忆候选确认”。
-          自动运行结果更偏向写入会话笔记；大多数长期记忆仍走候选确认，但像回答语言、输出格式、回答结构、常驻地这类明确结构化规则，会直接升级为正式记忆。
+          当前流程已经拆成两层：“会话笔记静默沉淀” + “长期记忆后台整理”。
+          自动运行结果更偏向写入会话笔记；明确且高置信的长期规则会直接升级为正式记忆，其余才进入后台候选队列。
         </div>
         <div>
           总开关：{memoryEnabled ? "已开启" : "已关闭"}；云同步：{memorySyncEnabled ? "开启，仅同步正式记忆" : "关闭，仅保留本地正式记忆"}。
@@ -895,11 +958,11 @@ export function MemoryTab() {
           `memory-graph` 这一类图谱数据目前不参与主召回链路，现阶段重点仍是这套稳定的候选/正式记忆体系。
         </div>
         <div>
-          自动提取候选：{autoCandidateEnabled ? "已开启，只会上浮高置信度长期信号" : (memoryEnabled ? "已关闭，仅保留手动确认" : "停用")}。
+          自动提取候选：{autoCandidateEnabled ? "已开启，主流程默认静默，只保留后台候选" : (memoryEnabled ? "已关闭，仅保留手动确认" : "停用")}。
         </div>
       </div>
 
-      <div className="grid gap-3 lg:grid-cols-2">
+      {activeView === "durable" && (
         <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-3 space-y-3">
           <div className="flex items-center gap-2">
             <Plus className="w-3.5 h-3.5 text-[#F28F36]" />
@@ -1002,13 +1065,15 @@ export function MemoryTab() {
                 : "会话记忆适合单个房间/任务的长期上下文，只会在对应会话中参与召回。"}
           </div>
         </div>
+      )}
 
+      {activeView === "review_queue" && (
         <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-3 space-y-3">
           <div className="flex items-center justify-between gap-2">
             <div>
-              <div className="text-xs font-semibold text-[var(--color-text)]">待确认候选</div>
+              <div className="text-xs font-semibold text-[var(--color-text)]">后台审查队列</div>
               <div className="text-[10px] text-[var(--color-text-secondary)]">
-                候选不会自动生效，确认后才进入正式记忆。
+                主对话流程默认静默运行，只有少量值得审查的候选才会进入这里。
               </div>
             </div>
             {candidates.length > 0 && (
@@ -1027,7 +1092,7 @@ export function MemoryTab() {
               当前没有待确认候选
             </div>
           ) : (
-            <div className="max-h-[320px] space-y-2 overflow-auto pr-1">
+            <div className="max-h-[520px] space-y-2 overflow-auto pr-1">
               {candidates.map((candidate) => {
                 const confirmBusy = candidateActionId === `confirm:${candidate.id}`;
                 const dismissBusy = candidateActionId === `dismiss:${candidate.id}`;
@@ -1138,121 +1203,136 @@ export function MemoryTab() {
             </div>
           )}
         </div>
-      </div>
+      )}
 
-      <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-3 space-y-3">
-        <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-          <div>
-            <div className="text-xs font-semibold text-[var(--color-text)]">已确认记忆</div>
-            <div className="text-[10px] text-[var(--color-text-secondary)]">
-              搜索和筛选会同时作用在“长期记忆”和“会话笔记”两组列表上。
+      {activeView !== "review_queue" && (
+        <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-3 space-y-3">
+          <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+            <div>
+              <div className="text-xs font-semibold text-[var(--color-text)]">
+                {activeView === "durable" ? "长期记忆" : "会话笔记"}
+              </div>
+              <div className="text-[10px] text-[var(--color-text-secondary)]">
+                {activeView === "durable"
+                  ? "稳定偏好、长期约束和项目背景会优先保留在这里，并跨模式参与召回。"
+                  : "运行过程中的阶段性上下文会静默沉淀到这里，主要在同会话或同工作区内回补上下文。"}
+              </div>
             </div>
+            {!config.enable_long_term_memory && (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[10px] text-amber-700 dark:text-amber-300">
+                长期记忆总开关当前关闭，现有数据仍可管理，但不会自动召回/提取。
+              </div>
+            )}
           </div>
-          {!config.enable_long_term_memory && (
-            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[10px] text-amber-700 dark:text-amber-300">
-              长期记忆总开关当前关闭，现有数据仍可管理，但不会自动召回/提取。
+
+          <div className="flex flex-col gap-2 md:flex-row">
+            <div className="relative flex-1">
+              <Search className="absolute left-2.5 top-1/2 h-3 w-3 -translate-y-1/2 text-[var(--color-text-secondary)]" />
+              <input
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="搜索内容、标签、类型或来源..."
+                className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] py-2 pl-8 pr-3 text-xs text-[var(--color-text)] outline-none"
+              />
+            </div>
+            <select
+              value={filterKind}
+              onChange={(e) => setFilterKind(e.target.value)}
+              className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2.5 py-2 text-xs text-[var(--color-text)] outline-none"
+            >
+              <option value="all">全部类型</option>
+              {KIND_OPTIONS.map(([kind, info]) => (
+                <option key={kind} value={kind}>
+                  {info.label}
+                </option>
+              ))}
+            </select>
+            <select
+              value={filterSource}
+              onChange={(e) => setFilterSource(e.target.value)}
+              className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2.5 py-2 text-xs text-[var(--color-text)] outline-none"
+            >
+              <option value="all">全部来源</option>
+              {SOURCE_OPTIONS.map(([source, label]) => (
+                <option key={source} value={source}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {activeView === "durable" && filteredLongTermMemories.length === 0 && (
+            <div className="rounded-xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg)] py-8 text-center">
+              <Brain className="mx-auto mb-2 h-8 w-8 text-[var(--color-text-secondary)] opacity-20" />
+              <p className="text-xs text-[var(--color-text-secondary)]">
+                {hasMemoryFilters ? "当前筛选下没有匹配的长期记忆" : "尚无长期记忆"}
+              </p>
+            </div>
+          )}
+
+          {activeView === "session_notes" && filteredSessionNotes.length === 0 && (
+            <div className="rounded-xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg)] py-8 text-center">
+              <Brain className="mx-auto mb-2 h-8 w-8 text-[var(--color-text-secondary)] opacity-20" />
+              <p className="text-xs text-[var(--color-text-secondary)]">
+                {hasMemoryFilters ? "当前筛选下没有匹配的会话笔记" : "尚无会话笔记"}
+              </p>
+            </div>
+          )}
+
+          {activeView === "durable" && (
+            <div className="space-y-2">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-xs font-semibold text-[var(--color-text)]">长期记忆</div>
+                  <div className="text-[10px] text-[var(--color-text-secondary)]">
+                    稳定偏好、长期约束、项目背景等会优先保留在这里，并跨模式参与召回。
+                  </div>
+                </div>
+                <div className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-1 text-[10px] text-[var(--color-text-secondary)]">
+                  {filteredLongTermMemories.length} / {confirmedLongTermMemories.length}
+                </div>
+              </div>
+              {legacySummaryCount > 0 && (
+                <div className="rounded-lg border border-sky-500/20 bg-sky-500/10 px-2.5 py-1.5 text-[10px] text-sky-700 dark:text-sky-300">
+                  兼容保留了 {legacySummaryCount} 条旧版“对话摘要”记忆；新流程默认改为沉淀到“会话笔记”。
+                </div>
+              )}
+              {renderMemoryList(filteredLongTermMemories, {
+                emptyTitle: hasMemoryFilters ? "当前筛选下没有长期记忆" : "还没有长期记忆",
+                emptyDescription: hasMemoryFilters
+                  ? "可以调整搜索词、类型或来源筛选后再看。"
+                  : "确认候选或手动录入稳定偏好后，这里会开始积累。",
+              })}
+            </div>
+          )}
+
+          {activeView === "session_notes" && (
+            <div className="space-y-2 pt-1">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-xs font-semibold text-[var(--color-text)]">会话笔记</div>
+                  <div className="text-[10px] text-[var(--color-text-secondary)]">
+                    运行过程中的阶段性上下文会静默沉淀到这里，主要在同会话或同工作区内回补上下文。
+                  </div>
+                </div>
+                <div className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-1 text-[10px] text-[var(--color-text-secondary)]">
+                  {filteredSessionNotes.length} / {sessionNotes.length}
+                </div>
+              </div>
+              <div className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[10px] text-slate-600 dark:border-slate-800 dark:bg-slate-950/40 dark:text-slate-300">
+                会话笔记不会进入待确认流，也不适合作为全局偏好使用；它更像自动整理的“当前上下文缓存”。
+              </div>
+              {renderMemoryList(filteredSessionNotes, {
+                emptyTitle: hasMemoryFilters ? "当前筛选下没有会话笔记" : "当前还没有会话笔记",
+                emptyDescription: hasMemoryFilters
+                  ? "可以切换筛选条件，或者把类型改回“全部类型”。"
+                  : "当 AI 在会话中持续工作时，重要阶段信息会逐步沉淀到这里。",
+                accent: "muted",
+              })}
             </div>
           )}
         </div>
-
-        <div className="flex flex-col gap-2 md:flex-row">
-          <div className="relative flex-1">
-            <Search className="absolute left-2.5 top-1/2 h-3 w-3 -translate-y-1/2 text-[var(--color-text-secondary)]" />
-            <input
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="搜索内容、标签、类型或来源..."
-              className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] py-2 pl-8 pr-3 text-xs text-[var(--color-text)] outline-none"
-            />
-          </div>
-          <select
-            value={filterKind}
-            onChange={(e) => setFilterKind(e.target.value)}
-            className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2.5 py-2 text-xs text-[var(--color-text)] outline-none"
-          >
-            <option value="all">全部类型</option>
-            {KIND_OPTIONS.map(([kind, info]) => (
-              <option key={kind} value={kind}>
-                {info.label}
-              </option>
-            ))}
-          </select>
-          <select
-            value={filterSource}
-            onChange={(e) => setFilterSource(e.target.value)}
-            className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2.5 py-2 text-xs text-[var(--color-text)] outline-none"
-          >
-            <option value="all">全部来源</option>
-            {SOURCE_OPTIONS.map(([source, label]) => (
-              <option key={source} value={source}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        {filteredLongTermMemories.length === 0 && filteredSessionNotes.length === 0 && (
-          <div className="rounded-xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg)] py-8 text-center">
-            <Brain className="mx-auto mb-2 h-8 w-8 text-[var(--color-text-secondary)] opacity-20" />
-            <p className="text-xs text-[var(--color-text-secondary)]">
-              {hasMemoryFilters ? "当前筛选下没有匹配的已确认记忆" : "尚无已确认记忆"}
-            </p>
-          </div>
-        )}
-
-        {(filteredLongTermMemories.length > 0 || !hasMemoryFilters || filterKind !== "session_note") && (
-          <div className="space-y-2">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <div className="text-xs font-semibold text-[var(--color-text)]">长期记忆</div>
-                <div className="text-[10px] text-[var(--color-text-secondary)]">
-                  稳定偏好、长期约束、项目背景等会优先保留在这里，并跨模式参与召回。
-                </div>
-              </div>
-              <div className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-1 text-[10px] text-[var(--color-text-secondary)]">
-                {filteredLongTermMemories.length} / {confirmedLongTermMemories.length}
-              </div>
-            </div>
-            {legacySummaryCount > 0 && (
-              <div className="rounded-lg border border-sky-500/20 bg-sky-500/10 px-2.5 py-1.5 text-[10px] text-sky-700 dark:text-sky-300">
-                兼容保留了 {legacySummaryCount} 条旧版“对话摘要”记忆；新流程默认改为沉淀到“会话笔记”。
-              </div>
-            )}
-            {renderMemoryList(filteredLongTermMemories, {
-              emptyTitle: hasMemoryFilters ? "当前筛选下没有长期记忆" : "还没有长期记忆",
-              emptyDescription: hasMemoryFilters
-                ? "可以调整搜索词、类型或来源筛选后再看。"
-                : "确认候选或手动录入稳定偏好后，这里会开始积累。",
-            })}
-          </div>
-        )}
-
-        {(filteredSessionNotes.length > 0 || !hasMemoryFilters || filterKind === "session_note" || filterKind === "all") && (
-          <div className="space-y-2 pt-1">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <div className="text-xs font-semibold text-[var(--color-text)]">会话笔记</div>
-                <div className="text-[10px] text-[var(--color-text-secondary)]">
-                  运行过程中的阶段性上下文会静默沉淀到这里，主要在同会话或同工作区内回补上下文。
-                </div>
-              </div>
-              <div className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-1 text-[10px] text-[var(--color-text-secondary)]">
-                {filteredSessionNotes.length} / {sessionNotes.length}
-              </div>
-            </div>
-            <div className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[10px] text-slate-600 dark:border-slate-800 dark:bg-slate-950/40 dark:text-slate-300">
-              会话笔记不会进入待确认流，也不适合作为全局偏好使用；它更像自动整理的“当前上下文缓存”。
-            </div>
-            {renderMemoryList(filteredSessionNotes, {
-              emptyTitle: hasMemoryFilters ? "当前筛选下没有会话笔记" : "当前还没有会话笔记",
-              emptyDescription: hasMemoryFilters
-                ? "可以切换筛选条件，或者把类型改回“全部类型”。"
-                : "当 AI 在会话中持续工作时，重要阶段信息会逐步沉淀到这里。",
-              accent: "muted",
-            })}
-          </div>
-        )}
-      </div>
+      )}
 
       {archivedMemories.length > 0 && (
         <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-3 space-y-2">

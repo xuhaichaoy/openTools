@@ -2,9 +2,8 @@ import type { AgentTool } from "@/plugins/builtin/SmartAgent/core/react-agent";
 import {
   semanticRecall,
   recallMemories,
-  extractMemoryCandidates,
   listConfirmedMemories,
-  llmExtractMemories,
+  ingestAutomaticMemorySignals,
   queueMemoryCandidateFromAgent,
   saveSessionMemoryNote,
   type AIMemoryCandidateMode,
@@ -16,7 +15,6 @@ import {
   shouldRecallAssistantMemory,
 } from "@/core/ai/assistant-config";
 import {
-  appendAssistantMemoryCandidates,
   buildAssistantMemoryPromptForQuery,
 } from "@/core/ai/assistant-memory";
 import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
@@ -243,7 +241,11 @@ function formatMemoryItem(m: AIMemoryItem) {
 export async function autoExtractMemories(
   conversationContent: string,
   conversationId?: string,
-  opts?: { sourceMode?: AIMemoryCandidateMode; workspaceId?: string },
+  opts?: {
+    sourceMode?: AIMemoryCandidateMode;
+    workspaceId?: string;
+    skipSessionNote?: boolean;
+  },
 ): Promise<number> {
   if (!shouldAutoSaveAssistantMemory(useAIStore.getState().config)) {
     return 0;
@@ -256,7 +258,7 @@ export async function autoExtractMemories(
   if (!conversationContent || conversationContent.length < 20) return 0;
 
   const truncated = conversationContent.slice(0, MAX_EXTRACT_CONTENT_LENGTH);
-  const note = buildSessionNoteSummary(truncated);
+  const note = opts?.skipSessionNote ? null : buildSessionNoteSummary(truncated);
   let savedCount = 0;
 
   if (note) {
@@ -273,37 +275,15 @@ export async function autoExtractMemories(
   // Keep automatic long-term extraction very conservative.
   // Silent session notes carry most transient context; only explicit durable signals
   // should still surface as candidate memories.
-  const llmCandidates = await llmExtractMemories(truncated, {
+  const ingested = await ingestAutomaticMemorySignals(truncated, {
     conversationId,
     workspaceId: opts?.workspaceId,
     source: "assistant",
     sourceMode: opts?.sourceMode ?? "agent",
     evidence: truncated,
-  }).catch(() => []);
-
-  if (llmCandidates.length > 0) {
-    const inlineCandidates = llmCandidates.filter((candidate) => candidate.review_surface !== "background");
-    if (inlineCandidates.length > 0) {
-      await appendAssistantMemoryCandidates(inlineCandidates);
-      return savedCount + inlineCandidates.length;
-    }
-    return savedCount;
-  }
-
-  // Fallback to regex-based heuristic
-  const candidates = extractMemoryCandidates(truncated, {
-    conversationId,
-    workspaceId: opts?.workspaceId,
-    source: "assistant",
-    sourceMode: opts?.sourceMode ?? "agent",
-    reason: "从对话中匹配到明确的长期记忆提示词",
-    evidence: truncated,
-  });
-  const inlineCandidates = candidates.filter((candidate) => candidate.review_surface !== "background");
-  if (inlineCandidates.length === 0) return savedCount;
-
-  await appendAssistantMemoryCandidates(inlineCandidates);
-  return savedCount + inlineCandidates.length;
+    autoConfirm: false,
+  }).catch(() => ({ confirmed: 0, queued: 0 }));
+  return savedCount + ingested.confirmed + ingested.queued;
 }
 
 function buildSessionNoteSummary(conversationContent: string): string | null {

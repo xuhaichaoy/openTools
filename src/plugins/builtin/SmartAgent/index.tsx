@@ -480,6 +480,11 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
         sourceHandoff: pendingSourceHandoff ?? currentSession?.sourceHandoff,
         files: sessionFiles,
         contextLines: sessionContextLines,
+        workspaceRoot: currentSession?.workspaceRoot,
+        workspaceReset: Boolean(currentSession?.lastContextResetAt),
+        continuityStrategy: currentSession?.lastContinuityStrategy,
+        continuityReason: currentSession?.lastContinuityReason,
+        memoryItemCount: currentSession?.lastMemoryItemCount,
         historyContextMessageCount: currentSession?.compaction?.summary ? 2 : 0,
         knowledgeContextMessageCount: 0,
       });
@@ -671,7 +676,7 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
           onClose={() => setShowHistory(false)}
         />
 
-        <div className="flex flex-col flex-1 min-w-0">
+        <div className="flex min-h-0 flex-1 min-w-0 flex-col">
           {!headless && (
             <AgentHeaderBar
               onBack={onBack}
@@ -756,6 +761,7 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
           {currentSession && (
             <AgentSessionContextStrip
               session={currentSession}
+              snapshot={effectivePromptContextSnapshot}
               hiddenTaskCount={hiddenTasks.length}
               onRedo={redoCurrentSession}
               onRestore={restoreCurrentSession}

@@ -732,7 +732,7 @@ export function AIModelTab() {
               <div className="flex-1 pr-3">
                 <span className="text-xs text-[var(--color-text)]">自动提取候选</span>
                 <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
-                  从明确的“记住”类指令中提取候选，需你手动确认后生效。
+                  明确且高置信的长期偏好会直接记住，其余候选进入后台队列，不再打断主流程。
                 </p>
               </div>
               <Toggle

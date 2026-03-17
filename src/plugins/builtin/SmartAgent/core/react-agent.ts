@@ -131,6 +131,15 @@ const DEFAULT_CONFIG: AgentConfig = {
 const FC_CACHE_TTL_MS = 30 * 60 * 1000;
 const FC_CACHE_MAX_SIZE = 50;
 const fcIncompatibleCache = new Map<string, number>();
+const MEMORY_RECALL_TOOL_NAMES = new Set(["memory_search", "memory_get"]);
+const MEMORY_RECALL_QUERY_PATTERNS: RegExp[] = [
+  /之前|先前|前面|上次|刚才|历史|记得|还记得|回忆|回顾/,
+  /偏好|习惯|默认|常驻地|常住地|居住地|所在城市|我的城市/,
+  /待办|todo|任务列表|未完成|进度|进展/,
+  /决策|决定|结论|方案|约定|规则/,
+  /日期|几号|哪天|何时|什么时候/,
+  /人物|谁|联系人|用户信息|背景/,
+];
 
 function pruneFCCache() {
   if (fcIncompatibleCache.size <= FC_CACHE_MAX_SIZE) return;
@@ -159,6 +168,23 @@ function isFCCacheValid(key: string): boolean {
 function normalizeFCCompatibilityKey(key?: string): string | null {
   const normalized = (key || "").trim().toLowerCase();
   return normalized || null;
+}
+
+function extractNumericIntentTokens(input: string): string[] {
+  const matches = input.match(/\b\d{3,}(?:px|rpx|rem|em|vh|vw|%)?\b/gi) ?? [];
+  return [...new Set(matches.map((item) => item.toLowerCase()))];
+}
+
+function countExactTokenMatches(tokens: readonly string[], candidate?: string): number {
+  if (!candidate || tokens.length === 0) return 0;
+  const normalized = candidate.toLowerCase();
+  let score = 0;
+  for (const token of tokens) {
+    if (normalized.includes(token)) {
+      score += 1;
+    }
+  }
+  return score;
 }
 
 function isFCCompatibilityErrorMessage(message: string): boolean {
@@ -1241,6 +1267,64 @@ export class ReActAgent {
     return lines.join("\n");
   }
 
+  private shouldEnforceMemoryRecall(userInput: string): boolean {
+    const availableToolNames = new Set(this.getAvailableTools().map((tool) => tool.name));
+    if (!availableToolNames.has("memory_search") || !availableToolNames.has("memory_get")) {
+      return false;
+    }
+    const normalized = userInput.trim();
+    if (!normalized) return false;
+    return MEMORY_RECALL_QUERY_PATTERNS.some((pattern) => pattern.test(normalized));
+  }
+
+  private hasPerformedMemoryRecall(): boolean {
+    return [...this.history, ...this.steps].some(
+      (step) =>
+        step.type === "action"
+        && !!step.toolName
+        && MEMORY_RECALL_TOOL_NAMES.has(step.toolName),
+    );
+  }
+
+  private buildMemoryRecallCorrection(userInput: string): string | null {
+    if (!this.shouldEnforceMemoryRecall(userInput)) return null;
+    if (this.hasPerformedMemoryRecall()) return null;
+    return [
+      "[系统校验] 当前问题涉及历史信息、用户偏好、待办或既有决策。",
+      "在给出最终答案前，必须先调用 memory_search 检索 MEMORY.md / memory/*.md；必要时再调用 memory_get 精读命中的片段。",
+      "如果检索后仍然没有命中，请明确说明你已经检查过记忆，再继续回答。",
+    ].join("\n");
+  }
+
+  private pickBestFinalAnswer(
+    userInput: string,
+    candidates: Array<string | null | undefined>,
+  ): string | undefined {
+    const validCandidates = candidates.filter(
+      (candidate): candidate is string => typeof candidate === "string" && candidate.trim().length > 0,
+    );
+    if (validCandidates.length === 0) return undefined;
+
+    const intentTokens = extractNumericIntentTokens(userInput);
+    if (intentTokens.length === 0) {
+      return validCandidates[0];
+    }
+
+    let best = validCandidates[0];
+    let bestScore = countExactTokenMatches(intentTokens, best);
+
+    for (let index = 1; index < validCandidates.length; index += 1) {
+      const candidate = validCandidates[index];
+      const score = countExactTokenMatches(intentTokens, candidate);
+      if (score > bestScore) {
+        best = candidate;
+        bestScore = score;
+      }
+    }
+
+    return best;
+  }
+
   /** 带超时的工具执行 */
   private async executeWithTimeout(
     tool: AgentTool,
@@ -1958,6 +2042,16 @@ ${s.taskStrategy}
     });
 
     if (signal?.aborted) throw new Error("Aborted");
+    const finalVisibleAnswer = accumulated.trim();
+    if (finalVisibleAnswer && finalVisibleAnswer !== this.lastStreamingAnswer) {
+      this.onStep?.({
+        type: "answer",
+        content: finalVisibleAnswer,
+        timestamp: Date.now(),
+        streaming: true,
+      });
+      this.lastStreamingAnswer = finalVisibleAnswer;
+    }
     if (thinkingAccum) {
       this.onStep?.({
         type: "thinking",
@@ -2052,6 +2146,7 @@ ${s.taskStrategy}
     let unknownToolCount = 0;
     let rejectedDangerousActionCount = 0;
     let guardRailRetryCount = 0;
+    let memoryRecallCorrectionCount = 0;
     const MAX_GUARD_RAIL_RETRIES = 2;
     const toolFailCounts = new Map<string, number>();
 
@@ -2128,6 +2223,16 @@ ${s.taskStrategy}
       if (result.type === "content") {
         const answer = result.content.trim();
         if (answer) {
+          const memoryRecallCorrection =
+            memoryRecallCorrectionCount < 2
+              ? this.buildMemoryRecallCorrection(userInput)
+              : null;
+          if (memoryRecallCorrection) {
+            memoryRecallCorrectionCount++;
+            messages.push({ role: "assistant", content: answer });
+            messages.push({ role: "user", content: memoryRecallCorrection });
+            continue;
+          }
           const guardRailCorrection =
             guardRailRetryCount < MAX_GUARD_RAIL_RETRIES
               ? this.checkAnswerGuardRails(answer, userInput, rejectedDangerousActionCount)
@@ -2301,12 +2406,22 @@ ${s.taskStrategy}
 
       if (taskDoneResult) {
         const lastAnswerStep = [...this.steps].reverse().find((s) => s.type === "answer");
-        // 优先级：① 已记录的 answer 步骤 → ② 流式累积的完整文档 → ③ task_done.summary 文本 → ④ 原始 outputStr JSON
-        const answer =
-          lastAnswerStep?.content ||
-          (this.lastStreamingAnswer.length > 50 ? this.lastStreamingAnswer : undefined) ||
-          taskDoneSummary ||
-          taskDoneResult;
+        const answer = this.pickBestFinalAnswer(userInput, [
+          lastAnswerStep?.content,
+          this.lastStreamingAnswer.length > 50 ? this.lastStreamingAnswer : undefined,
+          taskDoneSummary,
+          taskDoneResult,
+        ]) || taskDoneResult;
+        const memoryRecallCorrection =
+          memoryRecallCorrectionCount < 2
+            ? this.buildMemoryRecallCorrection(userInput)
+            : null;
+        if (memoryRecallCorrection) {
+          memoryRecallCorrectionCount++;
+          messages.push({ role: "assistant", content: answer });
+          messages.push({ role: "user", content: memoryRecallCorrection });
+          continue;
+        }
         if (!lastAnswerStep) {
           this.addStep({ type: "answer", content: answer, timestamp: Date.now() });
         }
@@ -2334,6 +2449,7 @@ ${s.taskStrategy}
     messages.push(userMsg);
     let rejectedDangerousActionCount = 0;
     let guardRailRetryCount = 0;
+    let memoryRecallCorrectionCount = 0;
     const MAX_GUARD_RAIL_RETRIES = 2;
     const textToolFailCounts = new Map<string, number>();
 
@@ -2407,6 +2523,16 @@ ${s.taskStrategy}
       }
 
       if (parsed.finalAnswer) {
+        const memoryRecallCorrection =
+          memoryRecallCorrectionCount < 2
+            ? this.buildMemoryRecallCorrection(userInput)
+            : null;
+        if (memoryRecallCorrection) {
+          memoryRecallCorrectionCount++;
+          messages.push({ role: "assistant", content: responseContent });
+          messages.push({ role: "user", content: memoryRecallCorrection });
+          continue;
+        }
         const guardRailCorrection =
           guardRailRetryCount < MAX_GUARD_RAIL_RETRIES
             ? this.checkAnswerGuardRails(parsed.finalAnswer, userInput, rejectedDangerousActionCount)

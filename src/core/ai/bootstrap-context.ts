@@ -15,6 +15,11 @@ export interface BootstrapContextSnapshot {
   prompt: string;
 }
 
+export interface BootstrapReinjectionSectionPreview {
+  title: string;
+  lines: string[];
+}
+
 const WORKSPACE_BOOTSTRAP_FILENAMES = [
   "AGENTS.md",
   "BOOTSTRAP.md",
@@ -35,6 +40,8 @@ const PROJECT_MARKER_FILENAMES = [
 const DEFAULT_MAX_CHARS_PER_FILE = 4_000;
 const DEFAULT_TOTAL_MAX_CHARS = 12_000;
 const MAX_CANDIDATE_ANCESTORS = 6;
+const DEFAULT_REINJECTION_SECTION_COUNT = 3;
+const DEFAULT_REINJECTION_LINES_PER_SECTION = 2;
 
 function normalizePath(path: string): string {
   const normalized = String(path || "").trim().replace(/\\/g, "/");
@@ -120,6 +127,38 @@ function truncateContent(content: string, maxChars: number): {
     content: `${normalized.slice(0, Math.max(0, maxChars - 18)).trimEnd()}\n...[已截断]...`,
     truncated: true,
   };
+}
+
+function cleanHeadingTitle(title: string): string {
+  return title
+    .replace(/\s+/g, " ")
+    .replace(/[：:]+$/, "")
+    .trim();
+}
+
+function scoreReinjectionSectionTitle(title: string): number {
+  const normalized = cleanHeadingTitle(title).toLowerCase();
+  if (!normalized) return -1;
+  if (/session startup|startup|启动|初始化/.test(normalized)) return 12;
+  if (/red lines?|hard rules?|non[- ]?negotiable|禁止|红线/.test(normalized)) return 11;
+  if (/working rules?|agent working rules?|rules?|规范|约束/.test(normalized)) return 9;
+  if (/scan policy|扫描|搜索策略|search strategy/.test(normalized)) return 8;
+  if (/workflow|执行流程|协作/.test(normalized)) return 7;
+  if (/safety|权限|工具/.test(normalized)) return 6;
+  return 2;
+}
+
+function buildSectionPreviewLines(
+  bodyLines: readonly string[],
+  maxLines: number,
+): string[] {
+  const cleaned = bodyLines
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.replace(/^[-*]\s+/, "").trim())
+    .filter(Boolean);
+  if (cleaned.length === 0) return [];
+  return cleaned.slice(0, Math.max(1, maxLines));
 }
 
 async function scoreWorkspaceCandidate(candidate: string, pathHints: readonly string[]): Promise<number> {
@@ -261,6 +300,109 @@ export async function buildBootstrapContextSnapshot(params?: {
     files,
     prompt: buildBootstrapContextPrompt(files, workspaceRoot),
   };
+}
+
+export function extractBootstrapReinjectionSections(
+  content: string,
+  options?: {
+    maxSections?: number;
+    maxLinesPerSection?: number;
+  },
+): BootstrapReinjectionSectionPreview[] {
+  const normalized = String(content || "").replace(/\r\n/g, "\n").trim();
+  if (!normalized) return [];
+
+  const maxSections = Math.max(1, options?.maxSections ?? DEFAULT_REINJECTION_SECTION_COUNT);
+  const maxLinesPerSection = Math.max(
+    1,
+    options?.maxLinesPerSection ?? DEFAULT_REINJECTION_LINES_PER_SECTION,
+  );
+  const lines = normalized.split("\n");
+  const sections: Array<BootstrapReinjectionSectionPreview & { score: number; order: number }> = [];
+
+  let currentTitle = "";
+  let currentLines: string[] = [];
+  let order = 0;
+
+  const pushSection = () => {
+    const title = cleanHeadingTitle(currentTitle);
+    if (!title) return;
+    const previewLines = buildSectionPreviewLines(currentLines, maxLinesPerSection);
+    if (previewLines.length === 0) return;
+    sections.push({
+      title,
+      lines: previewLines,
+      score: scoreReinjectionSectionTitle(title),
+      order,
+    });
+    order += 1;
+  };
+
+  for (const rawLine of lines) {
+    const headingMatch = rawLine.match(/^\s{0,3}#{1,6}\s+(.+?)\s*$/);
+    if (headingMatch) {
+      pushSection();
+      currentTitle = headingMatch[1] || "";
+      currentLines = [];
+      continue;
+    }
+    currentLines.push(rawLine);
+  }
+  pushSection();
+
+  const selected = sections
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return a.order - b.order;
+    })
+    .slice(0, maxSections)
+    .sort((a, b) => a.order - b.order)
+    .map(({ title, lines: previewLines }) => ({
+      title,
+      lines: previewLines,
+    }));
+
+  if (selected.length > 0) {
+    return selected;
+  }
+
+  const fallbackLines = buildSectionPreviewLines(lines, maxLinesPerSection);
+  if (fallbackLines.length === 0) return [];
+  return [
+    {
+      title: "AGENTS.md",
+      lines: fallbackLines,
+    },
+  ];
+}
+
+export function extractBootstrapReinjectionPreview(
+  content: string,
+  options?: {
+    maxSections?: number;
+    maxLinesPerSection?: number;
+  },
+): string[] {
+  return extractBootstrapReinjectionSections(content, options).map((section) => {
+    const joined = section.lines.join(" / ");
+    return `${section.title}：${joined}`;
+  });
+}
+
+export async function loadBootstrapReinjectionPreview(params: {
+  workspaceRoot?: string;
+  maxSections?: number;
+  maxLinesPerSection?: number;
+}): Promise<string[]> {
+  const workspaceRoot = normalizePath(params.workspaceRoot || "");
+  if (!workspaceRoot) return [];
+
+  const content = await readTextFileSafe(joinPath(workspaceRoot, "AGENTS.md"));
+  if (!content.trim()) return [];
+  return extractBootstrapReinjectionPreview(content, {
+    maxSections: params.maxSections,
+    maxLinesPerSection: params.maxLinesPerSection,
+  });
 }
 
 export function buildBootstrapContextPrompt(

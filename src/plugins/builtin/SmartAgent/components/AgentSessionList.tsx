@@ -35,7 +35,11 @@ interface AgentSessionItemProps {
     visibleTaskCount?: number;
     followUpQueue?: Array<unknown>;
     forkMeta?: { parentSessionId: string; parentVisibleTaskCount: number; createdAt: number };
-    compaction?: { compactedTaskCount: number };
+    compaction?: {
+      compactedTaskCount: number;
+      preservedIdentifiers?: string[];
+      bootstrapReinjectionPreview?: string[];
+    };
   };
   isActive: boolean;
   isEditing: boolean;
@@ -175,6 +179,11 @@ const AgentSessionItem = memo(function AgentSessionItem({
               摘要 {session.compaction.compactedTaskCount}
             </span>
           ) : null}
+          {session.compaction?.preservedIdentifiers?.length || session.compaction?.bootstrapReinjectionPreview?.length ? (
+            <span className="text-[10px] text-teal-600 opacity-70">
+              护栏
+            </span>
+          ) : null}
           {session.followUpQueue?.length ? (
             <span className="text-[10px] text-violet-600 opacity-70">
               跟进 {session.followUpQueue.length}
@@ -200,7 +209,11 @@ interface AgentSessionListProps {
     visibleTaskCount?: number;
     followUpQueue?: Array<unknown>;
     forkMeta?: { parentSessionId: string; parentVisibleTaskCount: number; createdAt: number };
-    compaction?: { compactedTaskCount: number };
+    compaction?: {
+      compactedTaskCount: number;
+      preservedIdentifiers?: string[];
+      bootstrapReinjectionPreview?: string[];
+    };
   }>;
   currentSessionId: string | null;
   onSelect: (id: string) => void;

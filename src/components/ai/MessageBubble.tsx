@@ -377,6 +377,8 @@ export const MessageBubble = memo(function MessageBubble({
     return !MARKDOWN_PATTERN.test(displayContent);
   }, [displayContent, msg.streaming]);
   const hasThinking = Boolean(msg.thinkingContent?.trim());
+  const appliedMemoryPreview = msg.appliedMemoryPreview ?? [];
+  const appliedMemoryCount = msg.appliedMemoryIds?.length ?? appliedMemoryPreview.length;
 
   useEffect(() => {
     if (msg.thinkingStreaming && msg.thinkingContent?.trim()) {
@@ -462,6 +464,24 @@ export const MessageBubble = memo(function MessageBubble({
                       )}
                     </div>
                   )}
+                </div>
+              )}
+              {appliedMemoryPreview.length > 0 && (
+                <div className="mb-2 rounded-2xl border border-emerald-500/15 bg-emerald-500/5 px-3 py-2">
+                  <div className="text-[11px] text-[var(--color-text-secondary)]">
+                    已用记忆 {appliedMemoryCount} 条
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-1.5">
+                    {appliedMemoryPreview.map((item, index) => (
+                      <span
+                        key={`${msg.id}-memory-${index}`}
+                        className="inline-flex max-w-full rounded-full border border-emerald-500/20 bg-[var(--color-bg)]/70 px-2 py-0.5 text-[11px] leading-5 text-[var(--color-text-secondary)]"
+                        title={item}
+                      >
+                        {item}
+                      </span>
+                    ))}
+                  </div>
                 </div>
               )}
               <div

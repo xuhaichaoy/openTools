@@ -41,6 +41,8 @@ export interface StreamCallbacks {
   onPersist: () => void;
   /** 最终回答完成后触发 */
   onDone?: (assistantContent: string) => void;
+  /** 流式执行失败后触发 */
+  onError?: (errorText: string, assistantContent: string) => void;
 }
 
 // ── ID 生成器 ──
@@ -232,15 +234,16 @@ export async function startStreamingChat(opts: {
     _chunkBuffer = "";
     _thinkingBuffer = "";
 
+    let finalizedAssistantContent = "";
     updateAssistant((m) => {
       const nextContent = visibleContent ? m.content + visibleContent : m.content;
       const normalizedError = errorText.trim() || "请求失败";
-      const contentWithError = nextContent.trim()
+      finalizedAssistantContent = nextContent.trim()
         ? `${nextContent}\n\n⚠️ 生成中断：${normalizedError}`
         : `❌ ${normalizedError}`;
       return {
         ...m,
-        content: contentWithError,
+        content: finalizedAssistantContent,
         streaming: false,
         thinkingContent: thinkingContent
           ? (m.thinkingContent || "") + thinkingContent
@@ -251,6 +254,7 @@ export async function startStreamingChat(opts: {
     setState({ isStreaming: false, pendingToolConfirm: null });
     cleanup();
     onPersist();
+    callbacks.onError?.(errorText.trim() || "请求失败", finalizedAssistantContent);
   }
 
   // 并行注册所有事件监听器（减少 IPC 串行等待）

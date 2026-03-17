@@ -1,3 +1,7 @@
+import type { AskContextSnapshot } from "@/core/ai/ask-context-snapshot";
+import type { AskContextRuntimeDebugReport } from "@/core/agent/context-runtime/debug-types";
+import type { AICenterHandoff } from "@/store/app-store";
+
 export interface ToolCallInfo {
   id: string;
   name: string;
@@ -22,6 +26,9 @@ export interface ChatMessage {
   attachmentPaths?: string[];
   /** Ask 模式检测到复杂工具调用后，建议用户升级到 Agent 模式 */
   suggestAgentUpgrade?: boolean;
+  /** Ask 模式本轮回答前注入的长期记忆引用 */
+  appliedMemoryIds?: string[];
+  appliedMemoryPreview?: string[];
 }
 
 /**
@@ -43,6 +50,11 @@ export interface Conversation {
   createdAt: number;
   updatedAt?: number;
   model?: string;
+  workspaceRoot?: string;
+  sourceHandoff?: AICenterHandoff;
+  contextSnapshot?: AskContextSnapshot | null;
+  lastSessionNotePreview?: string;
+  lastContextRuntimeReport?: AskContextRuntimeDebugReport;
 }
 
 export interface AIConfig {

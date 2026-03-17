@@ -179,6 +179,21 @@ export function buildAgentSessionContextOutline(
     lines.push(
       `早期上下文已整理：前 ${session.compaction.compactedTaskCount} 个任务被压缩为摘要，以减小模型上下文压力。`,
     );
+    if (session.compaction.preservedIdentifiers?.length) {
+      lines.push(
+        `压缩后仍保留的关键标识：${session.compaction.preservedIdentifiers.slice(0, 6).join("、")}`,
+      );
+    }
+    if (session.compaction.preservedToolNames?.length) {
+      lines.push(
+        `压缩后仍延续的关键工具：${session.compaction.preservedToolNames.join("、")}`,
+      );
+    }
+    if (session.compaction.bootstrapReinjectionPreview?.length) {
+      lines.push(
+        `已重新注入 AGENTS 规则：${session.compaction.bootstrapReinjectionPreview.slice(0, 2).join("；")}`,
+      );
+    }
   }
   if (session.sourceHandoff?.sourceMode) {
     lines.push(

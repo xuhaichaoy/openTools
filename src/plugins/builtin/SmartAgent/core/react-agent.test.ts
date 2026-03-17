@@ -263,6 +263,109 @@ describe("ReActAgent FC compatibility cache", () => {
     expect(lastToolStep?.content).not.toContain("temporary tail");
   });
 
+  it("should flush the final streamed answer before task_done uses it", async () => {
+    const steps: Array<{ type: string; content: string; streaming?: boolean }> = [];
+
+    const ai = createMockAI(async ({ onChunk }) => {
+      onChunk("页面主容器宽度设置为 120");
+      onChunk("0px");
+      return {
+        type: "tool_calls",
+        toolCalls: [
+          {
+            id: "call-task-done",
+            type: "function",
+            function: {
+              name: "task_done",
+              arguments: "{\"summary\":\"页面主容器宽度设置为 1200px\"}",
+            },
+          },
+        ],
+      };
+    });
+
+    const tools: AgentTool[] = [
+      {
+        name: "task_done",
+        description: "finish task",
+        parameters: {
+          summary: { type: "string", description: "summary" },
+        },
+        execute: async (params) => ({
+          ok: true,
+          summary: String(params.summary ?? ""),
+        }),
+      },
+    ];
+
+    const agent = new ReActAgent(
+      ai,
+      tools,
+      {
+        maxIterations: 2,
+        fcCompatibilityKey: "flush-final-streaming-answer",
+      },
+      (step) => {
+        steps.push({
+          type: step.type,
+          content: step.content,
+          streaming: step.streaming,
+        });
+      },
+    );
+
+    const answer = await agent.run("把页面主容器宽度改成 1200px");
+
+    expect(answer).toContain("1200px");
+    const finalStreamingAnswer = steps
+      .filter((step) => step.type === "answer" && step.streaming)
+      .at(-1);
+    expect(finalStreamingAnswer?.content).toContain("1200px");
+  });
+
+  it("should prefer task_done summary when it preserves the user's full numeric intent", async () => {
+    const ai = createMockAI(async ({ onChunk }) => {
+      onChunk("文件主容器宽度是 100px，不需要修改。");
+      return {
+        type: "tool_calls",
+        toolCalls: [
+          {
+            id: "call-task-done",
+            type: "function",
+            function: {
+              name: "task_done",
+              arguments: "{\"summary\":\"文件主容器宽度是 1000px，不需要修改。\"}",
+            },
+          },
+        ],
+      };
+    });
+
+    const tools: AgentTool[] = [
+      {
+        name: "task_done",
+        description: "finish task",
+        parameters: {
+          summary: { type: "string", description: "summary" },
+        },
+        execute: async (params) => ({
+          status: "done",
+          summary: String(params.summary ?? ""),
+        }),
+      },
+    ];
+
+    const agent = new ReActAgent(ai, tools, {
+      maxIterations: 2,
+      fcCompatibilityKey: "prefer-task-done-summary-for-precise-numbers",
+    });
+
+    const answer = await agent.run("确认页面主容器是不是 1000px");
+
+    expect(answer).toContain("1000px");
+    expect(answer).not.toContain("100px，不需要修改");
+  });
+
   it("should not downgrade or cache on generic FC execution errors", async () => {
     let fcCalls = 0;
     const ai = createMockAI(async () => {

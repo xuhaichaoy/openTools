@@ -43,6 +43,14 @@ describe("stream-chunk-merge", () => {
     });
   });
 
+  it("does not treat single-character numeric boundaries as overlap", () => {
+    expect(mergeStreamChunk("width: 120", "0px")).toEqual({
+      mode: "delta",
+      full: "width: 1200px",
+      delta: "0px",
+    });
+  });
+
   it("detects long prefix restarts and resets the canonical full text", () => {
     const previous = "这是一段已经写了很多很多内容的长文本，用于模拟模型流式输出中途重头开始。";
     const incoming = "这是一段已经写了很多很多内容";

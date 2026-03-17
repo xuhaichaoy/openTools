@@ -56,6 +56,21 @@ export interface AIMemoryCandidate {
   review_surface?: AIMemoryCandidateReviewSurface;
 }
 
+export interface MemoryCandidateIngestResult {
+  confirmed: number;
+  queued: number;
+}
+
+interface AutomaticMemorySignalIngestOptions {
+  conversationId?: string;
+  workspaceId?: string;
+  source?: AIMemorySource;
+  sourceMode?: AIMemoryCandidateMode;
+  evidence?: string;
+  autoConfirm?: boolean;
+  allowNonUserSourceAutoConfirm?: boolean;
+}
+
 export interface CandidateSanitizeResult {
   ok: boolean;
   sanitized: string;
@@ -87,12 +102,14 @@ interface MemoryCandidateBuildOptions {
 const DEFAULT_RECALL_TOP_K = 6;
 const MAX_CANDIDATE_TEXT_LENGTH = 500;
 const MAX_MEMORY_TEXT_LENGTH = 260;
-const MAX_CANDIDATES = 60;
+const MAX_REVIEW_QUEUE_CANDIDATES = 24;
 const MAX_MEMORIES_IN_PROMPT = 6;
 const MAX_INJECTION_TOKENS = 2000;
 const FACT_CONFIDENCE_THRESHOLD = 0.7;
 const MAX_FACTS = 100;
 const MAX_SESSION_NOTES_PER_SCOPE = 12;
+const MIN_BACKGROUND_REVIEW_CONFIDENCE = 0.72;
+const MIN_NON_USER_REVIEW_CONFIDENCE = 0.82;
 
 const SENSITIVE_PATTERNS: RegExp[] = [
   /\b(sk|rk|pk)-[a-z0-9]{10,}\b/i,
@@ -262,6 +279,17 @@ function inferScope(
   }
   if (kind === "conversation_summary") {
     return conversationId ? "conversation" : "global";
+  }
+  if (
+    kind === "fact"
+    && (
+      containsAnyPattern(text, EXPLICIT_CAPTURE_HINTS)
+      || containsAnyPattern(text, USER_BACKGROUND_PATTERNS)
+      || HOME_LOCATION_SLOT_HINTS.test(text)
+      || LONG_TERM_HINTS.test(text)
+    )
+  ) {
+    return "global";
   }
   if (kind === "fact" && conversationId && !LONG_TERM_HINTS.test(text)) {
     return "conversation";
@@ -556,10 +584,126 @@ function inferCandidateReviewSurface(
   text: string,
   source?: AIMemorySource,
 ): AIMemoryCandidateReviewSurface {
-  if ((source ?? "user") !== "user") {
-    return "background";
+  void text;
+  void source;
+  return "background";
+}
+
+function hasDurableReviewSignals(text: string): boolean {
+  return (
+    containsAnyPattern(text, EXPLICIT_CAPTURE_HINTS)
+    || containsAnyPattern(text, LONG_TERM_CAPTURE_HINTS)
+    || containsAnyPattern(text, USER_BACKGROUND_PATTERNS)
+    || containsAnyPattern(text, PROJECT_CONTEXT_SIGNAL_PATTERNS)
+    || HOME_LOCATION_SLOT_HINTS.test(text)
+  );
+}
+
+export function shouldRetainMemoryCandidateForReview(
+  candidate: Pick<
+    AIMemoryCandidate,
+    | "content"
+    | "kind"
+    | "scope"
+    | "source"
+    | "confidence"
+    | "conflict_memory_ids"
+    | "source_mode"
+  >,
+): boolean {
+  const text = normalizeWhitespace(candidate.content);
+  if (!text) return false;
+  if (containsAnyPattern(text, AUTO_EXTRACT_TRANSIENT_PATTERNS)) return false;
+  if (containsAnyPattern(text, MEMORY_PROMPT_LEAK_PATTERNS)) return false;
+  if (containsAnyPattern(text, EPHEMERAL_PATTERNS)) return false;
+
+  if ((candidate.conflict_memory_ids?.length ?? 0) > 0) {
+    return true;
   }
-  return containsAnyPattern(text, EXPLICIT_CAPTURE_HINTS) ? "inline" : "background";
+
+  const source = candidate.source ?? "user";
+  const confidence = clamp(candidate.confidence ?? 0, 0, 1);
+  const explicitCapture = containsAnyPattern(text, EXPLICIT_CAPTURE_HINTS);
+  const durableSignals = hasDurableReviewSignals(text);
+
+  if (source === "user") {
+    if (explicitCapture) return true;
+    if (confidence < MIN_BACKGROUND_REVIEW_CONFIDENCE) return false;
+    if (candidate.scope === "conversation") {
+      return durableSignals;
+    }
+    return durableSignals;
+  }
+
+  if (candidate.scope === "conversation") {
+    return false;
+  }
+  if (confidence < MIN_NON_USER_REVIEW_CONFIDENCE) {
+    return false;
+  }
+
+  switch (candidate.kind) {
+    case "constraint":
+    case "goal":
+      return durableSignals;
+    case "preference":
+    case "behavior":
+      return durableSignals && containsAnyPattern(text, LONG_TERM_CAPTURE_HINTS);
+    case "knowledge":
+      return containsAnyPattern(text, USER_BACKGROUND_PATTERNS);
+    case "project_context":
+      return containsAnyPattern(text, PROJECT_CONTEXT_SIGNAL_PATTERNS)
+        && candidate.scope === "workspace";
+    case "fact":
+      return HOME_LOCATION_SLOT_HINTS.test(text);
+    default:
+      return false;
+  }
+}
+
+export function scoreMemoryCandidateForReview(
+  candidate: Pick<
+    AIMemoryCandidate,
+    | "content"
+    | "kind"
+    | "scope"
+    | "source"
+    | "confidence"
+    | "conflict_memory_ids"
+  >,
+): number {
+  const text = normalizeWhitespace(candidate.content);
+  let score = clamp(candidate.confidence ?? 0, 0, 1);
+
+  if ((candidate.conflict_memory_ids?.length ?? 0) > 0) {
+    score += 2;
+  }
+  if ((candidate.source ?? "user") === "user") {
+    score += 0.4;
+  }
+  if (containsAnyPattern(text, EXPLICIT_CAPTURE_HINTS)) {
+    score += 0.6;
+  }
+  if (HOME_LOCATION_SLOT_HINTS.test(text)) {
+    score += 0.35;
+  }
+  if (candidate.kind === "constraint") {
+    score += 0.25;
+  }
+  if (candidate.kind === "goal") {
+    score += 0.18;
+  }
+  if (candidate.kind === "project_context") {
+    score += 0.14;
+  }
+  if (candidate.scope === "workspace") {
+    score += 0.12;
+  }
+  if (candidate.scope === "conversation") {
+    score -= 0.08;
+  }
+
+  return score;
 }
 
 function detectCandidateConflicts(
@@ -742,14 +886,166 @@ export async function appendMemoryCandidates(
   }
 
   const next = [...dedup.values()]
-    .sort((a, b) => b.created_at - a.created_at)
-    .slice(0, MAX_CANDIDATES);
+    .filter((candidate) => shouldRetainMemoryCandidateForReview(candidate))
+    .sort((a, b) => {
+      const scoreDiff = scoreMemoryCandidateForReview(b) - scoreMemoryCandidateForReview(a);
+      if (scoreDiff !== 0) return scoreDiff;
+      return b.created_at - a.created_at;
+    })
+    .slice(0, MAX_REVIEW_QUEUE_CANDIDATES)
+    .sort((a, b) => b.created_at - a.created_at);
   await aiMemoryCandidateDb.setAll(next);
+}
+
+export function shouldAutoConfirmMemoryCandidate(
+  candidate: Pick<AIMemoryCandidate, "content" | "kind" | "scope" | "source">,
+  options?: { allowNonUserSourceAutoConfirm?: boolean },
+): boolean {
+  const text = normalizeWhitespace(candidate.content);
+  if (!text) return false;
+  if (
+    (candidate.source ?? "user") !== "user"
+    && !options?.allowNonUserSourceAutoConfirm
+  ) {
+    return false;
+  }
+  if (candidate.scope === "conversation") return false;
+  if (containsAnyPattern(text, EXPLICIT_CAPTURE_HINTS)) return true;
+  if (containsAnyPattern(text, USER_BACKGROUND_PATTERNS)) return true;
+  if (
+    candidate.scope === "workspace"
+    && containsAnyPattern(text, PROJECT_CONTEXT_SIGNAL_PATTERNS)
+  ) {
+    return true;
+  }
+  if (
+    (candidate.kind === "preference"
+      || candidate.kind === "constraint"
+      || candidate.kind === "behavior"
+      || candidate.kind === "goal")
+    && containsAnyPattern(text, LONG_TERM_CAPTURE_HINTS)
+  ) {
+    return true;
+  }
+  if (candidate.kind === "fact" && HOME_LOCATION_SLOT_HINTS.test(text)) {
+    return true;
+  }
+  return false;
+}
+
+export async function ingestMemoryCandidates(
+  candidates: AIMemoryCandidate[],
+  options?: {
+    autoConfirm?: boolean;
+    allowNonUserSourceAutoConfirm?: boolean;
+  },
+): Promise<MemoryCandidateIngestResult> {
+  if (!candidates.length) {
+    return { confirmed: 0, queued: 0 };
+  }
+
+  const confirmedMemories = (await aiMemoryDb.getAll()).filter((item) => !item.deleted);
+  const pendingCandidates: AIMemoryCandidate[] = [];
+  let confirmedCount = 0;
+
+  for (const candidate of candidates) {
+    const prepared = enrichMemoryCandidate(candidate, confirmedMemories);
+    if (!prepared) continue;
+
+    const canAutoConfirm =
+      options?.autoConfirm
+      && shouldAutoConfirmMemoryCandidate(prepared, {
+        allowNonUserSourceAutoConfirm: options.allowNonUserSourceAutoConfirm,
+      })
+      && !(prepared.conflict_memory_ids?.length);
+
+    if (!canAutoConfirm) {
+      pendingCandidates.push(prepared);
+      continue;
+    }
+
+    const saved = await saveConfirmedMemory(prepared.content, {
+      kind: prepared.kind,
+      source: prepared.source ?? "user",
+      conversationId: prepared.conversation_id,
+      workspaceId: prepared.workspace_id,
+      scope: prepared.scope,
+      confidence: prepared.confidence,
+      tags: prepared.tags,
+    });
+    if (!saved) {
+      pendingCandidates.push(prepared);
+      continue;
+    }
+    confirmedCount += 1;
+    confirmedMemories.push(saved);
+  }
+
+  if (pendingCandidates.length > 0) {
+    await appendMemoryCandidates(pendingCandidates);
+  }
+
+  return {
+    confirmed: confirmedCount,
+    queued: pendingCandidates.length,
+  };
+}
+
+export async function ingestAutomaticMemorySignals(
+  content: string,
+  opts?: AutomaticMemorySignalIngestOptions,
+): Promise<MemoryCandidateIngestResult> {
+  const normalized = normalizeWhitespace(content).slice(0, 3_000);
+  if (!normalized) {
+    return { confirmed: 0, queued: 0 };
+  }
+
+  const llmCandidates = await llmExtractMemories(normalized, {
+    conversationId: opts?.conversationId,
+    workspaceId: opts?.workspaceId,
+    source: opts?.source,
+    sourceMode: opts?.sourceMode,
+    evidence: opts?.evidence ?? normalized,
+  }).catch(() => []);
+
+  if (llmCandidates.length > 0) {
+    return ingestMemoryCandidates(llmCandidates, {
+      autoConfirm: opts?.autoConfirm,
+      allowNonUserSourceAutoConfirm: opts?.allowNonUserSourceAutoConfirm,
+    });
+  }
+
+  const fallback = extractMemoryCandidates(normalized, {
+    conversationId: opts?.conversationId,
+    workspaceId: opts?.workspaceId,
+    source: opts?.source,
+    sourceMode: opts?.sourceMode,
+    reason: "从对话中匹配到明确的长期记忆提示词",
+    evidence: opts?.evidence ?? normalized,
+  });
+  if (fallback.length === 0) {
+    return { confirmed: 0, queued: 0 };
+  }
+
+  return ingestMemoryCandidates(fallback, {
+    autoConfirm: opts?.autoConfirm,
+    allowNonUserSourceAutoConfirm: opts?.allowNonUserSourceAutoConfirm,
+  });
 }
 
 export async function listMemoryCandidates(): Promise<AIMemoryCandidate[]> {
   const all = await aiMemoryCandidateDb.getAll();
-  return [...all].sort((a, b) => b.created_at - a.created_at);
+  return [...all]
+    .map((item) => ({
+      ...item,
+      review_surface: "background" as const,
+    }))
+    .filter((item) => shouldRetainMemoryCandidateForReview(item))
+    .sort((a, b) => {
+      const scoreDiff = scoreMemoryCandidateForReview(b) - scoreMemoryCandidateForReview(a);
+      if (scoreDiff !== 0) return scoreDiff;
+      return b.created_at - a.created_at;
+    });
 }
 
 export async function dismissMemoryCandidate(candidateId: string): Promise<void> {
@@ -1431,7 +1727,7 @@ export async function queueMemoryCandidateFromAgent(
     reason: opts?.reason ?? "Agent 建议保存用户长期记忆，等待确认后才会生效",
     confidence: 0.85,
     evidence: opts?.evidence ?? content,
-    reviewSurface: "inline",
+    reviewSurface: "background",
   });
   if (!candidate) return null;
   await appendMemoryCandidates([candidate]);

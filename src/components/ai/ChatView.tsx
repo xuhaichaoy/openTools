@@ -22,17 +22,25 @@ import {
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
 import { useAIStore } from "@/store/ai-store";
+import { useAppStore } from "@/store/app-store";
 import { useToast } from "@/components/ui/Toast";
 import { handleError } from "@/core/errors";
+import {
+  buildAskContextSnapshot,
+  hasAskContextSnapshotContent,
+} from "@/core/ai/ask-context-snapshot";
 import { modelSupportsImageInput } from "@/core/ai/model-capabilities";
 import { buildAskAgentHandoff } from "@/core/ai/ask-agent-handoff";
 import { inferCodingExecutionProfile } from "@/core/agent/coding-profile";
+import { resolveTaskScopeSnapshot } from "@/core/agent/context-runtime";
 import {
   buildAICenterHandoffScopedFileRefs,
+  getAICenterHandoffImportPaths,
   normalizeAICenterHandoff,
   pickVisualAttachmentPaths,
 } from "@/core/ai/ai-center-handoff";
 import { useInputAttachments } from "@/hooks/use-input-attachments";
+import { AskContextStrip } from "./AskContextStrip";
 import { ModelSelector } from "./ModelSelector";
 import { MessageBubble } from "./MessageBubble";
 import { ToolConfirmDialog } from "./ToolConfirmDialog";
@@ -55,26 +63,6 @@ export interface ChatViewHandle {
   /** 将当前 Ask 对话上下文传递到 Dialog 模式继续 */
   continueInDialog: () => void;
 }
-
-const MEMORY_KIND_META: Record<string, { label: string; className: string }> = {
-  preference: { label: "偏好", className: "bg-blue-500/10 text-blue-600 dark:text-blue-300" },
-  fact: { label: "事实", className: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-300" },
-  goal: { label: "目标", className: "bg-amber-500/10 text-amber-600 dark:text-amber-300" },
-  constraint: { label: "约束", className: "bg-red-500/10 text-red-600 dark:text-red-300" },
-  project_context: { label: "项目", className: "bg-violet-500/10 text-violet-600 dark:text-violet-300" },
-  conversation_summary: { label: "摘要", className: "bg-cyan-500/10 text-cyan-600 dark:text-cyan-300" },
-  session_note: { label: "会话笔记", className: "bg-slate-500/10 text-slate-600 dark:text-slate-300" },
-  knowledge: { label: "知识", className: "bg-teal-500/10 text-teal-600 dark:text-teal-300" },
-  behavior: { label: "行为", className: "bg-orange-500/10 text-orange-600 dark:text-orange-300" },
-};
-
-const MEMORY_SCOPE_LABELS: Record<string, string> = {
-  global: "全局",
-  conversation: "会话",
-  workspace: "工作区",
-};
-
-const ASK_MEMORY_DOCK_COLLAPSED_KEY = "ask_memory_candidate_dock_collapsed";
 
 export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideModelSelector?: boolean; headless?: boolean }>(function ChatView({ onBack, hideModelSelector, headless }, ref) {
   const [input, setInput] = useState("");
@@ -100,13 +88,6 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [currentMatchIdx, setCurrentMatchIdx] = useState(0);
-  const [memoryDockCollapsed, setMemoryDockCollapsed] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem(ASK_MEMORY_DOCK_COLLAPSED_KEY) !== "0";
-    } catch {
-      return true;
-    }
-  });
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -124,11 +105,8 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
     conversations,
     currentConversationId,
     createConversation,
+    updateConversation,
     stopStreaming,
-    memoryCandidates,
-    loadMemoryCandidates,
-    confirmMemoryCandidate,
-    dismissMemoryCandidate,
   } = useAIStore(
     useShallow((s) => ({
       getCurrentConversation: s.getCurrentConversation,
@@ -138,18 +116,31 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
       conversations: s.conversations,
       currentConversationId: s.currentConversationId,
       createConversation: s.createConversation,
+      updateConversation: s.updateConversation,
       stopStreaming: s.stopStreaming,
-      memoryCandidates: s.memoryCandidates,
-      loadMemoryCandidates: s.loadMemoryCandidates,
-      confirmMemoryCandidate: s.confirmMemoryCandidate,
-      dismissMemoryCandidate: s.dismissMemoryCandidate,
     })),
   );
+  const pendingAICenterHandoff = useAppStore((s) => s.pendingAICenterHandoff);
 
   const { toast } = useToast();
   const { onMouseDown } = useDragWindow();
   const conversation = getCurrentConversation();
   const messages = useMemo(() => conversation?.messages ?? [], [conversation]);
+  const liveContextSnapshot = useMemo(() => buildAskContextSnapshot({
+    conversationId: conversation?.id,
+    title: conversation?.title,
+    workspaceRoot: conversation?.workspaceRoot,
+    sourceHandoff: conversation?.sourceHandoff,
+    messages,
+    draftInput: input.trim() || undefined,
+    draftAttachmentCount: attachments.filter((attachment) => attachment.type !== "image").length,
+    draftImageCount: imagePaths.length,
+    draftHasContextBlock: !!fileContextBlock.trim(),
+    lastSessionNotePreview: conversation?.lastSessionNotePreview,
+    lastRunStatus: conversation?.lastContextRuntimeReport?.execution.status,
+    lastRunDurationMs: conversation?.lastContextRuntimeReport?.execution.durationMs,
+    isStreaming,
+  }), [attachments, conversation, fileContextBlock, imagePaths.length, input, isStreaming, messages]);
   const matchedIndices = useMemo(() => {
     if (!searchQuery.trim()) return [] as number[];
     const q = searchQuery.toLowerCase();
@@ -171,39 +162,6 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
     const el = messagesContainerRef.current.querySelector(`[data-msg-index="${msgIdx}"]`);
     el?.scrollIntoView({ behavior: "smooth", block: "center" });
   }, [currentMatchIdx, matchedIndices]);
-
-  const relevantMemoryCandidates = useMemo(() => {
-    const filtered = memoryCandidates.filter(
-      (candidate) =>
-        candidate.review_surface !== "background"
-        && candidate.kind !== "session_note"
-        && candidate.scope !== "workspace"
-        && (
-          !candidate.conversation_id
-          || candidate.conversation_id === currentConversationId
-        )
-    );
-    return filtered.slice(0, 3);
-  }, [currentConversationId, memoryCandidates]);
-  const backgroundMemoryCandidateCount = useMemo(() => {
-    return memoryCandidates.filter(
-      (candidate) =>
-        candidate.review_surface === "background"
-        && (
-          !candidate.conversation_id
-          || candidate.conversation_id === currentConversationId
-        ),
-    ).length;
-  }, [currentConversationId, memoryCandidates]);
-  const memoryDockPreview = relevantMemoryCandidates[0]?.content ?? "";
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(ASK_MEMORY_DOCK_COLLAPSED_KEY, memoryDockCollapsed ? "1" : "0");
-    } catch {
-      // ignore local preference write failures
-    }
-  }, [memoryDockCollapsed]);
 
   const lastAssistantIdx = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -367,10 +325,6 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
     setTimeout(() => inputRef.current?.focus(), 100);
   }, []);
 
-  useEffect(() => {
-    loadMemoryCandidates();
-  }, [loadMemoryCandidates]);
-
   const scrollToBottom = useCallback((instant?: boolean) => {
     const container = messagesContainerRef.current;
     if (!container) return;
@@ -449,6 +403,53 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
     setShowSearch(false);
     setSearchQuery("");
   }, [currentConversationId]);
+
+  useEffect(() => {
+    if (!pendingAICenterHandoff || pendingAICenterHandoff.mode !== "ask") return;
+    let cancelled = false;
+
+    const applyHandoff = async () => {
+      const payload = pendingAICenterHandoff.payload;
+      const currentConversation = useAIStore.getState().getCurrentConversation();
+      const targetConversationId =
+        currentConversation && currentConversation.messages.length === 0
+          ? currentConversation.id
+          : createConversation();
+      const importPaths = getAICenterHandoffImportPaths(payload);
+      const scope = await resolveTaskScopeSnapshot({
+        query: payload.query,
+        attachmentPaths: importPaths,
+        sourceHandoff: payload,
+      }).catch(() => ({
+        workspaceRoot: undefined,
+      }));
+
+      if (cancelled) return;
+
+      clearAttachments();
+      for (const path of importPaths) {
+        if (cancelled) return;
+        await addAttachmentFromPath(path);
+      }
+
+      updateConversation(targetConversationId, {
+        title: payload.title?.trim() || currentConversation?.title || "接力对话",
+        sourceHandoff: payload,
+        workspaceRoot: scope.workspaceRoot,
+      });
+      setInput(payload.query);
+    };
+
+    void applyHandoff().finally(() => {
+      if (!cancelled) {
+        useAppStore.getState().setPendingAICenterHandoff(null);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [addAttachmentFromPath, clearAttachments, createConversation, pendingAICenterHandoff, updateConversation]);
 
   // 键盘快捷键
   useEffect(() => {
@@ -798,106 +799,31 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
         </div>
 
         {/* 输入区域 — 提取为独立组件 */}
-        {relevantMemoryCandidates.length > 0 && (
-          <div className="px-2 pb-1">
-            <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)]">
-              <button
-                type="button"
-                onClick={() => setMemoryDockCollapsed((value) => !value)}
-                className="flex w-full items-center gap-2 px-3 py-2 text-left"
-              >
-                <span className="shrink-0 text-[11px] font-medium text-[var(--color-text)]">
-                  长期记忆候选 {relevantMemoryCandidates.length}
+        {hasAskContextSnapshotContent(liveContextSnapshot) && (
+          <div className="px-3 pt-2 space-y-2">
+            <AskContextStrip snapshot={liveContextSnapshot} />
+            <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/45 px-3 py-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-medium text-[var(--color-text)]">
+                  当前上下文说明
                 </span>
-                {backgroundMemoryCandidateCount > 0 && (
-                  <span className="rounded-full bg-[var(--color-bg)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
-                    后台 {backgroundMemoryCandidateCount}
-                  </span>
-                )}
-                {memoryDockCollapsed && memoryDockPreview && (
-                  <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--color-text-secondary)]">
-                    {memoryDockPreview}
-                  </span>
-                )}
-                <span className="ml-auto shrink-0 text-[var(--color-text-tertiary)]">
-                  {memoryDockCollapsed ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
+                <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                  更新于 {new Date(liveContextSnapshot.generatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                 </span>
-              </button>
-
-              {!memoryDockCollapsed && (
-                <div className="space-y-2 px-2 pb-2">
-                  <div className="px-1 text-[10px] text-[var(--color-text-secondary)]">
-                    自动提取的候选会先收在这里，确认后才会进入正式长期记忆。
+              </div>
+              <div className="mt-2 space-y-1">
+                {liveContextSnapshot.contextLines.map((line, index) => (
+                  <div
+                    key={`ask-context-${index}`}
+                    className="text-[11px] leading-5 text-[var(--color-text-secondary)]"
+                  >
+                    {line}
                   </div>
-                  {relevantMemoryCandidates.map((candidate) => (
-                    <div
-                      key={candidate.id}
-                      className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5"
-                    >
-                      <div className="text-xs text-[var(--color-text)] break-words">
-                        {candidate.content}
-                      </div>
-                      <div className="mt-1 flex flex-wrap items-center gap-1">
-                        {candidate.kind && MEMORY_KIND_META[candidate.kind] && (
-                          <span className={`rounded-full px-1.5 py-0.5 text-[10px] ${MEMORY_KIND_META[candidate.kind].className}`}>
-                            {MEMORY_KIND_META[candidate.kind].label}
-                          </span>
-                        )}
-                        <span className="rounded-full bg-[var(--color-bg-secondary)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
-                          {(candidate.scope && MEMORY_SCOPE_LABELS[candidate.scope]) || (candidate.conversation_id ? "会话" : "全局")}
-                        </span>
-                        <span className="rounded-full bg-[var(--color-bg-secondary)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
-                          {candidate.review_surface === "inline" ? "建议确认" : "后台候选"}
-                        </span>
-                        {candidate.conflict_memory_ids && candidate.conflict_memory_ids.length > 0 && (
-                          <span className="rounded-full bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-700 dark:text-amber-300">
-                            有冲突
-                          </span>
-                        )}
-                      </div>
-                      {candidate.conflict_summary && (
-                        <div className="mt-1 text-[10px] text-amber-700 dark:text-amber-300">
-                          {candidate.conflict_summary}
-                        </div>
-                      )}
-                      <div className="mt-1 flex justify-end gap-2">
-                        <button
-                          onClick={async () => {
-                            await dismissMemoryCandidate(candidate.id);
-                          }}
-                          className="rounded-md border border-[var(--color-border)] px-2 py-0.5 text-[10px] hover:bg-[var(--color-bg-hover)]"
-                        >
-                          忽略
-                        </button>
-                        {!!candidate.conflict_memory_ids?.length && (
-                          <button
-                            onClick={async () => {
-                              await confirmMemoryCandidate(candidate.id, { replaceConflicts: true });
-                              toast("success", "已替换旧记忆并保存新记忆");
-                            }}
-                            className="rounded-md bg-amber-500 px-2 py-0.5 text-[10px] text-white hover:bg-amber-600"
-                          >
-                            替换旧项
-                          </button>
-                        )}
-                        <button
-                          onClick={async () => {
-                            await confirmMemoryCandidate(candidate.id);
-                            toast("success", "已保存为长期记忆");
-                          }}
-                          className="rounded-md bg-indigo-500 px-2 py-0.5 text-[10px] text-white hover:bg-indigo-600"
-                        >
-                          {!!candidate.conflict_memory_ids?.length ? "保留并记住" : "记住"}
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
+                ))}
+              </div>
             </div>
           </div>
         )}
-
         <ChatInput
           input={input}
           setInput={setInput}

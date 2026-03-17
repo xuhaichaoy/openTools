@@ -6,6 +6,9 @@ import {
   planAutomaticStructuredMemorySave,
   rankMemoriesForRecall,
   sanitizeCandidateStrict,
+  scoreMemoryCandidateForReview,
+  shouldAutoConfirmMemoryCandidate,
+  shouldRetainMemoryCandidateForReview,
   type AIMemoryItem,
 } from "./memory-store";
 
@@ -50,7 +53,7 @@ describe("memory-store", () => {
     expect(candidates[0]?.kind).toBe("preference");
     expect(candidates[0]?.scope).toBe("global");
     expect(candidates[0]?.source).toBe("user");
-    expect(candidates[0]?.review_surface).toBe("inline");
+    expect(candidates[0]?.review_surface).toBe("background");
   });
 
   it("keeps implicit durable preference as background review", () => {
@@ -85,12 +88,102 @@ describe("memory-store", () => {
     expect(plan?.tags).toContain("slot:home_location");
   });
 
+  it("treats explicit identity memory as global durable memory", () => {
+    const candidates = extractMemoryCandidates(
+      "请记住我是前端开发者，平时主要做 React 和 TypeScript 项目。",
+      { conversationId: "conv-1" },
+    );
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]?.kind).toBe("fact");
+    expect(candidates[0]?.scope).toBe("global");
+    expect(shouldAutoConfirmMemoryCandidate(candidates[0]!)).toBe(true);
+  });
+
+  it("does not auto confirm conversation-scoped temporary memory candidates", () => {
+    const candidates = extractMemoryCandidates(
+      "这次请记住当前对话里先不要展开说明，直接给结果。",
+      { conversationId: "conv-1" },
+    );
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]?.scope).toBe("conversation");
+    expect(shouldAutoConfirmMemoryCandidate(candidates[0]!)).toBe(false);
+  });
+
+  it("keeps explicit user memory candidates in the background review queue", () => {
+    const candidates = extractMemoryCandidates(
+      "请记住我以后默认输出 Markdown 表格，并先给结论。",
+      { conversationId: "conv-1" },
+    );
+    expect(candidates).toHaveLength(1);
+    expect(shouldRetainMemoryCandidateForReview(candidates[0]!)).toBe(true);
+  });
+
+  it("drops low-confidence assistant candidates from the review queue", () => {
+    expect(
+      shouldRetainMemoryCandidateForReview({
+        content: "项目结构：前端使用 React，后端使用 Rust",
+        kind: "project_context",
+        scope: "workspace",
+        source: "assistant",
+        confidence: 0.76,
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps high-confidence workspace project context for background review", () => {
+    expect(
+      shouldRetainMemoryCandidateForReview({
+        content: "项目结构：前端使用 React，后端使用 Rust",
+        kind: "project_context",
+        scope: "workspace",
+        source: "assistant",
+        confidence: 0.91,
+      }),
+    ).toBe(true);
+  });
+
+  it("prioritizes conflict candidates above ordinary background candidates", () => {
+    const ordinary = scoreMemoryCandidateForReview({
+      content: "默认回答语言：中文",
+      kind: "preference",
+      scope: "global",
+      source: "user",
+      confidence: 0.9,
+      conflict_memory_ids: [],
+    });
+    const conflict = scoreMemoryCandidateForReview({
+      content: "默认回答语言：英文",
+      kind: "preference",
+      scope: "global",
+      source: "user",
+      confidence: 0.82,
+      conflict_memory_ids: ["mem-1"],
+    });
+    expect(conflict).toBeGreaterThan(ordinary);
+  });
+
   it("does not extract generic short-term task instructions as memory", () => {
     const candidates = extractMemoryCandidates(
       "这次请让 Specialist 先做一下自我介绍，然后继续当前任务",
       { conversationId: "conv-1" },
     );
     expect(candidates).toHaveLength(0);
+  });
+
+  it("allows non-user durable memories to auto confirm only when explicitly enabled", () => {
+    const candidate = {
+      content: "用户常驻地：杭州",
+      kind: "fact" as const,
+      scope: "global" as const,
+      source: "assistant" as const,
+    };
+
+    expect(shouldAutoConfirmMemoryCandidate(candidate)).toBe(false);
+    expect(
+      shouldAutoConfirmMemoryCandidate(candidate, {
+        allowNonUserSourceAutoConfirm: true,
+      }),
+    ).toBe(true);
   });
 
   it("rejects internal memory extraction prompts", () => {

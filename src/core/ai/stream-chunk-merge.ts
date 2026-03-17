@@ -12,6 +12,8 @@ export interface StreamChunkMergeResult {
   delta: string;
 }
 
+const MIN_SAFE_OVERLAP = 2;
+
 function longestSuffixPrefixOverlap(left: string, right: string): number {
   const max = Math.min(left.length, right.length);
   for (let size = max; size > 0; size -= 1) {
@@ -81,7 +83,9 @@ export function mergeStreamChunk(
   }
 
   const overlap = longestSuffixPrefixOverlap(previous, incoming);
-  if (overlap > 0) {
+  // 单字符重叠在真实增量流里非常常见，例如 "120" + "0px"。
+  // 这里如果按 overlap 去重，会把 1200px 错合并成 120px。
+  if (overlap >= MIN_SAFE_OVERLAP) {
     return {
       mode: "overlap",
       full: previous + incoming.slice(overlap),

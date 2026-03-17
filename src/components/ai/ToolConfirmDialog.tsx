@@ -1,5 +1,6 @@
-import { ConfirmDialog } from "@/plugins/builtin/SmartAgent/components/ConfirmDialog";
+import { useEffect, useRef } from "react";
 import { useAIStore } from "@/store/ai-store";
+import { useConfirmDialogStore } from "@/store/confirm-dialog-store";
 
 function parseToolParams(argumentsText: string): Record<string, unknown> {
   if (!argumentsText.trim()) return {};
@@ -13,16 +14,28 @@ function parseToolParams(argumentsText: string): Record<string, unknown> {
 
 export function ToolConfirmDialog() {
   const { pendingToolConfirm, confirmTool } = useAIStore();
+  const openConfirmDialog = useConfirmDialogStore((s) => s.open);
+  const activeKeyRef = useRef<string | null>(null);
 
-  if (!pendingToolConfirm) return null;
+  useEffect(() => {
+    if (!pendingToolConfirm) {
+      activeKeyRef.current = null;
+      return;
+    }
 
-  return (
-    <ConfirmDialog
-      toolName={pendingToolConfirm.name}
-      params={parseToolParams(pendingToolConfirm.arguments)}
-      onResult={(result) => {
-        void confirmTool(result.confirmed);
-      }}
-    />
-  );
+    const key = `${pendingToolConfirm.name}::${pendingToolConfirm.arguments}`;
+    if (activeKeyRef.current === key) return;
+    activeKeyRef.current = key;
+
+    void openConfirmDialog({
+      toolName: pendingToolConfirm.name,
+      params: parseToolParams(pendingToolConfirm.arguments),
+      source: "ask",
+    }).then((confirmed) => {
+      activeKeyRef.current = null;
+      void confirmTool(confirmed);
+    });
+  }, [confirmTool, openConfirmDialog, pendingToolConfirm]);
+
+  return null;
 }
