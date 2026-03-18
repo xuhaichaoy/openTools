@@ -14,6 +14,7 @@ export interface PartialToolJSONPreview {
   targetAgent: string;
   task: string;
   label: string;
+  roleBoundary: string;
   thought: string;
   thoughtNumber?: number;
   totalThoughts?: number;
@@ -365,6 +366,10 @@ export function parsePartialToolJSON(jsonStr: string): PartialToolJSONPreview {
       || extractLooseJsonStringField(jsonStr, ["target_agent", "targetAgent"]),
     task: pickString(parsed.task) || extractLooseJsonStringField(jsonStr, ["task"], true),
     label: pickString(parsed.label) || extractLooseJsonStringField(jsonStr, ["label"]),
+    roleBoundary:
+      pickString(parsed.role_boundary)
+      || pickString(parsed.roleBoundary)
+      || extractLooseJsonStringField(jsonStr, ["role_boundary", "roleBoundary"]),
     thought: pickString(parsed.thought) || extractLooseJsonStringField(jsonStr, ["thought"], true),
     thoughtNumber:
       pickNumber(parsed.thought_number)

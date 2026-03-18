@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { useAgentExecution } from "./use-agent-execution";
 import type { AgentTool } from "../core/react-agent";
+import type { AgentPromptContextSnapshot } from "../core/prompt-context";
 
 // React 19 tests require explicit act environment flag when using raw createRoot harnesses.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -18,6 +19,7 @@ const hoisted = vi.hoisted(() => ({
       createdAt: number;
       visibleTaskCount?: number;
       workspaceRoot?: string;
+      lastActivePaths?: string[];
       sourceHandoff?: {
         attachmentPaths?: string[];
         visualAttachmentPaths?: string[];
@@ -46,9 +48,28 @@ const hoisted = vi.hoisted(() => ({
   runMode: "success" as "success" | "abort" | "timeout" | "tool_round" | "retry_then_success",
   runCallCount: 0,
   modelSupportsImageInput: true,
+  shouldRecallAssistantMemory: false,
+  memoryRecallBundle: {
+    prompt: "",
+    memories: [],
+    memoryIds: [] as string[],
+    memoryPreview: [] as string[],
+    searched: false,
+    hitCount: 0,
+    transcriptPrompt: "",
+    transcriptPreview: [] as string[],
+    transcriptSearched: false,
+    transcriptHitCount: 0,
+  },
   latestRunQuery: "",
   runningStore: {
-    info: null as null | { sessionId: string; query: string; startedAt: number },
+    info: null as null | {
+      sessionId: string;
+      query: string;
+      startedAt: number;
+      workspaceRoot?: string;
+      waitingStage?: string;
+    },
     abortFn: null as null | (() => void),
   },
 }));
@@ -146,7 +167,7 @@ vi.mock("@/store/skill-store", () => ({
 vi.mock("@/core/ai/assistant-config", () => ({
   buildAssistantSupplementalPrompt: () => "",
   shouldAutoSaveAssistantMemory: () => false,
-  shouldRecallAssistantMemory: () => false,
+  shouldRecallAssistantMemory: () => hoisted.shouldRecallAssistantMemory,
 }));
 
 vi.mock("@/store/agent-memory-store", () => ({
@@ -155,6 +176,7 @@ vi.mock("@/store/agent-memory-store", () => ({
       loaded: true,
       load: vi.fn(async () => undefined),
       getMemoriesForQueryPromptAsync: vi.fn(async () => ""),
+      getMemoryRecallBundleAsync: vi.fn(async () => hoisted.memoryRecallBundle),
     }),
   },
 }));
@@ -225,11 +247,18 @@ vi.mock("@/store/agent-running-store", () => ({
       info: hoisted.runningStore.info,
       abortFn: hoisted.runningStore.abortFn,
       start: (
-        info: { sessionId: string; query: string; startedAt: number },
+        info: { sessionId: string; query: string; startedAt: number; workspaceRoot?: string; waitingStage?: string },
         abortFn?: () => void,
       ) => {
         hoisted.runningStore.info = info;
         hoisted.runningStore.abortFn = abortFn ?? null;
+      },
+      patch: (updates: Partial<{ waitingStage?: string; workspaceRoot?: string }>) => {
+        if (!hoisted.runningStore.info) return;
+        hoisted.runningStore.info = {
+          ...hoisted.runningStore.info,
+          ...updates,
+        };
       },
       stop: () => {
         hoisted.runningStore.info = null;
@@ -399,6 +428,19 @@ describe("useAgentExecution", () => {
     hoisted.runMode = "success";
     hoisted.runCallCount = 0;
     hoisted.modelSupportsImageInput = true;
+    hoisted.shouldRecallAssistantMemory = false;
+    hoisted.memoryRecallBundle = {
+      prompt: "",
+      memories: [],
+      memoryIds: [],
+      memoryPreview: [],
+      searched: false,
+      hitCount: 0,
+      transcriptPrompt: "",
+      transcriptPreview: [],
+      transcriptSearched: false,
+      transcriptHitCount: 0,
+    };
     hoisted.latestRunQuery = "";
     hoisted.fakeStoreState = {
       sessions: [],
@@ -713,6 +755,113 @@ describe("useAgentExecution", () => {
 
     expect(hoisted.latestRunQuery).toContain("当前模型不支持直接识别图片内容");
     expect(hoisted.latestRunQuery).toContain("不要假装自己看到了图片");
+  });
+
+  it("persists recalled memory preview when agent memory recall is enabled", async () => {
+    hoisted.shouldRecallAssistantMemory = true;
+    hoisted.memoryRecallBundle = {
+      prompt: "- [fact] 用户常驻上海\n- [preference] 回复尽量简洁",
+      memories: [],
+      memoryIds: ["memory-1", "memory-2"],
+      memoryPreview: ["用户常驻上海", "回复尽量简洁"],
+      searched: true,
+      hitCount: 2,
+      transcriptPrompt: "- [Agent] 用户任务：继续做天气默认按上海",
+      transcriptPreview: ["Agent：用户任务：继续做天气默认按上海"],
+      transcriptSearched: true,
+      transcriptHitCount: 1,
+    };
+    hoisted.fakeStoreState = {
+      currentSessionId: "target",
+      sessions: [
+        {
+          id: "target",
+          createdAt: 1,
+          tasks: [],
+        },
+      ],
+    };
+
+    const updateTask = vi.fn();
+    const updateSession = vi.fn();
+    let latestSnapshot: AgentPromptContextSnapshot | null = null;
+    let hookValue: ReturnType<typeof useAgentExecution> | null = null;
+
+    act(() => {
+      root.render(
+        <HookHarness
+          onReady={(value) => {
+            hookValue = value;
+          }}
+          params={{
+            ai: {} as never,
+            setRunning: vi.fn(),
+            setRunningPhase: vi.fn(),
+            setExecutionWaitingStage: vi.fn(),
+            availableTools: [] as AgentTool[],
+            currentSessionId: "target",
+            createSession: vi.fn(() => "target"),
+            addTask: vi.fn(() => "task_memory"),
+            updateTask,
+            updateSession,
+            forkSession: vi.fn(() => null),
+            inputRef: { current: document.createElement("textarea") },
+            scrollRef: {
+              current: {
+                scrollHeight: 100,
+                scrollTo: vi.fn(),
+              } as unknown as HTMLDivElement,
+            },
+            openDangerConfirm: vi.fn(async () => true),
+            resetPerRunState: null,
+            onPromptContextSnapshot: (snapshot) => {
+              latestSnapshot = snapshot;
+            },
+          }}
+        />,
+      );
+    });
+
+    await act(async () => {
+      await hookValue!.executeAgentTask("今天天气怎么样", { sessionId: "target" });
+    });
+
+    expect(
+      updateTask.mock.calls.some(
+        (call) =>
+          call[0] === "target"
+          && call[1] === "task_memory"
+          && call[2]?.memoryRecallAttempted === true
+          && call[2]?.appliedMemoryIds?.join(",") === "memory-1,memory-2"
+          && call[2]?.appliedMemoryPreview?.join(",") === "用户常驻上海,回复尽量简洁",
+      ),
+    ).toBe(true);
+    expect(
+      updateTask.mock.calls.some(
+        (call) =>
+          call[0] === "target"
+          && call[1] === "task_memory"
+          && call[2]?.transcriptRecallAttempted === true
+          && call[2]?.transcriptRecallHitCount === 1
+          && call[2]?.appliedTranscriptPreview?.join(",") === "Agent：用户任务：继续做天气默认按上海",
+      ),
+    ).toBe(true);
+    expect(updateSession).toHaveBeenCalledWith(
+      "target",
+      expect.objectContaining({
+        lastMemoryRecallAttempted: true,
+        lastMemoryRecallPreview: ["用户常驻上海", "回复尽量简洁"],
+        lastTranscriptRecallAttempted: true,
+        lastTranscriptRecallHitCount: 1,
+        lastTranscriptRecallPreview: ["Agent：用户任务：继续做天气默认按上海"],
+      }),
+    );
+    expect(latestSnapshot?.memoryRecallAttempted).toBe(true);
+    expect(latestSnapshot?.memoryRecallPreview).toEqual(["用户常驻上海", "回复尽量简洁"]);
+    expect(latestSnapshot?.memoryItemCount).toBe(2);
+    expect(latestSnapshot?.transcriptRecallAttempted).toBe(true);
+    expect(latestSnapshot?.transcriptRecallHitCount).toBe(1);
+    expect(latestSnapshot?.transcriptRecallPreview).toEqual(["Agent：用户任务：继续做天气默认按上海"]);
   });
 
   it("marks task as cancelled when aborted by user", async () => {

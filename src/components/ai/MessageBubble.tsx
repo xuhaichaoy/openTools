@@ -379,6 +379,9 @@ export const MessageBubble = memo(function MessageBubble({
   const hasThinking = Boolean(msg.thinkingContent?.trim());
   const appliedMemoryPreview = msg.appliedMemoryPreview ?? [];
   const appliedMemoryCount = msg.appliedMemoryIds?.length ?? appliedMemoryPreview.length;
+  const appliedTranscriptPreview = msg.appliedTranscriptPreview ?? [];
+  const appliedTranscriptCount =
+    msg.transcriptRecallHitCount ?? appliedTranscriptPreview.length;
 
   useEffect(() => {
     if (msg.thinkingStreaming && msg.thinkingContent?.trim()) {
@@ -482,6 +485,28 @@ export const MessageBubble = memo(function MessageBubble({
                       </span>
                     ))}
                   </div>
+                </div>
+              )}
+              {msg.transcriptRecallAttempted && (
+                <div className="mb-2 rounded-2xl border border-sky-500/15 bg-sky-500/5 px-3 py-2">
+                  <div className="text-[11px] text-[var(--color-text-secondary)]">
+                    {appliedTranscriptCount > 0
+                      ? `已回补会话轨迹 ${appliedTranscriptCount} 条`
+                      : "已检索会话轨迹，本轮未命中"}
+                  </div>
+                  {appliedTranscriptPreview.length > 0 && (
+                    <div className="mt-1 flex flex-wrap gap-1.5">
+                      {appliedTranscriptPreview.map((item, index) => (
+                        <span
+                          key={`${msg.id}-transcript-${index}`}
+                          className="inline-flex max-w-full rounded-full border border-sky-500/20 bg-[var(--color-bg)]/70 px-2 py-0.5 text-[11px] leading-5 text-[var(--color-text-secondary)]"
+                          title={item}
+                        >
+                          {item}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
               <div

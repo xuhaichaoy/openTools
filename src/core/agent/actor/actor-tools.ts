@@ -1,11 +1,41 @@
 import type { AgentTool } from "@/plugins/builtin/SmartAgent/core/react-agent";
 import type { ActorSystem } from "./actor-system";
+import type { AgentCapability, SpawnedTaskRoleBoundary } from "./types";
 import {
   readSessionHistory,
   getSessionSummary,
   listTranscriptSessionIds,
   compactTranscript,
 } from "./actor-transcript";
+
+const KNOWN_AGENT_CAPABILITIES = new Set<AgentCapability>([
+  "coordinator",
+  "code_review",
+  "code_write",
+  "code_analysis",
+  "security",
+  "performance",
+  "architecture",
+  "debugging",
+  "research",
+  "documentation",
+  "testing",
+  "devops",
+  "data_analysis",
+  "creative",
+  "synthesis",
+  "file_write",
+  "shell_execute",
+  "information_retrieval",
+  "web_search",
+]);
+
+const KNOWN_ROLE_BOUNDARIES = new Set<SpawnedTaskRoleBoundary>([
+  "general",
+  "executor",
+  "reviewer",
+  "validator",
+]);
 
 /**
  * 创建 Actor 间通信工具集（对标 OpenClaw sessions_spawn / subagents / sessions_send）。
@@ -34,17 +64,33 @@ export function createActorCommunicationTools(
     return actor?.role.name ?? id;
   };
 
+  const parseCapabilities = (raw: unknown): AgentCapability[] | undefined => {
+    if (!raw) return undefined;
+    const values = String(raw)
+      .split(",")
+      .map((item) => item.trim())
+      .filter((item): item is AgentCapability => KNOWN_AGENT_CAPABILITIES.has(item as AgentCapability));
+    return values.length > 0 ? values : undefined;
+  };
+
+  const parseRoleBoundary = (raw: unknown): SpawnedTaskRoleBoundary | undefined => {
+    if (!raw) return undefined;
+    const value = String(raw).trim() as SpawnedTaskRoleBoundary;
+    return KNOWN_ROLE_BOUNDARIES.has(value) ? value : undefined;
+  };
+
   // ── spawn_task (对标 OpenClaw sessions_spawn) ──
   tools.push({
     name: "spawn_task",
     description:
       "将一个子任务派发给另一个 Agent 执行。系统会自动追踪任务进度，" +
       "目标 Agent 完成后结果会自动发送到你的收件箱。此操作是非阻塞的。" +
-      "适用于将大任务分解为子任务分配给不同 Agent 并行执行。",
+      "适用于将大任务分解为子任务分配给不同 Agent 并行执行。" +
+      "当目标 Agent 不存在时，也可以按需创建临时子 Agent。",
     parameters: {
       target_agent: {
         type: "string",
-        description: "目标 Agent 的名称",
+        description: "目标 Agent 的名称；若不存在且 create_if_missing=true，则会创建同名临时子 Agent",
         required: true,
       },
       task: {
@@ -88,6 +134,31 @@ export function createActorCommunicationTools(
         description: "是否期望收到完成消息通知（默认 true）。设为 false 可用于 fire-and-forget 场景。",
         required: false,
       },
+      create_if_missing: {
+        type: "boolean",
+        description: "当目标 Agent 不存在时，是否自动创建一个临时子 Agent（默认 false）",
+        required: false,
+      },
+      agent_description: {
+        type: "string",
+        description: "创建临时子 Agent 时的职责描述，例如“只负责独立审查 patch 的回归风险”",
+        required: false,
+      },
+      agent_capabilities: {
+        type: "string",
+        description: "创建临时子 Agent 时的能力标签，逗号分隔，如 'code_review,testing'",
+        required: false,
+      },
+      agent_workspace: {
+        type: "string",
+        description: "创建临时子 Agent 时的工作目录；不填则继承当前 Agent 的工作目录",
+        required: false,
+      },
+      role_boundary: {
+        type: "string",
+        description: "显式声明本轮子任务职责边界：'executor'、'reviewer'、'validator' 或 'general'。用于把计划层的职责边界稳定传到执行层。",
+        required: false,
+      },
       override_model: {
         type: "string",
         description: "覆盖目标 Agent 的 LLM 模型（如 'gpt-4o'、'claude-3-sonnet' 等）。不提供则使用目标 Agent 的默认模型。",
@@ -127,8 +198,13 @@ export function createActorCommunicationTools(
         ? String(params.attachments).split(",").map((s) => s.trim()).filter(Boolean)
         : undefined;
       const mode = params.mode === "session" ? "session" : "run";
-      const cleanup = params.cleanup === "delete" ? "delete" : "keep";
+      const createIfMissing = params.create_if_missing === true;
+      const cleanup = params.cleanup === "delete"
+        ? "delete"
+        : (params.cleanup === "keep" ? "keep" : undefined);
       const expectsCompletionMessage = params.expects_completion !== false;
+      const childCapabilities = parseCapabilities(params.agent_capabilities);
+      const roleBoundary = parseRoleBoundary(params.role_boundary);
 
       // Subagent 独立配置
       const overrides: import("./types").SpawnTaskOverrides = {};
@@ -157,6 +233,15 @@ export function createActorCommunicationTools(
         mode,
         cleanup,
         expectsCompletionMessage,
+        roleBoundary,
+        createIfMissing,
+        createChildSpec: createIfMissing
+          ? {
+              description: params.agent_description ? String(params.agent_description) : undefined,
+              capabilities: childCapabilities,
+              workspace: params.agent_workspace ? String(params.agent_workspace) : undefined,
+            }
+          : undefined,
         overrides: hasOverrides ? overrides : undefined,
       });
 
@@ -167,8 +252,9 @@ export function createActorCommunicationTools(
         spawned: true,
         runId: result.runId,
         mode: result.mode,
-        to: getActorName(target),
+        to: getActorName(result.targetActorId),
         label: result.label,
+        roleBoundary: result.roleBoundary,
         hint: `任务已派发（mode=${result.mode}），${result.mode === "run" ? "完成后结果会自动发送到你的收件箱" : "子 agent 会保持活跃状态"}。你可以继续做其他事，或用 agents(action='list') 查看进度。`,
       };
     },
@@ -283,6 +369,9 @@ export function createActorCommunicationTools(
         },
         task_tree: descendants.map((r) => ({
           runId: r.runId,
+          parentRunId: r.parentRunId ?? null,
+          rootRunId: r.rootRunId ?? r.runId,
+          roleBoundary: r.roleBoundary ?? "general",
           spawner: getActorName(r.spawnerActorId),
           target: getActorName(r.targetActorId),
           label: r.label,

@@ -61,6 +61,12 @@ describe("buildDialogContextSnapshot", () => {
       queuedFollowUpCount: 2,
       focusedSessionRunId: "run-1",
       focusedSessionLabel: "前端子会话",
+      memoryRecallAttempted: true,
+      memoryHitCount: 2,
+      memoryPreview: ["默认中文回答", "常驻上海"],
+      transcriptRecallAttempted: true,
+      transcriptRecallHitCount: 1,
+      transcriptPreview: ["Dialog：继续完成首页实现"],
     });
 
     expect(snapshot.workspaceRoot).toBe("/tmp/project");
@@ -70,8 +76,12 @@ describe("buildDialogContextSnapshot", () => {
     expect(snapshot.pendingApprovalCount).toBe(1);
     expect(snapshot.openSessionCount).toBe(1);
     expect(snapshot.focusedSessionLabel).toBe("前端子会话");
+    expect(snapshot.memoryHitCount).toBe(2);
+    expect(snapshot.transcriptRecallHitCount).toBe(1);
     expect(snapshot.contextLines.some((line) => line.includes("当前工作区"))).toBe(true);
     expect(snapshot.contextLines.some((line) => line.includes("跨模式来源"))).toBe(true);
     expect(snapshot.contextLines.some((line) => line.includes("待处理交互"))).toBe(true);
+    expect(snapshot.contextLines.some((line) => line.includes("长期记忆"))).toBe(true);
+    expect(snapshot.contextLines.some((line) => line.includes("会话轨迹回补"))).toBe(true);
   });
 });

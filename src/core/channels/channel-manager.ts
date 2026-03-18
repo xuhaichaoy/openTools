@@ -36,6 +36,15 @@ export interface ChannelEntry {
   unsubscribe?: () => void;
 }
 
+interface ConversationRoute {
+  channelId: string;
+  lastActiveAt: number;
+  messageId?: string;
+  replyWebhookUrl?: string;
+  replyWebhookExpiresAt?: number;
+  robotCode?: string;
+}
+
 export class ChannelManager {
   private channels = new Map<string, ChannelEntry>();
   private _globalHandlers: MessageHandler[] = [];
@@ -47,7 +56,7 @@ export class ChannelManager {
    */
   private _conversationRoutes = new Map<
     string, // conversationId
-    { channelId: string; lastActiveAt: number }
+    ConversationRoute
   >();
 
   /** 路由表条目超时清理时间（30 分钟） */
@@ -72,15 +81,6 @@ export class ChannelManager {
         return;
       }
 
-      // 找到消息来源的通道 ID 并注册路由
-      const sourceChannelId = this._findChannelIdForMessage(msg);
-      if (sourceChannelId) {
-        this._conversationRoutes.set(msg.conversationId, {
-          channelId: sourceChannelId,
-          lastActiveAt: Date.now(),
-        });
-      }
-
       log.info(`Routing IM message to ActorSystem: "${msg.text.slice(0, 60)}" (conv=${msg.conversationId})`);
       actorSystem.broadcastAndResolve("user", msg.text, {
         _briefContent: `[IM:${msg.senderName}] ${msg.text.slice(0, 40)}`,
@@ -89,48 +89,20 @@ export class ChannelManager {
     });
 
     const eventUnsub = actorSystem.onEvent((event) => {
-      // 只回发"面向用户的最终回复"，而不是所有内部 task_completed
-      const eventType = (event as { type?: string }).type;
-      if (eventType !== "agent_result" && eventType !== "task_completed") return;
+      const dialogEvent = event as { kind?: string; content?: string };
+      if (dialogEvent.kind !== "agent_result") return;
 
-      const detail = (event as { detail?: unknown }).detail as {
-        result?: string;
-        _imConversationId?: string;
-      } | undefined;
-      if (!detail?.result) return;
+      const text = String(dialogEvent.content || "").slice(0, 2000);
+      if (!text.trim()) return;
 
-      const text = detail.result.slice(0, 2000);
-
-      // 1. 优先通过 conversationId 精确路由
-      if (detail._imConversationId) {
-        const route = this._conversationRoutes.get(detail._imConversationId);
-        if (route) {
-          const entry = this.channels.get(route.channelId);
-          if (entry?.channel.status === "connected") {
-            entry.channel.send({
-              conversationId: detail._imConversationId,
-              text,
-            }).catch((err) => log.error("Failed to forward reply to source IM channel", err));
-            route.lastActiveAt = Date.now();
-            return;
-          }
-        }
-      }
-
-      // 2. 回退：查找最近活跃的路由
+      // 回退：查找最近活跃的路由
       const recentRoute = this._findMostRecentRoute();
       if (recentRoute) {
-        const entry = this.channels.get(recentRoute.channelId);
-        if (entry?.channel.status === "connected") {
-          entry.channel.send({
-            conversationId: recentRoute.conversationId,
-            text,
-          }).catch((err) => log.error("Failed to forward reply to IM (fallback)", err));
-          return;
-        }
+        void this._sendReplyThroughRoute(recentRoute.conversationId, recentRoute, text);
+        return;
       }
 
-      // 3. 最终回退：广播到所有已连接通道
+      // 最终回退：广播到所有已连接通道
       for (const entry of this.channels.values()) {
         if (entry.channel.status === "connected") {
           entry.channel.send({ conversationId: "default", text })
@@ -153,8 +125,8 @@ export class ChannelManager {
   }
 
   /** 查找最近活跃的路由条目 */
-  private _findMostRecentRoute(): { channelId: string; conversationId: string } | null {
-    let best: { channelId: string; conversationId: string; lastActiveAt: number } | null = null;
+  private _findMostRecentRoute(): ({ conversationId: string } & ConversationRoute) | null {
+    let best: ({ conversationId: string } & ConversationRoute) | null = null;
     for (const [conversationId, route] of this._conversationRoutes) {
       if (!best || route.lastActiveAt > best.lastActiveAt) {
         best = { ...route, conversationId };
@@ -336,6 +308,19 @@ export class ChannelManager {
 
   private async _dispatchMessage(channelId: string, msg: ChannelIncomingMessage): Promise<string | void> {
     log.info(`Message from ${channelId}: [${msg.senderName}] ${msg.text.slice(0, 60)}`);
+    this._conversationRoutes.set(msg.conversationId, {
+      channelId,
+      lastActiveAt: Date.now(),
+      messageId: msg.messageId,
+      replyWebhookUrl: msg.replyWebhookUrl,
+      replyWebhookExpiresAt: msg.replyWebhookExpiresAt,
+      robotCode: msg.robotCode,
+    });
+
+    const entry = this.channels.get(channelId);
+    if (entry?.channel instanceof FeishuChannel) {
+      void entry.channel.startTypingForMessage(msg);
+    }
 
     for (const handler of this._globalHandlers) {
       try {
@@ -343,6 +328,38 @@ export class ChannelManager {
         if (reply) return reply;
       } catch (err) {
         log.error("Global message handler error", err);
+      }
+    }
+  }
+
+  private async _sendReplyThroughRoute(
+    conversationId: string,
+    route: ConversationRoute,
+    text: string,
+  ): Promise<void> {
+    const entry = this.channels.get(route.channelId);
+    if (!entry?.channel || entry.channel.status !== "connected") {
+      return;
+    }
+
+    try {
+      await entry.channel.send({
+        conversationId,
+        replyToMessageId: route.messageId,
+        replyWebhookUrl: route.replyWebhookUrl,
+        replyWebhookExpiresAt: route.replyWebhookExpiresAt,
+        robotCode: route.robotCode,
+        text,
+      });
+      const storedRoute = this._conversationRoutes.get(conversationId);
+      if (storedRoute) {
+        storedRoute.lastActiveAt = Date.now();
+      }
+    } catch (err) {
+      log.error("Failed to forward reply to source IM channel", err);
+    } finally {
+      if (entry.channel instanceof FeishuChannel) {
+        await entry.channel.stopTypingForConversation(conversationId);
       }
     }
   }

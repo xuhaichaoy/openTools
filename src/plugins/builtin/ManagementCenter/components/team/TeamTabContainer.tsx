@@ -165,7 +165,7 @@ export function TeamTabContainer() {
 
   if (!isLoggedIn) {
     return (
-      <div className="max-w-xl mx-auto space-y-[var(--space-compact-3)]">
+      <div className="w-full space-y-[var(--space-compact-3)]">
         <div>
           <h2 className="text-sm font-semibold">团队空间</h2>
           <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">
@@ -207,7 +207,7 @@ export function TeamTabContainer() {
   }
 
   return (
-    <div className="max-w-xl mx-auto space-y-[var(--space-compact-3)]">
+    <div className="w-full space-y-[var(--space-compact-3)]">
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-sm font-semibold">团队空间</h2>
@@ -346,7 +346,7 @@ function TeamDetail({
     !teamActive && teamSection !== "members" ? "members" : teamSection;
 
   return (
-    <div className="max-w-xl mx-auto space-y-[var(--space-compact-3)]">
+    <div className="w-full space-y-[var(--space-compact-3)]">
       <button
         onClick={onBack}
         className="flex items-center gap-1.5 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text)] transition-colors"

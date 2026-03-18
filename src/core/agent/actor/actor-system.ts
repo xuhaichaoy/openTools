@@ -1,6 +1,7 @@
-import { AgentActor, type AskUserCallback } from "./agent-actor";
+import { AgentActor, DIALOG_FULL_ROLE, type AskUserCallback } from "./agent-actor";
 import type {
   ApprovalRequest,
+  AgentCapability,
   AgentCapabilities,
   ActorConfig,
   ActorEvent,
@@ -15,7 +16,9 @@ import type {
   PendingReply,
   SessionUploadRecord,
   SpawnedTaskRecord,
+  SpawnedTaskRoleBoundary,
   SpawnedTaskEventDetail,
+  ToolPolicy,
 } from "./types";
 import {
   appendDialogMessageSync as appendDialogMessage,
@@ -47,6 +50,36 @@ const MAX_CHILDREN_PER_AGENT = 5; // 单个 Agent 同时运行的子任务上限
 const ANNOUNCE_RETRY_DELAYS_MS = [5_000, 10_000, 20_000] as const;
 const ANNOUNCE_HARD_EXPIRY_MS = 30 * 60 * 1000; // 30 分钟硬超时
 
+const READ_ONLY_CHILD_POLICY: ToolPolicy = {
+  deny: [
+    "write_file",
+    "str_replace_edit",
+    "json_edit",
+    "delete_file",
+    "run_shell_command",
+    "persistent_shell",
+    "native_*",
+    "database_execute",
+    "ssh_*",
+  ],
+};
+
+const VALIDATION_CHILD_POLICY: ToolPolicy = {
+  deny: [
+    "write_file",
+    "str_replace_edit",
+    "json_edit",
+    "delete_file",
+    "native_*",
+    "database_execute",
+    "ssh_*",
+  ],
+};
+
+const EXECUTOR_CHILD_POLICY: ToolPolicy = {
+  deny: ["delete_file", "native_*", "ssh_*"],
+};
+
 // 错误分类：对标 OpenClaw announce 机制
 const TRANSIENT_ERROR_PATTERNS = [
   /\berrorcode=unavailable\b/i,
@@ -76,6 +109,122 @@ function isTransientAnnounceError(error: unknown): boolean {
 
   // 检查是否是 transient 错误
   return TRANSIENT_ERROR_PATTERNS.some((p) => p.test(msg));
+}
+
+function mergeToolPolicies(
+  base?: ToolPolicy,
+  override?: ToolPolicy,
+): ToolPolicy | undefined {
+  if (!base && !override) return undefined;
+  const allow = [...new Set([...(base?.allow ?? []), ...(override?.allow ?? [])])];
+  const deny = [...new Set([...(base?.deny ?? []), ...(override?.deny ?? [])])];
+  return {
+    ...(allow.length > 0 ? { allow } : {}),
+    ...(deny.length > 0 ? { deny } : {}),
+  };
+}
+
+type EphemeralChildRoleBoundary = {
+  role: SpawnedTaskRoleBoundary;
+  systemPromptAppend?: string;
+  toolPolicy?: ToolPolicy;
+};
+
+function buildEphemeralChildBoundary(role: SpawnedTaskRoleBoundary): EphemeralChildRoleBoundary {
+  switch (role) {
+    case "reviewer":
+      return {
+        role,
+        toolPolicy: READ_ONLY_CHILD_POLICY,
+        systemPromptAppend: [
+          "你当前是独立审查子 Agent。",
+          "默认不要修改文件、不要运行写操作、不要直接接管实现任务。",
+          "重点输出发现、风险、证据和建议修复方向；如果认为必须改代码，应回传上游协调者，由其决定是否另派实现任务。",
+        ].join("\n"),
+      };
+    case "validator":
+      return {
+        role,
+        toolPolicy: VALIDATION_CHILD_POLICY,
+        systemPromptAppend: [
+          "你当前是验证子 Agent。",
+          "默认不要修改代码；重点做复现、测试、验收和回归检查。",
+          "可以运行测试、构建或检查命令，但若被实现缺口阻塞，应明确说明阻塞点和建议的上游动作。",
+        ].join("\n"),
+      };
+    case "executor":
+      return {
+        role,
+        toolPolicy: EXECUTOR_CHILD_POLICY,
+        systemPromptAppend: [
+          "你当前是执行子 Agent。",
+          "聚焦实现、修复或探索，不要抢协调权。",
+          "如需额外审查或验证，优先把结果和缺口回传给上游协调者，再由其继续分派。",
+        ].join("\n"),
+      };
+    default:
+      return { role: "general" };
+  }
+}
+
+function inferEphemeralChildBoundary(params: {
+  name: string;
+  description?: string;
+  capabilities?: AgentCapability[];
+}): EphemeralChildRoleBoundary {
+  const text = `${params.name}\n${params.description ?? ""}`.toLowerCase();
+  const capabilities = new Set(params.capabilities ?? []);
+  const reviewLike =
+    capabilities.has("code_review")
+    || capabilities.has("security")
+    || /review|reviewer|审查|审阅|评审|审核|安全/.test(text);
+  const validationLike =
+    capabilities.has("testing")
+    || /tester|test|qa|验证|回归|验收|测试/.test(text);
+  const executorLike =
+    capabilities.has("code_write")
+    || capabilities.has("debugging")
+    || /fix|fixer|implement|coder|修复|实现|开发|编码/.test(text);
+
+  if (reviewLike && !executorLike) {
+    return buildEphemeralChildBoundary("reviewer");
+  }
+
+  if (validationLike && !executorLike) {
+    return buildEphemeralChildBoundary("validator");
+  }
+
+  if (executorLike) {
+    return buildEphemeralChildBoundary("executor");
+  }
+
+  return buildEphemeralChildBoundary("general");
+}
+
+function formatRoleBoundaryLabel(role: SpawnedTaskRoleBoundary): string | null {
+  switch (role) {
+    case "reviewer":
+      return "独立审查";
+    case "validator":
+      return "验证回归";
+    case "executor":
+      return "执行实现";
+    default:
+      return null;
+  }
+}
+
+function buildSpawnTaskRoleBoundaryInstruction(role: SpawnedTaskRoleBoundary): string | undefined {
+  switch (role) {
+    case "reviewer":
+      return "你本轮是独立审查角色。重点检查边界条件、回归风险、证据和修复建议，默认不要直接接管实现。";
+    case "validator":
+      return "你本轮是验证角色。重点做复现、测试、构建、验收和回归检查，默认不要直接修改代码。";
+    case "executor":
+      return "你本轮是执行角色。聚焦实现、修复和探索，不要抢协调权；若需要独立审查或验证，请把缺口回传上游。";
+    default:
+      return undefined;
+  }
 }
 
 function summarizeError(error: unknown): string {
@@ -131,6 +280,22 @@ function inferLanguageFromPath(path: string): string | undefined {
     default:
       return ext || undefined;
   }
+}
+
+function collectDialogMessagePreview(items: readonly string[] | undefined, limit = 3): string[] | undefined {
+  if (!items?.length) return undefined;
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const item of items) {
+    const normalized = String(item || "").trim();
+    if (!normalized) continue;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(normalized);
+    if (result.length >= limit) break;
+  }
+  return result.length > 0 ? result : undefined;
 }
 
 function getInteractionRequestKind(type: PendingInteractionType): DialogMessage["kind"] {
@@ -445,6 +610,7 @@ export class ActorSystem {
       }
     }
     this.actors.delete(actorId);
+    this.removeActorFromDialogExecutionPlan(actorId);
     if (this.coordinatorActorId === actorId) {
       this.coordinatorActorId = this.getFirstActor()?.id ?? null;
     }
@@ -563,6 +729,7 @@ export class ActorSystem {
       participantActorIds: [...this.dialogExecutionPlan.participantActorIds],
       allowedMessagePairs: this.dialogExecutionPlan.allowedMessagePairs.map((edge) => ({ ...edge })),
       allowedSpawnPairs: this.dialogExecutionPlan.allowedSpawnPairs.map((edge) => ({ ...edge })),
+      plannedSpawns: this.dialogExecutionPlan.plannedSpawns?.map((spawn) => ({ ...spawn })),
     };
   }
 
@@ -587,10 +754,147 @@ export class ActorSystem {
       allowedSpawnPairs: plan.allowedSpawnPairs
         .filter((edge) => edge.fromActorId && edge.toActorId)
         .map((edge) => ({ ...edge })),
+      plannedSpawns: plan.plannedSpawns
+        ?.filter((spawn) => spawn.targetActorId && spawn.task.trim())
+        .map((spawn) => ({ ...spawn, task: spawn.task.trim() })),
       state: preserveRuntimeState ? plan.state : "armed",
       activatedAt: preserveRuntimeState ? plan.activatedAt : undefined,
       sourceMessageId: preserveRuntimeState ? plan.sourceMessageId : undefined,
     };
+  }
+
+  private dedupeDialogExecutionPlanEdges(
+    edges: DialogExecutionPlan["allowedMessagePairs"] | DialogExecutionPlan["allowedSpawnPairs"],
+  ): DialogExecutionPlan["allowedMessagePairs"] {
+    const seen = new Set<string>();
+    const result: DialogExecutionPlan["allowedMessagePairs"] = [];
+    for (const edge of edges) {
+      if (!edge.fromActorId || !edge.toActorId) continue;
+      const key = `${edge.fromActorId}->${edge.toActorId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.push({ fromActorId: edge.fromActorId, toActorId: edge.toActorId });
+    }
+    return result;
+  }
+
+  private attachDynamicActorToDialogPlan(parentActorId: string, childActorId: string): void {
+    if (!this.dialogExecutionPlan) return;
+    if (!this.dialogExecutionPlan.participantActorIds.includes(parentActorId)) {
+      throw new Error(`[dialog_plan] ${parentActorId} 不在已批准协作范围内，不能创建新的子 Agent`);
+    }
+    this.dialogExecutionPlan = {
+      ...this.dialogExecutionPlan,
+      participantActorIds: [...new Set([...this.dialogExecutionPlan.participantActorIds, childActorId])],
+      allowedMessagePairs: this.dedupeDialogExecutionPlanEdges([
+        ...this.dialogExecutionPlan.allowedMessagePairs,
+        { fromActorId: parentActorId, toActorId: childActorId },
+        { fromActorId: childActorId, toActorId: parentActorId },
+      ]),
+      allowedSpawnPairs: this.dedupeDialogExecutionPlanEdges([
+        ...this.dialogExecutionPlan.allowedSpawnPairs,
+        { fromActorId: parentActorId, toActorId: childActorId },
+      ]),
+    };
+  }
+
+  private removeActorFromDialogExecutionPlan(actorId: string): void {
+    if (!this.dialogExecutionPlan) return;
+    this.dialogExecutionPlan = {
+      ...this.dialogExecutionPlan,
+      initialRecipientActorIds: this.dialogExecutionPlan.initialRecipientActorIds.filter((id) => id !== actorId),
+      participantActorIds: this.dialogExecutionPlan.participantActorIds.filter((id) => id !== actorId),
+      coordinatorActorId: this.dialogExecutionPlan.coordinatorActorId === actorId
+        ? undefined
+        : this.dialogExecutionPlan.coordinatorActorId,
+      allowedMessagePairs: this.dialogExecutionPlan.allowedMessagePairs.filter(
+        (edge) => edge.fromActorId !== actorId && edge.toActorId !== actorId,
+      ),
+      allowedSpawnPairs: this.dialogExecutionPlan.allowedSpawnPairs.filter(
+        (edge) => edge.fromActorId !== actorId && edge.toActorId !== actorId,
+      ),
+      plannedSpawns: this.dialogExecutionPlan.plannedSpawns?.filter((spawn) => spawn.targetActorId !== actorId),
+    };
+  }
+
+  private createEphemeralAgent(
+    spawnerActorId: string,
+    opts: {
+      name: string;
+      description?: string;
+      capabilities?: AgentCapability[];
+      roleBoundary?: SpawnedTaskRoleBoundary;
+      workspace?: string;
+      toolPolicy?: ToolPolicy;
+      timeoutSeconds?: number;
+      overrides?: import("./types").SpawnTaskOverrides;
+    },
+  ): AgentActor | { error: string } {
+    const spawner = this.actors.get(spawnerActorId);
+    if (!spawner) return { error: `Spawner ${spawnerActorId} not found` };
+
+    const requestedName = opts.name.trim();
+    if (!requestedName) {
+      return { error: "临时 Agent 名称不能为空" };
+    }
+
+    const actorId = `spawned-${generateId()}`;
+    const inferredBoundary = opts.roleBoundary
+      ? buildEphemeralChildBoundary(opts.roleBoundary)
+      : inferEphemeralChildBoundary({
+          name: requestedName,
+          description: opts.description,
+          capabilities: opts.capabilities,
+        });
+    const explicitToolPolicy = opts.toolPolicy ?? opts.overrides?.toolPolicy;
+    const effectiveToolPolicy = mergeToolPolicies(
+      mergeToolPolicies(spawner.toolPolicyConfig, inferredBoundary.toolPolicy),
+      explicitToolPolicy,
+    );
+    const systemPromptBlocks = [
+      DIALOG_FULL_ROLE.systemPrompt,
+      `你是由 ${spawner.role.name} 临时创建的专用子 Agent。`,
+      opts.description ? `你的职责定位：${opts.description}` : "",
+      opts.capabilities?.length ? `优先能力聚焦：${opts.capabilities.join("、")}` : "",
+      inferredBoundary.systemPromptAppend ? `默认职责边界：${inferredBoundary.systemPromptAppend}` : "",
+      opts.overrides?.systemPromptAppend ? `额外约束：${opts.overrides.systemPromptAppend}` : "",
+    ].filter(Boolean);
+
+    try {
+      const actor = this.spawn({
+        id: actorId,
+        role: {
+          ...DIALOG_FULL_ROLE,
+          id: `dialog_agent_${actorId}`,
+          name: requestedName,
+        },
+        persistent: false,
+        modelOverride: opts.overrides?.model,
+        maxIterations: opts.overrides?.maxIterations,
+        systemPromptOverride: systemPromptBlocks.join("\n\n"),
+        toolPolicy: effectiveToolPolicy,
+        timeoutSeconds: opts.timeoutSeconds ?? spawner.timeoutSeconds,
+        workspace: opts.workspace ?? spawner.workspace,
+        contextTokens: opts.overrides?.contextTokens ?? spawner.contextTokens,
+        thinkingLevel: opts.overrides?.thinkingLevel ?? spawner.thinkingLevel,
+        capabilities: opts.capabilities?.length
+          ? { tags: opts.capabilities, description: opts.description }
+          : spawner.capabilities,
+        middlewareOverrides: opts.overrides?.middlewareOverrides ?? spawner.middlewareOverrides,
+      });
+
+      try {
+        this.attachDynamicActorToDialogPlan(spawnerActorId, actor.id);
+      } catch (error) {
+        this.kill(actor.id);
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
+
+      log(`[dialog_plan] spawned ephemeral child agent ${actor.role.name} for ${spawner.role.name}`);
+      return actor;
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   armDialogExecutionPlan(plan: DialogExecutionPlan): void {
@@ -610,8 +914,8 @@ export class ActorSystem {
     this.dialogExecutionPlan = null;
   }
 
-  private activateDialogExecutionPlan(sourceMessageId: string): void {
-    if (!this.dialogExecutionPlan || this.dialogExecutionPlan.state === "active") return;
+  private activateDialogExecutionPlan(sourceMessageId: string): boolean {
+    if (!this.dialogExecutionPlan || this.dialogExecutionPlan.state === "active") return false;
     this.dialogExecutionPlan = {
       ...this.dialogExecutionPlan,
       state: "active",
@@ -619,6 +923,71 @@ export class ActorSystem {
       sourceMessageId,
     };
     log(`activateDialogExecutionPlan: sourceMessageId=${sourceMessageId}`);
+    return true;
+  }
+
+  private deliverDialogExecutionPlanBootstrap(sourceMessage: DialogMessage): void {
+    const plan = this.dialogExecutionPlan;
+    if (!plan?.plannedSpawns?.length) return;
+    if (sourceMessage.from !== "user") return;
+
+    const coordinatorActorId = plan.coordinatorActorId ?? plan.initialRecipientActorIds[0];
+    const coordinator = coordinatorActorId ? this.actors.get(coordinatorActorId) : null;
+    if (!coordinatorActorId || !coordinator) return;
+
+    const suggestions = plan.plannedSpawns
+      .filter((spawn) => spawn.targetActorId !== coordinatorActorId)
+      .map((spawn, index) => {
+        const targetName = this.actors.get(spawn.targetActorId)?.role.name ?? spawn.targetActorId;
+        const label = spawn.label ? `（${spawn.label}）` : "";
+        const roleBoundaryLabel = spawn.roleBoundary ? formatRoleBoundaryLabel(spawn.roleBoundary) : null;
+        const roleBoundary = spawn.roleBoundary
+          ? `；建议 role_boundary=${spawn.roleBoundary}${roleBoundaryLabel ? `（${roleBoundaryLabel}）` : ""}`
+          : "";
+        const extraContext = spawn.context ? `；补充说明：${spawn.context}` : "";
+        return `${index + 1}. 使用 spawn_task 派给 ${targetName}${label}：${spawn.task}${roleBoundary}${extraContext}`;
+      });
+    if (suggestions.length === 0) return;
+
+    const bootstrap = [
+      "[已批准协作计划 / 内部指令]",
+      `你是本轮协调者，用户主任务已经发给你：${sourceMessage.content}`,
+      sourceMessage._briefContent ? `附件摘要：${sourceMessage._briefContent}` : "",
+      sourceMessage.images?.length ? `本轮附带图片：${sourceMessage.images.length} 张` : "",
+      "",
+      "请先快速理解用户任务，再立即决定如何分工。",
+      "优先参考以下建议子任务，并自行调用 spawn_task 派发：",
+      ...suggestions,
+      "",
+      "执行要求：",
+      "1. 先自己理解需求并拆解流程，再由你自己发起 spawn_task，不要等待系统代派。",
+      "2. 你的职责是主协调：理解需求、分工、review 回流结果、追问缺口、做最终综合。",
+      "3. 子 Agent 主要负责执行和验证；如果条件允许，请尽量保留独立审查 Agent，避免实现上下文污染审查判断。",
+      "4. 如果某个建议子任务不合适，可以自行改写、合并、跳过或新增更合理的子任务。",
+      "5. 如有必要，被派发的子 Agent 也可以继续使用 spawn_task 拆更小的子任务，但范围必须更具体，且它仍要对自己这段结果负责。",
+      "6. 最终答复必须由你统一输出，不要把总协调权让出去。",
+    ].filter(Boolean).join("\n");
+
+    coordinator.receive({
+      id: generateId(),
+      from: "system",
+      content: bootstrap,
+      timestamp: Date.now(),
+      priority: "urgent",
+      images: sourceMessage.images,
+    });
+    log(`[dialog_plan] delivered coordinator bootstrap to ${coordinator.role.name}`);
+  }
+
+  private getSuggestedPlannedSpawn(
+    spawnerActorId: string,
+    targetActorId: string,
+  ): NonNullable<DialogExecutionPlan["plannedSpawns"]>[number] | undefined {
+    const plan = this.dialogExecutionPlan;
+    if (!plan?.plannedSpawns?.length) return undefined;
+    const coordinatorActorId = plan.coordinatorActorId ?? plan.initialRecipientActorIds[0];
+    if (!coordinatorActorId || spawnerActorId !== coordinatorActorId) return undefined;
+    return plan.plannedSpawns.find((spawn) => spawn.targetActorId === targetActorId);
   }
 
   private isDialogPlanEdgeAllowed(
@@ -694,6 +1063,17 @@ export class ActorSystem {
   private getOpenSpawnedSessionByTarget(targetActorId: string): SpawnedTaskRecord | undefined {
     return [...this.spawnedTasks.values()]
       .filter((record) => record.mode === "session" && record.sessionOpen && record.targetActorId === targetActorId)
+      .sort((a, b) => (b.lastActiveAt ?? b.spawnedAt) - (a.lastActiveAt ?? a.spawnedAt))[0];
+  }
+
+  private getOwningSpawnedTaskForActor(actorId: string): SpawnedTaskRecord | undefined {
+    return [...this.spawnedTasks.values()]
+      .filter((record) =>
+        record.targetActorId === actorId
+        && (
+          record.status === "running"
+          || (record.mode === "session" && record.sessionOpen)
+        ))
       .sort((a, b) => (b.lastActiveAt ?? b.spawnedAt) - (a.lastActiveAt ?? a.spawnedAt))[0];
   }
 
@@ -778,12 +1158,16 @@ export class ActorSystem {
       _briefContent: opts?._briefContent,
       kind: from === "user" ? "user_input" : "agent_message",
       relatedRunId: opts?.relatedRunId,
+      ...(from !== "user" ? this.buildDialogMessageRecallPatch(from) : {}),
       ...(opts?.images?.length ? { images: opts.images } : {}),
     };
 
     target.receive(msg);
     if (from === "user" && !opts?.bypassPlanCheck) {
-      this.activateDialogExecutionPlan(msg.id);
+      const activated = this.activateDialogExecutionPlan(msg.id);
+      if (activated) {
+        this.deliverDialogExecutionPlanBootstrap(msg);
+      }
     }
     this.dialogHistory.push(msg);
     appendDialogMessage(this.sessionId, msg);
@@ -838,13 +1222,17 @@ export class ActorSystem {
       priority: "normal",
       _briefContent: opts?._briefContent,
       kind: from === "user" ? "user_input" : "agent_message",
+      ...(from !== "user" ? this.buildDialogMessageRecallPatch(from) : {}),
       ...(opts?.images?.length ? { images: opts.images } : {}),
     };
     this.dialogHistory.push(msg);
     appendDialogMessage(this.sessionId, msg);
     this.emitEvent(msg);
     if (from === "user") {
-      this.activateDialogExecutionPlan(msg.id);
+      const activated = this.activateDialogExecutionPlan(msg.id);
+      if (activated) {
+        this.deliverDialogExecutionPlanBootstrap(msg);
+      }
     }
 
     for (const actor of this.actors.values()) {
@@ -888,6 +1276,7 @@ export class ActorSystem {
       relatedRunId: activePending.length === 1
         ? this.dialogHistory.find((message) => message.id === activePending[0][0])?.relatedRunId
         : undefined,
+      ...(from !== "user" ? this.buildDialogMessageRecallPatch(from) : {}),
       ...(opts?.images?.length ? { images: opts.images } : {}),
     };
     this.dialogHistory.push(msg);
@@ -943,7 +1332,10 @@ export class ActorSystem {
           }
         }
       }
-      this.activateDialogExecutionPlan(msg.id);
+      const activated = this.activateDialogExecutionPlan(msg.id);
+      if (activated) {
+        this.deliverDialogExecutionPlanBootstrap(msg);
+      }
     } else {
       const recipientIds = [...this.actors.values()]
         .filter((actor) => actor.id !== from)
@@ -1046,16 +1438,71 @@ export class ActorSystem {
       cleanup?: "delete" | "keep";
       /** 是否期望完成消息通知 */
       expectsCompletionMessage?: boolean;
+      /** 本轮显式职责边界：执行 / 审查 / 验证 */
+      roleBoundary?: SpawnedTaskRoleBoundary;
+      /** 目标不存在时，是否自动创建一个临时子 Agent */
+      createIfMissing?: boolean;
+      /** 自动创建临时子 Agent 时的描述与能力提示 */
+      createChildSpec?: {
+        description?: string;
+        capabilities?: AgentCapability[];
+        workspace?: string;
+      };
       /** Subagent 独立配置：动态覆盖目标 Agent 的运行参数 */
       overrides?: import("./types").SpawnTaskOverrides;
     },
   ): SpawnedTaskRecord | { error: string } {
     const spawner = this.actors.get(spawnerActorId);
-    const target = this.actors.get(targetActorId);
     if (!spawner) return { error: `Spawner ${spawnerActorId} not found` };
+    const explicitRoleBoundary = opts?.roleBoundary;
+    let resolvedRoleBoundary: SpawnedTaskRoleBoundary = explicitRoleBoundary ?? "general";
+    let resolvedTargetActorId = targetActorId;
+    let target = this.actors.get(resolvedTargetActorId);
+    if (!target) {
+      const actorByName = this.getAll().find((actor) => actor.role.name === targetActorId);
+      if (actorByName) {
+        target = actorByName;
+        resolvedTargetActorId = actorByName.id;
+      }
+    }
+    const plannedSpawn = this.getSuggestedPlannedSpawn(spawnerActorId, resolvedTargetActorId);
+    if (!explicitRoleBoundary && resolvedRoleBoundary === "general" && plannedSpawn?.roleBoundary) {
+      resolvedRoleBoundary = plannedSpawn.roleBoundary;
+    }
+    if (!target && opts?.createIfMissing) {
+      if (resolvedRoleBoundary === "general") {
+        resolvedRoleBoundary = inferEphemeralChildBoundary({
+          name: targetActorId,
+          description: opts.createChildSpec?.description,
+          capabilities: opts.createChildSpec?.capabilities,
+        }).role;
+      }
+      const created = this.createEphemeralAgent(spawnerActorId, {
+        name: targetActorId,
+        description: opts.createChildSpec?.description,
+        capabilities: opts.createChildSpec?.capabilities,
+        roleBoundary: resolvedRoleBoundary,
+        workspace: opts.createChildSpec?.workspace,
+        toolPolicy: opts.overrides?.toolPolicy,
+        timeoutSeconds: opts.timeoutSeconds,
+        overrides: opts.overrides,
+      });
+      if ("error" in created) {
+        return { error: created.error };
+      }
+      target = created;
+      resolvedTargetActorId = created.id;
+    }
     if (!target) return { error: `Target ${targetActorId} not found` };
+    if (resolvedRoleBoundary === "general" && target.persistent === false) {
+      resolvedRoleBoundary = inferEphemeralChildBoundary({
+        name: target.role.name,
+        capabilities: target.capabilities?.tags,
+        description: target.capabilities?.description,
+      }).role;
+    }
     try {
-      this.assertActorSpawnAllowed(spawnerActorId, targetActorId);
+      this.assertActorSpawnAllowed(spawnerActorId, resolvedTargetActorId);
     } catch (error) {
       return { error: error instanceof Error ? error.message : String(error) };
     }
@@ -1065,7 +1512,7 @@ export class ActorSystem {
     }
 
     const mode = opts?.mode ?? "run";
-    const existingOpenSession = this.getOpenSpawnedSessionByTarget(targetActorId);
+    const existingOpenSession = this.getOpenSpawnedSessionByTarget(resolvedTargetActorId);
     if (mode === "session" && existingOpenSession) {
       if (existingOpenSession.spawnerActorId !== spawnerActorId) {
         return {
@@ -1100,13 +1547,20 @@ export class ActorSystem {
     const runId = generateId();
     const spawnerName = spawner.role.name;
     const targetName = target.role.name;
-    const label = opts?.label ?? task.slice(0, 30);
+    const label = opts?.label ?? plannedSpawn?.label ?? task.slice(0, 30);
     const timeoutMs = (opts?.timeoutSeconds ?? DEFAULT_SPAWN_TIMEOUT_MS / 1000) * 1000;
-    const cleanup = opts?.cleanup ?? "keep";
+    const cleanup = opts?.cleanup ?? (opts?.createIfMissing && mode === "run" ? "delete" : "keep");
     const expectsCompletionMessage = opts?.expectsCompletionMessage ?? true;
+    const parentRecord = this.getOwningSpawnedTaskForActor(spawnerActorId);
+    const rootRunId = parentRecord?.rootRunId ?? parentRecord?.runId ?? runId;
+    const effectiveContext = opts?.context ?? plannedSpawn?.context;
+    const roleBoundaryInstruction = buildSpawnTaskRoleBoundaryInstruction(resolvedRoleBoundary);
 
     let fullTask = `[由 ${spawnerName} 委派的任务]\n\n${task}`;
-    if (opts?.context) fullTask += `\n\n补充上下文：${opts.context}`;
+    if (roleBoundaryInstruction) {
+      fullTask += `\n\n[本轮职责边界]\n${roleBoundaryInstruction}`;
+    }
+    if (effectiveContext) fullTask += `\n\n补充上下文：${effectiveContext}`;
     if (opts?.attachments?.length) {
       fullTask += `\n\n附件文件路径：\n${opts.attachments.map((f) => `- ${f}`).join("\n")}`;
     }
@@ -1118,7 +1572,10 @@ export class ActorSystem {
     const record: SpawnedTaskRecord = {
       runId,
       spawnerActorId,
-      targetActorId,
+      targetActorId: resolvedTargetActorId,
+      parentRunId: parentRecord?.runId,
+      rootRunId,
+      roleBoundary: resolvedRoleBoundary,
       task,
       label,
       images: opts?.images?.length ? [...new Set(opts.images)] : undefined,
@@ -1145,13 +1602,13 @@ export class ActorSystem {
       this.finalizeSpawnedTaskHistoryWindow(record, target);
 
       if (expectsCompletionMessage) {
-        this.send(targetActorId, spawnerActorId, `[Task timeout: ${label}]\n\n子任务超时未完成，已自动终止。`);
+        this.send(resolvedTargetActorId, spawnerActorId, `[Task timeout: ${label}]\n\n子任务超时未完成，已自动终止。`);
       }
 
-      this.emitEvent({ type: "task_error", actorId: targetActorId, timestamp: Date.now(), detail: { runId, reason: "timeout" } });
+      this.emitEvent({ type: "task_error", actorId: resolvedTargetActorId, timestamp: Date.now(), detail: { runId, reason: "timeout" } });
       this.emitEvent({
         type: "spawned_task_timeout",
-        actorId: targetActorId,
+        actorId: resolvedTargetActorId,
         timestamp: Date.now(),
         detail: {
           ...taskEventBase,
@@ -1163,14 +1620,14 @@ export class ActorSystem {
 
       // 超时时清理（如果需要，且目标非持久 Agent）
       if (cleanup === "delete" && mode !== "session" && !target.persistent) {
-        this.kill(targetActorId);
+        this.kill(resolvedTargetActorId);
       } else if (cleanup === "delete" && mode !== "session" && target.persistent) {
         log(`spawnTask cleanup skipped on timeout: ${targetName} is persistent (runId=${runId})`);
       }
     }, timeoutMs);
 
     this.spawnedTasks.set(runId, record);
-    appendSpawnEvent(this.sessionId, spawnerActorId, targetActorId, task, runId);
+    appendSpawnEvent(this.sessionId, spawnerActorId, resolvedTargetActorId, task, runId);
 
     // 同步到 TaskCenter（如果可用）
     try {
@@ -1182,7 +1639,7 @@ export class ActorSystem {
         description: task.slice(0, 200),
         type: "agent_spawn",
         priority: "normal",
-        params: { runId, spawnerActorId, targetActorId },
+        params: { runId, spawnerActorId, targetActorId: resolvedTargetActorId },
         createdBy: spawnerName,
         assignee: targetName,
         timeoutSeconds: timeoutMs / 1000,
@@ -1193,7 +1650,7 @@ export class ActorSystem {
 
     // Emit structured spawned_task_started event (deer-flow SSE pattern)
     const taskEventBase: Omit<SpawnedTaskEventDetail, "status" | "elapsed"> = {
-      runId, spawnerActorId, targetActorId,
+      runId, spawnerActorId, targetActorId: resolvedTargetActorId,
       targetName, spawnerName, label, task,
     };
     let detachRunningListener: (() => void) | undefined;
@@ -1204,7 +1661,7 @@ export class ActorSystem {
     };
     this.emitEvent({
       type: "spawned_task_started",
-      actorId: targetActorId,
+      actorId: resolvedTargetActorId,
       timestamp: Date.now(),
       detail: { ...taskEventBase, status: "running" as const, elapsed: 0 },
     });
@@ -1219,7 +1676,7 @@ export class ActorSystem {
         : "";
       this.emitEvent({
         type: "spawned_task_running",
-        actorId: targetActorId,
+        actorId: resolvedTargetActorId,
         timestamp: event.timestamp,
         detail: {
           ...taskEventBase,
@@ -1234,11 +1691,11 @@ export class ActorSystem {
     // 触发 onSpawnTask 钩子
     void this.runHooks<SpawnTaskHookContext>("onSpawnTask", {
       system: this,
-      actorId: targetActorId,
+      actorId: resolvedTargetActorId,
       actorName: targetName,
       timestamp: Date.now(),
       spawnerId: spawnerActorId,
-      targetId: targetActorId,
+      targetId: resolvedTargetActorId,
       task,
       mode,
       runId,
@@ -1272,7 +1729,7 @@ export class ActorSystem {
           try { const { getTaskQueue } = require("@/core/task-center/task-queue"); getTaskQueue().fail(`spawn-${runId}`, record.error || "invalid result"); } catch { /* noop */ }
 
           if (expectsCompletionMessage) {
-            this.announceWithRetry(targetActorId, spawnerActorId, `[Task failed: ${label}]\n\nError: ${record.error}`, runId);
+            this.announceWithRetry(resolvedTargetActorId, spawnerActorId, `[Task failed: ${label}]\n\nError: ${record.error}`, runId);
           }
         } else {
           record.status = "completed";
@@ -1284,7 +1741,7 @@ export class ActorSystem {
           try { const { getTaskQueue } = require("@/core/task-center/task-queue"); getTaskQueue().complete(`spawn-${runId}`, taskResult.result?.slice(0, 500)); } catch { /* noop */ }
 
           if (expectsCompletionMessage) {
-            this.announceWithRetry(targetActorId, spawnerActorId, `[Task completed: ${label}]\n\n${taskResult.result}`, runId);
+            this.announceWithRetry(resolvedTargetActorId, spawnerActorId, `[Task completed: ${label}]\n\n${taskResult.result}`, runId);
           }
         }
       } else {
@@ -1297,18 +1754,18 @@ export class ActorSystem {
         try { const { getTaskQueue } = require("@/core/task-center/task-queue"); getTaskQueue().fail(`spawn-${runId}`, record.error || "unknown"); } catch { /* noop */ }
 
         if (expectsCompletionMessage) {
-          this.announceWithRetry(targetActorId, spawnerActorId, `[Task failed: ${label}]\n\nError: ${record.error}`, runId);
+          this.announceWithRetry(resolvedTargetActorId, spawnerActorId, `[Task failed: ${label}]\n\nError: ${record.error}`, runId);
         }
       }
 
-      this.emitEvent({ type: "task_completed", actorId: targetActorId, timestamp: Date.now(), detail: { runId } });
+      this.emitEvent({ type: "task_completed", actorId: resolvedTargetActorId, timestamp: Date.now(), detail: { runId } });
 
       // Emit structured spawned_task lifecycle event
       const elapsed = Date.now() - record.spawnedAt;
       if (record.status === "completed") {
         this.emitEvent({
           type: "spawned_task_completed",
-          actorId: targetActorId,
+          actorId: resolvedTargetActorId,
           timestamp: Date.now(),
           detail: {
             ...taskEventBase,
@@ -1320,7 +1777,7 @@ export class ActorSystem {
       } else {
         this.emitEvent({
           type: "spawned_task_failed",
-          actorId: targetActorId,
+          actorId: resolvedTargetActorId,
           timestamp: Date.now(),
           detail: {
             ...taskEventBase,
@@ -1334,11 +1791,11 @@ export class ActorSystem {
       // 触发 onSpawnTaskEnd 钩子
       void this.runHooks<SpawnTaskEndHookContext>("onSpawnTaskEnd", {
         system: this,
-        actorId: targetActorId,
+        actorId: resolvedTargetActorId,
         actorName: targetName,
         timestamp: Date.now(),
         spawnerId: spawnerActorId,
-        targetId: targetActorId,
+        targetId: resolvedTargetActorId,
         task,
         runId,
         status: record.status,
@@ -1349,7 +1806,7 @@ export class ActorSystem {
       // 根据 cleanup 策略决定是否删除子 agent（仅非持久 Agent 可删除）
       if (cleanup === "delete" && mode !== "session" && !target.persistent) {
         log(`spawnTask cleanup: deleting target ${targetName} (runId=${runId})`);
-        this.kill(targetActorId);
+        this.kill(resolvedTargetActorId);
       } else if (cleanup === "delete" && mode !== "session" && target.persistent) {
         log(`spawnTask cleanup skipped: ${targetName} is persistent (runId=${runId})`);
       }
@@ -1572,35 +2029,43 @@ export class ActorSystem {
   getDescendantTasks(actorId: string): Array<SpawnedTaskRecord & { depth: number }> {
     const result: Array<SpawnedTaskRecord & { depth: number }> = [];
     const visited = new Set<string>();
+    const taskByParentRunId = new Map<string, SpawnedTaskRecord[]>();
 
-    const collect = (parentId: string, depth: number) => {
-      const children = this.getSpawnedTasks(parentId);
-      for (const child of children) {
+    for (const record of this.spawnedTasks.values()) {
+      if (!record.parentRunId) continue;
+      const bucket = taskByParentRunId.get(record.parentRunId) ?? [];
+      bucket.push(record);
+      taskByParentRunId.set(record.parentRunId, bucket);
+    }
+
+    const collect = (records: SpawnedTaskRecord[], depth: number) => {
+      for (const child of records) {
         if (visited.has(child.runId)) continue;
         visited.add(child.runId);
         result.push({ ...child, depth });
-        collect(child.targetActorId, depth + 1);
+        const descendants = taskByParentRunId.get(child.runId) ?? [];
+        collect(descendants, depth + 1);
       }
     };
 
-    collect(actorId, 1);
+    const roots = this.getSpawnedTasks(actorId).sort((a, b) => a.spawnedAt - b.spawnedAt);
+    collect(roots, 1);
     return result;
   }
 
   /** 计算 spawn 链深度（通过 spawnedTasks 回溯 spawner 链） */
   private getSpawnDepth(actorId: string): number {
     let depth = 0;
-    let current = actorId;
+    let currentRecord = this.getOwningSpawnedTaskForActor(actorId);
     const visited = new Set<string>();
     while (true) {
-      if (visited.has(current)) break;
-      visited.add(current);
-      const parentRecord = [...this.spawnedTasks.values()].find(
-        (r) => r.targetActorId === current && r.status === "running",
-      );
-      if (!parentRecord) break;
+      if (!currentRecord) break;
+      if (visited.has(currentRecord.runId)) break;
+      visited.add(currentRecord.runId);
       depth++;
-      current = parentRecord.spawnerActorId;
+      currentRecord = currentRecord.parentRunId
+        ? this.spawnedTasks.get(currentRecord.parentRunId)
+        : undefined;
     }
     return depth;
   }
@@ -1742,6 +2207,7 @@ export class ActorSystem {
       priority: "normal",
       kind: "agent_result",
       relatedRunId: this.getOpenSpawnedSessionByTarget(actorId)?.runId,
+      ...this.buildDialogMessageRecallPatch(actorId),
     };
     this.dialogHistory.push(msg);
     appendDialogMessage(this.sessionId, msg);
@@ -2443,6 +2909,30 @@ export class ActorSystem {
       this.sessionId,
       this.getAll().map((a) => ({ id: a.id, name: a.role.name, model: a.modelOverride })),
     );
+  }
+
+  private buildDialogMessageRecallPatch(actorId: string): Pick<
+    DialogMessage,
+    | "memoryRecallAttempted"
+    | "appliedMemoryPreview"
+    | "transcriptRecallAttempted"
+    | "transcriptRecallHitCount"
+    | "appliedTranscriptPreview"
+  > {
+    const actor = this.actors.get(actorId);
+    if (!actor) {
+      return {};
+    }
+    const memoryPreview = collectDialogMessagePreview(actor.lastMemoryRecallPreview);
+    const transcriptPreview = collectDialogMessagePreview(actor.lastTranscriptRecallPreview);
+    const transcriptHitCount = Math.max(0, actor.lastTranscriptRecallHitCount ?? 0);
+    return {
+      ...(actor.lastMemoryRecallAttempted ? { memoryRecallAttempted: true } : {}),
+      ...(memoryPreview ? { appliedMemoryPreview: memoryPreview } : {}),
+      ...(actor.lastTranscriptRecallAttempted ? { transcriptRecallAttempted: true } : {}),
+      ...(transcriptHitCount > 0 ? { transcriptRecallHitCount: transcriptHitCount } : {}),
+      ...(transcriptPreview ? { appliedTranscriptPreview: transcriptPreview } : {}),
+    };
   }
 
   private updateDialogMessage(messageId: string, patch: Partial<DialogMessage>): void {

@@ -6,6 +6,7 @@ import {
 import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
 import { inferCodingExecutionProfile } from "@/core/agent/coding-profile";
 import type { AICenterHandoff } from "@/store/app-store";
+import { getSpawnedTaskRoleBoundaryMeta } from "./spawned-task-role-boundary";
 import type { TodoItem } from "./middlewares";
 import type {
   DialogArtifactRecord,
@@ -318,11 +319,13 @@ export function buildDialogSpawnedTaskHandoff(params: {
   ], 12);
   const visualAttachmentPaths = pickVisualAttachmentPaths(artifactPaths, 8) ?? [];
   const actorName = actorNameById?.get(task.targetActorId) ?? targetActor?.roleName ?? task.targetActorId;
+  const roleBoundaryMeta = getSpawnedTaskRoleBoundaryMeta(task.roleBoundary);
 
   const intro = [
     `请接力继续推进 Dialog 子任务：${summarizeAISessionRuntimeText(task.label ?? task.task, 80) || "未命名子任务"}`,
     "",
     `原始任务：${task.task}`,
+    `当前职责：${roleBoundaryMeta.label}`,
     checkpoint ? `当前阶段：${checkpoint.stageLabel}` : "",
     checkpoint?.summary ? `当前进展：${checkpoint.summary}` : "",
     checkpoint?.nextStep ? `建议下一步：${checkpoint.nextStep}` : "",
@@ -342,6 +345,7 @@ export function buildDialogSpawnedTaskHandoff(params: {
       || "继续推进当前子任务",
     intent: inferredCoding.profile.codingMode ? "coding" : "delivery",
     keyPoints: [
+      `职责边界：${roleBoundaryMeta.label}`,
       checkpoint ? `当前阶段：${checkpoint.stageLabel}` : "",
       checkpoint?.activeTodoCount ? `${checkpoint.activeTodoCount} 个活跃待办` : "",
       visualAttachmentPaths.length ? `${visualAttachmentPaths.length} 张视觉参考图` : "",
@@ -375,9 +379,9 @@ export function buildDialogSpawnedTaskHandoff(params: {
     }),
     sourceMode: "dialog",
     ...(sourceSessionId ? { sourceSessionId } : {}),
-    sourceLabel: `Dialog 子任务 · ${actorName}`,
+    sourceLabel: `Dialog 子任务 · ${actorName} · ${roleBoundaryMeta.shortLabel}`,
     summary: checkpoint
-      ? `从 Dialog 子任务接力 · ${checkpoint.stageLabel}${checkpoint.activeTodoCount ? ` · ${checkpoint.activeTodoCount} 个活跃待办` : ""}`
+      ? `从 Dialog 子任务接力 · ${roleBoundaryMeta.label} · ${checkpoint.stageLabel}${checkpoint.activeTodoCount ? ` · ${checkpoint.activeTodoCount} 个活跃待办` : ""}`
       : "从 Dialog 子任务接力",
   });
 }

@@ -83,9 +83,16 @@ export function buildAgentContextRuntimeDebugReport(params: {
       runModeLabel: promptSnapshot?.runModeLabel,
       bootstrapFileCount: promptSnapshot?.bootstrapContextFileCount ?? 0,
       bootstrapFileNames: promptSnapshot?.bootstrapContextFileNames?.slice(0, 6) ?? [],
+      bootstrapUsedChars: promptSnapshot?.bootstrapDiagnostics.usedChars ?? 0,
+      bootstrapTotalChars: promptSnapshot?.bootstrapDiagnostics.totalMaxChars ?? 0,
+      bootstrapTruncatedFileCount:
+        promptSnapshot?.bootstrapDiagnostics.truncatedFileCount ?? 0,
+      bootstrapOmittedFileCount:
+        promptSnapshot?.bootstrapDiagnostics.omittedFileCount ?? 0,
       historyContextMessageCount: promptSnapshot?.historyContextMessageCount ?? 0,
       knowledgeContextMessageCount: promptSnapshot?.knowledgeContextMessageCount ?? 0,
       memoryItemCount: promptSnapshot?.memoryItemCount ?? 0,
+      transcriptRecallHitCount: promptSnapshot?.transcriptRecallHitCount ?? 0,
     },
     compaction: {
       compactedTaskCount: session?.compaction?.compactedTaskCount ?? 0,

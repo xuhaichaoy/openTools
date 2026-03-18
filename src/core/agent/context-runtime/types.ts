@@ -10,13 +10,16 @@ export interface TaskScopeSnapshot {
   imagePaths: string[];
   handoffPaths: string[];
   pathHints: string[];
+  queryPathHints?: string[];
   queryIntent: AgentQueryIntent;
   explicitReset: boolean;
+  workspaceSource?: "explicit" | "attachment" | "handoff" | "query_path" | "locked_previous" | "none";
 }
 
 export type ContinuityReason =
   | "same_workspace"
   | "workspace_switch"
+  | "path_focus_shift"
   | "query_topic_switch"
   | "explicit_new_task"
   | "force_new_session";

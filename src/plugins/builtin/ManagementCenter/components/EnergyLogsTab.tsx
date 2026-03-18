@@ -48,7 +48,7 @@ export function EnergyLogsTab() {
   }, [fetchLogs]);
 
   return (
-    <div className="max-w-xl mx-auto space-y-[var(--space-compact-3)]">
+    <div className="w-full space-y-[var(--space-compact-3)]">
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-sm font-semibold">能量流水</h2>

@@ -49,6 +49,7 @@ import { ChatHistory } from "./ChatHistory";
 import { useDragWindow } from "@/hooks/useDragWindow";
 import { routeToAICenter } from "@/core/ai/ai-center-routing";
 import { useShallow } from "zustand/shallow";
+import { getForegroundRuntimeSession, useRuntimeStateStore } from "@/core/agent/context-runtime/runtime-state";
 
 export interface ChatViewHandle {
   toggleHistory: () => void;
@@ -64,7 +65,7 @@ export interface ChatViewHandle {
   continueInDialog: () => void;
 }
 
-export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideModelSelector?: boolean; headless?: boolean }>(function ChatView({ onBack, hideModelSelector, headless }, ref) {
+export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideModelSelector?: boolean; headless?: boolean; active?: boolean }>(function ChatView({ onBack, hideModelSelector, headless, active = true }, ref) {
   const [input, setInput] = useState("");
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const {
@@ -104,6 +105,7 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
     config,
     conversations,
     currentConversationId,
+    setCurrentConversation,
     createConversation,
     updateConversation,
     stopStreaming,
@@ -115,6 +117,7 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
       config: s.config,
       conversations: s.conversations,
       currentConversationId: s.currentConversationId,
+      setCurrentConversation: s.setCurrentConversation,
       createConversation: s.createConversation,
       updateConversation: s.updateConversation,
       stopStreaming: s.stopStreaming,
@@ -403,6 +406,27 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
     setShowSearch(false);
     setSearchQuery("");
   }, [currentConversationId]);
+
+  useEffect(() => {
+    useRuntimeStateStore.getState().setPanelVisible("ask", active);
+    if (!active) return;
+
+    const foregroundSessionId = getForegroundRuntimeSession("ask")?.sessionId;
+    const targetConversationId = currentConversationId || foregroundSessionId || null;
+    if (
+      targetConversationId
+      && conversations.some((item) => item.id === targetConversationId)
+    ) {
+      if (currentConversationId !== targetConversationId) {
+        setCurrentConversation(targetConversationId);
+      }
+      useRuntimeStateStore.getState().setForegroundSession("ask", targetConversationId);
+    }
+  }, [active, conversations, currentConversationId, setCurrentConversation]);
+
+  useEffect(() => () => {
+    useRuntimeStateStore.getState().setPanelVisible("ask", false);
+  }, []);
 
   useEffect(() => {
     if (!pendingAICenterHandoff || pendingAICenterHandoff.mode !== "ask") return;

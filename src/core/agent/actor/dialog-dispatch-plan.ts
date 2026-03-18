@@ -10,6 +10,8 @@ import type {
   AgentCapability,
   AgentCapabilities,
   DialogExecutionPlan,
+  DialogExecutionPlannedSpawn,
+  SpawnedTaskRoleBoundary,
 } from "./types";
 
 export interface DialogPlanningActor {
@@ -97,11 +99,16 @@ function pickBestActor(
   actors: DialogPlanningActor[],
   weights: CapabilityWeights,
   excludeIds: Set<string>,
+  requiredAny?: AgentCapability[],
 ): DialogPlanningActor | null {
   let best: DialogPlanningActor | null = null;
   let bestScore = Number.NEGATIVE_INFINITY;
   for (const actor of actors) {
     if (excludeIds.has(actor.id)) continue;
+    const caps = getActorCapabilities(actor);
+    if (requiredAny?.length && !requiredAny.some((capability) => caps.includes(capability))) {
+      continue;
+    }
     const score = scoreActor(actor, weights);
     if (score > bestScore) {
       best = actor;
@@ -211,7 +218,7 @@ function getPrimaryWeights(
 function getSupportRoleSpecs(
   focus: DialogCodingFocus,
   largeProjectMode: boolean,
-): Array<{ id: DialogSupportRoleId; label: string; weights: CapabilityWeights }> {
+): Array<{ id: DialogSupportRoleId; label: string; weights: CapabilityWeights; requiredAny?: AgentCapability[] }> {
   const queue = (() => {
     switch (focus) {
       case "review":
@@ -227,7 +234,7 @@ function getSupportRoleSpecs(
     }
   })();
 
-  const specs: Record<DialogSupportRoleId, { label: string; weights: CapabilityWeights }> = {
+  const specs: Record<DialogSupportRoleId, { label: string; weights: CapabilityWeights; requiredAny?: AgentCapability[] }> = {
     architect: {
       label: "架构把关",
       weights: {
@@ -237,6 +244,7 @@ function getSupportRoleSpecs(
         synthesis: 2,
         code_review: 1,
       },
+      requiredAny: ["architecture", "code_analysis", "synthesis"],
     },
     implementer: {
       label: "核心实现",
@@ -248,6 +256,7 @@ function getSupportRoleSpecs(
         file_write: 1,
         shell_execute: 1,
       },
+      requiredAny: ["code_write", "file_write", "shell_execute"],
     },
     reviewer: {
       label: "代码评审",
@@ -258,6 +267,7 @@ function getSupportRoleSpecs(
         architecture: 1,
         testing: 1,
       },
+      requiredAny: ["code_review", "security", "architecture"],
     },
     debugger: {
       label: "问题定位",
@@ -267,6 +277,7 @@ function getSupportRoleSpecs(
         testing: 2,
         code_write: 2,
       },
+      requiredAny: ["debugging"],
     },
     tester: {
       label: "验证回归",
@@ -276,6 +287,7 @@ function getSupportRoleSpecs(
         code_write: 1,
         shell_execute: 1,
       },
+      requiredAny: ["testing", "debugging"],
     },
     support: {
       label: largeProjectMode ? "模块支援" : "补充支援",
@@ -302,7 +314,7 @@ function assignSupportRoles(
   const usedIds = new Set<string>([primaryActorId]);
   const assignments: DialogSupportAssignment[] = [];
   for (const spec of getSupportRoleSpecs(focus, largeProjectMode)) {
-    const actor = pickBestActor(supportingActors, spec.weights, usedIds);
+    const actor = pickBestActor(supportingActors, spec.weights, usedIds, spec.requiredAny);
     if (!actor) continue;
     usedIds.add(actor.id);
     assignments.push({
@@ -338,6 +350,32 @@ function buildDirectTask(taskSummary: string, insight: DialogDispatchInsight): s
   return `直接处理用户指派的编码任务${focus}：${taskSummary.slice(0, 240)}`;
 }
 
+function buildGeneralSupportTask(
+  actor: DialogPlanningActor,
+  primaryActorName: string,
+  taskSummary: string,
+): string {
+  const capabilities = getActorCapabilities(actor);
+  const perspective = (() => {
+    if (capabilities.includes("security")) return "从安全、权限边界和潜在风险角度";
+    if (capabilities.includes("performance")) return "从性能瓶颈、资源消耗和扩展性角度";
+    if (capabilities.includes("architecture")) return "从架构边界、模块依赖和长期演进角度";
+    if (capabilities.includes("testing")) return "从验证路径、回归覆盖和可复验性角度";
+    if (capabilities.includes("code_review")) return "从质量、边界条件和回归风险角度";
+    if (capabilities.includes("debugging")) return "从异常链路、根因定位和排查证据角度";
+    if (capabilities.includes("creative")) return "从新方案、替代思路和差异化角度";
+    if (capabilities.includes("synthesis")) return "从信息整合、优先级和结构化输出角度";
+    if (capabilities.includes("documentation")) return "从需求澄清、约束归纳和文档表达角度";
+    if (capabilities.includes("research") || capabilities.includes("web_search") || capabilities.includes("information_retrieval")) {
+      return "从资料调研、事实核对和可引用信息角度";
+    }
+    if (capabilities.includes("code_write")) return "从可落地实现和最小改动方案角度";
+    return "从你的专长角度";
+  })();
+
+  return `${perspective}分析当前任务：${taskSummary.slice(0, 220)}。输出关键发现、风险、建议与下一步，并回传给 ${primaryActorName} 统一整合。`;
+}
+
 function buildCodingLeadTask(params: {
   routingMode: DialogRoutingMode;
   taskSummary: string;
@@ -357,27 +395,27 @@ function buildCodingLeadTask(params: {
   const routeText = formatRouteReason(routeReason);
   if (routingMode === "smart") {
     if (largeProjectMode) {
-      return `优先接手大型编码任务，先按“探索 -> 设计 -> 实施 -> 验证”拆解范围，再按需派发实现/评审/验证子任务：${taskSummary.slice(0, 240)}${routeText}`;
+      return `优先接手大型编码任务，先按“探索 -> 设计 -> 实施 -> 独立审查 -> 验证”拆解范围，再按需派发实现/评审/验证子任务：${taskSummary.slice(0, 240)}${routeText}`;
     }
     if (focus === "debugging") {
-      return `优先接手问题定位与修复任务，先确认根因和受影响范围，再按需派发修复或验证子任务：${taskSummary.slice(0, 240)}${routeText}`;
+      return `优先接手问题定位与修复任务，先确认根因和受影响范围，再按需派发修复、独立审查或验证子任务：${taskSummary.slice(0, 240)}${routeText}`;
     }
     if (focus === "review") {
       return `优先接手代码评审任务，先标出风险与待确认点，再按需派发修复或验证子任务：${taskSummary.slice(0, 240)}${routeText}`;
     }
-    return `优先接手编码任务${focusText ? `（${focusText}）` : ""}，先确认修改范围与验证路径，再按需派发子任务：${taskSummary.slice(0, 240)}${routeText}`;
+    return `优先接手编码任务${focusText ? `（${focusText}）` : ""}，先确认修改范围与验证路径，并预留独立 review，再按需派发子任务：${taskSummary.slice(0, 240)}${routeText}`;
   }
 
   if (largeProjectMode) {
-    return `作为技术协调者先拆解大型编码任务，明确受影响模块、修改边界与验证顺序，再通过 spawn_task 调度实现/评审/验证：${taskSummary.slice(0, 240)}`;
+    return `作为技术协调者先拆解大型编码任务，明确受影响模块、修改边界、独立审查点与验证顺序，再通过 spawn_task 调度实现/评审/验证：${taskSummary.slice(0, 240)}`;
   }
   if (focus === "debugging") {
-    return `作为协调者先定位问题根因和最小修复路径，再按需派发实现与验证子任务：${taskSummary.slice(0, 240)}`;
+    return `作为协调者先定位问题根因和最小修复路径，再按需派发实现、独立审查与验证子任务：${taskSummary.slice(0, 240)}`;
   }
   if (focus === "review") {
     return `作为协调者先归纳需要审查的风险点，再按需派发修复建议与验证子任务：${taskSummary.slice(0, 240)}`;
   }
-  return `作为协调者先拆解编码任务${focusText ? `（${focusText}）` : ""}，再按需 spawn_task 派发实现、评审和验证：${taskSummary.slice(0, 240)}`;
+  return `作为协调者先拆解编码任务${focusText ? `（${focusText}）` : ""}，再按需 spawn_task 派发实现、独立评审和验证：${taskSummary.slice(0, 240)}`;
 }
 
 function buildCodingSupportTask(
@@ -401,7 +439,7 @@ function buildCodingSupportTask(
       }
       return `负责核心实现，明确修改文件、接口变化与验证结果，并及时回报给 ${primaryActorName}。`;
     case "reviewer":
-      return `对实现方案或代码改动做 review，重点检查边界条件、回归风险、可维护性与潜在副作用。`;
+      return `作为独立审查者，对实现方案或代码改动做 review，重点检查边界条件、回归风险、可维护性与潜在副作用；尽量不要被实现细节带偏。`;
     case "debugger":
       return `定位异常链路与复现条件，帮助 ${primaryActorName} 快速锁定根因；必要时补充最小复现与排查证据。`;
     case "tester":
@@ -430,6 +468,38 @@ function buildCodingRuntimeSummary(
     return `${primaryActor.roleName} 主接手编码任务${focusText ? ` · ${focusText}` : ""}，并协调 ${roleSummary}`;
   }
   return `${primaryActor.roleName} 作为技术协调者推进编码任务${focusText ? ` · ${focusText}` : ""}，并调度 ${roleSummary}`;
+}
+
+function mapSupportRoleToBoundary(roleId: DialogSupportRoleId): SpawnedTaskRoleBoundary {
+  switch (roleId) {
+    case "implementer":
+    case "debugger":
+      return "executor";
+    case "reviewer":
+    case "architect":
+      return "reviewer";
+    case "tester":
+      return "validator";
+    default:
+      return "general";
+  }
+}
+
+function buildPlannedSpawns(
+  assignments: Array<{
+    actor: DialogPlanningActor;
+    task: string;
+    label: string;
+    roleBoundary?: SpawnedTaskRoleBoundary;
+  }>,
+): DialogExecutionPlannedSpawn[] {
+  return assignments.map((assignment, index) => ({
+    id: `spawn-${index + 1}`,
+    targetActorId: assignment.actor.id,
+    task: assignment.task,
+    label: assignment.label,
+    roleBoundary: assignment.roleBoundary,
+  }));
 }
 
 function buildCodingBroadcastSteps(
@@ -629,6 +699,12 @@ export function buildDialogDispatchPlanBundle(params: {
   }));
 
   if (!insight.codingProfile.profile.codingMode || !insight.focus) {
+    const supportTasks = supportingActors.map((actor) => ({
+      actor,
+      task: buildGeneralSupportTask(actor, primaryActor.roleName, taskSummary),
+      label: actor.roleName,
+      roleBoundary: "general" as const,
+    }));
     const steps = [
       {
         id: "plan-1",
@@ -639,10 +715,10 @@ export function buildDialogDispatchPlanBundle(params: {
         dependencies: [],
         critical: true,
       },
-      ...supportingActors.map((actor, index) => ({
+      ...supportTasks.map((assignment, index) => ({
         id: `plan-${index + 2}`,
-        role: actor.roleName,
-        task: `保持待命；当 ${primaryActor.roleName} 派发任务时，负责自己擅长的子问题`,
+        role: assignment.actor.roleName,
+        task: assignment.task,
         dependencies: ["plan-1"],
         critical: false,
       })),
@@ -665,6 +741,7 @@ export function buildDialogDispatchPlanBundle(params: {
         coordinatorActorId: primaryActor.id,
         allowedMessagePairs,
         allowedSpawnPairs,
+        plannedSpawns: buildPlannedSpawns(supportTasks),
         state: "armed",
       },
       insight,
@@ -705,6 +782,19 @@ export function buildDialogDispatchPlanBundle(params: {
       critical: false,
     })),
   ];
+  const plannedSpawns = buildPlannedSpawns(
+    assignments.map((assignment) => ({
+      actor: assignment.actor,
+      task: buildCodingSupportTask(
+        assignment,
+        primaryActor.roleName,
+        insight.focus!,
+        insight.codingProfile.profile.largeProjectMode,
+      ),
+      label: assignment.roleLabel,
+      roleBoundary: mapSupportRoleToBoundary(assignment.roleId),
+    })),
+  );
 
   return {
     clusterPlan: {
@@ -735,6 +825,7 @@ export function buildDialogDispatchPlanBundle(params: {
       coordinatorActorId: primaryActor.id,
       allowedMessagePairs,
       allowedSpawnPairs,
+      plannedSpawns,
       state: "armed",
     },
     insight,

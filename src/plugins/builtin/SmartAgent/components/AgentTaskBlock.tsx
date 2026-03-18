@@ -212,6 +212,12 @@ function AgentTaskBlockInner({
   const shouldCollapseProcess = processCollapsed && effectiveStatus !== "running";
   const lastStep = task.steps[task.steps.length - 1];
   const { mainText, attachmentMeta } = splitTaskQueryDisplay(task.query);
+  const appliedMemoryPreview = task.appliedMemoryPreview ?? [];
+  const appliedMemoryCount =
+    task.appliedMemoryIds?.length ?? appliedMemoryPreview.length;
+  const appliedTranscriptPreview = task.appliedTranscriptPreview ?? [];
+  const appliedTranscriptCount =
+    task.transcriptRecallHitCount ?? appliedTranscriptPreview.length;
 
   const statusClassMap: Record<string, string> = {
     success: "text-[var(--color-text-secondary)] bg-[var(--color-bg-secondary)]/75",
@@ -315,6 +321,50 @@ function AgentTaskBlockInner({
                 onClick={(blobUrl) => setPreviewImage(blobUrl)}
               />
             ))}
+          </div>
+        )}
+        {task.memoryRecallAttempted && (
+          <div className="mt-2.5 rounded-2xl border border-emerald-500/15 bg-emerald-500/[0.05] px-3 py-2">
+            <div className="text-[11px] text-[var(--color-text-secondary)]">
+              {appliedMemoryCount > 0
+                ? `已用记忆 ${appliedMemoryCount} 条`
+                : "已检索长期记忆，本轮未命中"}
+            </div>
+            {appliedMemoryPreview.length > 0 && (
+              <div className="mt-1 flex flex-wrap gap-1.5">
+                {appliedMemoryPreview.map((item, index) => (
+                  <span
+                    key={`${task.id}-memory-${index}`}
+                    className="inline-flex max-w-full rounded-full border border-emerald-500/20 bg-[var(--color-bg)]/70 px-2 py-0.5 text-[11px] leading-5 text-[var(--color-text-secondary)]"
+                    title={item}
+                  >
+                    {item}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+        {task.transcriptRecallAttempted && (
+          <div className="mt-2.5 rounded-2xl border border-sky-500/15 bg-sky-500/[0.05] px-3 py-2">
+            <div className="text-[11px] text-[var(--color-text-secondary)]">
+              {appliedTranscriptCount > 0
+                ? `已回补会话轨迹 ${appliedTranscriptCount} 条`
+                : "已检索会话轨迹，本轮未命中"}
+            </div>
+            {appliedTranscriptPreview.length > 0 && (
+              <div className="mt-1 flex flex-wrap gap-1.5">
+                {appliedTranscriptPreview.map((item, index) => (
+                  <span
+                    key={`${task.id}-transcript-${index}`}
+                    className="inline-flex max-w-full rounded-full border border-sky-500/20 bg-[var(--color-bg)]/70 px-2 py-0.5 text-[11px] leading-5 text-[var(--color-text-secondary)]"
+                    title={item}
+                  >
+                    {item}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -478,6 +528,15 @@ export const AgentTaskBlock = React.memo(AgentTaskBlockInner, (prev, next) => {
       prev.task.query !== next.task.query ||
       prev.task.answer !== next.task.answer ||
       prev.task.status !== next.task.status ||
+      prev.task.memoryRecallAttempted !== next.task.memoryRecallAttempted ||
+      (prev.task.appliedMemoryIds?.join("\n") || "") !==
+        (next.task.appliedMemoryIds?.join("\n") || "") ||
+      (prev.task.appliedMemoryPreview?.join("\n") || "") !==
+        (next.task.appliedMemoryPreview?.join("\n") || "") ||
+      prev.task.transcriptRecallAttempted !== next.task.transcriptRecallAttempted ||
+      prev.task.transcriptRecallHitCount !== next.task.transcriptRecallHitCount ||
+      (prev.task.appliedTranscriptPreview?.join("\n") || "") !==
+        (next.task.appliedTranscriptPreview?.join("\n") || "") ||
       prev.task.steps.length !== next.task.steps.length ||
       prev.task.steps[prev.task.steps.length - 1]?.type !==
         next.task.steps[next.task.steps.length - 1]?.type ||

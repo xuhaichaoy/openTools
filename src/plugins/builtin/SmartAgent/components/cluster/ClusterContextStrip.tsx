@@ -64,6 +64,26 @@ export function ClusterContextStrip({ snapshot }: ClusterContextStripProps) {
             最近运行 {snapshot.lastRunStatus === "success" ? "成功" : snapshot.lastRunStatus === "error" ? "失败" : "中断"}
           </span>
         )}
+        {snapshot && snapshot.memoryHitCount > 0 && (
+          <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-700">
+            记忆 {snapshot.memoryHitCount}
+          </span>
+        )}
+        {snapshot && snapshot.memoryRecallAttempted && snapshot.memoryHitCount === 0 && (
+          <span className="rounded-full border border-amber-500/20 bg-amber-500/5 px-2 py-0.5 text-[10px] text-amber-700">
+            记忆已检索
+          </span>
+        )}
+        {snapshot && snapshot.transcriptRecallHitCount > 0 && (
+          <span className="rounded-full border border-violet-500/20 bg-violet-500/10 px-2 py-0.5 text-[10px] text-violet-700">
+            轨迹 {snapshot.transcriptRecallHitCount}
+          </span>
+        )}
+        {snapshot && snapshot.transcriptRecallAttempted && snapshot.transcriptRecallHitCount === 0 && (
+          <span className="rounded-full border border-violet-500/20 bg-violet-500/5 px-2 py-0.5 text-[10px] text-violet-700">
+            轨迹已检索
+          </span>
+        )}
         {snapshot?.reportPreview && (
           <span className="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 text-[10px] text-indigo-700">
             已汇总
@@ -81,6 +101,16 @@ export function ClusterContextStrip({ snapshot }: ClusterContextStripProps) {
       {snapshot?.lastSessionNotePreview && (
         <div className="mt-1 text-[11px] text-[var(--color-text-tertiary)]">
           最近会话笔记：{snapshot.lastSessionNotePreview}
+        </div>
+      )}
+      {snapshot && snapshot.memoryPreview.length > 0 && (
+        <div className="mt-1 text-[11px] text-[var(--color-text-tertiary)]">
+          记忆命中：{snapshot.memoryPreview.join("；")}
+        </div>
+      )}
+      {snapshot && snapshot.transcriptPreview.length > 0 && (
+        <div className="mt-1 text-[11px] text-[var(--color-text-tertiary)]">
+          轨迹回补：{snapshot.transcriptPreview.join("；")}
         </div>
       )}
     </div>

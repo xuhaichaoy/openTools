@@ -463,11 +463,11 @@ export function AICenter({
       <div className="flex-1 overflow-hidden relative">
         <Suspense fallback={Loading}>
           <div className={`absolute inset-0 ${mode === "ask" ? "" : "invisible pointer-events-none"}`}>
-            <ChatView ref={chatRef} headless hideModelSelector />
+            <ChatView ref={chatRef} headless hideModelSelector active={mode === "ask"} />
           </div>
           {mounted.agent && (
             <div className={`absolute inset-0 ${mode === "agent" ? "" : "invisible pointer-events-none"}`}>
-              <SmartAgentPlugin ref={agentRef} ai={ai} headless />
+              <SmartAgentPlugin ref={agentRef} ai={ai} headless active={mode === "agent"} />
             </div>
           )}
           {mounted.cluster && (

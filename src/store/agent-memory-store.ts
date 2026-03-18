@@ -6,7 +6,10 @@ import {
   migrateAgentMemory,
   queueMemoryCandidateFromAgent,
 } from "@/core/ai/memory-store";
-import { buildAssistantMemoryPromptForQuery } from "@/core/ai/assistant-memory";
+import {
+  buildAssistantMemoryPromptBundleForQuery,
+  type AssistantMemoryPromptBundle,
+} from "@/core/ai/assistant-memory";
 
 export interface UserMemory {
   key: string;
@@ -42,6 +45,15 @@ interface AgentMemoryState {
       preferSemantic?: boolean;
     },
   ) => Promise<string>;
+  getMemoryRecallBundleAsync: (
+    query: string,
+    options?: {
+      topK?: number;
+      conversationId?: string;
+      workspaceId?: string;
+      preferSemantic?: boolean;
+    },
+  ) => Promise<AssistantMemoryPromptBundle>;
 }
 
 let cachedPrompt = "";
@@ -117,11 +129,23 @@ export const useAgentMemoryStore = create<AgentMemoryState>((set, get) => ({
   },
 
   getMemoriesForQueryPromptAsync: async (query, options) => {
-    return buildAssistantMemoryPromptForQuery(query, {
+    const bundle = await buildAssistantMemoryPromptBundleForQuery(query, {
       topK: options?.topK ?? 6,
       conversationId: options?.conversationId,
       workspaceId: options?.workspaceId,
       preferSemantic: options?.preferSemantic ?? true,
+      enableTranscriptFallback: true,
+    });
+    return bundle.prompt;
+  },
+
+  getMemoryRecallBundleAsync: async (query, options) => {
+    return buildAssistantMemoryPromptBundleForQuery(query, {
+      topK: options?.topK ?? 6,
+      conversationId: options?.conversationId,
+      workspaceId: options?.workspaceId,
+      preferSemantic: options?.preferSemantic ?? true,
+      enableTranscriptFallback: true,
     });
   },
 }));

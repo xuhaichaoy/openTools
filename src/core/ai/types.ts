@@ -29,6 +29,10 @@ export interface ChatMessage {
   /** Ask 模式本轮回答前注入的长期记忆引用 */
   appliedMemoryIds?: string[];
   appliedMemoryPreview?: string[];
+  /** Ask 模式本轮回答前回补的会话轨迹引用 */
+  transcriptRecallAttempted?: boolean;
+  transcriptRecallHitCount?: number;
+  appliedTranscriptPreview?: string[];
 }
 
 /**

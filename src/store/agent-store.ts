@@ -17,6 +17,7 @@ import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
 import type { AICenterHandoff } from "@/store/app-store";
 import { buildRecoveredAgentTaskPatch } from "@/plugins/builtin/SmartAgent/core/agent-task-state";
 import { useAISessionRuntimeStore } from "@/store/ai-session-runtime-store";
+import type { AgentQueryIntent } from "@/core/agent/context-runtime/types";
 
 /** 单个任务（一次用户提问 + Agent 执行流程） */
 export interface AgentTask {
@@ -39,6 +40,12 @@ export interface AgentTask {
   last_finished_at?: number;
   last_duration_ms?: number;
   last_result_status?: "success" | "error" | "skipped";
+  memoryRecallAttempted?: boolean;
+  appliedMemoryIds?: string[];
+  appliedMemoryPreview?: string[];
+  transcriptRecallAttempted?: boolean;
+  transcriptRecallHitCount?: number;
+  appliedTranscriptPreview?: string[];
 }
 
 export interface AgentQueuedFollowUp {
@@ -77,10 +84,21 @@ export interface AgentSession {
   tasks: AgentTask[];
   createdAt: number;
   workspaceRoot?: string;
+  repoRoot?: string;
+  lastActivePaths?: string[];
+  lastTaskIntent?: AgentQueryIntent;
+  workspaceLocked?: boolean;
+  workspaceLockReason?: "user" | "session_policy";
+  lastSoftResetAt?: number;
   lastContinuityStrategy?: string;
   lastContinuityReason?: string;
   lastContextResetAt?: number;
   lastMemoryItemCount?: number;
+  lastMemoryRecallAttempted?: boolean;
+  lastMemoryRecallPreview?: string[];
+  lastTranscriptRecallAttempted?: boolean;
+  lastTranscriptRecallHitCount?: number;
+  lastTranscriptRecallPreview?: string[];
   lastSessionNotePreview?: string;
   lastContextRuntimeReport?: AgentContextRuntimeDebugReport;
   /** 跨模式 handoff 来源信息（如从 Ask 切换到 Agent） */
@@ -153,6 +171,54 @@ function normalizeSessionState(session: AgentSession): AgentSession {
 
   return {
     ...session,
+    ...(typeof session.workspaceRoot === "string" && session.workspaceRoot.trim()
+      ? { workspaceRoot: session.workspaceRoot.trim() }
+      : {}),
+    ...(typeof session.repoRoot === "string" && session.repoRoot.trim()
+      ? { repoRoot: session.repoRoot.trim() }
+      : {}),
+    ...(Array.isArray(session.lastActivePaths)
+      ? {
+          lastActivePaths: [
+            ...new Set(
+              session.lastActivePaths
+                .map((path) => String(path || "").trim())
+                .filter(Boolean),
+            ),
+          ].slice(0, 16),
+        }
+      : {}),
+    ...(session.lastTaskIntent ? { lastTaskIntent: session.lastTaskIntent } : {}),
+    ...(session.workspaceLocked ? { workspaceLocked: true } : {}),
+    ...(session.workspaceLockReason ? { workspaceLockReason: session.workspaceLockReason } : {}),
+    ...(typeof session.lastSoftResetAt === "number"
+      ? { lastSoftResetAt: session.lastSoftResetAt }
+      : {}),
+    ...(typeof session.lastMemoryRecallAttempted === "boolean"
+      ? { lastMemoryRecallAttempted: session.lastMemoryRecallAttempted }
+      : {}),
+    ...(Array.isArray(session.lastMemoryRecallPreview)
+      ? {
+          lastMemoryRecallPreview: session.lastMemoryRecallPreview
+            .map((item) => String(item || "").trim())
+            .filter(Boolean)
+            .slice(0, 6),
+        }
+      : {}),
+    ...(typeof session.lastTranscriptRecallAttempted === "boolean"
+      ? { lastTranscriptRecallAttempted: session.lastTranscriptRecallAttempted }
+      : {}),
+    ...(typeof session.lastTranscriptRecallHitCount === "number"
+      ? { lastTranscriptRecallHitCount: Math.max(0, Math.floor(session.lastTranscriptRecallHitCount)) }
+      : {}),
+    ...(Array.isArray(session.lastTranscriptRecallPreview)
+      ? {
+          lastTranscriptRecallPreview: session.lastTranscriptRecallPreview
+            .map((item) => String(item || "").trim())
+            .filter(Boolean)
+            .slice(0, 6),
+        }
+      : {}),
     ...(visibleTaskCount >= session.tasks.length
       ? { visibleTaskCount: undefined }
       : { visibleTaskCount }),
@@ -221,6 +287,12 @@ interface AgentState {
         | "last_finished_at"
         | "last_duration_ms"
         | "last_result_status"
+        | "memoryRecallAttempted"
+        | "appliedMemoryIds"
+        | "appliedMemoryPreview"
+        | "transcriptRecallAttempted"
+        | "transcriptRecallHitCount"
+        | "appliedTranscriptPreview"
       >
     >,
   ) => void;
@@ -237,14 +309,30 @@ interface AgentState {
         | "forkMeta"
         | "compaction"
         | "workspaceRoot"
+        | "repoRoot"
+        | "lastActivePaths"
+        | "lastTaskIntent"
+        | "workspaceLocked"
+        | "workspaceLockReason"
+        | "lastSoftResetAt"
         | "lastContinuityStrategy"
         | "lastContinuityReason"
         | "lastContextResetAt"
         | "lastMemoryItemCount"
+        | "lastMemoryRecallAttempted"
+        | "lastMemoryRecallPreview"
+        | "lastTranscriptRecallAttempted"
+        | "lastTranscriptRecallHitCount"
+        | "lastTranscriptRecallPreview"
         | "lastSessionNotePreview"
         | "lastContextRuntimeReport"
       >
     >,
+  ) => void;
+  setWorkspaceLock: (
+    sessionId: string,
+    locked: boolean,
+    reason?: "user" | "session_policy",
   ) => void;
   revertCurrentSessionToPreviousTask: () => void;
   redoCurrentSession: () => void;
@@ -309,6 +397,32 @@ function migrateSession(raw: Record<string, unknown>): AgentSession {
         status: t.status || (t.answer ? "success" : "pending"),
         retry_count: t.retry_count ?? 0,
         createdAt: t.createdAt ?? createdAt,
+        appliedMemoryIds: Array.isArray(t.appliedMemoryIds)
+          ? t.appliedMemoryIds
+            .map((item) => String(item || "").trim())
+            .filter(Boolean)
+            .slice(0, 8)
+          : undefined,
+        appliedMemoryPreview: Array.isArray(t.appliedMemoryPreview)
+          ? t.appliedMemoryPreview
+            .map((item) => String(item || "").trim())
+            .filter(Boolean)
+            .slice(0, 4)
+          : undefined,
+        transcriptRecallAttempted:
+          typeof t.transcriptRecallAttempted === "boolean"
+            ? t.transcriptRecallAttempted
+            : undefined,
+        transcriptRecallHitCount:
+          typeof t.transcriptRecallHitCount === "number"
+            ? Math.max(0, Math.floor(t.transcriptRecallHitCount))
+            : undefined,
+        appliedTranscriptPreview: Array.isArray(t.appliedTranscriptPreview)
+          ? t.appliedTranscriptPreview
+            .map((item) => String(item || "").trim())
+            .filter(Boolean)
+            .slice(0, 4)
+          : undefined,
       };
       return {
         ...baseTask,
@@ -323,6 +437,22 @@ function migrateSession(raw: Record<string, unknown>): AgentSession {
       ...(typeof r.workspaceRoot === "string" && r.workspaceRoot.trim()
         ? { workspaceRoot: r.workspaceRoot.trim() }
         : {}),
+      ...(typeof r.repoRoot === "string" && r.repoRoot.trim()
+        ? { repoRoot: r.repoRoot.trim() }
+        : {}),
+      ...(Array.isArray(r.lastActivePaths)
+        ? { lastActivePaths: r.lastActivePaths }
+        : {}),
+      ...(typeof r.lastTaskIntent === "string" && r.lastTaskIntent.trim()
+        ? { lastTaskIntent: r.lastTaskIntent.trim() }
+        : {}),
+      ...(r.workspaceLocked ? { workspaceLocked: true } : {}),
+      ...(typeof r.workspaceLockReason === "string" && r.workspaceLockReason.trim()
+        ? { workspaceLockReason: r.workspaceLockReason.trim() }
+        : {}),
+      ...(typeof r.lastSoftResetAt === "number"
+        ? { lastSoftResetAt: r.lastSoftResetAt }
+        : {}),
       ...(typeof r.lastContinuityStrategy === "string" && r.lastContinuityStrategy.trim()
         ? { lastContinuityStrategy: r.lastContinuityStrategy.trim() }
         : {}),
@@ -334,6 +464,21 @@ function migrateSession(raw: Record<string, unknown>): AgentSession {
         : {}),
       ...(typeof r.lastMemoryItemCount === "number"
         ? { lastMemoryItemCount: r.lastMemoryItemCount }
+        : {}),
+      ...(typeof r.lastMemoryRecallAttempted === "boolean"
+        ? { lastMemoryRecallAttempted: r.lastMemoryRecallAttempted }
+        : {}),
+      ...(Array.isArray(r.lastMemoryRecallPreview)
+        ? { lastMemoryRecallPreview: r.lastMemoryRecallPreview }
+        : {}),
+      ...(typeof r.lastTranscriptRecallAttempted === "boolean"
+        ? { lastTranscriptRecallAttempted: r.lastTranscriptRecallAttempted }
+        : {}),
+      ...(typeof r.lastTranscriptRecallHitCount === "number"
+        ? { lastTranscriptRecallHitCount: r.lastTranscriptRecallHitCount }
+        : {}),
+      ...(Array.isArray(r.lastTranscriptRecallPreview)
+        ? { lastTranscriptRecallPreview: r.lastTranscriptRecallPreview }
         : {}),
       ...(typeof r.lastSessionNotePreview === "string" && r.lastSessionNotePreview.trim()
         ? { lastSessionNotePreview: r.lastSessionNotePreview.trim() }
@@ -378,6 +523,22 @@ function migrateSession(raw: Record<string, unknown>): AgentSession {
     ...(typeof r.workspaceRoot === "string" && r.workspaceRoot.trim()
       ? { workspaceRoot: r.workspaceRoot.trim() }
       : {}),
+    ...(typeof r.repoRoot === "string" && r.repoRoot.trim()
+      ? { repoRoot: r.repoRoot.trim() }
+      : {}),
+    ...(Array.isArray(r.lastActivePaths)
+      ? { lastActivePaths: r.lastActivePaths }
+      : {}),
+    ...(typeof r.lastTaskIntent === "string" && r.lastTaskIntent.trim()
+      ? { lastTaskIntent: r.lastTaskIntent.trim() }
+      : {}),
+    ...(r.workspaceLocked ? { workspaceLocked: true } : {}),
+    ...(typeof r.workspaceLockReason === "string" && r.workspaceLockReason.trim()
+      ? { workspaceLockReason: r.workspaceLockReason.trim() }
+      : {}),
+    ...(typeof r.lastSoftResetAt === "number"
+      ? { lastSoftResetAt: r.lastSoftResetAt }
+      : {}),
     ...(typeof r.lastContinuityStrategy === "string" && r.lastContinuityStrategy.trim()
       ? { lastContinuityStrategy: r.lastContinuityStrategy.trim() }
       : {}),
@@ -389,6 +550,21 @@ function migrateSession(raw: Record<string, unknown>): AgentSession {
       : {}),
     ...(typeof r.lastMemoryItemCount === "number"
       ? { lastMemoryItemCount: r.lastMemoryItemCount }
+      : {}),
+    ...(typeof r.lastMemoryRecallAttempted === "boolean"
+      ? { lastMemoryRecallAttempted: r.lastMemoryRecallAttempted }
+      : {}),
+    ...(Array.isArray(r.lastMemoryRecallPreview)
+      ? { lastMemoryRecallPreview: r.lastMemoryRecallPreview }
+      : {}),
+    ...(typeof r.lastTranscriptRecallAttempted === "boolean"
+      ? { lastTranscriptRecallAttempted: r.lastTranscriptRecallAttempted }
+      : {}),
+    ...(typeof r.lastTranscriptRecallHitCount === "number"
+      ? { lastTranscriptRecallHitCount: r.lastTranscriptRecallHitCount }
+      : {}),
+    ...(Array.isArray(r.lastTranscriptRecallPreview)
+      ? { lastTranscriptRecallPreview: r.lastTranscriptRecallPreview }
       : {}),
     ...(typeof r.lastSessionNotePreview === "string" && r.lastSessionNotePreview.trim()
       ? { lastSessionNotePreview: r.lastSessionNotePreview.trim() }
@@ -757,6 +933,21 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     debouncedPersist();
   },
 
+  setWorkspaceLock: (sessionId, locked, reason = "user") => {
+    set((state) => ({
+      sessions: state.sessions.map((session) =>
+        session.id === sessionId
+          ? normalizeSessionState({
+              ...session,
+              workspaceLocked: locked,
+              workspaceLockReason: locked ? reason : undefined,
+            })
+          : session,
+      ),
+    }));
+    debouncedPersist();
+  },
+
   revertCurrentSessionToPreviousTask: () => {
     const session = get().getCurrentSession();
     if (!session) return;
@@ -801,6 +992,13 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       })),
       images: task.images ? [...task.images] : undefined,
       attachmentPaths: task.attachmentPaths ? [...task.attachmentPaths] : undefined,
+      appliedMemoryIds: task.appliedMemoryIds ? [...task.appliedMemoryIds] : undefined,
+      appliedMemoryPreview: task.appliedMemoryPreview ? [...task.appliedMemoryPreview] : undefined,
+      transcriptRecallAttempted: task.transcriptRecallAttempted,
+      transcriptRecallHitCount: task.transcriptRecallHitCount,
+      appliedTranscriptPreview: task.appliedTranscriptPreview
+        ? [...task.appliedTranscriptPreview]
+        : undefined,
     }));
     const forked: AgentSession = normalizeSessionState({
       id: generateId(),
@@ -808,6 +1006,17 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       tasks: clonedTasks,
       createdAt: now,
       workspaceRoot: session.workspaceRoot,
+      repoRoot: session.repoRoot,
+      lastActivePaths: session.lastActivePaths,
+      lastTaskIntent: session.lastTaskIntent,
+      workspaceLocked: session.workspaceLocked,
+      workspaceLockReason: session.workspaceLockReason,
+      lastSoftResetAt: session.lastSoftResetAt,
+      lastMemoryRecallAttempted: session.lastMemoryRecallAttempted,
+      lastMemoryRecallPreview: session.lastMemoryRecallPreview,
+      lastTranscriptRecallAttempted: session.lastTranscriptRecallAttempted,
+      lastTranscriptRecallHitCount: session.lastTranscriptRecallHitCount,
+      lastTranscriptRecallPreview: session.lastTranscriptRecallPreview,
       sourceHandoff: session.sourceHandoff,
       forkMeta: {
         parentSessionId: session.id,

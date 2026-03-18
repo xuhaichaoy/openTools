@@ -92,7 +92,7 @@ export function MCPTab() {
   }
 
   return (
-    <div className="max-w-2xl mx-auto space-y-3">
+    <div className="w-full space-y-3">
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-sm font-semibold">MCP 服务器</h2>

@@ -141,6 +141,20 @@ const MEMORY_RECALL_QUERY_PATTERNS: RegExp[] = [
   /人物|谁|联系人|用户信息|背景/,
 ];
 
+function extractPrimaryUserIntent(input: string): string {
+  const normalized = String(input || "").trim();
+  if (!normalized) return "";
+
+  const wrappedUserBlock = normalized.match(
+    /(?:^|\n)\[用户\]:\s*([\s\S]*?)(?=\n\s*\[(?:system|系统)\]:|$)/i,
+  );
+  if (wrappedUserBlock?.[1]) {
+    return wrappedUserBlock[1].trim();
+  }
+
+  return normalized;
+}
+
 function pruneFCCache() {
   if (fcIncompatibleCache.size <= FC_CACHE_MAX_SIZE) return;
   const now = Date.now();
@@ -765,6 +779,23 @@ export class ReActAgent {
     return directExpression || askMath;
   }
 
+  private getLatestAnswerSnapshot(): string {
+    const streaming = this.lastStreamingAnswer.trim();
+    if (streaming) return streaming;
+
+    const currentAnswer = [...this.steps]
+      .reverse()
+      .find((step) => step.type === "answer" && step.content.trim());
+    if (currentAnswer?.content.trim()) return currentAnswer.content.trim();
+
+    const historyAnswer = [...this.history]
+      .reverse()
+      .find((step) => step.type === "answer" && step.content.trim());
+    if (historyAnswer?.content.trim()) return historyAnswer.content.trim();
+
+    return "";
+  }
+
   private buildQuickAnswerFromTool(
     userInput: string,
     toolName: string,
@@ -793,6 +824,18 @@ export class ReActAgent {
           return `${output.expression} = ${output.result}`;
         }
         return `计算结果：${output.result}`;
+      }
+    }
+
+    if (toolName === "generate_suggestions" && toolOutput && typeof toolOutput === "object") {
+      const output = toolOutput as { display?: unknown };
+      if (typeof output.display === "string" && output.display.trim()) {
+        const baseAnswer = this.getLatestAnswerSnapshot();
+        if (!baseAnswer) return null;
+        const display = output.display.trim();
+        if (!display) return baseAnswer;
+        if (baseAnswer.includes(display)) return baseAnswer;
+        return `${baseAnswer}\n\n${display}`;
       }
     }
 
@@ -1272,7 +1315,7 @@ export class ReActAgent {
     if (!availableToolNames.has("memory_search") || !availableToolNames.has("memory_get")) {
       return false;
     }
-    const normalized = userInput.trim();
+    const normalized = extractPrimaryUserIntent(userInput);
     if (!normalized) return false;
     return MEMORY_RECALL_QUERY_PATTERNS.some((pattern) => pattern.test(normalized));
   }

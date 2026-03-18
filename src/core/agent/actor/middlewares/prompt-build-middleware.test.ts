@@ -3,22 +3,56 @@ import type { ActorRunContext } from "../actor-middleware";
 import { PromptBuildMiddleware } from "./prompt-build-middleware";
 
 const hoisted = vi.hoisted(() => ({
-  buildBootstrapContextSnapshot: vi.fn(async (params: {
-    workspaceRoot?: string;
-  }) => ({
-    workspaceRoot: params.workspaceRoot,
-    files: [],
-    prompt: params.workspaceRoot ? `BOOTSTRAP:${params.workspaceRoot}` : "",
+  buildAgentExecutionContextPlan: vi.fn(async () => ({
+    scope: {
+      previousWorkspaceRoot: undefined,
+      workspaceRoot: "/repo",
+      attachmentPaths: [],
+      imagePaths: ["/repo/assets/mock.png"],
+      handoffPaths: [],
+      pathHints: ["/repo/assets/mock.png"],
+      queryIntent: "coding" as const,
+      explicitReset: true,
+    },
+    continuity: {
+      strategy: "soft_reset" as const,
+      reason: "explicit_new_task" as const,
+      carrySummary: false,
+      carryRecentSteps: false,
+      carryFiles: false,
+      carryHandoff: false,
+    },
+    effectiveWorkspaceRoot: "/repo",
+    workspaceRootToPersist: "/repo",
+    promptSourceHandoff: undefined,
+    shouldResetInheritedContext: true,
+  })),
+  assembleAgentExecutionContext: vi.fn(async () => ({
+    sessionContextMessages: [],
+    bootstrapContext: null,
+    promptContextSnapshot: {
+      continuityStrategy: "soft_reset",
+      continuityReason: "explicit_new_task",
+      workspaceReset: true,
+      memoryItemCount: 0,
+    },
+    promptContextPrompt: "## 当前执行上下文",
+    extraSystemPrompt: "GLOBAL_PROMPT\n\nBOOTSTRAP:/repo\n\n## 当前执行上下文",
+    effectiveFiles: [],
+    currentTurnFiles: [],
+    sessionFiles: [],
+    bootstrapFilePaths: ["/repo/assets/mock.png"],
+    bootstrapHandoffPaths: [],
+    effectiveWorkspaceRoot: "/repo",
+    promptSourceHandoff: undefined,
+    shouldResetInheritedContext: true,
   })),
 }));
 
-vi.mock("@/core/ai/bootstrap-context", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@/core/ai/bootstrap-context")>();
-  return {
-    ...actual,
-    buildBootstrapContextSnapshot: hoisted.buildBootstrapContextSnapshot,
-  };
-});
+vi.mock("@/core/agent/context-runtime", () => ({
+  buildAgentExecutionContextPlan: hoisted.buildAgentExecutionContextPlan,
+  assembleAgentExecutionContext: hoisted.assembleAgentExecutionContext,
+}));
 
 vi.mock("@/core/ai/assistant-config", () => ({
   buildAssistantSupplementalPrompt: () => "GLOBAL_PROMPT",
@@ -61,13 +95,21 @@ describe("PromptBuildMiddleware", () => {
 
     await new PromptBuildMiddleware().apply(ctx);
 
-    expect(hoisted.buildBootstrapContextSnapshot).toHaveBeenCalledWith(
+    expect(hoisted.buildAgentExecutionContextPlan).toHaveBeenCalledWith(
       expect.objectContaining({
-        workspaceRoot: "/repo",
+        explicitWorkspaceRoot: "/repo",
+        query: "重新开始一个新任务",
+      }),
+    );
+    expect(hoisted.assembleAgentExecutionContext).toHaveBeenCalledWith(
+      expect.objectContaining({
+        query: "重新开始一个新任务",
+        supplementalSystemPrompt: "GLOBAL_PROMPT",
       }),
     );
     expect(ctx.rolePrompt).toContain("GLOBAL_PROMPT");
     expect(ctx.rolePrompt).toContain("BOOTSTRAP:/repo");
+    expect(ctx.rolePrompt).toContain("## 当前执行上下文");
     expect(ctx.rolePrompt).toContain("你的工作目录为: /repo");
   });
 });

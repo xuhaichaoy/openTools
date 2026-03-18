@@ -51,12 +51,13 @@ describe("tool-streaming-preview", () => {
 
   it("extracts spawn_task payload fields", () => {
     const parsed = parsePartialToolJSON(
-      "{\"target_agent\":\"Specialist\",\"task\":\"创建完整 HTML 页面\",\"label\":\"页面实现\"}",
+      "{\"target_agent\":\"Specialist\",\"task\":\"创建完整 HTML 页面\",\"label\":\"页面实现\",\"role_boundary\":\"executor\"}",
     );
 
     expect(parsed.targetAgent).toBe("Specialist");
     expect(parsed.task).toBe("创建完整 HTML 页面");
     expect(parsed.label).toBe("页面实现");
+    expect(parsed.roleBoundary).toBe("executor");
   });
 
   it("decodes escaped preview text", () => {

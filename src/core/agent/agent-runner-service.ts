@@ -31,7 +31,10 @@ import {
   createMemoryTools,
 } from "@/core/agent/actor/actor-memory";
 import { buildKnowledgeContextMessages } from "@/core/agent/actor/middlewares/knowledge-base-middleware";
-import { buildBootstrapContextSnapshot } from "@/core/ai/bootstrap-context";
+import {
+  assembleAgentExecutionContext,
+  buildAgentExecutionContextPlan,
+} from "@/core/agent/context-runtime";
 
 type QueueItem = {
   task: AgentScheduledTask;
@@ -359,15 +362,18 @@ export class AgentRunnerService {
     let sessionId = task.session_id || store.currentSessionId;
     let taskId = "";
     const historySteps: AgentStep[] = [];
+    let session = sessionId
+      ? store.sessions.find((s) => s.id === sessionId)
+      : undefined;
 
-    if (!sessionId || !store.sessions.some((s) => s.id === sessionId)) {
+    if (!sessionId || !session) {
       sessionId = store.createSession(task.query);
       const created = useAgentStore
         .getState()
         .sessions.find((s) => s.id === sessionId);
       taskId = created?.tasks[0]?.id || "";
+      session = created;
     } else {
-      const session = store.sessions.find((s) => s.id === sessionId);
       if (session) {
         for (const t of session.tasks) {
           historySteps.push(...t.steps);
@@ -381,6 +387,7 @@ export class AgentRunnerService {
         }
       }
       taskId = store.addTask(sessionId, task.query);
+      session = useAgentStore.getState().sessions.find((s) => s.id === sessionId) ?? session;
     }
 
     if (!taskId) {
@@ -414,21 +421,36 @@ export class AgentRunnerService {
       }
       userMemoryPrompt = await memorySnap.getMemoriesForQueryPromptAsync(task.query, {
         topK: 6,
+        conversationId: sessionId,
+        workspaceId: session?.workspaceRoot,
         preferSemantic: true,
       }) || undefined;
     }
     const knowledgeContextMessages = await buildKnowledgeContextMessages(task.query);
-    const bootstrapContext = await buildBootstrapContextSnapshot({
+    const executionContextPlan = await buildAgentExecutionContextPlan({
       query: task.query,
-      includeMemory: true,
-      recentDailyFiles: 1,
-    }).catch(() => null);
-    const extraSystemPrompt = [
-      buildAssistantSupplementalPrompt(aiConfig.system_prompt),
-      bootstrapContext?.prompt || "",
-    ]
-      .filter((block): block is string => typeof block === "string" && block.trim().length > 0)
-      .join("\n\n");
+      currentSession: session,
+    });
+    store.updateSession(sessionId, {
+      ...(executionContextPlan.workspaceRootToPersist
+        ? { workspaceRoot: executionContextPlan.workspaceRootToPersist }
+        : {}),
+      lastContinuityStrategy: executionContextPlan.continuity.strategy,
+      lastContinuityReason: executionContextPlan.continuity.reason,
+      lastContextResetAt: executionContextPlan.shouldResetInheritedContext
+        ? Date.now()
+        : undefined,
+    });
+    session = useAgentStore.getState().sessions.find((s) => s.id === sessionId) ?? session;
+    const assembledContext = await assembleAgentExecutionContext({
+      session,
+      query: task.query,
+      executionContextPlan,
+      userMemoryPrompt,
+      skillsPrompt,
+      supplementalSystemPrompt: buildAssistantSupplementalPrompt(aiConfig.system_prompt),
+      knowledgeContextMessageCount: knowledgeContextMessages.length,
+    });
 
     const collectedSteps: AgentStep[] = [];
     const agent = new ReActAgent(
@@ -441,9 +463,12 @@ export class AgentRunnerService {
         temperature: aiConfig.temperature ?? 0.7,
         userMemoryPrompt,
         skillsPrompt,
-        extraSystemPrompt: extraSystemPrompt || undefined,
+        extraSystemPrompt: assembledContext.extraSystemPrompt,
         skipInternalCodingBlock: hasCodingWorkflowSkill,
-        contextMessages: knowledgeContextMessages,
+        contextMessages: [
+          ...assembledContext.sessionContextMessages,
+          ...knowledgeContextMessages,
+        ],
       },
       (step) => {
         const nextSteps = applyIncomingAgentStep(collectedSteps, step);

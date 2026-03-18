@@ -693,7 +693,7 @@ export function MemoryTab() {
   }
 
   return (
-    <div className="max-w-3xl mx-auto space-y-3">
+    <div className="w-full space-y-3">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h2 className="text-sm font-semibold">AI 记忆管理</h2>

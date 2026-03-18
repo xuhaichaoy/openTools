@@ -50,7 +50,10 @@ import { useAIStore } from "@/store/ai-store";
 import { useAppStore, type AICenterHandoff } from "@/store/app-store";
 import { useAISessionRuntimeStore } from "@/store/ai-session-runtime-store";
 import { useTeamStore } from "@/store/team-store";
-import { useClusterPlanApprovalStore } from "@/store/cluster-plan-approval-store";
+import {
+  useClusterPlanApprovalStore,
+  type ApprovalDialogPresentation,
+} from "@/store/cluster-plan-approval-store";
 import { useConfirmDialogStore } from "@/store/confirm-dialog-store";
 import { useToolTrustStore } from "@/store/command-allowlist-store";
 import { api } from "@/core/api/client";
@@ -63,6 +66,7 @@ import { routeToAICenter } from "@/core/ai/ai-center-routing";
 import { buildDialogContextBreakdown, type DialogContextBreakdown } from "@/core/ai/dialog-context-breakdown";
 import { buildDialogWorkingSetSnapshot } from "@/core/ai/ai-working-set";
 import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
+import { getForegroundRuntimeSession, useRuntimeStateStore } from "@/core/agent/context-runtime/runtime-state";
 import {
   hasDialogContextSnapshotContent,
   type DialogContextSnapshot,
@@ -72,6 +76,7 @@ import { primeTeamModelCache } from "@/core/ai/router";
 import { queueAssistantMemoryCandidates } from "@/core/ai/assistant-memory";
 import { shouldAutoSaveAssistantMemory } from "@/core/ai/assistant-config";
 import { DIALOG_FULL_ROLE } from "@/core/agent/actor/agent-actor";
+import { getSpawnedTaskRoleBoundaryMeta } from "@/core/agent/actor/spawned-task-role-boundary";
 import {
   decodePartialToolContent,
   formatArtifactPreviewBody,
@@ -122,9 +127,11 @@ import { DialogFollowUpDock } from "./DialogFollowUpDock";
 import { DialogContextStrip } from "./DialogContextStrip";
 import { useToast } from "@/components/ui/Toast";
 import { modelSupportsImageInput } from "@/core/ai/model-capabilities";
+import { createLogger } from "@/core/logger";
 
 const TaskCenterPanel = lazy(() => import("../TaskCenterPanel"));
 const KnowledgeGraphView = lazy(() => import("../KnowledgeGraphView"));
+const dialogRenderLogger = createLogger("DialogRender");
 
 type DialogOverlay = "tasks" | "graph" | null;
 
@@ -273,10 +280,15 @@ function describeAgentActivity(steps: AgentStep[], roleName: string, hasStreamin
       if (name === "spawn_task") {
         const target = String(prevAction.toolInput?.target_agent ?? "").trim();
         const taskText = String(prevAction.toolInput?.task ?? "").trim();
+        const roleBoundary = getSpawnedTaskRoleBoundaryMeta(
+          String(prevAction.toolInput?.role_boundary ?? prevAction.toolInput?.roleBoundary ?? "").trim() as SpawnedTaskRecord["roleBoundary"],
+        );
         const codingLabel = describeCodingExecutionProfile(
           inferCodingExecutionProfile({ query: taskText }).profile,
         );
+        if (target && codingLabel && roleBoundary.shortLabel !== "支援") return `${codingLabel} · ${roleBoundary.shortLabel} 已派发给 ${target}`;
         if (target && codingLabel) return `${codingLabel} 子任务已派发给 ${target}`;
+        if (target && roleBoundary.shortLabel !== "支援") return `${roleBoundary.label} 已派发给 ${target}`;
         if (target) return `子任务已派发给 ${target}`;
         return "子任务已派发，等待进展";
       }
@@ -305,6 +317,86 @@ type ToolStreamingPreview = {
   collapsible?: boolean;
 };
 
+function truncateWorkflowText(value: string | undefined, max = 80): string | undefined {
+  const normalized = value?.trim();
+  if (!normalized) return undefined;
+  if (normalized.length <= max) return normalized;
+  return `${normalized.slice(0, Math.max(0, max - 1)).trimEnd()}…`;
+}
+
+function formatDialogApprovalModeLabel(planBundle: DialogDispatchPlanBundle): string {
+  const { runtimePlan, insight } = planBundle;
+  switch (runtimePlan.routingMode) {
+    case "broadcast":
+      return insight.codingProfile.profile.codingMode
+        ? "并行协作（广播）"
+        : "广播讨论";
+    case "direct":
+      return "直接处理";
+    case "smart":
+      return `${insight.autoModeLabel ?? "智能协作"} · 协调者动态分工`;
+    default:
+      return `${insight.autoModeLabel ?? "协调协作"} · 协调者动态分工`;
+  }
+}
+
+function buildDialogBoundaryApprovalPresentation(params: {
+  planBundle: DialogDispatchPlanBundle;
+  actors: ActorSnapshot[];
+}): ApprovalDialogPresentation {
+  const { planBundle, actors } = params;
+  const actorById = new Map(actors.map((actor) => [actor.id, actor] as const));
+  const { runtimePlan, insight } = planBundle;
+  const coordinatorId = runtimePlan.coordinatorActorId ?? runtimePlan.initialRecipientActorIds[0];
+  const coordinatorName = coordinatorId
+    ? actorById.get(coordinatorId)?.roleName ?? coordinatorId
+    : undefined;
+  const allParticipantLabels = [...new Set(
+    runtimePlan.participantActorIds.map((actorId) => actorById.get(actorId)?.roleName ?? actorId),
+  )];
+  const participantLabels = coordinatorName
+    ? allParticipantLabels.filter((label) => label !== coordinatorName)
+    : allParticipantLabels;
+  const suggestedLanes = [...new Set(
+    (runtimePlan.plannedSpawns ?? [])
+      .map((spawn) => spawn.label?.trim())
+      .filter((label): label is string => Boolean(label)),
+  )];
+
+  const permissions = [
+    coordinatorName
+      ? `${coordinatorName} 负责理解需求、拆解任务、调度协作并统一输出最终结论。`
+      : "首个接手 Agent 负责理解需求、拆解任务并统一输出最终结论。",
+    allParticipantLabels.length > 1
+      ? `允许在当前房间的 ${allParticipantLabels.length} 个 Agent 之间自由分配执行、审查和验证工作。`
+      : "本轮不会预先锁死额外分工，当前主执行者可根据现场情况继续拆解任务。",
+    "允许协调者或上游负责人改写、合并、跳过建议分工，并在必要时创建临时子 Agent。",
+    "本次批准的是协作边界和授权范围，不是每个 Agent 的硬编码任务单。",
+  ];
+
+  const notes = [
+    suggestedLanes.length > 0
+      ? `系统只提供建议分工方向作为参考：${suggestedLanes.join("、")}。最终怎么派活，由执行时的协调者决定。`
+      : "系统可能提供建议分工方向，但不会锁死每个 Agent 的具体任务文本。",
+    "如果执行中发现更合理的拆法，协调者可以重新派活；子任务在确有必要时，也可以继续拆成更小的子任务。",
+  ];
+
+  return {
+    kind: "boundary",
+    title: "审批协作边界",
+    description: "请确认本轮协作的主负责人、可参与范围和授权边界是否合理。",
+    modeLabel: formatDialogApprovalModeLabel(planBundle),
+    taskPreview: truncateWorkflowText(insight.taskSummary, 240),
+    summary: insight.focusLabel
+      ? `当前重点是「${insight.focusLabel}」，具体执行、审查、验证顺序由协调者在运行中决定。`
+      : "本轮会先由主负责人理解任务，再按实际需要组织执行、审查与验证。",
+    coordinatorLabel: coordinatorName,
+    participantLabels,
+    permissions,
+    notes,
+  };
+}
+
 function buildSequentialThinkingPreview(parsed: ReturnType<typeof parsePartialToolJSON>): ToolStreamingPreview {
   const thoughtText = decodePartialToolContent(parsed.thought || "");
   const thoughtMeta = [
@@ -323,15 +415,17 @@ function buildSequentialThinkingPreview(parsed: ReturnType<typeof parsePartialTo
 function buildSpawnTaskPreview(parsed: ReturnType<typeof parsePartialToolJSON>): ToolStreamingPreview {
   const taskText = decodePartialToolContent(parsed.task || "");
   const target = parsed.targetAgent || "未知 Agent";
+  const roleBoundaryMeta = getSpawnedTaskRoleBoundaryMeta(parsed.roleBoundary as SpawnedTaskRecord["roleBoundary"]);
   const codingLabel = describeCodingExecutionProfile(
     inferCodingExecutionProfile({ query: `${parsed.label}\n${taskText}` }).profile,
   );
   const title = codingLabel
-    ? `派发 ${codingLabel} 子任务 -> ${target}`
-    : `派发子任务 -> ${target}`;
+    ? `派发 ${codingLabel}${parsed.roleBoundary ? ` · ${roleBoundaryMeta.label}` : ""} 子任务 -> ${target}`
+    : `派发${parsed.roleBoundary ? `${roleBoundaryMeta.label}` : ""}子任务 -> ${target}`;
   const meta = [
     parsed.label ? `标签: ${parsed.label}` : "",
     codingLabel ? `模式: ${codingLabel}` : "",
+    parsed.roleBoundary ? `职责: ${roleBoundaryMeta.label}` : "",
   ].filter(Boolean).join(" · ");
 
   return {
@@ -340,6 +434,19 @@ function buildSpawnTaskPreview(parsed: ReturnType<typeof parsePartialToolJSON>):
     body: taskText || "正在整理委派任务...",
     meta: meta || "协作派发中",
   };
+}
+
+function getSpawnedTaskRoleBoundaryTone(roleBoundary?: SpawnedTaskRecord["roleBoundary"]) {
+  switch (roleBoundary) {
+    case "reviewer":
+      return "border-violet-500/20 bg-violet-500/10 text-violet-700";
+    case "validator":
+      return "border-emerald-500/20 bg-emerald-500/10 text-emerald-700";
+    case "executor":
+      return "border-amber-500/20 bg-amber-500/10 text-amber-700";
+    default:
+      return "border-[var(--color-border)] bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]";
+  }
 }
 
 function ThinkingBlock({
@@ -1217,6 +1324,51 @@ interface MessageBubbleProps {
   onOpenApprovalDrawer?: (messageId: string) => void;
 }
 
+function RecallInfoChips({ message }: { message: DialogMessage }) {
+  const memoryPreview = message.appliedMemoryPreview ?? [];
+  const transcriptPreview = message.appliedTranscriptPreview ?? [];
+  const transcriptHitCount = Math.max(
+    0,
+    message.transcriptRecallHitCount ?? transcriptPreview.length,
+  );
+
+  if (
+    message.memoryRecallAttempted !== true
+    && message.transcriptRecallAttempted !== true
+    && memoryPreview.length === 0
+    && transcriptPreview.length === 0
+  ) {
+    return null;
+  }
+
+  return (
+    <div className="mt-1.5 flex max-w-full flex-col gap-1">
+      <div className="flex flex-wrap gap-1.5">
+        {message.memoryRecallAttempted && (
+          <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-700">
+            {memoryPreview.length > 0 ? `已用记忆 ${memoryPreview.length} 条` : "记忆已检索"}
+          </span>
+        )}
+        {message.transcriptRecallAttempted && (
+          <span className="rounded-full border border-violet-500/20 bg-violet-500/10 px-2 py-0.5 text-[10px] text-violet-700">
+            {transcriptHitCount > 0 ? `已回补轨迹 ${transcriptHitCount} 条` : "轨迹已检索"}
+          </span>
+        )}
+      </div>
+      {memoryPreview.length > 0 && (
+        <div className="rounded-xl border border-amber-500/15 bg-amber-500/5 px-2.5 py-1.5 text-[10px] leading-relaxed text-amber-800/90">
+          记忆命中：{memoryPreview.join("；")}
+        </div>
+      )}
+      {transcriptPreview.length > 0 && (
+        <div className="rounded-xl border border-violet-500/15 bg-violet-500/5 px-2.5 py-1.5 text-[10px] leading-relaxed text-violet-800/90">
+          轨迹回补：{transcriptPreview.join("；")}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ApprovalRequestCard({
   message,
   pendingInteraction,
@@ -1637,6 +1789,7 @@ function MessageBubbleBase({
             这次提问会保持已超时。Agent 已按已有信息继续或结束当前分支；现在再发送内容，只会作为新的跟进消息发给原提问 Actor，不会把状态改回已处理，也不会接回原等待流程。
           </div>
         )}
+        {!isUser && <RecallInfoChips message={message} />}
       </div>
     </div>
   );
@@ -1650,6 +1803,13 @@ const MessageBubble = React.memo(
     prev.message._briefContent === next.message._briefContent &&
     prev.message.images === next.message.images &&
     prev.message.timestamp === next.message.timestamp &&
+    prev.message.memoryRecallAttempted === next.message.memoryRecallAttempted &&
+    (prev.message.appliedMemoryPreview?.join("\n") || "") ===
+      (next.message.appliedMemoryPreview?.join("\n") || "") &&
+    prev.message.transcriptRecallAttempted === next.message.transcriptRecallAttempted &&
+    prev.message.transcriptRecallHitCount === next.message.transcriptRecallHitCount &&
+    (prev.message.appliedTranscriptPreview?.join("\n") || "") ===
+      (next.message.appliedTranscriptPreview?.join("\n") || "") &&
     prev.actorIndex === next.actorIndex &&
     prev.actorName === next.actorName &&
     prev.targetName === next.targetName &&
@@ -2695,6 +2855,8 @@ function DialogWorkspaceDock({
                     const spawner = actorById.get(task.spawnerActorId)?.roleName ?? task.spawnerActorId;
                     const target = actorById.get(task.targetActorId)?.roleName ?? task.targetActorId;
                     const checkpoint = taskCheckpointByRunId.get(task.runId);
+                    const roleBoundaryMeta = getSpawnedTaskRoleBoundaryMeta(task.roleBoundary);
+                    const roleBoundaryTone = getSpawnedTaskRoleBoundaryTone(task.roleBoundary);
                     return (
                       <button
                         key={task.runId}
@@ -2708,6 +2870,9 @@ function DialogWorkspaceDock({
                         <div className="flex items-center gap-2">
                           <span className="text-[11px] font-medium text-[var(--color-text)] truncate">
                             {task.label || task.task.slice(0, 24)}
+                          </span>
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded-full border ${roleBoundaryTone}`}>
+                            {roleBoundaryMeta.shortLabel}
                           </span>
                           {task.mode === "session" && task.sessionOpen && (
                             <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-500/10 text-blue-600">
@@ -2738,10 +2903,18 @@ function DialogWorkspaceDock({
                 </div>
                 {selectedTask && (
                   <div className="rounded-xl border border-[var(--color-border)] p-2.5 space-y-2.5">
+                    {(() => {
+                      const roleBoundaryMeta = getSpawnedTaskRoleBoundaryMeta(selectedTask.roleBoundary);
+                      const roleBoundaryTone = getSpawnedTaskRoleBoundaryTone(selectedTask.roleBoundary);
+                      return (
+                        <>
                     <div className="flex flex-wrap items-center gap-2">
                       <div className="text-[13px] font-medium text-[var(--color-text)]">
                         {selectedTask.label || selectedTask.task.slice(0, 32)}
                       </div>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full border ${roleBoundaryTone}`}>
+                        {roleBoundaryMeta.label}
+                      </span>
                       <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]">
                         {selectedTask.status}
                       </span>
@@ -2776,10 +2949,15 @@ function DialogWorkspaceDock({
                         </>
                       )}
                     </div>
+                    <div className="rounded-lg border border-[var(--color-border)]/70 bg-[var(--color-bg-secondary)]/65 px-3 py-2">
+                      <div className="text-[10px] text-[var(--color-text-tertiary)]">职责边界</div>
+                      <div className="mt-1 text-[12px] text-[var(--color-text)]">{roleBoundaryMeta.label}</div>
+                      <div className="mt-1 text-[11px] text-[var(--color-text-secondary)]">{roleBoundaryMeta.description}</div>
+                    </div>
                     <div className="text-[11px] text-[var(--color-text-secondary)] whitespace-pre-wrap break-words">
                       {selectedTask.task}
                     </div>
-                    <div className="grid gap-2 md:grid-cols-2">
+                    <div className="grid gap-2 md:grid-cols-3">
                       <div className="rounded-lg bg-[var(--color-bg-secondary)]/70 px-3 py-2">
                         <div className="text-[10px] text-[var(--color-text-tertiary)]">派发者</div>
                         <div className="mt-1 text-[12px] text-[var(--color-text)]">
@@ -2790,6 +2968,12 @@ function DialogWorkspaceDock({
                         <div className="text-[10px] text-[var(--color-text-tertiary)]">执行者</div>
                         <div className="mt-1 text-[12px] text-[var(--color-text)]">
                           {actorById.get(selectedTask.targetActorId)?.roleName ?? selectedTask.targetActorId}
+                        </div>
+                      </div>
+                      <div className="rounded-lg bg-[var(--color-bg-secondary)]/70 px-3 py-2">
+                        <div className="text-[10px] text-[var(--color-text-tertiary)]">任务类型</div>
+                        <div className="mt-1 text-[12px] text-[var(--color-text)]">
+                          {selectedTask.mode === "session" ? "子会话" : "一次性子任务"}
                         </div>
                       </div>
                     </div>
@@ -2897,6 +3081,9 @@ function DialogWorkspaceDock({
                         </div>
                       )}
                     </div>
+                        </>
+                      );
+                    })()}
                   </div>
                 )}
               </div>
@@ -3232,6 +3419,11 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   const dialogUserScrolledUpRef = useRef(false);
   const dialogScrollThrottleRef = useRef(0);
   const actorThinkingAnchorRef = useRef<Record<string, { taskId: string; startedAt: number }>>({});
+  const streamingAnswerRenderRef = useRef<Record<string, {
+    taskId: string;
+    maxVisibleLength: number;
+    lastVisibleLength: number;
+  }>>({});
   const queuedFollowUpDispatchRef = useRef(false);
 
   const {
@@ -3349,6 +3541,51 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     }
   }, [runningActors, runningActivityKey]);
 
+  useEffect(() => {
+    const nextSnapshot: Record<string, {
+      taskId: string;
+      maxVisibleLength: number;
+      lastVisibleLength: number;
+    }> = {};
+
+    for (const actor of runningActors) {
+      const taskId = actor.currentTask?.id ?? "";
+      if (!taskId) continue;
+      const steps = actor.currentTask?.steps ?? [];
+      const reversedSteps = [...steps].reverse();
+      const latestStreamingAnswer = reversedSteps.find((step) => step.streaming && step.type === "answer");
+      const currentLength = latestStreamingAnswer?.content?.trim().length ?? 0;
+      const previous = streamingAnswerRenderRef.current[actor.id];
+
+      if (previous && previous.taskId === taskId) {
+        const looksLikeRestart =
+          previous.maxVisibleLength >= 320
+          && currentLength > 0
+          && currentLength <= 120
+          && currentLength + 160 < previous.maxVisibleLength;
+        if (looksLikeRestart) {
+          dialogRenderLogger.warn("streaming answer visibly restarted in Dialog UI", {
+            actorId: actor.id,
+            actorName: actor.roleName,
+            taskId,
+            previousMaxLength: previous.maxVisibleLength,
+            previousVisibleLength: previous.lastVisibleLength,
+            currentLength,
+            stepCount: steps.length,
+          });
+        }
+      }
+
+      nextSnapshot[actor.id] = {
+        taskId,
+        maxVisibleLength: Math.max(previous?.taskId === taskId ? previous.maxVisibleLength : 0, currentLength),
+        lastVisibleLength: currentLength,
+      };
+    }
+
+    streamingAnswerRenderRef.current = nextSnapshot;
+  }, [runningActors, runningActivityKey]);
+
   // Auto-init: mount 时自动创建 ActorSystem
   // ActorSystemStore 会负责恢复磁盘会话快照或补齐默认 Agent。
   const ensureSystem = useCallback(() => {
@@ -3366,6 +3603,23 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       ensureSystem();
     }
   }, [active, ensureSystem]);
+
+  useEffect(() => {
+    useRuntimeStateStore.getState().setPanelVisible("dialog", active);
+    if (!active) return;
+
+    const sessionId =
+      getSystem()?.sessionId
+      || getForegroundRuntimeSession("dialog")?.sessionId
+      || null;
+    if (sessionId) {
+      useRuntimeStateStore.getState().setForegroundSession("dialog", sessionId);
+    }
+  }, [active, getSystem, systemActive]);
+
+  useEffect(() => () => {
+    useRuntimeStateStore.getState().setPanelVisible("dialog", false);
+  }, []);
 
   useEffect(() => {
     if (!pendingAICenterHandoff || pendingAICenterHandoff.mode !== "dialog") return;
@@ -3815,7 +4069,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       : null;
 
     let runtimePlan: DialogExecutionPlan | null = null;
-    if (requirePlanApproval) {
+    {
       const planningRoutingMode: DialogRoutingMode =
         item.routingMode === "direct" ? "coordinator" : item.routingMode;
       const planBundle = buildDialogDispatchPlanBundle({
@@ -3827,21 +4081,27 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
         selectedRoute: smartRoute,
         coordinatorActorId,
       });
-      if (planBundle) {
-        const approvalResult = await openPlanApprovalDialog({
-          plan: planBundle.clusterPlan,
-          sessionId: system.sessionId,
-        });
-        if (approvalResult.status !== "approved") {
-          setLastPlanReview({ status: "rejected", timestamp: Date.now(), plan: planBundle.clusterPlan });
-          setInputNotice("排队消息的执行计划已取消，消息会继续保留在队列里。");
-          inputRef.current?.focus();
-          return false;
+        if (planBundle) {
+          if (requirePlanApproval) {
+            const approvalResult = await openPlanApprovalDialog({
+              plan: planBundle.clusterPlan,
+              sessionId: system.sessionId,
+              presentation: buildDialogBoundaryApprovalPresentation({
+                planBundle,
+                actors,
+              }),
+            });
+            if (approvalResult.status !== "approved") {
+              setLastPlanReview({ status: "rejected", timestamp: Date.now(), plan: planBundle.clusterPlan });
+              setInputNotice("排队消息的执行计划已取消，消息会继续保留在队列里。");
+              inputRef.current?.focus();
+              return false;
+            }
+            setLastPlanReview({ status: "approved", timestamp: Date.now(), plan: planBundle.clusterPlan });
+          }
+          runtimePlan = planBundle.runtimePlan;
         }
-        runtimePlan = planBundle.runtimePlan;
-        setLastPlanReview({ status: "approved", timestamp: Date.now(), plan: planBundle.clusterPlan });
       }
-    }
 
     if (runtimePlan) {
       system.armDialogExecutionPlan(runtimePlan);
@@ -4095,7 +4355,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       return;
     }
 
-    if (!effectiveReplyTarget && requirePlanApproval && !isSteerCommand) {
+    if (!effectiveReplyTarget && !isSteerCommand) {
       if (shouldRouteToFocusedSession) {
         runtimePlan = null;
       } else {
@@ -4111,21 +4371,27 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
           coordinatorActorId,
         });
         if (planBundle) {
-          const approvalResult = await openPlanApprovalDialog({
-            plan: planBundle.clusterPlan,
-            sessionId: system?.sessionId,
-          });
-          if (approvalResult.status !== "approved") {
-            setLastPlanReview({ status: "rejected", timestamp: Date.now(), plan: planBundle.clusterPlan });
-            setShowConfig(false);
-            setOverlay(null);
-            setWorkspacePanel("plan");
-            setInputNotice("执行计划已取消，调整后可重新发送。");
-            inputRef.current?.focus();
-            return;
+          if (requirePlanApproval) {
+            const approvalResult = await openPlanApprovalDialog({
+              plan: planBundle.clusterPlan,
+              sessionId: system?.sessionId,
+              presentation: buildDialogBoundaryApprovalPresentation({
+                planBundle,
+                actors,
+              }),
+            });
+            if (approvalResult.status !== "approved") {
+              setLastPlanReview({ status: "rejected", timestamp: Date.now(), plan: planBundle.clusterPlan });
+              setShowConfig(false);
+              setOverlay(null);
+              setWorkspacePanel("plan");
+              setInputNotice("执行计划已取消，调整后可重新发送。");
+              inputRef.current?.focus();
+              return;
+            }
+            setLastPlanReview({ status: "approved", timestamp: Date.now(), plan: planBundle.clusterPlan });
           }
           runtimePlan = planBundle.runtimePlan;
-          setLastPlanReview({ status: "approved", timestamp: Date.now(), plan: planBundle.clusterPlan });
         }
       }
     }
@@ -4421,6 +4687,13 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     });
   }, [dialogHistory, draftDispatchInsight]);
   const activeDispatchInsight = draftDispatchInsight ?? latestUserDispatchInsight ?? lastCommittedDispatchInsight;
+  const hasActiveCollaborationFlow = useMemo(
+    () =>
+      spawnedTasks.some((task) => task.status === "running")
+      || runningActors.length > 1
+      || runningActors.some((actor) => actor.id !== coordinatorActorId),
+    [spawnedTasks, runningActors, coordinatorActorId],
+  );
 
   useEffect(() => {
     if (dialogHistory.length === 0) {
@@ -4786,21 +5059,35 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
               && a.currentTask?.status === "running",
             );
             const showThinkingBlock = Boolean(
-              !streamingContent
+              !hasActiveCollaborationFlow
+              && !streamingContent
               && !latestToolStreamingStep
               && !showExecutionCard
               && (latestThinkingStep || derivedThinkingContent || showThinkingPlaceholder),
             );
-            const executionCardTitle = showExecutionCard
+            const showThinkingSummaryOnly = Boolean(
+              hasActiveCollaborationFlow
+              && !streamingContent
+              && !latestToolStreamingStep
+              && !showExecutionCard
+              && (latestThinkingStep || derivedThinkingContent || showThinkingPlaceholder),
+            );
+            const executionCardTitle = showExecutionCard || showThinkingSummaryOnly
               ? describeAgentActivity(steps, a.roleName, false)
               : "";
             const executionCardDetail = latestExecutionToolPreview?.kind === "spawn"
               ? latestExecutionToolPreview.body
+              : showThinkingSummaryOnly
+                ? truncateWorkflowText(thinkingContent ?? "正在整理思路...", 72)
               : undefined;
             const executionCardIcon = latestExecutionToolPreview?.kind === "spawn"
               ? ArrowRightCircle
+              : showThinkingSummaryOnly
+                ? Brain
               : Settings2;
             const executionCardStartedAt = latestExecutionToolStep?.timestamp
+              ?? latestThinkingStep?.timestamp
+              ?? latestThoughtToolStep?.timestamp
               ?? latestExecutionStateStep?.timestamp
               ?? Date.now();
             const thinkingStartedAt = latestThinkingStep?.timestamp
@@ -4815,6 +5102,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
             const hasRichLiveBlock = Boolean(
               showThinkingBlock
               || showExecutionCard
+              || showThinkingSummaryOnly
               || (latestToolStreamingStep && latestToolStreamingPreview?.kind === "artifact")
               || streamingContent,
             );
@@ -4831,13 +5119,13 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                   />
                 )}
 
-                {showExecutionCard && (
+                {(showExecutionCard || showThinkingSummaryOnly) && (
                   <LiveExecutionCard
                     roleName={a.roleName}
                     title={executionCardTitle}
                     detail={executionCardDetail}
                     startedAt={executionCardStartedAt}
-                    isStreaming
+                    isStreaming={showThinkingSummaryOnly ? thinkingIsStreaming : true}
                     color={color}
                     icon={executionCardIcon}
                   />

@@ -41,6 +41,7 @@ import {
   buildAgentExecutionContextPlan,
   persistClusterTurnContextIngest,
 } from "@/core/agent/context-runtime";
+import { useRuntimeStateStore } from "@/core/agent/context-runtime/runtime-state";
 import {
   AI_CENTER_MODE_META,
   describeAICenterSource,
@@ -794,6 +795,21 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
         : undefined,
       onStatusChange: (status) => {
         useClusterStore.getState().updateSession(sessionId, { status });
+        useRuntimeStateStore.getState().patchSession("cluster", sessionId, {
+          status,
+          waitingStage:
+            status === "awaiting_approval"
+              ? "user_confirm"
+              : status === "planning"
+                ? "planning"
+                : status === "dispatching"
+                  ? "dispatching"
+                  : status === "running"
+                    ? "running"
+                    : status === "aggregating"
+                      ? "aggregating"
+                      : "",
+        });
       },
       onInstanceUpdate: (instance) => {
         useClusterStore.getState().updateInstance(sessionId, instance);
@@ -811,7 +827,11 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
     if (fileContextBlock.trim()) {
       orchestrator.setProjectContext(fileContextBlock.trim());
     }
-    setActiveOrchestrator(sessionId, orchestrator, abortController);
+    setActiveOrchestrator(sessionId, orchestrator, abortController, {
+      query: displayQuery,
+      workspaceRoot,
+      status: "planning",
+    });
     setRunningCount(getActiveOrchestratorCount());
     const runStartedAt = Date.now();
 

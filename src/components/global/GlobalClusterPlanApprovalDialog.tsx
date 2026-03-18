@@ -11,6 +11,7 @@ export function GlobalClusterPlanApprovalDialog() {
   return (
     <ClusterPlanApprovalDialog
       plan={active.plan}
+      presentation={active.presentation}
       onApprove={approve}
       onReject={reject}
     />

@@ -21,9 +21,14 @@ export interface AgentContextRuntimeDebugReport {
     runModeLabel?: string;
     bootstrapFileCount: number;
     bootstrapFileNames: string[];
+    bootstrapUsedChars?: number;
+    bootstrapTotalChars?: number;
+    bootstrapTruncatedFileCount?: number;
+    bootstrapOmittedFileCount?: number;
     historyContextMessageCount: number;
     knowledgeContextMessageCount: number;
     memoryItemCount: number;
+    transcriptRecallHitCount?: number;
   };
   compaction: {
     compactedTaskCount: number;

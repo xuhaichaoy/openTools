@@ -96,7 +96,7 @@ export function MyDataTab() {
   }, [loadStats]);
 
   return (
-    <div className="max-w-xl mx-auto space-y-[var(--space-compact-3)]">
+    <div className="w-full space-y-[var(--space-compact-3)]">
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-sm font-semibold">我的数据</h2>

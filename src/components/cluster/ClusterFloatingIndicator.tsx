@@ -1,28 +1,30 @@
-import { useState, useEffect, useCallback, type ReactNode } from "react";
-import { Network, Loader2, X, Bot, MessageCircle } from "lucide-react";
+import { useState, useEffect, useCallback, useMemo, type ReactNode } from "react";
+import { Network, Loader2, X, Bot, MessageCircle, Users } from "lucide-react";
 import { useClusterStore } from "@/store/cluster-store";
 import { useAppStore } from "@/store/app-store";
-import { useAgentRunningStore } from "@/store/agent-running-store";
 import { useAgentStore } from "@/store/agent-store";
-import { useAskUserStore } from "@/store/ask-user-store";
-import {
-  isClusterRunning,
-  getActiveSessionIds,
-  getActiveOrchestratorCount,
-  abortActiveOrchestrator,
-} from "@/core/agent/cluster/active-orchestrator";
-import type { ClusterSessionStatus } from "@/core/agent/cluster/types";
+import { useAIStore } from "@/store/ai-store";
 import { routeToAICenter } from "@/core/ai/ai-center-routing";
+import {
+  abortRuntimeSession,
+  hasRuntimeAbortHandler,
+  type RuntimeSessionMode,
+  type RuntimeSessionRecord,
+  useRuntimeStateStore,
+} from "@/core/agent/context-runtime/runtime-state";
+import {
+  buildRuntimeIndicatorDetail,
+  getRuntimeIndicatorMeta,
+  shouldPulseRuntimeIndicator,
+} from "@/core/agent/context-runtime/runtime-indicator";
 
-const STATUS_LABELS: Record<ClusterSessionStatus, string> = {
-  idle: "空闲",
-  planning: "规划中",
-  awaiting_approval: "等待审批",
-  dispatching: "分发中",
-  running: "执行中",
-  aggregating: "汇总中",
-  done: "已完成",
-  error: "失败",
+const MODE_ORDER: RuntimeSessionMode[] = ["cluster", "agent", "dialog", "ask"];
+
+const MODE_ICONS: Record<RuntimeSessionMode, ReactNode> = {
+  ask: <MessageCircle className="w-3.5 h-3.5" />,
+  agent: <Bot className="w-3.5 h-3.5" />,
+  cluster: <Network className="w-3.5 h-3.5" />,
+  dialog: <Users className="w-3.5 h-3.5" />,
 };
 
 function formatElapsed(ms: number) {
@@ -32,166 +34,136 @@ function formatElapsed(ms: number) {
   return `${m}m${s % 60}s`;
 }
 
+function pickVisibleRuntimeRecord(
+  sessions: RuntimeSessionRecord[],
+  foregroundSessionId?: string,
+): RuntimeSessionRecord | null {
+  if (sessions.length === 0) return null;
+  if (foregroundSessionId) {
+    const foreground = sessions.find((session) => session.sessionId === foregroundSessionId);
+    if (foreground) return foreground;
+  }
+  return [...sessions].sort((a, b) => b.startedAt - a.startedAt)[0] ?? null;
+}
+
+interface RuntimeIndicatorItem {
+  key: string;
+  mode: RuntimeSessionMode;
+  sessionId: string;
+  label: string;
+  detail: string;
+  elapsed?: string;
+  onAbort?: () => void;
+  onOpen: () => void;
+  color: string;
+  pulse: boolean;
+}
+
 export function ClusterFloatingIndicator() {
   const aiCenterMode = useAppStore((s) => s.aiCenterMode);
   const currentView = useAppStore((s) => s.currentView());
   const pushView = useAppStore((s) => s.pushView);
-  const clusterSessions = useClusterStore((s) => s.sessions);
-  const agentInfo = useAgentRunningStore((s) => s.info);
-  const agentAbort = useAgentRunningStore((s) => s.abortFn);
+  const setClusterCurrentSession = useClusterStore((s) => s.setCurrentSession);
   const setAgentCurrentSession = useAgentStore((s) => s.setCurrentSession);
-  const askDialog = useAskUserStore((s) => s.dialog);
+  const setAskCurrentConversation = useAIStore((s) => s.setCurrentConversation);
+  const runtimeSessions = useRuntimeStateStore((s) => s.sessions);
+  const foregroundSessionIds = useRuntimeStateStore((s) => s.foregroundSessionIds);
   const [now, setNow] = useState(() => Date.now());
 
-  const clusterRunning = isClusterRunning();
-  const activeClusterSessionIds = getActiveSessionIds();
-  const clusterRunningCount = getActiveOrchestratorCount();
-  const activeClusterSessionId = activeClusterSessionIds[0] ?? null;
-  const clusterSession = clusterSessions.find((s) => s.id === activeClusterSessionId);
-  const clusterStatus = clusterSession?.status;
+  const openRuntimeSession = useCallback((mode: RuntimeSessionMode, sessionId: string) => {
+    useRuntimeStateStore.getState().setForegroundSession(mode, sessionId);
+    switch (mode) {
+      case "ask":
+        setAskCurrentConversation(sessionId);
+        routeToAICenter({
+          mode: "ask",
+          source: "floating_indicator",
+          taskId: sessionId,
+          note: "resume ask runtime",
+          pushView,
+        });
+        return;
+      case "agent":
+        setAgentCurrentSession(sessionId);
+        routeToAICenter({
+          mode: "agent",
+          source: "floating_indicator",
+          taskId: sessionId,
+          note: "resume agent runtime",
+          pushView,
+        });
+        return;
+      case "cluster":
+        setClusterCurrentSession(sessionId);
+        routeToAICenter({
+          mode: "cluster",
+          source: "floating_indicator",
+          taskId: sessionId,
+          note: "resume cluster runtime",
+          pushView,
+        });
+        return;
+      case "dialog":
+        routeToAICenter({
+          mode: "dialog",
+          source: "floating_indicator",
+          taskId: sessionId,
+          note: "resume dialog runtime",
+          pushView,
+        });
+    }
+  }, [pushView, setAgentCurrentSession, setAskCurrentConversation, setClusterCurrentSession]);
 
-  const anyActive = clusterRunning || !!agentInfo;
+  const stopRuntimeSession = useCallback((mode: RuntimeSessionMode, sessionId: string) => {
+    void abortRuntimeSession(mode, sessionId);
+  }, []);
+
+  const items = useMemo(() => {
+    const sessions = Object.values(runtimeSessions);
+    const nextItems: RuntimeIndicatorItem[] = [];
+
+    for (const mode of MODE_ORDER) {
+      const modeSessions = sessions
+        .filter((session) => session.mode === mode)
+        .sort((a, b) => b.startedAt - a.startedAt);
+      const record = pickVisibleRuntimeRecord(modeSessions, foregroundSessionIds[mode]);
+      if (!record) continue;
+
+      const meta = getRuntimeIndicatorMeta(mode);
+      nextItems.push({
+        key: record.key,
+        mode,
+        sessionId: record.sessionId,
+        label: meta.label,
+        detail: buildRuntimeIndicatorDetail(record, modeSessions.length),
+        elapsed: formatElapsed(Math.max(0, now - record.startedAt)),
+        onAbort: hasRuntimeAbortHandler(mode, record.sessionId)
+          ? () => stopRuntimeSession(mode, record.sessionId)
+          : undefined,
+        onOpen: () => openRuntimeSession(mode, record.sessionId),
+        color: meta.color,
+        pulse: shouldPulseRuntimeIndicator(record),
+      });
+    }
+
+    return nextItems;
+  }, [foregroundSessionIds, now, openRuntimeSession, runtimeSessions, stopRuntimeSession]);
+
   useEffect(() => {
-    if (!anyActive) return;
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, [anyActive]);
+    if (items.length === 0) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [items.length]);
 
-  const handleAbortCluster = useCallback(() => {
-    void abortActiveOrchestrator(activeClusterSessionId ?? undefined);
-  }, [activeClusterSessionId]);
-
-  const handleAbortAgent = useCallback(() => {
-    agentAbort?.();
-  }, [agentAbort]);
-
-  const handleOpenCluster = useCallback(() => {
-    routeToAICenter({
-      mode: "cluster",
-      source: "floating_indicator",
-      taskId: activeClusterSessionId ?? undefined,
-      pushView,
-    });
-  }, [activeClusterSessionId, pushView]);
-
-  const handleOpenAgent = useCallback(() => {
-    if (agentInfo?.sessionId) {
-      setAgentCurrentSession(agentInfo.sessionId);
-    }
-    routeToAICenter({
-      mode: "agent",
-      source: "floating_indicator",
-      taskId: agentInfo?.sessionId,
-      pushView,
-    });
-  }, [agentInfo, pushView, setAgentCurrentSession]);
-
-  const handleOpenAskSource = useCallback(() => {
-    const sourceMode = askDialog?.source === "cluster"
-      ? "cluster"
-      : askDialog?.source === "actor_dialog"
-        ? "dialog"
-        : "agent";
-    if (sourceMode === "agent" && agentInfo?.sessionId) {
-      setAgentCurrentSession(agentInfo.sessionId);
-    }
-    routeToAICenter({
-      mode: sourceMode,
-      source: "floating_indicator",
-      pushView,
-      note: "focus ask_user source",
-    });
-  }, [agentInfo, askDialog?.source, pushView, setAgentCurrentSession]);
-
-  const items: Array<{
-    key: string;
-    icon: ReactNode;
-    label: string;
-    detail: string;
-    elapsed?: string;
-    onAbort?: () => void;
-    onOpen: () => void;
-    color: string;
-  }> = [];
-
-  if (clusterRunning) {
-    const elapsed = clusterSession?.createdAt
-      ? formatElapsed(now - clusterSession.createdAt)
-      : "";
-    const effectiveStatus: ClusterSessionStatus = clusterStatus ?? "running";
-    const detail = clusterRunningCount > 1
-      ? `${STATUS_LABELS[effectiveStatus]} · ${clusterRunningCount} 个任务`
-      : STATUS_LABELS[effectiveStatus] || effectiveStatus;
-
-    items.push({
-      key: "cluster",
-      icon: <Network className="w-3.5 h-3.5" />,
-      label: "集群任务",
-      detail,
-      elapsed,
-      onAbort: handleAbortCluster,
-      onOpen: handleOpenCluster,
-      color: "var(--color-accent)",
-    });
-  }
-
-  if (agentInfo) {
-    const elapsed = formatElapsed(now - agentInfo.startedAt);
-    const queryPreview = agentInfo.query.length > 30
-      ? `${agentInfo.query.slice(0, 30)}…`
-      : agentInfo.query;
-
-    items.push({
-      key: "agent",
-      icon: <Bot className="w-3.5 h-3.5" />,
-      label: "Agent 任务",
-      detail: queryPreview || "执行中",
-      elapsed,
-      onAbort: handleAbortAgent,
-      onOpen: handleOpenAgent,
-      color: "#22c55e",
-    });
-  }
-
-  if (askDialog) {
-    const sourceLabel = askDialog.source === "cluster"
-      ? "集群"
-      : askDialog.source === "actor_dialog"
-        ? "Dialog"
-        : "Agent";
-    items.push({
-      key: "ask",
-      icon: <MessageCircle className="w-3.5 h-3.5" />,
-      label: `${sourceLabel} 等待回复`,
-      detail: askDialog.questions[0]?.question || "请回答问题",
-      onOpen: handleOpenAskSource,
-      color: "#f59e0b",
-    });
-  }
-
+  const isOnManagementCenter = currentView === "management-center";
   const isOnAiCenter = currentView === "ai-center";
+  if (isOnManagementCenter) return null;
   const visibleItems = items.filter((item) => {
-    if (!isOnAiCenter || item.key !== "ask") return true;
-    const askSourceMode = askDialog?.source === "cluster"
-      ? "cluster"
-      : askDialog?.source === "actor_dialog"
-        ? "dialog"
-        : "agent";
-    return aiCenterMode !== askSourceMode;
+    if (!isOnAiCenter) return true;
+    return aiCenterMode !== item.mode;
   });
 
   if (visibleItems.length === 0) return null;
-
-  if (isOnAiCenter && visibleItems.length === 1) {
-    const onlyItem = visibleItems[0];
-    if (
-      (onlyItem.key === "cluster" && aiCenterMode === "cluster") ||
-      (onlyItem.key === "agent" && aiCenterMode === "agent") ||
-      (onlyItem.key === "ask" && aiCenterMode === "ask")
-    ) {
-      return null;
-    }
-  }
 
   return (
     <div className="fixed bottom-4 right-4 z-[9999] flex flex-col gap-2">
@@ -201,7 +173,7 @@ export function ClusterFloatingIndicator() {
           role="button"
           tabIndex={0}
           className={`group flex items-center gap-2 px-3 py-2 rounded-lg shadow-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] text-xs select-none transition-all hover:shadow-xl ${
-            item.key === "ask" ? "animate-pulse" : ""
+            item.pulse ? "animate-pulse" : ""
           }`}
           onClick={item.onOpen}
           onKeyDown={(e) => {
@@ -212,10 +184,10 @@ export function ClusterFloatingIndicator() {
           }}
         >
           <span style={{ color: item.color }} className="flex items-center">
-            {item.key === "ask" ? item.icon : <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+            {item.pulse ? MODE_ICONS[item.mode] : <Loader2 className="w-3.5 h-3.5 animate-spin" />}
           </span>
           <span className="font-medium text-[var(--color-text-primary)]">{item.label}</span>
-          <span className="text-[var(--color-text-secondary)] max-w-[180px] truncate">{item.detail}</span>
+          <span className="text-[var(--color-text-secondary)] max-w-[200px] truncate">{item.detail}</span>
           {item.elapsed && (
             <span className="text-[var(--color-text-tertiary)] tabular-nums">{item.elapsed}</span>
           )}

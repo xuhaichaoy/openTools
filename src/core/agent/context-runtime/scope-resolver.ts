@@ -120,14 +120,18 @@ export async function resolveTaskScopeSnapshot(
   const attachmentPaths = uniqueContextPaths(params.attachmentPaths ?? []);
   const imagePaths = uniqueContextPaths(params.images ?? []);
   const handoffPaths = collectHandoffPaths(params.sourceHandoff);
+  const queryPathHints = collectAbsolutePathHints(params.query);
   const pathHints = uniqueContextPaths([
     ...attachmentPaths,
     ...imagePaths,
     ...handoffPaths,
+    ...queryPathHints,
   ]);
 
+  const explicitWorkspaceRoot = normalizeContextPath(params.explicitWorkspaceRoot || "") || undefined;
+
   const workspaceRoot = await resolveBootstrapWorkspaceRoot({
-    explicitWorkspace: normalizeContextPath(params.explicitWorkspaceRoot || "") || undefined,
+    explicitWorkspace: explicitWorkspaceRoot,
     filePaths: pathHints,
     handoffPaths,
     query: params.query,
@@ -142,9 +146,20 @@ export async function resolveTaskScopeSnapshot(
     imagePaths,
     handoffPaths,
     pathHints,
+    queryPathHints,
     queryIntent: inferQueryIntent(params.query),
     explicitReset: EXPLICIT_RESET_PATTERNS.some((pattern) =>
       pattern.test(params.query),
     ),
+    workspaceSource:
+      explicitWorkspaceRoot
+        ? "explicit"
+        : attachmentPaths.length > 0 || imagePaths.length > 0
+          ? "attachment"
+          : handoffPaths.length > 0
+            ? "handoff"
+            : queryPathHints.length > 0
+              ? "query_path"
+              : "none",
   };
 }

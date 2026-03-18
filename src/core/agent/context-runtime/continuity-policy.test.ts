@@ -143,4 +143,50 @@ describe("decideAgentSessionContinuity", () => {
     expect(decision.carrySummary).toBe(true);
     expect(decision.carryRecentSteps).toBe(false);
   });
+
+  it("keeps only summary when the user explicitly points to a different path inside the same workspace", () => {
+    const decision = decideAgentSessionContinuity({
+      scope: {
+        previousWorkspaceRoot: "/workspace/repo",
+        workspaceRoot: "/workspace/repo",
+        attachmentPaths: ["/workspace/repo/apps/admin/new-page.tsx"],
+        imagePaths: [],
+        handoffPaths: [],
+        pathHints: ["/workspace/repo/apps/admin/new-page.tsx"],
+        queryPathHints: ["/workspace/repo/apps/admin/new-page.tsx"],
+        queryIntent: "coding",
+        explicitReset: false,
+      },
+      currentSession: {
+        id: "s1",
+        title: "Test",
+        createdAt: 1,
+        workspaceRoot: "/workspace/repo",
+        lastActivePaths: [
+          "/workspace/repo/packages/core/src/runtime.ts",
+          "/workspace/repo/packages/core/src/store.ts",
+        ],
+        tasks: [
+          {
+            id: "t1",
+            query: "分析 core runtime",
+            steps: [],
+            answer: "done",
+          },
+        ],
+        compaction: {
+          summary: "summary",
+          compactedTaskCount: 1,
+          lastCompactedAt: 1,
+        },
+      },
+    });
+
+    expect(decision.strategy).toBe("inherit_summary_only");
+    expect(decision.reason).toBe("path_focus_shift");
+    expect(decision.carrySummary).toBe(true);
+    expect(decision.carryRecentSteps).toBe(false);
+    expect(decision.carryFiles).toBe(false);
+    expect(decision.carryHandoff).toBe(false);
+  });
 });

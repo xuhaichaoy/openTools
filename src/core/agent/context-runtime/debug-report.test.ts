@@ -55,8 +55,11 @@ describe("debug-report", () => {
       workspaceReset: false,
       promptContextSnapshot: {
         generatedAt: 1,
+        currentTimeLabel: "2026-03-17 12:00:00",
+        currentTimeIso: "2026-03-17T04:00:00.000Z",
         runModeLabel: "Coding 模式",
         forceNewSession: false,
+        queryPreview: "继续实现设置页字体缩放和窗口尺寸本地存储",
         review: {
           visibleTaskCount: 2,
           hiddenTaskCount: 0,
@@ -71,9 +74,25 @@ describe("debug-report", () => {
         compactionBootstrapRules: [],
         bootstrapContextFileCount: 2,
         bootstrapContextFileNames: ["AGENTS.md", "USER.md"],
+        bootstrapDiagnostics: {
+          maxCharsPerFile: 4000,
+          totalMaxChars: 12000,
+          usedChars: 5000,
+          remainingChars: 7000,
+          includedFileCount: 2,
+          truncatedFileCount: 1,
+          omittedFileCount: 0,
+          missingFileCount: 0,
+          files: [],
+        },
         workspaceRoot: "/repo/app",
         workspaceReset: false,
         memoryItemCount: 3,
+        memoryRecallAttempted: true,
+        memoryRecallPreview: ["默认使用 1.2 倍字体"],
+        transcriptRecallAttempted: true,
+        transcriptRecallHitCount: 2,
+        transcriptRecallPreview: ["Agent：任务结果：已完成设置页基础布局"],
         historyContextMessageCount: 4,
         knowledgeContextMessageCount: 1,
         hasSkillsPrompt: false,
@@ -104,6 +123,8 @@ describe("debug-report", () => {
 
     expect(report.scope.queryIntent).toBe("coding");
     expect(report.prompt.bootstrapFileNames).toEqual(["AGENTS.md", "USER.md"]);
+    expect(report.prompt.bootstrapTruncatedFileCount).toBe(1);
+    expect(report.prompt.transcriptRecallHitCount).toBe(2);
     expect(report.compaction.compactedTaskCount).toBe(3);
     expect(report.ingest.sessionNoteSaved).toBe(true);
     expect(report.execution.status).toBe("success");

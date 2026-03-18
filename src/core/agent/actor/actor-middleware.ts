@@ -35,6 +35,11 @@ export interface ActorRunContext {
   tools: AgentTool[];
   rolePrompt: string;
   userMemoryPrompt?: string;
+  memoryRecallAttempted?: boolean;
+  appliedMemoryPreview?: string[];
+  transcriptRecallAttempted?: boolean;
+  transcriptRecallHitCount?: number;
+  appliedTranscriptPreview?: string[];
   skillsPrompt?: string;
   hasCodingWorkflowSkill: boolean;
   fcCompatibilityKey: string;

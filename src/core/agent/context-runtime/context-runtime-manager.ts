@@ -13,7 +13,7 @@ export async function buildAgentExecutionContextPlan(params: {
   sourceHandoff?: AICenterHandoff | null;
   forceNewSession?: boolean;
 }): Promise<AgentExecutionContextPlan> {
-  const scope = await resolveTaskScopeSnapshot({
+  let scope = await resolveTaskScopeSnapshot({
     query: params.query,
     previousWorkspaceRoot: params.currentSession?.workspaceRoot,
     explicitWorkspaceRoot: params.explicitWorkspaceRoot,
@@ -21,6 +21,24 @@ export async function buildAgentExecutionContextPlan(params: {
     images: params.images,
     sourceHandoff: params.sourceHandoff,
   });
+  const lockedWorkspaceRoot = params.currentSession?.workspaceLocked
+    ? params.currentSession.workspaceRoot?.trim()
+    : undefined;
+  if (lockedWorkspaceRoot) {
+    const hasExternalWorkspaceSignal =
+      !!params.explicitWorkspaceRoot?.trim()
+      || !!scope.attachmentPaths.length
+      || !!scope.imagePaths.length
+      || !!scope.handoffPaths.length
+      || !!scope.queryPathHints.length;
+    if (!hasExternalWorkspaceSignal) {
+      scope = {
+        ...scope,
+        workspaceRoot: lockedWorkspaceRoot,
+        workspaceSource: "locked_previous",
+      };
+    }
+  }
   const continuity = decideAgentSessionContinuity({
     scope,
     forceNewSession: params.forceNewSession,

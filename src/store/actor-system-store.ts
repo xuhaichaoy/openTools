@@ -50,6 +50,11 @@ import {
   type DialogContextSnapshot,
 } from "@/plugins/builtin/SmartAgent/core/dialog-context-snapshot";
 import { useAISessionRuntimeStore } from "@/store/ai-session-runtime-store";
+import {
+  registerRuntimeAbortHandler,
+  unregisterRuntimeAbortHandler,
+  useRuntimeStateStore,
+} from "@/core/agent/context-runtime/runtime-state";
 
 const log = createLogger("ActorStore");
 
@@ -63,6 +68,9 @@ interface PersistedSpawnedTask {
   runId: string;
   spawnerActorId: string;
   targetActorId: string;
+  parentRunId?: string;
+  rootRunId?: string;
+  roleBoundary?: SpawnedTaskRecord["roleBoundary"];
   task: string;
   label?: string;
   status: string;
@@ -132,6 +140,21 @@ function cloneAICenterHandoff(handoff?: AICenterHandoff | null): AICenterHandoff
       ? { files: handoff.files.map((file) => ({ ...file })) }
       : {}),
   };
+}
+
+function collectUniquePreviewItems(items: readonly string[], limit = 4): string[] {
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const item of items) {
+    const normalized = String(item || "").trim();
+    if (!normalized) continue;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(normalized);
+    if (result.length >= limit) break;
+  }
+  return result;
 }
 
 function getPendingInteractionTypeFromMessage(message: DialogMessage): PendingInteraction["type"] | null {
@@ -206,6 +229,9 @@ function buildSessionSnapshot(
         runId: r.runId,
         spawnerActorId: r.spawnerActorId,
         targetActorId: r.targetActorId,
+        parentRunId: r.parentRunId,
+        rootRunId: r.rootRunId,
+        roleBoundary: r.roleBoundary,
         task: r.task.slice(0, 500),
         label: r.label,
         status: r.status,
@@ -281,6 +307,11 @@ function buildPersistableDialogContextSnapshot(params: {
     roleName: string;
     workspace?: string;
     status: ActorStatus;
+    lastMemoryRecallAttempted?: boolean;
+    lastMemoryRecallPreview?: string[];
+    lastTranscriptRecallAttempted?: boolean;
+    lastTranscriptRecallHitCount?: number;
+    lastTranscriptRecallPreview?: string[];
   }[];
   dialogHistory: readonly DialogMessage[];
   artifacts: readonly DialogArtifactRecord[];
@@ -298,6 +329,16 @@ function buildPersistableDialogContextSnapshot(params: {
     ?? params.actors.find((actor) => typeof actor.workspace === "string" && actor.workspace.trim().length > 0)?.workspace
   );
   const actorNameById = new Map(params.actors.map((actor) => [actor.id, actor.roleName] as const));
+  const memoryPreview = collectUniquePreviewItems(
+    params.actors.flatMap((actor) => actor.lastMemoryRecallPreview ?? []),
+  );
+  const transcriptPreview = collectUniquePreviewItems(
+    params.actors.flatMap((actor) => actor.lastTranscriptRecallPreview ?? []),
+  );
+  const transcriptRecallHitCount = params.actors.reduce(
+    (sum, actor) => sum + Math.max(0, actor.lastTranscriptRecallHitCount ?? 0),
+    0,
+  );
   const dialogContextSummary = buildDialogContextSummary({
     dialogHistory: params.dialogHistory,
     artifacts: params.artifacts,
@@ -328,6 +369,14 @@ function buildPersistableDialogContextSnapshot(params: {
     queuedFollowUpCount: params.queuedFollowUps.length,
     focusedSessionRunId: params.focusedSpawnedSessionRunId,
     focusedSessionLabel,
+    memoryRecallAttempted: params.actors.some((actor) => actor.lastMemoryRecallAttempted === true),
+    memoryHitCount: memoryPreview.length,
+    memoryPreview,
+    transcriptRecallAttempted: params.actors.some(
+      (actor) => actor.lastTranscriptRecallAttempted === true,
+    ),
+    transcriptRecallHitCount,
+    transcriptPreview,
   });
   return snapshot.contextLines.length > 0 ? snapshot : null;
 }
@@ -474,6 +523,99 @@ function syncDialogRuntimeSession(
           },
         }
       : {}),
+    });
+}
+
+function resolveDialogRuntimeWorkspaceRoot(
+  actors?: readonly Pick<ActorSnapshot, "id" | "workspace">[],
+  coordinatorActorId?: string | null,
+): string | undefined {
+  if (!actors?.length) return undefined;
+  const coordinatorWorkspace = coordinatorActorId
+    ? actors.find((actor) => actor.id === coordinatorActorId)?.workspace
+    : undefined;
+  const fallbackWorkspace = actors.find(
+    (actor) => typeof actor.workspace === "string" && actor.workspace.trim().length > 0,
+  )?.workspace;
+  const workspaceRoot = coordinatorWorkspace || fallbackWorkspace;
+  return workspaceRoot?.trim() ? workspaceRoot : undefined;
+}
+
+function syncDialogRuntimeState(params: {
+  sessionId: string;
+  system: ActorSystem;
+  actors?: readonly Pick<ActorSnapshot, "id" | "workspace">[];
+  coordinatorActorId?: string | null;
+  dialogHistory?: readonly DialogMessage[];
+  spawnedTasks?: readonly SpawnedTaskRecord[];
+  pendingUserInteractions?: readonly PendingInteraction[];
+  queuedFollowUps?: readonly DialogQueuedFollowUp[];
+  sourceHandoff?: AICenterHandoff | null;
+  updatedAt?: number;
+}): void {
+  const pendingApprovals = params.pendingUserInteractions?.filter(
+    (interaction) => interaction.status === "pending" && interaction.type === "approval",
+  ).length ?? 0;
+  const pendingReplies = params.pendingUserInteractions?.filter(
+    (interaction) => interaction.status === "pending" && interaction.type !== "approval",
+  ).length ?? 0;
+  const runningTasks = params.spawnedTasks?.filter((task) => task.status === "running").length ?? 0;
+  const queuedFollowUps = params.queuedFollowUps?.length ?? 0;
+  const shouldKeepRuntime =
+    pendingApprovals > 0
+    || pendingReplies > 0
+    || runningTasks > 0
+    || queuedFollowUps > 0;
+
+  if (!shouldKeepRuntime) {
+    unregisterRuntimeAbortHandler("dialog", params.sessionId);
+    useRuntimeStateStore.getState().removeSession("dialog", params.sessionId);
+    return;
+  }
+
+  registerRuntimeAbortHandler("dialog", params.sessionId, () => {
+    params.system.abortAll();
+  });
+
+  const waitingStage =
+    pendingApprovals > 0
+      ? "user_confirm"
+      : pendingReplies > 0
+        ? "user_reply"
+        : queuedFollowUps > 0 && runningTasks === 0
+          ? "follow_up_queue"
+          : "dialog_running";
+  const status =
+    pendingApprovals > 0
+      ? "awaiting_approval"
+      : pendingReplies > 0
+        ? "awaiting_reply"
+        : queuedFollowUps > 0 && runningTasks === 0
+          ? "queued"
+          : "running";
+  const query =
+    extractDialogRuntimeTitle(params.dialogHistory)
+    || summarizeAISessionRuntimeText(params.sourceHandoff?.query || "", 96)
+    || "Dialog 房间";
+  const startedAt =
+    params.dialogHistory?.[0]?.timestamp
+    ?? params.spawnedTasks?.[0]?.spawnedAt
+    ?? params.updatedAt
+    ?? Date.now();
+  const workspaceRoot = resolveDialogRuntimeWorkspaceRoot(
+    params.actors,
+    params.coordinatorActorId,
+  );
+
+  useRuntimeStateStore.getState().upsertSession({
+    mode: "dialog",
+    sessionId: params.sessionId,
+    query,
+    startedAt,
+    updatedAt: params.updatedAt,
+    workspaceRoot,
+    waitingStage,
+    status,
   });
 }
 
@@ -774,6 +916,9 @@ function restoreSnapshot(system: ActorSystem, persisted: PersistedSession): void
         runId: t.runId,
         spawnerActorId: t.spawnerActorId,
         targetActorId: t.targetActorId,
+        parentRunId: t.parentRunId,
+        rootRunId: t.rootRunId,
+        roleBoundary: t.roleBoundary,
         task: t.task,
         label: t.label,
         status: t.status as SpawnedTaskRecord["status"],
@@ -854,6 +999,11 @@ export interface ActorSnapshot {
   pendingInbox: number;
   capabilities?: AgentCapabilities;
   sessionHistory: Array<{ role: "user" | "assistant"; content: string; timestamp: number }>;
+  lastMemoryRecallAttempted?: boolean;
+  lastMemoryRecallPreview?: string[];
+  lastTranscriptRecallAttempted?: boolean;
+  lastTranscriptRecallHitCount?: number;
+  lastTranscriptRecallPreview?: string[];
   currentTask?: {
     id: string;
     query: string;
@@ -945,6 +1095,11 @@ function snapshotActor(actor: AgentActor): ActorSnapshot {
     pendingInbox: actor.pendingInboxCount,
     capabilities: actor.capabilities,
     sessionHistory: actor.getSessionHistory(),
+    lastMemoryRecallAttempted: actor.lastMemoryRecallAttempted,
+    lastMemoryRecallPreview: actor.lastMemoryRecallPreview,
+    lastTranscriptRecallAttempted: actor.lastTranscriptRecallAttempted,
+    lastTranscriptRecallHitCount: actor.lastTranscriptRecallHitCount,
+    lastTranscriptRecallPreview: actor.lastTranscriptRecallPreview,
     currentTask: current
       ? {
           id: current.id,
@@ -1106,6 +1261,8 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
     const system = get()._system;
     if (system) {
       system.killAll();
+      unregisterRuntimeAbortHandler("dialog", system.sessionId);
+      useRuntimeStateStore.getState().removeSession("dialog", system.sessionId);
     }
     clearAllTodos();
     clearSessionApprovals();
@@ -1207,6 +1364,8 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
     system.resetSession(summary);
     saveActiveSessionPointer(system.sessionId);
     syncDialogRuntimeSession(system.sessionId);
+    unregisterRuntimeAbortHandler("dialog", system.sessionId);
+    useRuntimeStateStore.getState().removeSession("dialog", system.sessionId);
     clearPersistedSession();
     set({
       spawnedTasks: [],
@@ -1290,6 +1449,17 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
         pendingUserInteractions,
         sourceHandoff: nextHandoff,
       });
+      syncDialogRuntimeState({
+        sessionId: system.sessionId,
+        system,
+        actors: system.getAll().map(snapshotActor),
+        coordinatorActorId: system.getCoordinatorId(),
+        dialogHistory,
+        spawnedTasks,
+        pendingUserInteractions,
+        queuedFollowUps: get().queuedFollowUps,
+        sourceHandoff: nextHandoff,
+      });
       debouncedSave(system);
     }
   },
@@ -1297,6 +1467,11 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
   sync: () => {
     const system = get()._system;
     if (!system) {
+      const previousSessionId = get()._system?.sessionId;
+      if (previousSessionId) {
+        unregisterRuntimeAbortHandler("dialog", previousSessionId);
+        useRuntimeStateStore.getState().removeSession("dialog", previousSessionId);
+      }
       set({
         actors: [],
         dialogHistory: [],
@@ -1363,6 +1538,17 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
       dialogHistory,
       spawnedTasks,
       pendingUserInteractions,
+      sourceHandoff,
+    });
+    syncDialogRuntimeState({
+      sessionId: system.sessionId,
+      system,
+      actors,
+      coordinatorActorId,
+      dialogHistory,
+      spawnedTasks,
+      pendingUserInteractions,
+      queuedFollowUps: get().queuedFollowUps,
       sourceHandoff,
     });
     syncDialogSpawnedRuntimeSessions(system.sessionId, spawnedTasks, actors, {

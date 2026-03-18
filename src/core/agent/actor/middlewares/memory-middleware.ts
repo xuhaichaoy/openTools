@@ -13,6 +13,11 @@ export class MemoryMiddleware implements ActorMiddleware {
   async apply(ctx: ActorRunContext): Promise<void> {
     if (!shouldRecallAssistantMemory(useAIStore.getState().config)) {
       ctx.userMemoryPrompt = undefined;
+      ctx.memoryRecallAttempted = false;
+      ctx.appliedMemoryPreview = [];
+      ctx.transcriptRecallAttempted = false;
+      ctx.transcriptRecallHitCount = 0;
+      ctx.appliedTranscriptPreview = [];
       return;
     }
 
@@ -26,13 +31,19 @@ export class MemoryMiddleware implements ActorMiddleware {
       }
     }
 
-    const userMemory = await memorySnap.getMemoriesForQueryPromptAsync(ctx.query, {
+    const memoryBundle = await memorySnap.getMemoryRecallBundleAsync(ctx.query, {
       topK: 6,
       workspaceId: ctx.workspace,
       preferSemantic: true,
+      conversationId: ctx.actorSystem?.sessionId,
     });
-    ctx.userMemoryPrompt = userMemory
-      ? `\n\n## 用户偏好\n${userMemory}`
+    ctx.memoryRecallAttempted = memoryBundle.searched;
+    ctx.appliedMemoryPreview = memoryBundle.memoryPreview.slice(0, 4);
+    ctx.transcriptRecallAttempted = memoryBundle.transcriptSearched;
+    ctx.transcriptRecallHitCount = memoryBundle.transcriptHitCount;
+    ctx.appliedTranscriptPreview = memoryBundle.transcriptPreview.slice(0, 4);
+    ctx.userMemoryPrompt = memoryBundle.prompt
+      ? `\n\n## 用户偏好\n${memoryBundle.prompt}`
       : undefined;
   }
 }

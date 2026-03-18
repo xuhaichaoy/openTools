@@ -31,6 +31,12 @@ export interface ChannelIncomingMessage {
   timestamp: number;
   /** 是否 @了机器人 */
   atBot?: boolean;
+  /** 会话级回复 webhook（如钉钉 sessionWebhook） */
+  replyWebhookUrl?: string;
+  /** 会话级回复 webhook 过期时间戳 */
+  replyWebhookExpiresAt?: number;
+  /** 平台机器人编码（如钉钉 robotCode） */
+  robotCode?: string;
   /** 原始消息数据 */
   raw?: unknown;
 }
@@ -39,6 +45,14 @@ export interface ChannelIncomingMessage {
 export interface ChannelOutgoingMessage {
   /** 目标会话 ID */
   conversationId: string;
+  /** 回复的目标消息 ID（如平台支持） */
+  replyToMessageId?: string;
+  /** 会话级回复 webhook（如钉钉 sessionWebhook） */
+  replyWebhookUrl?: string;
+  /** 会话级回复 webhook 过期时间戳 */
+  replyWebhookExpiresAt?: number;
+  /** 平台机器人编码（如钉钉 robotCode） */
+  robotCode?: string;
   /** 文本内容 */
   text?: string;
   /** Markdown 内容 */

@@ -29,6 +29,121 @@ function createMockAI(
 }
 
 describe("ReActAgent FC compatibility cache", () => {
+  it("should not trigger memory recall correction from wrapped system planning text alone", async () => {
+    let fcCalls = 0;
+    const ai = createMockAI(async () => {
+      fcCalls += 1;
+      return {
+        type: "content",
+        content: "天津未来一周以晴到多云为主。",
+      };
+    });
+
+    const tools: AgentTool[] = [
+      {
+        name: "memory_search",
+        description: "memory search",
+        execute: async () => ({ results: [] }),
+      },
+      {
+        name: "memory_get",
+        description: "memory get",
+        execute: async () => ({ content: "" }),
+      },
+    ];
+
+    const agent = new ReActAgent(ai, tools, {
+      maxIterations: 4,
+      fcCompatibilityKey: "wrapped-system-text-should-not-trigger-memory-recall",
+    });
+
+    const answer = await agent.run([
+      "[用户]: 未来一周 天津 天气",
+      "",
+      "[system]: [已批准协作计划 / 内部指令]",
+      "请先决定如何分工，再继续执行。",
+      "执行时注意 review、进度、方案与决策收敛。",
+    ].join("\n"));
+
+    expect(answer).toContain("天津未来一周");
+    expect(fcCalls).toBe(1);
+  });
+
+  it("should still enforce memory recall for wrapped memory questions", async () => {
+    let fcCalls = 0;
+    let memorySearchCalls = 0;
+    const ai = createMockAI(async () => {
+      fcCalls += 1;
+      if (fcCalls === 1) {
+        return {
+          type: "content",
+          content: "你在北京。",
+        };
+      }
+      if (fcCalls === 2) {
+        return {
+          type: "tool_calls",
+          toolCalls: [
+            {
+              id: "call-memory-search",
+              type: "function",
+              function: {
+                name: "memory_search",
+                arguments: "{\"query\":\"我在哪个城市\"}",
+              },
+            },
+          ],
+        };
+      }
+      return {
+        type: "content",
+        content: "已检查记忆，你所在城市是北京。",
+      };
+    });
+
+    const tools: AgentTool[] = [
+      {
+        name: "memory_search",
+        description: "memory search",
+        parameters: {
+          query: { type: "string", description: "query" },
+        },
+        execute: async () => {
+          memorySearchCalls += 1;
+          return {
+            results: [
+              {
+                path: "MEMORY.md",
+                snippet: "用户所在城市：北京",
+              },
+            ],
+          };
+        },
+      },
+      {
+        name: "memory_get",
+        description: "memory get",
+        execute: async () => ({ content: "用户所在城市：北京" }),
+      },
+    ];
+
+    const agent = new ReActAgent(ai, tools, {
+      maxIterations: 5,
+      fcCompatibilityKey: "wrapped-memory-question-should-still-recall",
+    });
+
+    const answer = await agent.run([
+      "[用户]: 还记得我在哪个城市吗？",
+      "",
+      "[system]: [已批准协作计划 / 内部指令]",
+      "请先决定如何分工，再继续执行。",
+    ].join("\n"));
+
+    expect(answer).toContain("已检查记忆");
+    expect(memorySearchCalls).toBe(1);
+    expect(fcCalls).toBe(3);
+  });
+
   it("should skip FC retry for same incompatible model key", async () => {
     let fcCalls = 0;
     const ai = createMockAI(async () => {
@@ -364,6 +479,82 @@ describe("ReActAgent FC compatibility cache", () => {
 
     expect(answer).toContain("1000px");
     expect(answer).not.toContain("100px，不需要修改");
+  });
+
+  it("should append generate_suggestions output without forcing a third model round", async () => {
+    let fcCalls = 0;
+    const ai = createMockAI(async ({ onChunk }) => {
+      fcCalls += 1;
+      if (fcCalls === 1) {
+        return {
+          type: "tool_calls",
+          toolCalls: [
+            {
+              id: "call-manage-skills",
+              type: "function",
+              function: {
+                name: "manage_skills",
+                arguments: "{\"action\":\"list\"}",
+              },
+            },
+          ],
+        };
+      }
+
+      onChunk("## 当前技能列表\n\n共有 **11 个技能**，全部已启用。");
+      return {
+        type: "tool_calls",
+        toolCalls: [
+          {
+            id: "call-generate-suggestions",
+            type: "function",
+            function: {
+              name: "generate_suggestions",
+              arguments:
+                "{\"context_summary\":\"用户查看了技能列表\",\"suggestions\":\"[{\\\"text\\\":\\\"查看某个技能的详细内容\\\",\\\"type\\\":\\\"question\\\"}]\"}",
+            },
+          },
+        ],
+      };
+    });
+
+    const tools: AgentTool[] = [
+      {
+        name: "manage_skills",
+        description: "list skills",
+        parameters: {
+          action: { type: "string", description: "action" },
+        },
+        execute: async () => ({
+          skills: [{ id: "skill-1", name: "天气查询助手" }],
+          total: 1,
+        }),
+      },
+      {
+        name: "generate_suggestions",
+        description: "generate suggestions",
+        parameters: {
+          context_summary: { type: "string", description: "summary" },
+          suggestions: { type: "string", description: "suggestions" },
+        },
+        execute: async () => ({
+          display: "\n---\n**你可能还想了解：**\n💡 1. 查看某个技能的详细内容",
+          suggestions: [{ text: "查看某个技能的详细内容", type: "question" }],
+        }),
+      },
+    ];
+
+    const agent = new ReActAgent(ai, tools, {
+      maxIterations: 4,
+      fcCompatibilityKey: "append-generate-suggestions-without-rerun",
+    });
+
+    const answer = await agent.run("现在都有什么技能了");
+
+    expect(answer).toContain("当前技能列表");
+    expect(answer).toContain("你可能还想了解");
+    expect(answer).toContain("查看某个技能的详细内容");
+    expect(fcCalls).toBe(2);
   });
 
   it("should not downgrade or cache on generic FC execution errors", async () => {

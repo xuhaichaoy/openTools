@@ -84,8 +84,14 @@ describe("dialog-dispatch-plan", () => {
     });
     expect(plan?.clusterPlan.steps[0].task).toContain("拆解大型编码任务");
     expect(plan?.clusterPlan.steps.find((step) => step.role === "Fixer")?.task).toContain("定位异常链路");
-    expect(plan?.clusterPlan.steps.some((step) => step.task.includes("实施修复"))).toBe(true);
+    expect(plan?.clusterPlan.steps.find((step) => step.role === "Reviewer")?.task).toContain("独立审查者");
     expect(plan?.clusterPlan.steps.find((step) => step.role === "Tester")?.task).toContain("设计并执行验证步骤");
+    expect(plan?.runtimePlan.plannedSpawns?.map((spawn) => spawn.targetActorId)).toEqual(["fixer", "tester", "reviewer"]);
+    expect(plan?.runtimePlan.plannedSpawns?.map((spawn) => spawn.roleBoundary)).toEqual([
+      "executor",
+      "validator",
+      "reviewer",
+    ]);
   });
 
   it("uses selected smart route for coding review tasks", () => {
@@ -109,5 +115,11 @@ describe("dialog-dispatch-plan", () => {
     expect(plan?.runtimePlan.initialRecipientActorIds).toEqual(["reviewer"]);
     expect(plan?.runtimePlan.summary).toContain("Reviewer 主接手编码任务");
     expect(plan?.clusterPlan.steps[0].task).toContain("路由理由：命中代码审查能力");
+    expect(plan?.runtimePlan.plannedSpawns?.map((spawn) => spawn.targetActorId)).toEqual(["fixer", "tester", "coordinator"]);
+    expect(plan?.runtimePlan.plannedSpawns?.map((spawn) => spawn.roleBoundary)).toEqual([
+      "executor",
+      "validator",
+      "general",
+    ]);
   });
 });

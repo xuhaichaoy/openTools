@@ -28,6 +28,12 @@ describe("buildClusterContextSnapshot", () => {
       lastSessionNotePreview: "Cluster 任务：继续实现首页并补全交互；结果：已完成首页布局",
       lastRunStatus: "success",
       lastRunDurationMs: 18000,
+      memoryRecallAttempted: true,
+      memoryHitCount: 2,
+      memoryPreview: ["用户常驻上海", "默认中文回答"],
+      transcriptRecallAttempted: true,
+      transcriptRecallHitCount: 1,
+      transcriptPreview: ["Agent：继续实现首页并补全交互"],
     });
 
     expect(snapshot.workspaceRoot).toBe("/tmp/project");
@@ -38,10 +44,14 @@ describe("buildClusterContextSnapshot", () => {
     expect(snapshot.reportPreview).toContain("已完成首页布局");
     expect(snapshot.lastRunStatus).toBe("success");
     expect(snapshot.lastSessionNotePreview).toContain("Cluster 任务");
+    expect(snapshot.memoryHitCount).toBe(2);
+    expect(snapshot.transcriptRecallHitCount).toBe(1);
     expect(snapshot.contextLines.some((line) => line.includes("当前工作区"))).toBe(true);
     expect(snapshot.contextLines.some((line) => line.includes("跨模式来源"))).toBe(true);
     expect(snapshot.contextLines.some((line) => line.includes("执行实例"))).toBe(true);
     expect(snapshot.contextLines.some((line) => line.includes("最近运行"))).toBe(true);
     expect(snapshot.contextLines.some((line) => line.includes("最近会话笔记"))).toBe(true);
+    expect(snapshot.contextLines.some((line) => line.includes("长期记忆"))).toBe(true);
+    expect(snapshot.contextLines.some((line) => line.includes("会话轨迹回补"))).toBe(true);
   });
 });

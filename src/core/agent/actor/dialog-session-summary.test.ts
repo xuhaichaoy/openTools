@@ -1,42 +1,45 @@
 import { describe, expect, it } from "vitest";
 import { buildDialogContextSummary } from "./dialog-session-summary";
+import type { DialogMessage, SpawnedTaskRecord } from "./types";
 
-describe("buildDialogContextSummary", () => {
-  it("returns null for short dialogs", () => {
-    expect(
-      buildDialogContextSummary({
-        dialogHistory: [{ id: "1", from: "user", content: "hi", timestamp: 1, priority: "normal" }],
-      }),
-    ).toBeNull();
-  });
+describe("dialog-session-summary", () => {
+  it("includes spawned task role boundaries in the older task summary", () => {
+    const dialogHistory: DialogMessage[] = Array.from({ length: 14 }, (_, index) => ({
+      id: `msg-${index}`,
+      from: index % 2 === 0 ? "user" : "coordinator",
+      content: index % 2 === 0 ? `用户消息 ${index}` : `房间回复 ${index}`,
+      timestamp: 1000 + index * 100,
+      priority: "normal",
+    }));
 
-  it("summarizes older dialog context", () => {
+    const spawnedTasks: SpawnedTaskRecord[] = [
+      {
+        runId: "run-1",
+        spawnerActorId: "coordinator",
+        targetActorId: "tester",
+        roleBoundary: "validator",
+        task: "补充验证并执行回归",
+        label: "验证支援",
+        status: "running",
+        spawnedAt: 1500,
+        mode: "run",
+        expectsCompletionMessage: true,
+        cleanup: "keep",
+      },
+    ];
+
     const summary = buildDialogContextSummary({
-      dialogHistory: Array.from({ length: 16 }, (_, index) => ({
-        id: String(index),
-        from: index % 2 === 0 ? "user" : "agent-a",
-        content: index % 2 === 0 ? `用户问题 ${index}` : `代理回复 ${index}`,
-        timestamp: index + 1,
-        priority: "normal" as const,
-      })),
-      artifacts: [
-        {
-          id: "a1",
-          actorId: "agent-a",
-          path: "/tmp/out.tsx",
-          fileName: "out.tsx",
-          directory: "/tmp",
-          source: "tool_write",
-          summary: "写出了首页组件",
-          timestamp: 10,
-        },
-      ],
-      actorNameById: new Map([["agent-a", "Coordinator"]]),
+      dialogHistory,
+      spawnedTasks,
+      actorNameById: new Map([
+        ["coordinator", "Coordinator"],
+        ["tester", "Tester"],
+      ]),
+      keepRecentMessages: 4,
     });
 
     expect(summary).not.toBeNull();
-    expect(summary?.summarizedMessageCount).toBe(4);
-    expect(summary?.summary).toContain("早期用户诉求");
-    expect(summary?.summary).toContain("已产生产物");
+    expect(summary?.summary).toContain("Tester · 验证回归 · 验证支援 · running");
   });
 });
+

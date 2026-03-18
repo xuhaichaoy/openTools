@@ -38,6 +38,11 @@ import {
   type AskContextSnapshot,
 } from "@/core/ai/ask-context-snapshot";
 import { persistAskTurnContextIngest } from "@/core/agent/context-runtime";
+import {
+  registerRuntimeAbortHandler,
+  unregisterRuntimeAbortHandler,
+  useRuntimeStateStore,
+} from "@/core/agent/context-runtime/runtime-state";
 import { applyAILocalConfigOverrides } from "@/core/ai/local-ai-config-preferences";
 import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
 import { loadAndResolveSkills } from "@/store/skill-store";
@@ -104,7 +109,7 @@ interface AIState {
   clearConversation: (id: string) => void;
   regenerateLastMessage: () => Promise<void>;
   editAndResend: (messageId: string, newContent: string) => Promise<void>;
-  stopStreaming: () => void;
+  stopStreaming: (conversationId?: string) => void;
   confirmTool: (approved: boolean) => Promise<void>;
   loadMemoryCandidates: () => Promise<void>;
   confirmMemoryCandidate: (
@@ -170,6 +175,52 @@ function syncAskRuntimeConversation(conversation: Conversation): void {
     summary: buildAskRuntimeSummary(conversation),
     source: conversation.sourceHandoff,
   });
+}
+
+function startAskRuntimeSession(params: {
+  conversationId: string;
+  query: string;
+  startedAt: number;
+  workspaceRoot?: string;
+}): void {
+  registerRuntimeAbortHandler(
+    "ask",
+    params.conversationId,
+    () => useAIStore.getState().stopStreaming(params.conversationId),
+  );
+  useRuntimeStateStore.getState().upsertSession({
+    mode: "ask",
+    sessionId: params.conversationId,
+    query: params.query,
+    startedAt: params.startedAt,
+    workspaceRoot: params.workspaceRoot,
+    waitingStage: "model_first_token",
+    status: "running",
+  });
+}
+
+function patchAskRuntimeSession(
+  conversationId: string,
+  patch: {
+    workspaceRoot?: string;
+    waitingStage?: string;
+    status?: string;
+  },
+): void {
+  useRuntimeStateStore.getState().patchSession("ask", conversationId, {
+    ...(typeof patch.workspaceRoot === "string"
+      ? { workspaceRoot: patch.workspaceRoot }
+      : {}),
+    ...(typeof patch.waitingStage === "string"
+      ? { waitingStage: patch.waitingStage }
+      : {}),
+    ...(typeof patch.status === "string" ? { status: patch.status } : {}),
+  });
+}
+
+function finishAskRuntimeSession(conversationId: string): void {
+  unregisterRuntimeAbortHandler("ask", conversationId);
+  useRuntimeStateStore.getState().removeSession("ask", conversationId);
 }
 
 function nativeToolsSupportedOnCurrentPlatform(): boolean {
@@ -538,10 +589,11 @@ export const useAIStore = create<AIState>((set, get) => ({
     }
   },
 
-  stopStreaming: () => {
+  stopStreaming: (requestedConversationId) => {
     const { currentConversationId } = get();
-    if (!currentConversationId) return;
-    invoke("ai_stop_stream", { conversationId: currentConversationId }).catch((err) => {
+    const targetConversationId = requestedConversationId ?? currentConversationId;
+    if (!targetConversationId) return;
+    invoke("ai_stop_stream", { conversationId: targetConversationId }).catch((err) => {
       console.warn("[AIStore] ai_stop_stream failed:", err);
     });
     if (_streamCleanup) {
@@ -551,7 +603,7 @@ export const useAIStore = create<AIState>((set, get) => ({
     set((state) => ({
       isStreaming: false,
       conversations: state.conversations.map((c) =>
-        c.id === currentConversationId
+        c.id === targetConversationId
           ? withAskContextSnapshot({
               ...c,
               updatedAt: Date.now(),
@@ -564,7 +616,8 @@ export const useAIStore = create<AIState>((set, get) => ({
           : c,
       ),
     }));
-    const conversation = get().conversations.find((item) => item.id === currentConversationId);
+    finishAskRuntimeSession(targetConversationId);
+    const conversation = get().conversations.find((item) => item.id === targetConversationId);
     if (conversation) {
       syncAskRuntimeConversation(conversation);
       Promise.resolve().then(async () => {
@@ -589,7 +642,7 @@ export const useAIStore = create<AIState>((set, get) => ({
             imageCount: latestUser.images?.length ?? 0,
             memoryAutoExtractionScheduled: false,
           });
-          get().updateConversation(currentConversationId, {
+          get().updateConversation(targetConversationId, {
             lastSessionNotePreview: ingestResult.sessionNotePreview,
             lastContextRuntimeReport: ingestResult.debugReport,
           });
@@ -722,6 +775,12 @@ export const useAIStore = create<AIState>((set, get) => ({
         title: content.slice(0, 30) || undefined,
       });
     }
+    startAskRuntimeSession({
+      conversationId,
+      query: content,
+      startedAt: userMessage.timestamp,
+      workspaceRoot: liveConversation?.workspaceRoot,
+    });
 
     // 记忆候选提取（非阻塞，不影响 API 请求速度）
     if (state.config.enable_long_term_memory && state.config.enable_memory_auto_save) {
@@ -769,6 +828,12 @@ export const useAIStore = create<AIState>((set, get) => ({
             memories: [],
             memoryIds: [],
             memoryPreview: [],
+            searched: false,
+            hitCount: 0,
+            transcriptPrompt: "",
+            transcriptPreview: [],
+            transcriptSearched: false,
+            transcriptHitCount: 0,
           };
         })
       : Promise.resolve({
@@ -776,18 +841,29 @@ export const useAIStore = create<AIState>((set, get) => ({
           memories: [],
           memoryIds: [],
           memoryPreview: [],
+          searched: false,
+          hitCount: 0,
+          transcriptPrompt: "",
+          transcriptPreview: [],
+          transcriptSearched: false,
+          transcriptHitCount: 0,
         });
 
     const memoryBundle = await memoryRecallPromise;
     if (memoryBundle.prompt) {
       apiMessages.unshift({ role: "system", content: memoryBundle.prompt });
     }
-    if (memoryBundle.memoryIds.length > 0 || memoryBundle.memoryPreview.length > 0) {
+    if (
+      memoryBundle.memoryIds.length > 0
+      || memoryBundle.memoryPreview.length > 0
+      || memoryBundle.transcriptSearched
+      || memoryBundle.transcriptPreview.length > 0
+    ) {
       set((state) => ({
         conversations: state.conversations.map((c) =>
           c.id === conversationId
             ? withAskContextSnapshot({
-                ...c,
+              ...c,
                 updatedAt: Date.now(),
                 messages: c.messages.map((m) =>
                   m.id === assistantMessage.id
@@ -795,6 +871,9 @@ export const useAIStore = create<AIState>((set, get) => ({
                         ...m,
                         appliedMemoryIds: memoryBundle.memoryIds,
                         appliedMemoryPreview: memoryBundle.memoryPreview,
+                        transcriptRecallAttempted: memoryBundle.transcriptSearched,
+                        transcriptRecallHitCount: memoryBundle.transcriptHitCount,
+                        appliedTranscriptPreview: memoryBundle.transcriptPreview,
                       }
                     : m,
                 ),
@@ -829,111 +908,123 @@ export const useAIStore = create<AIState>((set, get) => ({
     }));
 
     // 委托 Service 处理流式监听
-    const cleanup = await startStreamingChat({
-      conversationId,
-      assistantMessageId: assistantMessage.id,
-      apiMessages,
-      config: state.config,
-      extraTools: extraTools.length > 0 ? extraTools : undefined,
-      onFrontendToolCall: extraTools.length > 0
-        ? async (name, args) => executeMcpTool(name, args)
-        : undefined,
-      callbacks: {
-        updateAssistant: (updater) => {
-          set((state) => ({
-            conversations: state.conversations.map((c) =>
-              c.id === conversationId
-                ? withAskContextSnapshot({
-                    ...c,
-                    updatedAt: Date.now(),
-                    messages: c.messages.map((m) =>
-                      m.id === assistantMessage.id ? updater(m) : m,
-                    ),
-                  })
-                : c,
-            ),
-          }));
-        },
-        setState: (partial) => set(partial),
-        onPersist: () => {
-          _streamCleanup = null;
-          const currentConversation = useAIStore.getState().conversations.find(
-            (item) => item.id === conversationId,
-          );
-          if (currentConversation) {
-            syncAskRuntimeConversation(currentConversation);
-          }
-          triggerPersist();
-        },
-        onDone: (assistantContent) => {
-          const currentConfig = useAIStore.getState().config;
-          Promise.resolve().then(async () => {
-            try {
-              const currentConversation = useAIStore.getState().conversations.find(
-                (item) => item.id === conversationId,
-              );
-              if (currentConversation) {
+    try {
+      const cleanup = await startStreamingChat({
+        conversationId,
+        assistantMessageId: assistantMessage.id,
+        apiMessages,
+        config: state.config,
+        extraTools: extraTools.length > 0 ? extraTools : undefined,
+        onFrontendToolCall: extraTools.length > 0
+          ? async (name, args) => executeMcpTool(name, args)
+          : undefined,
+        callbacks: {
+          updateAssistant: (updater) => {
+            set((state) => ({
+              conversations: state.conversations.map((c) =>
+                c.id === conversationId
+                  ? withAskContextSnapshot({
+                      ...c,
+                      updatedAt: Date.now(),
+                      messages: c.messages.map((m) =>
+                        m.id === assistantMessage.id ? updater(m) : m,
+                      ),
+                    })
+                  : c,
+              ),
+            }));
+            patchAskRuntimeSession(conversationId, {
+              waitingStage: "model_generating",
+              status: "running",
+            });
+          },
+          setState: (partial) => set(partial),
+          onPersist: () => {
+            _streamCleanup = null;
+            finishAskRuntimeSession(conversationId);
+            const currentConversation = useAIStore.getState().conversations.find(
+              (item) => item.id === conversationId,
+            );
+            if (currentConversation) {
+              syncAskRuntimeConversation(currentConversation);
+            }
+            triggerPersist();
+          },
+          onDone: (assistantContent) => {
+            finishAskRuntimeSession(conversationId);
+            const currentConfig = useAIStore.getState().config;
+            Promise.resolve().then(async () => {
+              try {
+                const currentConversation = useAIStore.getState().conversations.find(
+                  (item) => item.id === conversationId,
+                );
+                if (currentConversation) {
+                  const ingestResult = await persistAskTurnContextIngest({
+                    conversation: currentConversation,
+                    query: content,
+                    status: "success",
+                    durationMs: Date.now() - userMessage.timestamp,
+                    answer: assistantContent,
+                    attachmentCount: attachmentPaths?.length ?? 0,
+                    imageCount: images?.length ?? 0,
+                    memoryAutoExtractionScheduled:
+                      currentConfig.enable_long_term_memory
+                      && currentConfig.enable_memory_auto_save,
+                  });
+                  get().updateConversation(conversationId, {
+                    lastSessionNotePreview: ingestResult.sessionNotePreview,
+                    lastContextRuntimeReport: ingestResult.debugReport,
+                  });
+                }
+                if (!currentConfig.enable_long_term_memory || !currentConfig.enable_memory_auto_save) {
+                  return;
+                }
+                const { autoExtractMemories } = await import("@/core/agent/actor/actor-memory");
+                await autoExtractMemories(`${content}\n${assistantContent}`, conversationId, {
+                  sourceMode: "ask",
+                  workspaceId: currentConversation?.workspaceRoot,
+                  skipSessionNote: true,
+                });
+              } catch (e) {
+                handleError(e, { context: "沉淀 Ask 会话记忆", silent: true });
+              }
+            });
+          },
+          onError: (errorText, assistantContent) => {
+            finishAskRuntimeSession(conversationId);
+            Promise.resolve().then(async () => {
+              try {
+                const currentConversation = useAIStore.getState().conversations.find(
+                  (item) => item.id === conversationId,
+                );
+                if (!currentConversation) return;
                 const ingestResult = await persistAskTurnContextIngest({
                   conversation: currentConversation,
                   query: content,
-                  status: "success",
+                  status: "error",
                   durationMs: Date.now() - userMessage.timestamp,
                   answer: assistantContent,
+                  error: errorText,
                   attachmentCount: attachmentPaths?.length ?? 0,
                   imageCount: images?.length ?? 0,
-                  memoryAutoExtractionScheduled:
-                    currentConfig.enable_long_term_memory
-                    && currentConfig.enable_memory_auto_save,
+                  memoryAutoExtractionScheduled: false,
                 });
                 get().updateConversation(conversationId, {
                   lastSessionNotePreview: ingestResult.sessionNotePreview,
                   lastContextRuntimeReport: ingestResult.debugReport,
                 });
+              } catch (e) {
+                handleError(e, { context: "写入 Ask 运行快照", silent: true });
               }
-              if (!currentConfig.enable_long_term_memory || !currentConfig.enable_memory_auto_save) {
-                return;
-              }
-              const { autoExtractMemories } = await import("@/core/agent/actor/actor-memory");
-              await autoExtractMemories(`${content}\n${assistantContent}`, conversationId, {
-                sourceMode: "ask",
-                workspaceId: currentConversation?.workspaceRoot,
-                skipSessionNote: true,
-              });
-            } catch (e) {
-              handleError(e, { context: "沉淀 Ask 会话记忆", silent: true });
-            }
-          });
+            });
+          },
         },
-        onError: (errorText, assistantContent) => {
-          Promise.resolve().then(async () => {
-            try {
-              const currentConversation = useAIStore.getState().conversations.find(
-                (item) => item.id === conversationId,
-              );
-              if (!currentConversation) return;
-              const ingestResult = await persistAskTurnContextIngest({
-                conversation: currentConversation,
-                query: content,
-                status: "error",
-                durationMs: Date.now() - userMessage.timestamp,
-                answer: assistantContent,
-                error: errorText,
-                attachmentCount: attachmentPaths?.length ?? 0,
-                imageCount: images?.length ?? 0,
-                memoryAutoExtractionScheduled: false,
-              });
-              get().updateConversation(conversationId, {
-                lastSessionNotePreview: ingestResult.sessionNotePreview,
-                lastContextRuntimeReport: ingestResult.debugReport,
-              });
-            } catch (e) {
-              handleError(e, { context: "写入 Ask 运行快照", silent: true });
-            }
-          });
-        },
-      },
-    });
-    _streamCleanup = cleanup;
+      });
+      _streamCleanup = cleanup;
+    } catch (e) {
+      finishAskRuntimeSession(conversationId);
+      throw e;
+    }
   },
 }));
 

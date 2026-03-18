@@ -61,6 +61,11 @@ export interface AgentInstance {
   finishedAt?: number;
   /** Review-Fix 循环计数 */
   reviewCount?: number;
+  memoryRecallAttempted?: boolean;
+  appliedMemoryPreview?: string[];
+  transcriptRecallAttempted?: boolean;
+  transcriptRecallHitCount?: number;
+  appliedTranscriptPreview?: string[];
 }
 
 export type ClusterSessionStatus =
@@ -100,6 +105,11 @@ export interface AgentBridgeResult {
   answer: string;
   steps: AgentStep[];
   error?: string;
+  memoryRecallAttempted?: boolean;
+  appliedMemoryPreview?: string[];
+  transcriptRecallAttempted?: boolean;
+  transcriptRecallHitCount?: number;
+  appliedTranscriptPreview?: string[];
 }
 
 export type AgentBridgeStatus = "online" | "offline" | "busy";

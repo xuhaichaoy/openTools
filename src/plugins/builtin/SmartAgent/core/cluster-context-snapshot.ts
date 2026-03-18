@@ -47,6 +47,12 @@ export interface ClusterContextSnapshot {
   lastSessionNotePreview?: string;
   lastRunStatus?: string;
   lastRunDurationMs?: number;
+  memoryRecallAttempted: boolean;
+  memoryHitCount: number;
+  memoryPreview: string[];
+  transcriptRecallAttempted: boolean;
+  transcriptRecallHitCount: number;
+  transcriptPreview: string[];
   contextLines: string[];
 }
 
@@ -60,6 +66,8 @@ export function cloneClusterContextSnapshot(
   if (!snapshot) return null;
   return {
     ...snapshot,
+    memoryPreview: [...(snapshot.memoryPreview ?? [])],
+    transcriptPreview: [...(snapshot.transcriptPreview ?? [])],
     contextLines: [...snapshot.contextLines],
   };
 }
@@ -106,6 +114,8 @@ export function hasClusterContextSnapshotContent(
     || snapshot.reportPreview
     || snapshot.lastSessionNotePreview
     || snapshot.lastRunStatus
+    || snapshot.memoryRecallAttempted
+    || snapshot.transcriptRecallAttempted
   );
 }
 
@@ -164,6 +174,16 @@ export function buildClusterContextNarrative(
   if (snapshot.lastSessionNotePreview) {
     parts.push("最近一次执行已经沉淀为会话笔记");
   }
+  if (snapshot.memoryHitCount > 0) {
+    parts.push(`最近子任务命中了 ${snapshot.memoryHitCount} 条长期记忆`);
+  } else if (snapshot.memoryRecallAttempted) {
+    parts.push("最近子任务检索过长期记忆，但本轮没有命中");
+  }
+  if (snapshot.transcriptRecallHitCount > 0) {
+    parts.push(`最近子任务回补了 ${snapshot.transcriptRecallHitCount} 条会话轨迹`);
+  } else if (snapshot.transcriptRecallAttempted) {
+    parts.push("最近子任务检索过会话轨迹，但本轮没有命中");
+  }
 
   if (parts.length === 0) {
     return "当前 Cluster 会基于本轮任务独立规划和执行。";
@@ -210,6 +230,22 @@ export function buildClusterContextReport(
   if (snapshot.lastSessionNotePreview) {
     lines.push(`最近会话笔记：${snapshot.lastSessionNotePreview}`);
   }
+  if (snapshot.memoryHitCount > 0) {
+    lines.push(`长期记忆：命中 ${snapshot.memoryHitCount} 条`);
+  } else if (snapshot.memoryRecallAttempted) {
+    lines.push("长期记忆：已检索，本轮未命中");
+  }
+  if (snapshot.memoryPreview.length > 0) {
+    lines.push(`记忆命中预览：${snapshot.memoryPreview.join("；")}`);
+  }
+  if (snapshot.transcriptRecallHitCount > 0) {
+    lines.push(`会话轨迹回补：${snapshot.transcriptRecallHitCount} 条`);
+  } else if (snapshot.transcriptRecallAttempted) {
+    lines.push("会话轨迹回补：已检索，本轮未命中");
+  }
+  if (snapshot.transcriptPreview.length > 0) {
+    lines.push(`轨迹命中预览：${snapshot.transcriptPreview.join("；")}`);
+  }
 
   return lines;
 }
@@ -232,6 +268,12 @@ export function buildClusterContextSnapshot(params: {
   lastSessionNotePreview?: string;
   lastRunStatus?: string;
   lastRunDurationMs?: number;
+  memoryRecallAttempted?: boolean;
+  memoryHitCount?: number;
+  memoryPreview?: string[];
+  transcriptRecallAttempted?: boolean;
+  transcriptRecallHitCount?: number;
+  transcriptPreview?: string[];
 }): ClusterContextSnapshot {
   const snapshot: ClusterContextSnapshot = {
     generatedAt: Date.now(),
@@ -262,6 +304,18 @@ export function buildClusterContextSnapshot(params: {
       typeof params.lastRunDurationMs === "number"
         ? Math.max(0, params.lastRunDurationMs)
         : undefined,
+    memoryRecallAttempted: params.memoryRecallAttempted === true,
+    memoryHitCount: Math.max(0, params.memoryHitCount ?? 0),
+    memoryPreview: (params.memoryPreview ?? [])
+      .map((item) => compactText(item, 72))
+      .filter((item): item is string => Boolean(item))
+      .slice(0, 4),
+    transcriptRecallAttempted: params.transcriptRecallAttempted === true,
+    transcriptRecallHitCount: Math.max(0, params.transcriptRecallHitCount ?? 0),
+    transcriptPreview: (params.transcriptPreview ?? [])
+      .map((item) => compactText(item, 88))
+      .filter((item): item is string => Boolean(item))
+      .slice(0, 4),
     contextLines: [],
   };
 

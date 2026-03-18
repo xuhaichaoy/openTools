@@ -9,10 +9,38 @@ export interface BootstrapContextFile {
   truncated: boolean;
 }
 
+export type BootstrapContextDiagnosticStatus =
+  | "included"
+  | "truncated"
+  | "omitted_budget"
+  | "missing";
+
+export interface BootstrapContextDiagnosticFile {
+  name: string;
+  path: string;
+  source: "workspace" | "memory";
+  status: BootstrapContextDiagnosticStatus;
+  originalChars: number;
+  includedChars: number;
+}
+
+export interface BootstrapContextDiagnostics {
+  maxCharsPerFile: number;
+  totalMaxChars: number;
+  usedChars: number;
+  remainingChars: number;
+  includedFileCount: number;
+  truncatedFileCount: number;
+  omittedFileCount: number;
+  missingFileCount: number;
+  files: BootstrapContextDiagnosticFile[];
+}
+
 export interface BootstrapContextSnapshot {
   workspaceRoot?: string;
   files: BootstrapContextFile[];
   prompt: string;
+  diagnostics: BootstrapContextDiagnostics;
 }
 
 export interface BootstrapReinjectionSectionPreview {
@@ -42,6 +70,7 @@ const DEFAULT_TOTAL_MAX_CHARS = 12_000;
 const MAX_CANDIDATE_ANCESTORS = 6;
 const DEFAULT_REINJECTION_SECTION_COUNT = 3;
 const DEFAULT_REINJECTION_LINES_PER_SECTION = 2;
+const TRUNCATION_NOTICE = "...[已截断]...";
 
 function normalizePath(path: string): string {
   const normalized = String(path || "").trim().replace(/\\/g, "/");
@@ -123,8 +152,17 @@ function truncateContent(content: string, maxChars: number): {
   if (normalized.length <= maxChars) {
     return { content: normalized, truncated: false };
   }
+  if (maxChars <= TRUNCATION_NOTICE.length) {
+    return {
+      content: normalized.slice(0, Math.max(0, maxChars)),
+      truncated: true,
+    };
+  }
+  const prefix = normalized
+    .slice(0, Math.max(0, maxChars - TRUNCATION_NOTICE.length))
+    .trimEnd();
   return {
-    content: `${normalized.slice(0, Math.max(0, maxChars - 18)).trimEnd()}\n...[已截断]...`,
+    content: `${prefix}${TRUNCATION_NOTICE}`,
     truncated: true,
   };
 }
@@ -240,26 +278,73 @@ export async function buildBootstrapContextSnapshot(params?: {
   });
 
   const files: BootstrapContextFile[] = [];
+  const diagnosticFiles: BootstrapContextDiagnosticFile[] = [];
   let remainingChars = totalMaxChars;
 
   const pushFile = (file: BootstrapContextFile) => {
-    if (!file.content.trim() || remainingChars <= 0) return;
-    const truncated = truncateContent(file.content, Math.min(maxCharsPerFile, remainingChars));
-    if (!truncated.content.trim()) return;
+    const normalizedContent = String(file.content || "").trim();
+    const originalChars = normalizedContent.length;
+    if (!normalizedContent) {
+      diagnosticFiles.push({
+        name: file.name,
+        path: file.path,
+        source: file.source,
+        status: "missing",
+        originalChars: 0,
+        includedChars: 0,
+      });
+      return;
+    }
+    if (remainingChars <= 0) {
+      diagnosticFiles.push({
+        name: file.name,
+        path: file.path,
+        source: file.source,
+        status: "omitted_budget",
+        originalChars,
+        includedChars: 0,
+      });
+      return;
+    }
+    const truncated = truncateContent(
+      normalizedContent,
+      Math.min(maxCharsPerFile, remainingChars),
+    );
+    if (!truncated.content.trim()) {
+      diagnosticFiles.push({
+        name: file.name,
+        path: file.path,
+        source: file.source,
+        status: "omitted_budget",
+        originalChars,
+        includedChars: 0,
+      });
+      return;
+    }
+    const includedChars = truncated.content.length;
+    const status = file.truncated || truncated.truncated
+      ? "truncated"
+      : "included";
     files.push({
       ...file,
       content: truncated.content,
-      truncated: file.truncated || truncated.truncated,
+      truncated: status === "truncated",
     });
-    remainingChars -= truncated.content.length;
+    diagnosticFiles.push({
+      name: file.name,
+      path: file.path,
+      source: file.source,
+      status,
+      originalChars,
+      includedChars,
+    });
+    remainingChars -= includedChars;
   };
 
   if (workspaceRoot) {
     for (const name of WORKSPACE_BOOTSTRAP_FILENAMES) {
-      if (remainingChars <= 0) break;
       const path = joinPath(workspaceRoot, name);
       const content = await readTextFileSafe(path);
-      if (!content.trim()) continue;
       pushFile({
         name,
         path,
@@ -270,21 +355,20 @@ export async function buildBootstrapContextSnapshot(params?: {
     }
   }
 
-  if (includeMemory && remainingChars > 0) {
+  if (includeMemory) {
     const snapshot = await getFileMemorySnapshot({
       recentDays: Math.max(1, params?.recentDailyFiles ?? 1),
     }).catch(() => null);
-    if (snapshot?.longTermContent?.trim()) {
+    if (snapshot) {
       pushFile({
         name: "MEMORY.md",
         path: snapshot.longTermPath,
-        content: snapshot.longTermContent,
+        content: snapshot.longTermContent || "",
         source: "memory",
         truncated: false,
       });
     }
     for (const dailyFile of snapshot?.recentDailyFiles ?? []) {
-      if (remainingChars <= 0) break;
       pushFile({
         name: `memory/${dailyFile.name}`,
         path: dailyFile.path,
@@ -295,10 +379,31 @@ export async function buildBootstrapContextSnapshot(params?: {
     }
   }
 
+  const diagnostics: BootstrapContextDiagnostics = {
+    maxCharsPerFile,
+    totalMaxChars,
+    usedChars: Math.max(0, totalMaxChars - remainingChars),
+    remainingChars: Math.max(0, remainingChars),
+    includedFileCount: diagnosticFiles.filter((file) =>
+      file.status === "included" || file.status === "truncated",
+    ).length,
+    truncatedFileCount: diagnosticFiles.filter((file) =>
+      file.status === "truncated",
+    ).length,
+    omittedFileCount: diagnosticFiles.filter((file) =>
+      file.status === "omitted_budget",
+    ).length,
+    missingFileCount: diagnosticFiles.filter((file) =>
+      file.status === "missing",
+    ).length,
+    files: diagnosticFiles,
+  };
+
   return {
     workspaceRoot,
     files,
     prompt: buildBootstrapContextPrompt(files, workspaceRoot),
+    diagnostics,
   };
 }
 

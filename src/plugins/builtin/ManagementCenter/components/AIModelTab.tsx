@@ -306,7 +306,7 @@ export function AIModelTab() {
     Number(config.enable_memory_sync);
 
   return (
-    <div className="max-w-xl mx-auto space-y-[var(--space-compact-3)]">
+    <div className="w-full space-y-[var(--space-compact-3)]">
       <div>
         <h2 className="text-sm font-semibold">AI 配置中心</h2>
       </div>

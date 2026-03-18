@@ -24,6 +24,7 @@ export interface AskContextSnapshot {
   imageCount: number;
   contextBlockCount: number;
   recalledMemoryCount: number;
+  recalledTranscriptCount: number;
   latestUserPreview?: string;
   latestAssistantPreview?: string;
   draftInputPreview?: string;
@@ -118,6 +119,17 @@ function getLatestRecalledMemoryCount(messages: readonly ChatMessage[]): number 
   );
 }
 
+function getLatestTranscriptRecallCount(messages: readonly ChatMessage[]): number {
+  const assistantMessage = [...messages]
+    .reverse()
+    .find((message) => message.role === "assistant");
+  if (!assistantMessage) return 0;
+  return Math.max(
+    assistantMessage.transcriptRecallHitCount ?? 0,
+    assistantMessage.appliedTranscriptPreview?.length ?? 0,
+  );
+}
+
 export function cloneAskContextSnapshot(
   snapshot?: AskContextSnapshot | null,
 ): AskContextSnapshot | null {
@@ -140,6 +152,7 @@ export function hasAskContextSnapshotContent(
     || snapshot.imageCount > 0
     || snapshot.contextBlockCount > 0
     || snapshot.recalledMemoryCount > 0
+    || snapshot.recalledTranscriptCount > 0
     || snapshot.draftInputPreview
     || snapshot.draftAttachmentCount > 0
     || snapshot.draftImageCount > 0
@@ -185,6 +198,9 @@ export function buildAskContextNarrative(
   if (snapshot.recalledMemoryCount > 0) {
     parts.push(`最近一轮回答已引用 ${snapshot.recalledMemoryCount} 条长期记忆`);
   }
+  if (snapshot.recalledTranscriptCount > 0) {
+    parts.push(`最近一轮回答还回补了 ${snapshot.recalledTranscriptCount} 条会话轨迹`);
+  }
   if (snapshot.lastRunStatus) {
     parts.push(
       `${describeLastRunStatus(snapshot.lastRunStatus) || "最近一轮已更新"}${snapshot.lastRunDurationMs ? `（约 ${Math.max(1, Math.round(snapshot.lastRunDurationMs / 1000))} 秒）` : ""}`,
@@ -226,6 +242,9 @@ export function buildAskContextReport(
   }
   if (snapshot.recalledMemoryCount > 0) {
     lines.push(`长期记忆：最近一轮回答用了 ${snapshot.recalledMemoryCount} 条记忆`);
+  }
+  if (snapshot.recalledTranscriptCount > 0) {
+    lines.push(`会话轨迹：最近一轮回答回补了 ${snapshot.recalledTranscriptCount} 条轨迹`);
   }
   if (snapshot.lastRunStatus) {
     lines.push(
@@ -286,6 +305,7 @@ export function buildAskContextSnapshot(params: {
     imageCount: attachmentStats.imageCount,
     contextBlockCount: attachmentStats.contextBlockCount,
     recalledMemoryCount: getLatestRecalledMemoryCount(messages),
+    recalledTranscriptCount: getLatestTranscriptRecallCount(messages),
     latestUserPreview: getLatestMessagePreview(messages, "user"),
     latestAssistantPreview: getLatestMessagePreview(messages, "assistant"),
     draftInputPreview: params.draftInput ? compactText(params.draftInput, 96) : undefined,

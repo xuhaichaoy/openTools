@@ -3,6 +3,10 @@ import {
   normalizeCodingExecutionProfile,
   type CodingExecutionProfile,
 } from "@/core/agent/coding-profile";
+import type {
+  BootstrapContextDiagnosticFile,
+  BootstrapContextDiagnostics,
+} from "@/core/ai/bootstrap-context";
 import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
 import type { AgentSession } from "@/store/agent-store";
 import {
@@ -34,11 +38,17 @@ export interface AgentPromptContextSnapshot {
   compactionBootstrapRules: string[];
   bootstrapContextFileCount: number;
   bootstrapContextFileNames: string[];
+  bootstrapDiagnostics: BootstrapContextDiagnostics;
   workspaceRoot?: string;
   workspaceReset: boolean;
   continuityStrategy?: string;
   continuityReason?: string;
   memoryItemCount: number;
+  memoryRecallAttempted: boolean;
+  memoryRecallPreview: string[];
+  transcriptRecallAttempted: boolean;
+  transcriptRecallHitCount: number;
+  transcriptRecallPreview: string[];
   historyContextMessageCount: number;
   knowledgeContextMessageCount: number;
   lastSessionNotePreview?: string;
@@ -136,11 +146,17 @@ export function buildAgentPromptContextSnapshot(params: {
   extraSystemPrompt?: string;
   codingHint?: string;
   bootstrapContextFileNames?: string[];
+  bootstrapContextDiagnostics?: BootstrapContextDiagnostics | null;
   workspaceRoot?: string;
   workspaceReset?: boolean;
   continuityStrategy?: string;
   continuityReason?: string;
   memoryItemCount?: number;
+  memoryRecallAttempted?: boolean;
+  memoryRecallPreview?: string[];
+  transcriptRecallAttempted?: boolean;
+  transcriptRecallHitCount?: number;
+  transcriptRecallPreview?: string[];
   historyContextMessageCount?: number;
   knowledgeContextMessageCount?: number;
   files?: AgentSessionFileInsight[];
@@ -151,6 +167,14 @@ export function buildAgentPromptContextSnapshot(params: {
   const files = params.files ?? deriveAgentSessionFiles(session);
   const contextLines = params.contextLines ?? buildAgentSessionContextOutline(session);
   const currentTime = buildCurrentTimeSnapshot();
+  const bootstrapContextFileNames = params.bootstrapContextFileNames?.filter(Boolean) ?? [];
+  const bootstrapDiagnostics =
+    params.bootstrapContextDiagnostics
+    ?? buildFallbackBootstrapDiagnostics(bootstrapContextFileNames);
+  const bootstrapContextFileCount = Math.max(
+    bootstrapContextFileNames.length,
+    bootstrapDiagnostics.includedFileCount,
+  );
 
   return {
     generatedAt: Date.now(),
@@ -173,8 +197,9 @@ export function buildAgentPromptContextSnapshot(params: {
     compactionPreservedIdentifiers: session?.compaction?.preservedIdentifiers?.slice(0, 8) ?? [],
     compactionPreservedToolNames: session?.compaction?.preservedToolNames?.slice(0, 6) ?? [],
     compactionBootstrapRules: session?.compaction?.bootstrapReinjectionPreview?.slice(0, 3) ?? [],
-    bootstrapContextFileCount: Math.max(0, params.bootstrapContextFileNames?.length ?? 0),
-    bootstrapContextFileNames: params.bootstrapContextFileNames?.filter(Boolean) ?? [],
+    bootstrapContextFileCount: Math.max(0, bootstrapContextFileCount),
+    bootstrapContextFileNames,
+    bootstrapDiagnostics,
     workspaceRoot: params.workspaceRoot?.trim() || undefined,
     workspaceReset: !!params.workspaceReset,
     continuityStrategy: params.continuityStrategy?.trim() || undefined,
@@ -183,6 +208,28 @@ export function buildAgentPromptContextSnapshot(params: {
       typeof params.memoryItemCount === "number"
         ? Math.max(0, params.memoryItemCount)
         : countPromptItems(params.userMemoryPrompt),
+    memoryRecallAttempted:
+      typeof params.memoryRecallAttempted === "boolean"
+        ? params.memoryRecallAttempted
+        : session?.lastMemoryRecallAttempted === true,
+    memoryRecallPreview:
+      (params.memoryRecallPreview ?? session?.lastMemoryRecallPreview ?? [])
+        .map((item) => String(item || "").trim())
+        .filter(Boolean)
+        .slice(0, 4),
+    transcriptRecallAttempted:
+      typeof params.transcriptRecallAttempted === "boolean"
+        ? params.transcriptRecallAttempted
+        : session?.lastTranscriptRecallAttempted === true,
+    transcriptRecallHitCount:
+      typeof params.transcriptRecallHitCount === "number"
+        ? Math.max(0, Math.floor(params.transcriptRecallHitCount))
+        : Math.max(0, Math.floor(session?.lastTranscriptRecallHitCount ?? 0)),
+    transcriptRecallPreview:
+      (params.transcriptRecallPreview ?? session?.lastTranscriptRecallPreview ?? [])
+        .map((item) => String(item || "").trim())
+        .filter(Boolean)
+        .slice(0, 4),
     historyContextMessageCount: Math.max(0, params.historyContextMessageCount ?? 0),
     knowledgeContextMessageCount: Math.max(0, params.knowledgeContextMessageCount ?? 0),
     lastSessionNotePreview:
@@ -193,6 +240,33 @@ export function buildAgentPromptContextSnapshot(params: {
     hasExtraSystemPrompt: !!params.extraSystemPrompt?.trim(),
     hasCodingHint: !!params.codingHint?.trim(),
   };
+}
+
+function buildFallbackBootstrapDiagnostics(
+  bootstrapContextFileNames: readonly string[],
+): BootstrapContextDiagnostics {
+  return {
+    maxCharsPerFile: 0,
+    totalMaxChars: 0,
+    usedChars: 0,
+    remainingChars: 0,
+    includedFileCount: bootstrapContextFileNames.length,
+    truncatedFileCount: 0,
+    omittedFileCount: 0,
+    missingFileCount: 0,
+    files: [],
+  };
+}
+
+function previewBootstrapDiagnosticNames(
+  files: readonly BootstrapContextDiagnosticFile[],
+  status: BootstrapContextDiagnosticFile["status"],
+): string[] {
+  return files
+    .filter((file) => file.status === status)
+    .map((file) => file.name)
+    .filter(Boolean)
+    .slice(0, 5);
 }
 
 export function buildAgentPromptContextReport(snapshot: AgentPromptContextSnapshot): string[] {
@@ -233,10 +307,36 @@ export function buildAgentPromptContextReport(snapshot: AgentPromptContextSnapsh
   if (snapshot.compactionBootstrapRules.length > 0) {
     lines.push(`AGENTS 回注规则：${snapshot.compactionBootstrapRules.join("；")}`);
   }
+  if (snapshot.bootstrapDiagnostics.totalMaxChars > 0) {
+    lines.push(
+      `Bootstrap 预算：已用 ${snapshot.bootstrapDiagnostics.usedChars} / ${snapshot.bootstrapDiagnostics.totalMaxChars} 字符，单文件上限 ${snapshot.bootstrapDiagnostics.maxCharsPerFile}；截断 ${snapshot.bootstrapDiagnostics.truncatedFileCount} 个，超预算未注入 ${snapshot.bootstrapDiagnostics.omittedFileCount} 个，未找到 ${snapshot.bootstrapDiagnostics.missingFileCount} 个`,
+    );
+  }
   if (snapshot.bootstrapContextFileCount > 0) {
     lines.push(
       `Bootstrap 上下文：${snapshot.bootstrapContextFileNames.slice(0, 5).join("、")}${snapshot.bootstrapContextFileCount > 5 ? ` 等 ${snapshot.bootstrapContextFileCount} 个文件` : ""}`,
     );
+  }
+  const truncatedBootstrapFiles = previewBootstrapDiagnosticNames(
+    snapshot.bootstrapDiagnostics.files,
+    "truncated",
+  );
+  if (truncatedBootstrapFiles.length > 0) {
+    lines.push(`Bootstrap 已截断：${truncatedBootstrapFiles.join("、")}`);
+  }
+  const omittedBootstrapFiles = previewBootstrapDiagnosticNames(
+    snapshot.bootstrapDiagnostics.files,
+    "omitted_budget",
+  );
+  if (omittedBootstrapFiles.length > 0) {
+    lines.push(`Bootstrap 超预算未注入：${omittedBootstrapFiles.join("、")}`);
+  }
+  const missingBootstrapFiles = previewBootstrapDiagnosticNames(
+    snapshot.bootstrapDiagnostics.files,
+    "missing",
+  );
+  if (missingBootstrapFiles.length > 0) {
+    lines.push(`Bootstrap 未找到：${missingBootstrapFiles.join("、")}`);
   }
   if (snapshot.workspaceRoot) {
     lines.push(
@@ -250,6 +350,19 @@ export function buildAgentPromptContextReport(snapshot: AgentPromptContextSnapsh
   }
   if (snapshot.memoryItemCount > 0) {
     lines.push(`已召回记忆：${snapshot.memoryItemCount} 条`);
+  } else if (snapshot.memoryRecallAttempted) {
+    lines.push("已检索长期记忆：本轮未命中");
+  }
+  if (snapshot.memoryRecallPreview.length > 0) {
+    lines.push(`记忆命中预览：${snapshot.memoryRecallPreview.join("；")}`);
+  }
+  if (snapshot.transcriptRecallHitCount > 0) {
+    lines.push(`会话轨迹回补：${snapshot.transcriptRecallHitCount} 条`);
+  } else if (snapshot.transcriptRecallAttempted) {
+    lines.push("已检索会话轨迹：本轮未命中");
+  }
+  if (snapshot.transcriptRecallPreview.length > 0) {
+    lines.push(`轨迹命中预览：${snapshot.transcriptRecallPreview.join("；")}`);
   }
   if (snapshot.lastTurnStatus) {
     lines.push(
@@ -301,6 +414,10 @@ export function buildAgentPromptContextPrompt(snapshot: AgentPromptContextSnapsh
     `- extra_system_prompt=${snapshot.hasExtraSystemPrompt ? "on" : "off"}`,
     `- coding_hint=${snapshot.hasCodingHint ? "on" : "off"}`,
     `- recalled_memories=${snapshot.memoryItemCount}`,
+    `- memory_recall_attempted=${snapshot.memoryRecallAttempted ? "yes" : "no"}`,
+    `- transcript_recall=${snapshot.transcriptRecallHitCount}`,
+    `- bootstrap_truncated=${snapshot.bootstrapDiagnostics.truncatedFileCount}`,
+    `- bootstrap_omitted=${snapshot.bootstrapDiagnostics.omittedFileCount}`,
     "</prompt-flags>",
   ].join("\n");
 }

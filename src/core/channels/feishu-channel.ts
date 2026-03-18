@@ -3,12 +3,13 @@
  *
  * 支持两种模式：
  * 1. Webhook 模式：通过自定义机器人 Webhook 发送消息（单向推送）
- * 2. App 模式：通过飞书开放平台 App 接收+发送消息（双向，需 Tauri 端转发回调）
+ * 2. App 模式：通过 Tauri 后端建立飞书 WebSocket 长连接接收消息（双向）
  *
  * 飞书 Webhook 文档：https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot
  * 飞书 API 文档：https://open.feishu.cn/document/server-docs/im-v1/message/create
  */
 
+import { invoke } from "@tauri-apps/api/core";
 import type {
   IMChannel,
   ChannelConfig,
@@ -20,6 +21,19 @@ import type {
 import { createLogger } from "@/core/logger";
 
 const log = createLogger("Feishu");
+// Typing reaction 会一直存在直到显式移除；这里保留较长 TTL 只做兜底清理，
+// 避免异常中断后残留，同时不至于让正常长任务过早丢失输入提示。
+const FEISHU_TYPING_TTL_MS = 10 * 60_000;
+
+interface FeishuTypingState {
+  messageId: string;
+  reactionId: string;
+  timeoutId: ReturnType<typeof setTimeout>;
+}
+
+interface FeishuTypingReactionResult {
+  reactionId: string;
+}
 
 export interface FeishuConfig {
   /** 自定义机器人 Webhook URL */
@@ -30,6 +44,8 @@ export interface FeishuConfig {
   appId?: string;
   /** 飞书应用 App Secret */
   appSecret?: string;
+  /** 飞书 OpenAPI 基础地址 */
+  openBaseUrl?: string;
 }
 
 async function computeFeishuSign(timestamp: string, secret: string): Promise<string> {
@@ -50,10 +66,10 @@ export class FeishuChannel implements IMChannel {
   readonly type = "feishu" as const;
 
   private _status: ChannelStatus = "disconnected";
+  private _channelId: string | null = null;
   private _config: FeishuConfig | null = null;
   private _handlers: MessageHandler[] = [];
-  private _tenantAccessToken: string | null = null;
-  private _tokenExpiresAt = 0;
+  private _typingStates = new Map<string, FeishuTypingState>();
 
   get status(): ChannelStatus {
     return this._status;
@@ -65,19 +81,28 @@ export class FeishuChannel implements IMChannel {
 
   async connect(config: ChannelConfig): Promise<void> {
     const platform = config.platformConfig as unknown as FeishuConfig;
-    if (!platform.webhookUrl && !platform.appId) {
-      throw new Error("飞书通道需要配置 webhookUrl 或 appId");
+    const hasWebhook = !!platform.webhookUrl?.trim();
+    const hasAppPair = !!platform.appId?.trim() && !!platform.appSecret?.trim();
+
+    if (!hasWebhook && !hasAppPair) {
+      throw new Error("飞书通道需要配置 webhookUrl，或同时配置 appId + appSecret");
     }
 
     this._config = platform;
+    this._channelId = config.id;
     this._status = "connecting";
 
     try {
-      if (platform.appId && platform.appSecret) {
-        await this._refreshTenantAccessToken();
+      if (hasAppPair) {
+        await invoke("start_feishu_ws_channel", {
+          channelId: config.id,
+          appId: platform.appId!.trim(),
+          appSecret: platform.appSecret!.trim(),
+          baseUrl: resolveFeishuOpenBaseUrl(platform),
+        });
       }
 
-      if (platform.webhookUrl) {
+      if (hasWebhook) {
         const url = new URL(platform.webhookUrl);
         if (!url.hostname.includes("feishu") && !url.hostname.includes("larksuite")) {
           log.warn("Webhook URL does not appear to be a Feishu/Lark URL");
@@ -94,17 +119,29 @@ export class FeishuChannel implements IMChannel {
   }
 
   async disconnect(): Promise<void> {
+    const activeTypingConversations = [...this._typingStates.keys()];
+    await Promise.allSettled(
+      activeTypingConversations.map((conversationId) => this.stopTypingForConversation(conversationId)),
+    );
+    if (this._channelId && this._config?.appId && this._config?.appSecret) {
+      await invoke("stop_feishu_ws_channel", {
+        channelId: this._channelId,
+      }).catch((err) => {
+        log.warn("Failed to stop Feishu WebSocket channel", err);
+      });
+    }
     this._status = "disconnected";
+    this._channelId = null;
     this._config = null;
-    this._tenantAccessToken = null;
+    this._typingStates.clear();
     log.info("Feishu channel disconnected");
   }
 
   async send(msg: ChannelOutgoingMessage): Promise<void> {
     if (!this._config) throw new Error("Feishu channel not connected");
 
-    // 优先 API 模式：有 tenantAccessToken 且有明确的群/用户会话 ID
-    if (this._tenantAccessToken && msg.conversationId && msg.conversationId !== "default") {
+    // 优先 App API 模式：有应用凭证且有明确会话 ID
+    if (this._config.appId && this._config.appSecret && msg.conversationId && msg.conversationId !== "default") {
       await this._sendByApi(msg);
       return;
     }
@@ -112,50 +149,80 @@ export class FeishuChannel implements IMChannel {
     await this._sendByWebhook(msg);
   }
 
+  async startTypingForMessage(msg: ChannelIncomingMessage): Promise<void> {
+    if (!this._config?.appId || !this._config?.appSecret) return;
+    const conversationId = msg.conversationId.trim();
+    const messageId = msg.messageId.trim();
+    if (!conversationId || !messageId) return;
+
+    const existing = this._typingStates.get(conversationId);
+    if (existing?.messageId === messageId) {
+      return;
+    }
+    if (existing) {
+      await this.stopTypingForConversation(conversationId);
+    }
+
+    try {
+      const result = await invoke<FeishuTypingReactionResult>("feishu_add_typing_reaction", {
+        appId: this._config.appId,
+        appSecret: this._config.appSecret,
+        baseUrl: this._getOpenBaseUrl(),
+        messageId,
+      });
+      const timeoutId = setTimeout(() => {
+        void this.stopTypingForConversation(conversationId);
+      }, FEISHU_TYPING_TTL_MS);
+      this._typingStates.set(conversationId, {
+        messageId,
+        reactionId: result.reactionId,
+        timeoutId,
+      });
+    } catch (err) {
+      log.warn("Failed to start Feishu typing indicator", err);
+    }
+  }
+
+  async stopTypingForConversation(conversationId: string): Promise<void> {
+    const state = this._typingStates.get(conversationId);
+    if (!state) return;
+
+    clearTimeout(state.timeoutId);
+    this._typingStates.delete(conversationId);
+
+    if (!this._config?.appId || !this._config?.appSecret) return;
+
+    try {
+      await invoke("feishu_remove_typing_reaction", {
+        appId: this._config.appId,
+        appSecret: this._config.appSecret,
+        baseUrl: this._getOpenBaseUrl(),
+        messageId: state.messageId,
+        reactionId: state.reactionId,
+      });
+    } catch (err) {
+      log.warn("Failed to stop Feishu typing indicator", err);
+    }
+  }
+
   private async _sendByApi(msg: ChannelOutgoingMessage): Promise<void> {
-    await this._refreshTenantAccessToken();
-    if (!this._tenantAccessToken) throw new Error("No tenant_access_token available for API mode");
+    const { msgType, content } = buildFeishuAppMessagePayload(msg);
 
-    const content = msg.messageType === "markdown" && msg.markdown
-      ? JSON.stringify({
-          elements: [{ tag: "markdown", content: msg.markdown.text }],
-          header: { title: { tag: "plain_text", content: msg.markdown.title }, template: "blue" },
-        })
-      : JSON.stringify({ text: msg.text || "" });
-
-    const msgType = msg.messageType === "markdown" && msg.markdown ? "interactive" : "text";
-
-    const response = await fetch(
-      `https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${this._tenantAccessToken}`,
-        },
-        body: JSON.stringify({
-          receive_id: msg.conversationId,
-          msg_type: msgType,
-          content,
-        }),
-      },
-    );
-
-    if (!response.ok) {
-      const text = await response.text();
-      log.warn(`Feishu API send failed (${response.status}), falling back to webhook`, text);
+    try {
+      await invoke("feishu_send_app_message", {
+        appId: this._config!.appId,
+        appSecret: this._config!.appSecret,
+        baseUrl: this._getOpenBaseUrl(),
+        receiveId: msg.conversationId,
+        msgType,
+        content,
+        replyToMessageId: msg.replyToMessageId ?? null,
+      });
+      log.info("Message sent via Feishu API", { conversationId: msg.conversationId });
+    } catch (err) {
+      log.warn("Feishu API send failed, falling back to webhook", err);
       await this._sendByWebhook(msg);
-      return;
     }
-
-    const result = await response.json() as { code: number; msg: string };
-    if (result.code !== 0) {
-      log.warn(`Feishu API error (${result.code}), falling back to webhook`);
-      await this._sendByWebhook(msg);
-      return;
-    }
-
-    log.info("Message sent via Feishu API", { conversationId: msg.conversationId });
   }
 
   private async _sendByWebhook(msg: ChannelOutgoingMessage): Promise<void> {
@@ -163,24 +230,10 @@ export class FeishuChannel implements IMChannel {
     if (!webhookUrl) throw new Error("No webhook URL configured");
 
     const body = await this._buildMessageBody(msg);
-    const response = await fetch(webhookUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+    await invoke("feishu_send_webhook_message", {
+      webhookUrl,
+      body,
     });
-
-    if (!response.ok) {
-      const text = await response.text();
-      log.error("Feishu webhook send failed", { status: response.status, body: text });
-      throw new Error(`Feishu send failed: ${response.status} ${text}`);
-    }
-
-    const result = await response.json() as { code: number; msg: string };
-    if (result.code !== 0) {
-      log.error("Feishu API error", result);
-      throw new Error(`Feishu API error: ${result.msg} (${result.code})`);
-    }
-
     log.info("Message sent via Feishu webhook", { conversationId: msg.conversationId });
   }
 
@@ -192,8 +245,8 @@ export class FeishuChannel implements IMChannel {
   }
 
   /**
-   * 处理来自 Tauri 后端转发的飞书事件回调。
-   * 飞书通过 Event Subscription 推送消息，Tauri 端接收后 emit 到前端。
+   * 处理来自 Tauri 后端转发的飞书入站事件。
+   * Tauri 端可能通过 WebSocket 长连接或兼容回调服务接收，再统一 emit 到前端。
    */
   async handleIncomingCallback(raw: Record<string, unknown>): Promise<string | undefined> {
     // 飞书 URL 验证（challenge 机制）
@@ -218,33 +271,8 @@ export class FeishuChannel implements IMChannel {
 
   // ── Private ──
 
-  private async _refreshTenantAccessToken(): Promise<void> {
-    if (!this._config?.appId || !this._config?.appSecret) return;
-    if (Date.now() < this._tokenExpiresAt - 60_000) return;
-
-    const response = await fetch("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        app_id: this._config.appId,
-        app_secret: this._config.appSecret,
-      }),
-    });
-
-    const data = await response.json() as {
-      code: number;
-      msg: string;
-      tenant_access_token: string;
-      expire: number;
-    };
-
-    if (data.code === 0 && data.tenant_access_token) {
-      this._tenantAccessToken = data.tenant_access_token;
-      this._tokenExpiresAt = Date.now() + data.expire * 1000;
-      log.info("Feishu tenant_access_token refreshed", { expire: data.expire });
-    } else {
-      log.error("Failed to get Feishu tenant_access_token", data);
-    }
+  private _getOpenBaseUrl(): string {
+    return resolveFeishuOpenBaseUrl(this._config);
   }
 
   private async _buildMessageBody(msg: ChannelOutgoingMessage): Promise<Record<string, unknown>> {
@@ -258,16 +286,10 @@ export class FeishuChannel implements IMChannel {
 
     if (msg.messageType === "markdown" && msg.markdown) {
       body.msg_type = "interactive";
-      body.card = {
-        elements: [{
-          tag: "markdown",
-          content: msg.markdown.text,
-        }],
-        header: {
-          title: { tag: "plain_text", content: msg.markdown.title },
-          template: "blue",
-        },
-      };
+      body.card = buildFeishuMarkdownCard(msg.markdown.text, msg.markdown.title);
+    } else if (looksLikeMarkdown(msg.text || "")) {
+      body.msg_type = "interactive";
+      body.card = buildFeishuMarkdownCard(msg.text || "", inferFeishuCardTitle(msg.text || ""));
     } else {
       body.msg_type = "text";
       body.content = { text: msg.text || "" };
@@ -339,4 +361,119 @@ export class FeishuChannel implements IMChannel {
       return null;
     }
   }
+}
+
+function resolveFeishuOpenBaseUrl(config: FeishuConfig | null): string {
+  const explicit = config?.openBaseUrl?.trim();
+  if (explicit) {
+    return explicit.replace(/\/+$/, "");
+  }
+
+  const webhookUrl = config?.webhookUrl?.trim();
+  if (webhookUrl) {
+    try {
+      const hostname = new URL(webhookUrl).hostname;
+      if (hostname.includes("larksuite")) {
+        return "https://open.larksuite.com";
+      }
+    } catch {
+      // Ignore malformed webhook URL here; validation happens during connect.
+    }
+  }
+
+  return "https://open.feishu.cn";
+}
+
+function buildFeishuMarkdownCard(text: string, title?: string): Record<string, unknown> {
+  const card: Record<string, unknown> = {
+    schema: "2.0",
+    config: {
+      wide_screen_mode: true,
+    },
+    body: {
+      elements: [
+        {
+          tag: "markdown",
+          content: text,
+        },
+      ],
+    },
+  };
+
+  if (title?.trim()) {
+    card.header = {
+      title: {
+        tag: "plain_text",
+        content: title.trim(),
+      },
+      template: "blue",
+    };
+  }
+
+  return card;
+}
+
+function buildFeishuPostContent(text: string): string {
+  return JSON.stringify({
+    zh_cn: {
+      content: [
+        [
+          {
+            tag: "md",
+            text,
+          },
+        ],
+      ],
+    },
+  });
+}
+
+function buildFeishuAppMessagePayload(msg: ChannelOutgoingMessage): {
+  msgType: "interactive" | "post";
+  content: string;
+} {
+  if (msg.messageType === "markdown" && msg.markdown) {
+    return {
+      msgType: "interactive",
+      content: JSON.stringify(buildFeishuMarkdownCard(msg.markdown.text, msg.markdown.title)),
+    };
+  }
+
+  const text = msg.text || "";
+  if (shouldUseFeishuMarkdownCard(text)) {
+    return {
+      msgType: "interactive",
+      content: JSON.stringify(buildFeishuMarkdownCard(text, inferFeishuCardTitle(text))),
+    };
+  }
+
+  return {
+    msgType: "post",
+    content: buildFeishuPostContent(text),
+  };
+}
+
+function shouldUseFeishuMarkdownCard(text: string): boolean {
+  return /```[\s\S]*?```/.test(text) || /\|.+\|[\r\n]+\|[-:| ]+\|/.test(text);
+}
+
+function looksLikeMarkdown(text: string): boolean {
+  if (!text.trim()) return false;
+  if (shouldUseFeishuMarkdownCard(text)) return true;
+  return /(^|\n)\s{0,3}(#{1,6}\s|[-*+]\s|>\s|\d+\.\s|\[[ xX]\]\s)/m.test(text)
+    || /(\*\*[^*]+\*\*|__[^_]+__|`[^`]+`|\[[^\]]+\]\([^)]+\))/m.test(text);
+}
+
+function inferFeishuCardTitle(text: string): string | undefined {
+  const firstHeading = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => /^#{1,6}\s+/.test(line));
+
+  if (firstHeading) {
+    return firstHeading.replace(/^#{1,6}\s+/, "").trim().slice(0, 80);
+  }
+
+  const firstLine = text.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+  return firstLine ? firstLine.slice(0, 80) : undefined;
 }

@@ -1,4 +1,5 @@
 import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
+import { getSpawnedTaskRoleBoundaryMeta } from "./spawned-task-role-boundary";
 import type {
   DialogArtifactRecord,
   DialogContextSummary,
@@ -69,7 +70,8 @@ export function buildDialogContextSummary({
     .slice(-4)
     .map((task) => {
       const actorName = actorNameById?.get(task.targetActorId) ?? task.targetActorId;
-      return `${actorName} · ${clip(task.label || task.task, 80)} · ${task.status}`;
+      const roleBoundary = getSpawnedTaskRoleBoundaryMeta(task.roleBoundary).label;
+      return `${actorName} · ${roleBoundary} · ${clip(task.label || task.task, 80)} · ${task.status}`;
     });
 
   const sections = [

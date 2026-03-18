@@ -78,6 +78,15 @@ export interface DialogExecutionPlanEdge {
   toActorId: string;
 }
 
+export interface DialogExecutionPlannedSpawn {
+  id: string;
+  targetActorId: string;
+  task: string;
+  label?: string;
+  context?: string;
+  roleBoundary?: SpawnedTaskRoleBoundary;
+}
+
 export interface DialogExecutionPlan {
   id: string;
   routingMode: "direct" | "coordinator" | "smart" | "broadcast";
@@ -88,6 +97,7 @@ export interface DialogExecutionPlan {
   coordinatorActorId?: string;
   allowedMessagePairs: DialogExecutionPlanEdge[];
   allowedSpawnPairs: DialogExecutionPlanEdge[];
+  plannedSpawns?: DialogExecutionPlannedSpawn[];
   state: "armed" | "active";
   activatedAt?: number;
   sourceMessageId?: string;
@@ -112,6 +122,11 @@ export interface DialogMessage extends InboxMessage {
   approvalRequest?: ApprovalRequest;
   /** 关联的子会话 runId（用于 thread-bound child session 聚焦） */
   relatedRunId?: string;
+  memoryRecallAttempted?: boolean;
+  appliedMemoryPreview?: string[];
+  transcriptRecallAttempted?: boolean;
+  transcriptRecallHitCount?: number;
+  appliedTranscriptPreview?: string[];
 }
 
 export type DialogArtifactSource =
@@ -342,6 +357,11 @@ export interface ActorTask {
   steps: AgentStep[];
   startedAt?: number;
   finishedAt?: number;
+  memoryRecallAttempted?: boolean;
+  appliedMemoryPreview?: string[];
+  transcriptRecallAttempted?: boolean;
+  transcriptRecallHitCount?: number;
+  appliedTranscriptPreview?: string[];
 }
 
 // ── Ask-and-Wait ──
@@ -383,12 +403,19 @@ export type SpawnedTaskStatus = "running" | "completed" | "error" | "aborted";
 
 /** Spawn 模式：对标 OpenClaw sessions_spawn mode */
 export type SpawnMode = "run" | "session";
+export type SpawnedTaskRoleBoundary = "reviewer" | "validator" | "executor" | "general";
 
 /** SpawnedTaskRecord：对标 OpenClaw subagent registry entry */
 export interface SpawnedTaskRecord {
   runId: string;
   spawnerActorId: string;
   targetActorId: string;
+  /** 父任务 runId；直接子任务为空，嵌套子任务会显式指向上游任务 */
+  parentRunId?: string;
+  /** 当前任务所在协作子树的根任务 runId */
+  rootRunId?: string;
+  /** 临时子 Agent 的默认职责边界；常驻 Agent 默认为 general */
+  roleBoundary?: SpawnedTaskRoleBoundary;
   task: string;
   label?: string;
   /** 任务启动时继承的图片附件（如截图、设计稿） */

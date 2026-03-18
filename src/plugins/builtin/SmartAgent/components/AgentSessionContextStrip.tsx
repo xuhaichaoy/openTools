@@ -9,6 +9,7 @@ interface AgentSessionContextStripProps {
   onRedo: () => void;
   onRestore: () => void;
   onFork: () => void;
+  onToggleWorkspaceLock: () => void;
 }
 
 function describeContinuityStrategy(strategy?: string): string {
@@ -34,6 +35,8 @@ function describeContinuityReason(reason?: string): string | null {
       return "同一工作区";
     case "workspace_switch":
       return "工作区切换";
+    case "path_focus_shift":
+      return "路径焦点切换";
     case "query_topic_switch":
       return "任务主题切换";
     case "explicit_new_task":
@@ -52,6 +55,7 @@ export function AgentSessionContextStrip({
   onRedo,
   onRestore,
   onFork,
+  onToggleWorkspaceLock,
 }: AgentSessionContextStripProps) {
   const hasRevertedContext = hiddenTaskCount > 0;
   const hasForkMeta = Boolean(session.forkMeta);
@@ -69,6 +73,7 @@ export function AgentSessionContextStrip({
     snapshot?.workspaceReset ?? Boolean(session.lastContextResetAt);
   const memoryItemCount =
     snapshot?.memoryItemCount ?? session.lastMemoryItemCount ?? 0;
+  const workspaceLocked = Boolean(session.workspaceLocked && workspaceRoot);
   const hasContextSummary =
     Boolean(workspaceRoot)
     || Boolean(continuityStrategy)
@@ -95,6 +100,11 @@ export function AgentSessionContextStrip({
                 工作区 {workspaceRoot}
               </span>
             )}
+            {workspaceLocked && (
+              <span className="rounded-full border border-violet-500/20 bg-violet-500/10 px-2 py-0.5 text-[10px] text-violet-700">
+                已锁定
+              </span>
+            )}
             {continuityStrategy && (
               <span className="rounded-full border border-sky-500/20 bg-sky-500/10 px-2 py-0.5 text-[10px] text-sky-700">
                 {describeContinuityStrategy(continuityStrategy)}
@@ -114,9 +124,20 @@ export function AgentSessionContextStrip({
           <div className="mt-1 text-[12px] text-[var(--color-text-secondary)]">
             {workspaceReset
               ? `这轮已按${workspaceRoot ? "新工作区" : "新任务"}重置历史继承${describeContinuityReason(continuityReason) ? `，原因：${describeContinuityReason(continuityReason)}` : ""}。`
-              : `${continuityStrategy ? describeContinuityStrategy(continuityStrategy) : "自动继承"}${describeContinuityReason(continuityReason) ? `，原因：${describeContinuityReason(continuityReason)}` : ""}${memoryItemCount > 0 ? `；同时召回了 ${memoryItemCount} 条长期记忆。` : "。"}`
+              : `${continuityStrategy ? describeContinuityStrategy(continuityStrategy) : "自动继承"}${describeContinuityReason(continuityReason) ? `，原因：${describeContinuityReason(continuityReason)}` : ""}${workspaceLocked ? "；当前工作区已锁定，后续没有明确路径信号时会优先沿用这里。" : ""}${memoryItemCount > 0 ? `；同时召回了 ${memoryItemCount} 条长期记忆。` : "。"}`
             }
           </div>
+          {workspaceRoot && (
+            <div className="mt-2">
+              <button
+                type="button"
+                onClick={onToggleWorkspaceLock}
+                className="rounded-full border border-[var(--color-border)] px-2 py-1 text-[11px] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]"
+              >
+                {workspaceLocked ? "取消锁定工作区" : "锁定当前工作区"}
+              </button>
+            </div>
+          )}
         </div>
       )}
       {hasRevertedContext && (

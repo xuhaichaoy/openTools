@@ -107,13 +107,12 @@ fn set_tray_attention_count(app: tauri::AppHandle, count: u32) -> Result<(), Str
     tray.set_tooltip(Some(tooltip)).map_err(|e| e.to_string())?;
 
     #[cfg(target_os = "macos")]
-    tray
-        .set_title(if count == 0 {
-            None::<String>
-        } else {
-            Some(display_count.to_string())
-        })
-        .map_err(|e| e.to_string())?;
+    tray.set_title(if count == 0 {
+        None::<String>
+    } else {
+        Some(display_count.to_string())
+    })
+    .map_err(|e| e.to_string())?;
 
     #[cfg(not(target_os = "macos"))]
     let _ = display_count;
@@ -260,6 +259,9 @@ pub fn run() {
         .manage(commands::ssh::SshManager::new())
         .manage(commands::database::DatabaseManager::new())
         .manage(commands::ding::DingManager::new())
+        .manage(commands::dingtalk_stream::DingTalkStreamManager::new())
+        .manage(commands::feishu_ws::FeishuWsManager::new())
+        .manage(commands::im_callback::ImCallbackServerManager::new())
         // 自定义协议：为插件文件提供 Tauri IPC 支持
         // 用 mtplugin://localhost/绝对路径 替代 file:// URL
         .register_uri_scheme_protocol("mtplugin", |app, request| {
@@ -487,6 +489,22 @@ pub fn run() {
             commands::mcp::mcp_load_config,
             commands::mcp::mcp_list_servers,
             commands::mcp::mcp_get_server_status,
+            commands::dingtalk_stream::start_dingtalk_stream_channel,
+            commands::dingtalk_stream::stop_dingtalk_stream_channel,
+            commands::dingtalk_stream::get_dingtalk_stream_channel_status,
+            commands::dingtalk_stream::dingtalk_send_app_message,
+            commands::dingtalk_stream::dingtalk_send_webhook_message,
+            commands::feishu_ws::start_feishu_ws_channel,
+            commands::feishu_ws::stop_feishu_ws_channel,
+            commands::feishu_ws::get_feishu_ws_channel_status,
+            commands::feishu_ws::feishu_refresh_tenant_access_token,
+            commands::feishu_ws::feishu_send_app_message,
+            commands::feishu_ws::feishu_add_typing_reaction,
+            commands::feishu_ws::feishu_remove_typing_reaction,
+            commands::feishu_ws::feishu_send_webhook_message,
+            commands::im_callback::start_im_callback_server,
+            commands::im_callback::stop_im_callback_server,
+            commands::im_callback::get_im_callback_server_status,
             commands::translate::translate_text,
             commands::collection::collection_get_all,
             commands::collection::collection_create,

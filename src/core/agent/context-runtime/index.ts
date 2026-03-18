@@ -3,6 +3,8 @@ export * from "./debug-types";
 export * from "./scope-resolver";
 export * from "./continuity-policy";
 export * from "./context-runtime-manager";
+export * from "./context-assembler";
+export * from "./runtime-state";
 export * from "./debug-report";
 export * from "./context-ingest";
 export * from "./ask-debug-report";

@@ -332,7 +332,9 @@ fn resolve_chunk_preset(config: &RAGConfig) -> ChunkPresetConfig {
             chunk_size: 300,
             overlap: 30,
             min_chunk_size: 50,
-            separators: &["\n\n", "\nQ:", "\n问:", "\n问题", "\n", "。", ".", "？", "?"],
+            separators: &[
+                "\n\n", "\nQ:", "\n问:", "\n问题", "\n", "。", ".", "？", "?",
+            ],
         },
         "book" => ChunkPresetConfig {
             chunk_size: 1000,
@@ -362,7 +364,9 @@ fn resolve_chunk_preset(config: &RAGConfig) -> ChunkPresetConfig {
         },
         "custom" => ChunkPresetConfig {
             chunk_size: config.chunk_size.max(80),
-            overlap: config.chunk_overlap.min(config.chunk_size.saturating_sub(1)),
+            overlap: config
+                .chunk_overlap
+                .min(config.chunk_size.saturating_sub(1)),
             min_chunk_size: config.chunk_size.saturating_div(5).max(40),
             separators: &["\n\n", "\n", "。", ".", "！", "!", "？", "?"],
         },
@@ -415,7 +419,12 @@ fn force_split_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<String
 }
 
 fn chunk_text_with_preset(text: &str, preset: ChunkPresetConfig) -> Vec<String> {
-    fn split_recursive(text: &str, preset: ChunkPresetConfig, sep_idx: usize, output: &mut Vec<String>) {
+    fn split_recursive(
+        text: &str,
+        preset: ChunkPresetConfig,
+        sep_idx: usize,
+        output: &mut Vec<String>,
+    ) {
         let trimmed = text.trim();
         if trimmed.is_empty() {
             return;
@@ -602,9 +611,7 @@ fn resolve_rerank_url(base_url: &str) -> String {
     }
 }
 
-fn extract_rerank_results(
-    payload: &serde_json::Value,
-) -> Option<Vec<(usize, f32)>> {
+fn extract_rerank_results(payload: &serde_json::Value) -> Option<Vec<(usize, f32)>> {
     let candidates = payload
         .get("results")
         .and_then(|value| value.as_array())
@@ -648,10 +655,7 @@ fn normalize_rank_scores(scores: &[f32]) -> Vec<f32> {
     }
 
     let min_score = scores.iter().cloned().fold(f32::INFINITY, f32::min);
-    let max_score = scores
-        .iter()
-        .cloned()
-        .fold(f32::NEG_INFINITY, f32::max);
+    let max_score = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
 
     if (max_score - min_score).abs() < f32::EPSILON {
         return vec![0.7; scores.len()];
@@ -807,7 +811,9 @@ fn load_rag_config(app: &AppHandle) -> RAGConfig {
             config.top_k = config.top_k.max(1);
             config.recall_top_k = config.recall_top_k.max(config.top_k).max(5);
             config.chunk_size = config.chunk_size.max(80);
-            config.chunk_overlap = config.chunk_overlap.min(config.chunk_size.saturating_sub(1));
+            config.chunk_overlap = config
+                .chunk_overlap
+                .min(config.chunk_size.saturating_sub(1));
             return config;
         }
     }
@@ -906,9 +912,7 @@ fn detect_format(path: &str) -> String {
         "html" | "htm" => "html".to_string(),
         "xmind" => "xmind".to_string(),
         "mm" => "mm".to_string(),
-        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tif" | "tiff" => {
-            "image".to_string()
-        }
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tif" | "tiff" => "image".to_string(),
         _ => "txt".to_string(),
     }
 }
@@ -951,7 +955,10 @@ fn load_persisted_store_json(
     }
 }
 
-fn resolve_ocr_settings(app: &AppHandle, rag_config: &RAGConfig) -> Option<(String, Option<String>)> {
+fn resolve_ocr_settings(
+    app: &AppHandle,
+    rag_config: &RAGConfig,
+) -> Option<(String, Option<String>)> {
     let base_url = rag_config
         .ocr_base_url
         .as_deref()
@@ -989,8 +996,9 @@ async fn extract_image_text_with_ocr(app: &AppHandle, path: &str) -> Result<Stri
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
 
     let rag_config = load_rag_config(app);
-    let (base_url, token) = resolve_ocr_settings(app, &rag_config)
-        .ok_or_else(|| "图片 OCR 需要先登录并配置服务器地址，或在知识库设置中单独填写 OCR 配置".to_string())?;
+    let (base_url, token) = resolve_ocr_settings(app, &rag_config).ok_or_else(|| {
+        "图片 OCR 需要先登录并配置服务器地址，或在知识库设置中单独填写 OCR 配置".to_string()
+    })?;
 
     let bytes = std::fs::read(path).map_err(|e| format!("读取图片失败: {}", e))?;
     let image_base64 = B64.encode(&bytes);
@@ -1017,10 +1025,13 @@ async fn extract_content_from_path(
             std::fs::read_to_string(path).map_err(|e| format!("读取源文件失败: {}", e))
         }
         "html" => {
-            let raw = std::fs::read_to_string(path).map_err(|e| format!("读取 HTML 失败: {}", e))?;
+            let raw =
+                std::fs::read_to_string(path).map_err(|e| format!("读取 HTML 失败: {}", e))?;
             Ok(strip_html_tags_simple(&raw))
         }
-        "csv" | "xlsx" => crate::commands::system::extract_spreadsheet_text(path.to_string(), None).await,
+        "csv" | "xlsx" => {
+            crate::commands::system::extract_spreadsheet_text(path.to_string(), None).await
+        }
         "pdf" | "docx" | "pptx" | "xmind" | "mm" => {
             crate::commands::system::extract_document_text(path.to_string()).await
         }
@@ -1323,7 +1334,8 @@ async fn parse_doc_internal(
                 && item.status != "duplicate"
         }) {
             parsed_doc.status = "duplicate".to_string();
-            parsed_doc.error_msg = Some(format!("与已有文档“{}”内容重复，已跳过入库", existing.name));
+            parsed_doc.error_msg =
+                Some(format!("与已有文档“{}”内容重复，已跳过入库", existing.name));
             parsed_doc.chunk_count = 0;
             parsed_doc.token_count = 0;
             parsed_doc.updated_at = now_ms();
@@ -1731,40 +1743,40 @@ pub async fn rag_search(
         Vec::new()
     } else {
         match get_embeddings(&app, &[query.clone()]).await {
-        Ok(query_embeddings) => {
-            let query_vec = query_embeddings.into_iter().next().unwrap_or_default();
-            if query_vec.is_empty() {
-                Vec::new()
-            } else {
-                let mut results = Vec::new();
-                for doc in &docs {
-                    if doc.status != "indexed_full" && doc.status != "indexed" {
-                        continue;
-                    }
-                    let chunks = load_chunks_for_doc(&app, &doc.id);
-                    let vectors = load_vectors_for_doc(&app, &doc.id);
-                    for (i, chunk) in chunks.iter().enumerate() {
-                        if i < vectors.len() {
-                            let score = cosine_similarity(&query_vec, &vectors[i]);
-                            if score >= threshold {
-                                results.push(RetrievalResult {
-                                    chunk: chunk.clone(),
-                                    score,
-                                });
+            Ok(query_embeddings) => {
+                let query_vec = query_embeddings.into_iter().next().unwrap_or_default();
+                if query_vec.is_empty() {
+                    Vec::new()
+                } else {
+                    let mut results = Vec::new();
+                    for doc in &docs {
+                        if doc.status != "indexed_full" && doc.status != "indexed" {
+                            continue;
+                        }
+                        let chunks = load_chunks_for_doc(&app, &doc.id);
+                        let vectors = load_vectors_for_doc(&app, &doc.id);
+                        for (i, chunk) in chunks.iter().enumerate() {
+                            if i < vectors.len() {
+                                let score = cosine_similarity(&query_vec, &vectors[i]);
+                                if score >= threshold {
+                                    results.push(RetrievalResult {
+                                        chunk: chunk.clone(),
+                                        score,
+                                    });
+                                }
                             }
                         }
                     }
+                    results.sort_by(|a, b| {
+                        b.score
+                            .partial_cmp(&a.score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    results.truncate(recall_top_k);
+                    results
                 }
-                results.sort_by(|a, b| {
-                    b.score
-                        .partial_cmp(&a.score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-                results.truncate(recall_top_k);
-                results
             }
-        }
-        Err(_) => Vec::new(),
+            Err(_) => Vec::new(),
         }
     };
 

@@ -12,8 +12,8 @@ import {
 } from "@/core/ai/assistant-config";
 import { autoExtractMemories } from "@/core/agent/actor/actor-memory";
 import { buildKnowledgeContextMessages } from "@/core/agent/actor/middlewares/knowledge-base-middleware";
-import { buildBootstrapContextSnapshot } from "@/core/ai/bootstrap-context";
 import {
+  assembleAgentExecutionContext,
   buildAgentExecutionContextPlan,
   collectContextPathHints,
   uniqueContextPaths,
@@ -164,16 +164,29 @@ export class LocalAgentBridge implements AgentBridge {
     const fullQuery = `${task}${contextStr}`;
 
     let userMemoryPrompt: string | undefined;
+    let memoryRecallAttempted = false;
+    let appliedMemoryPreview: string[] = [];
+    let transcriptRecallAttempted = false;
+    let transcriptRecallHitCount = 0;
+    let appliedTranscriptPreview: string[] = [];
     if (shouldRecallAssistantMemory(aiConfig)) {
       let memorySnap = useAgentMemoryStore.getState();
       if (!memorySnap.loaded) {
         try { await memorySnap.load(); memorySnap = useAgentMemoryStore.getState(); } catch { /* ignore */ }
       }
-      const userMemory = await memorySnap.getMemoriesForQueryPromptAsync(task, {
+      const memoryBundle = await memorySnap.getMemoryRecallBundleAsync(task, {
         topK: 6,
+        workspaceId: explicitWorkspaceRoot,
         preferSemantic: true,
       });
-      userMemoryPrompt = userMemory ? `\n\n## 用户偏好\n${userMemory}` : undefined;
+      memoryRecallAttempted = memoryBundle.searched;
+      appliedMemoryPreview = memoryBundle.memoryPreview.slice(0, 4);
+      transcriptRecallAttempted = memoryBundle.transcriptSearched;
+      transcriptRecallHitCount = memoryBundle.transcriptHitCount;
+      appliedTranscriptPreview = memoryBundle.transcriptPreview.slice(0, 4);
+      userMemoryPrompt = memoryBundle.prompt
+        ? `\n\n## 用户偏好\n${memoryBundle.prompt}`
+        : undefined;
     }
 
     const skillCtx = await loadAndResolveSkills(task, role?.id);
@@ -181,27 +194,28 @@ export class LocalAgentBridge implements AgentBridge {
     const hasCodingWorkflowSkill = skillCtx.visibleSkillIds.includes("builtin-coding-workflow");
     const toolsAfterSkills = applySkillToolFilter(tools, skillCtx.mergedToolFilter);
     const knowledgeContextMessages = await buildKnowledgeContextMessages(task);
+    const attachmentSummary = [
+      contextPathHints.length > 0 ? `附件 ${contextPathHints.length} 项` : "",
+      images?.length ? `图片 ${images.length} 张` : "",
+    ].filter(Boolean).join("，") || undefined;
     const executionContextPlan = await buildAgentExecutionContextPlan({
       query: fullQuery,
       explicitWorkspaceRoot,
       attachmentPaths: contextPathHints,
       images,
     });
-    const effectiveWorkspaceRoot = executionContextPlan.effectiveWorkspaceRoot;
-    const bootstrapContext = await buildBootstrapContextSnapshot({
-      workspaceRoot: effectiveWorkspaceRoot,
-      filePaths: uniqueContextPaths([
-        ...contextPathHints,
-        ...executionContextPlan.scope.pathHints,
-      ]),
-      handoffPaths: executionContextPlan.scope.handoffPaths,
+    const assembledContext = await assembleAgentExecutionContext({
       query: fullQuery,
-      includeMemory: true,
-      recentDailyFiles: 1,
-    }).catch(() => null);
+      executionContextPlan,
+      attachmentSummary,
+      userMemoryPrompt,
+      skillsPrompt,
+      supplementalSystemPrompt: buildAssistantSupplementalPrompt(aiConfig.system_prompt),
+      knowledgeContextMessageCount: knowledgeContextMessages.length,
+    });
+    const effectiveWorkspaceRoot = assembledContext.effectiveWorkspaceRoot;
     const extraSystemPrompt = [
-      buildAssistantSupplementalPrompt(aiConfig.system_prompt),
-      bootstrapContext?.prompt || "",
+      assembledContext.extraSystemPrompt,
       effectiveWorkspaceRoot
         ? `## 工作目录\n你的工作目录为: ${effectiveWorkspaceRoot}\n执行 shell 命令和文件操作时，请在此目录下进行。`
         : "",
@@ -256,13 +270,39 @@ export class LocalAgentBridge implements AgentBridge {
           sourceMode: "cluster",
         }).catch(() => undefined);
       }
-      return { answer, steps: collectedSteps };
+      return {
+        answer,
+        steps: collectedSteps,
+        memoryRecallAttempted,
+        appliedMemoryPreview,
+        transcriptRecallAttempted,
+        transcriptRecallHitCount,
+        appliedTranscriptPreview,
+      };
     } catch (e) {
       const error = e instanceof Error ? e.message : String(e);
       if (error === "Aborted" || signal.aborted) {
-        return { answer: "", steps: collectedSteps, error: "已取消" };
+        return {
+          answer: "",
+          steps: collectedSteps,
+          error: "已取消",
+          memoryRecallAttempted,
+          appliedMemoryPreview,
+          transcriptRecallAttempted,
+          transcriptRecallHitCount,
+          appliedTranscriptPreview,
+        };
       }
-      return { answer: "", steps: collectedSteps, error };
+      return {
+        answer: "",
+        steps: collectedSteps,
+        error,
+        memoryRecallAttempted,
+        appliedMemoryPreview,
+        transcriptRecallAttempted,
+        transcriptRecallHitCount,
+        appliedTranscriptPreview,
+      };
     } finally {
       this.abortController = null;
     }

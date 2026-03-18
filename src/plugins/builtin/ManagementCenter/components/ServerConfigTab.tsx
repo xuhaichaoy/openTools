@@ -38,7 +38,7 @@ export function ServerConfigTab() {
   };
 
   return (
-    <div className="max-w-xl mx-auto space-y-[var(--space-compact-3)]">
+    <div className="w-full space-y-[var(--space-compact-3)]">
       <div>
         <h2 className="text-sm font-semibold">服务器地址</h2>
         <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">

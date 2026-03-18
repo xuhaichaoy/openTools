@@ -11,6 +11,7 @@ const TASK: SpawnedTaskRecord = {
   runId: "run-1",
   spawnerActorId: "coordinator",
   targetActorId: "specialist",
+  roleBoundary: "validator",
   task: "请排查 src/app.tsx 里的异常并补上验证步骤",
   label: "修复首页异常",
   status: "running",
@@ -138,6 +139,8 @@ describe("spawned-task-checkpoint", () => {
     expect(handoff?.visualAttachmentPaths).toEqual(["/repo/assets/mockup.png"]);
     expect(handoff?.contextSections?.some((section) => section.title === "活跃待办")).toBe(true);
     expect(handoff?.contextSections?.some((section) => section.title === "视觉参考")).toBe(true);
+    expect(handoff?.query).toContain("当前职责：验证回归");
+    expect(handoff?.keyPoints).toContain("职责边界：验证回归");
     expect(handoff?.summary).toContain("验证中");
   });
 });

@@ -50,9 +50,37 @@ export function AgentPromptContextCard({
         <span className="rounded-full border border-[var(--color-border)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
           记忆 {snapshot.memoryItemCount}
         </span>
+        {snapshot.memoryRecallAttempted && snapshot.memoryItemCount === 0 && (
+          <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-700">
+            已检索未命中
+          </span>
+        )}
+        {snapshot.transcriptRecallHitCount > 0 && (
+          <span className="rounded-full border border-sky-500/20 bg-sky-500/10 px-2 py-0.5 text-[10px] text-sky-700">
+            轨迹 {snapshot.transcriptRecallHitCount}
+          </span>
+        )}
+        {snapshot.transcriptRecallAttempted && snapshot.transcriptRecallHitCount === 0 && (
+          <span className="rounded-full border border-sky-500/20 bg-sky-500/10 px-2 py-0.5 text-[10px] text-sky-700">
+            轨迹未命中
+          </span>
+        )}
         <span className="rounded-full border border-[var(--color-border)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
           任务 {snapshot.review.visibleTaskCount}
         </span>
+        <span className="rounded-full border border-[var(--color-border)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
+          Bootstrap {snapshot.bootstrapContextFileCount}
+        </span>
+        {snapshot.bootstrapDiagnostics.truncatedFileCount > 0 && (
+          <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-700">
+            截断 {snapshot.bootstrapDiagnostics.truncatedFileCount}
+          </span>
+        )}
+        {snapshot.bootstrapDiagnostics.omittedFileCount > 0 && (
+          <span className="rounded-full border border-rose-500/20 bg-rose-500/10 px-2 py-0.5 text-[10px] text-rose-700">
+            略过 {snapshot.bootstrapDiagnostics.omittedFileCount}
+          </span>
+        )}
         <button
           type="button"
           onClick={toggleExpanded}
@@ -63,7 +91,7 @@ export function AgentPromptContextCard({
       </div>
 
       <div className="mt-1 text-[11px] text-[var(--color-text-secondary)]">
-        模型这轮拿到的是同一份上下文快照，方便直接核对有没有被旧项目或旧任务污染。
+        模型这轮拿到的是同一份上下文快照，方便直接核对有没有被旧项目污染，以及 bootstrap 文件是否因为预算被截断或略过。
       </div>
 
       {expanded && (

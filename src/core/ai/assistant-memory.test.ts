@@ -15,6 +15,28 @@ const hoisted = vi.hoisted(() => ({
   saveAutomaticStructuredMemoryMock: vi.fn(async () => null),
   semanticRecallMock: vi.fn(async () => []),
   loadMemoryCandidatesMock: vi.fn(async () => undefined),
+  conversations: [] as Array<{
+    id: string;
+    messages: Array<{
+      id: string;
+      role: "user" | "assistant" | "system" | "tool";
+      content: string;
+      timestamp: number;
+    }>;
+  }>,
+  agentSessions: [] as Array<{
+    id: string;
+    createdAt: number;
+    lastSessionNotePreview?: string;
+    compaction?: { summary?: string; lastCompactedAt?: number };
+    tasks: Array<{
+      id: string;
+      query?: string;
+      answer?: string | null;
+      createdAt?: number;
+      last_finished_at?: number;
+    }>;
+  }>,
 }));
 
 vi.mock("./memory-store", () => ({
@@ -31,8 +53,30 @@ vi.mock("@/store/ai-store", () => ({
   useAIStore: {
     getState: () => ({
       loadMemoryCandidates: hoisted.loadMemoryCandidatesMock,
+      conversations: hoisted.conversations,
     }),
   },
+}));
+
+vi.mock("@/store/agent-store", () => ({
+  useAgentStore: {
+    getState: () => ({
+      sessions: hoisted.agentSessions,
+    }),
+  },
+  getVisibleAgentTasks: (session: { tasks: unknown[] }) => session.tasks,
+}));
+
+vi.mock("@/store/cluster-store", () => ({
+  useClusterStore: {
+    getState: () => ({
+      sessions: [],
+    }),
+  },
+}));
+
+vi.mock("@/core/agent/actor/actor-transcript", () => ({
+  readSessionHistory: vi.fn(async () => []),
 }));
 
 import {
@@ -50,6 +94,8 @@ describe("assistant-memory", () => {
     hoisted.saveAutomaticStructuredMemoryMock.mockClear();
     hoisted.semanticRecallMock.mockClear();
     hoisted.loadMemoryCandidatesMock.mockClear();
+    hoisted.conversations = [];
+    hoisted.agentSessions = [];
   });
 
   it("builds a prompt bundle with ids and readable previews", async () => {
@@ -74,6 +120,38 @@ describe("assistant-memory", () => {
       "默认回答语言：中文",
       "用户常驻地：杭州",
     ]);
+    expect(bundle.transcriptPrompt).toBe("");
+    expect(bundle.transcriptHitCount).toBe(0);
+  });
+
+  it("falls back to recent agent transcript snippets when durable memory is insufficient", async () => {
+    hoisted.agentSessions = [
+      {
+        id: "agent-session-1",
+        createdAt: 1,
+        lastSessionNotePreview: "上一轮已经把天气默认地点改成上海",
+        tasks: [
+          {
+            id: "task-1",
+            query: "以后天气默认按上海来回答",
+            answer: "已记录并按上海处理天气问题",
+            createdAt: 2,
+            last_finished_at: 3,
+          },
+        ],
+      },
+    ];
+
+    const bundle = await buildAssistantMemoryPromptBundleForQuery("今天天气怎么样", {
+      conversationId: "agent-session-1",
+      enableTranscriptFallback: true,
+    });
+
+    expect(bundle.hitCount).toBe(0);
+    expect(bundle.transcriptHitCount).toBeGreaterThanOrEqual(2);
+    expect(bundle.transcriptSearched).toBe(true);
+    expect(bundle.transcriptPreview.some((item) => item.includes("上海"))).toBe(true);
+    expect(bundle.prompt).toContain("当前会话中与本轮问题相关的最近记录片段");
   });
 
   it("stops after structured memory auto-save succeeds", async () => {

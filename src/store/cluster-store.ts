@@ -73,10 +73,35 @@ const generateId = () =>
 
 const RUNNING_INSTANCE_STATUSES: readonly AgentInstanceStatus[] = ["running", "reviewing"];
 
+function collectUniquePreviewItems(items: readonly string[], limit = 4): string[] {
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const item of items) {
+    const normalized = String(item || "").trim();
+    if (!normalized) continue;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(normalized);
+    if (result.length >= limit) break;
+  }
+  return result;
+}
+
 function buildClusterSnapshotForSession(session: ClusterSession): ClusterContextSnapshot {
   const runningInstanceCount = session.instances.filter((instance) =>
     RUNNING_INSTANCE_STATUSES.includes(instance.status),
   ).length;
+  const memoryPreview = collectUniquePreviewItems(
+    session.instances.flatMap((instance) => instance.appliedMemoryPreview ?? []),
+  );
+  const transcriptPreview = collectUniquePreviewItems(
+    session.instances.flatMap((instance) => instance.appliedTranscriptPreview ?? []),
+  );
+  const transcriptRecallHitCount = session.instances.reduce(
+    (sum, instance) => sum + Math.max(0, instance.transcriptRecallHitCount ?? 0),
+    0,
+  );
 
   return buildClusterContextSnapshot({
     sessionId: session.id,
@@ -96,6 +121,14 @@ function buildClusterSnapshotForSession(session: ClusterSession): ClusterContext
     lastSessionNotePreview: session.lastSessionNotePreview,
     lastRunStatus: session.lastContextRuntimeReport?.execution.status,
     lastRunDurationMs: session.lastContextRuntimeReport?.execution.durationMs,
+    memoryRecallAttempted: session.instances.some((instance) => instance.memoryRecallAttempted === true),
+    memoryHitCount: memoryPreview.length,
+    memoryPreview,
+    transcriptRecallAttempted: session.instances.some(
+      (instance) => instance.transcriptRecallAttempted === true,
+    ),
+    transcriptRecallHitCount,
+    transcriptPreview,
   });
 }
 

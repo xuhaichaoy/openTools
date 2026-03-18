@@ -53,6 +53,9 @@ const actorDebugLog = (name: string, ...args: unknown[]) => {
   void _agentActorLogger;
   void formatActorLog;
 };
+const actorInfoLog = (name: string, ...args: unknown[]) => {
+  _agentActorLogger.info(formatActorLog(name, args));
+};
 const actorWarnLog = (name: string, ...args: unknown[]) => {
   _agentActorLogger.warn(formatActorLog(name, args));
 };
@@ -233,6 +236,11 @@ export class AgentActor {
 
   /** inboxDrain 捕获的真实用户消息（用于替代 "[inbox]" 占位符写入 sessionHistory） */
   private _capturedInboxUserQuery?: string;
+  private _lastMemoryRecallAttempted = false;
+  private _lastMemoryRecallPreview: string[] = [];
+  private _lastTranscriptRecallAttempted = false;
+  private _lastTranscriptRecallHitCount = 0;
+  private _lastTranscriptRecallPreview: string[] = [];
 
   constructor(config: ActorConfig, opts?: {
     askUser?: AskUserCallback;
@@ -372,6 +380,26 @@ export class AgentActor {
     };
   }
 
+  get lastMemoryRecallAttempted(): boolean {
+    return this._lastMemoryRecallAttempted;
+  }
+
+  get lastMemoryRecallPreview(): string[] {
+    return [...this._lastMemoryRecallPreview];
+  }
+
+  get lastTranscriptRecallAttempted(): boolean {
+    return this._lastTranscriptRecallAttempted;
+  }
+
+  get lastTranscriptRecallHitCount(): number {
+    return this._lastTranscriptRecallHitCount;
+  }
+
+  get lastTranscriptRecallPreview(): string[] {
+    return [...this._lastTranscriptRecallPreview];
+  }
+
   /** 注入额外的 AgentTool（如 spawn_task / send_message / agents 等通信工具） */
   setExtraTools(tools: AgentTool[]): void {
     this.extraTools = tools;
@@ -463,6 +491,15 @@ export class AgentActor {
     this.tasks.push(task);
 
     let globalTimeoutId: ReturnType<typeof setTimeout> | undefined;
+    const rerunDiagnostics = {
+      spawnFollowUpRuns: 0,
+      finalSynthesisTriggered: false,
+      validationRepairTriggered: false,
+      answerStreamRestarts: 0,
+    };
+    let lastStreamingAnswerLength = 0;
+    let lastStreamingAnswerSnapshot = "";
+    let lastAnswerClearedBy: string | null = null;
 
     try {
       task.status = "running";
@@ -471,6 +508,39 @@ export class AgentActor {
       actorDebugLog(this.role.name, `📋 assignTask RUNNING: taskId=${task.id}, status changed to running`);
       this.emit("task_started", { taskId: task.id, query });
       const emitTaskStep = (step: AgentStep) => {
+        if (step.type === "answer" && step.streaming) {
+          const currentLength = step.content.trim().length;
+          const looksLikeRestart =
+            lastStreamingAnswerLength >= 320
+            && currentLength > 0
+            && currentLength <= 120
+            && currentLength + 160 < lastStreamingAnswerLength;
+          if (looksLikeRestart) {
+            rerunDiagnostics.answerStreamRestarts += 1;
+            actorWarnLog(this.role.name, "assignTask: streaming answer appears to restart", {
+              taskId: task.id,
+              restartCount: rerunDiagnostics.answerStreamRestarts,
+              previousLength: lastStreamingAnswerLength,
+              currentLength,
+              clearedBy: lastAnswerClearedBy,
+              previousPreview: lastStreamingAnswerSnapshot.slice(0, 120),
+              currentPreview: step.content.slice(0, 120),
+            });
+          }
+          lastStreamingAnswerLength = currentLength;
+          lastStreamingAnswerSnapshot = step.content;
+          lastAnswerClearedBy = null;
+        } else if ((step.type === "action" || step.type === "tool_streaming") && lastStreamingAnswerLength >= 320) {
+          lastAnswerClearedBy = step.type === "action"
+            ? `action:${step.toolName ?? "unknown"}`
+            : "tool_streaming";
+          actorInfoLog(this.role.name, "assignTask: long streaming answer cleared before next phase", {
+            taskId: task.id,
+            previousLength: lastStreamingAnswerLength,
+            trigger: lastAnswerClearedBy,
+            preview: lastStreamingAnswerSnapshot.slice(0, 120),
+          });
+        }
         task.steps = applyIncomingAgentStep(task.steps, step);
         this.emit("step", { taskId: task.id, step });
       };
@@ -527,6 +597,16 @@ export class AgentActor {
               userMessages: followUp.summary.userMessageCount,
             },
           );
+          rerunDiagnostics.spawnFollowUpRuns += 1;
+          actorWarnLog(this.role.name, "assignTask: rerun triggered by follow-up inbox messages", {
+            taskId: task.id,
+            rerunIndex: rerunDiagnostics.spawnFollowUpRuns,
+            drainedMessageCount: drainedMessages.length,
+            mode: followUp.mode,
+            failedTasks: followUp.summary.failedTaskLabels,
+            completedTasks: followUp.summary.completedTaskLabels,
+            userMessageCount: followUp.summary.userMessageCount,
+          });
           const { result: followUpResult, finalQuery: followUpHistoryQuery } = await this.runWithClarifications(
             followUp.prompt,
             undefined,
@@ -550,11 +630,13 @@ export class AgentActor {
           content: "所有子任务已结束，正在触发一次最终综合，避免停留在中间态回复。",
           timestamp: Date.now(),
         });
+        rerunDiagnostics.finalSynthesisTriggered = true;
         const finalSynthesisPrompt = buildFinalSynthesisPrompt({
           hadFailedSpawnFollowUp,
           failedTaskLabels: failedSpawnTaskLabels,
         });
-        actorDebugLog(this.role.name, "assignTask: triggering final synthesis", {
+        actorWarnLog(this.role.name, "assignTask: rerun triggered by final synthesis", {
+          taskId: task.id,
           hadFailedSpawnFollowUp,
           failedSpawnTaskLabels: [...new Set(failedSpawnTaskLabels.filter(Boolean))],
           resultPreview: String(result ?? "").slice(0, 120),
@@ -590,6 +672,12 @@ export class AgentActor {
           type: "observation",
           content: `最终答复未通过结果校验，正在触发一次纠偏：${finalValidation.reason}`,
           timestamp: Date.now(),
+        });
+        rerunDiagnostics.validationRepairTriggered = true;
+        actorWarnLog(this.role.name, "assignTask: rerun triggered by final-result validation repair", {
+          taskId: task.id,
+          reason: finalValidation.reason,
+          resultPreview: String(result ?? "").slice(0, 120),
         });
         const repairPrompt = [
           "你的上一条答复未通过结果校验。",
@@ -627,10 +715,27 @@ export class AgentActor {
       if (globalTimeoutId) clearTimeout(globalTimeoutId);
 
       task.status = "completed";
+      this.applyLatestRecallToTask(task);
       task.result = result;
       task.finishedAt = Date.now();
       const elapsed = task.finishedAt - (task.startedAt ?? task.finishedAt);
       actorDebugLog(this.role.name, `✅ assignTask COMPLETED: taskId=${task.id}, elapsed=${elapsed}ms, result="${(result ?? "").slice(0, 80)}"`);
+      if (
+        rerunDiagnostics.spawnFollowUpRuns > 0
+        || rerunDiagnostics.finalSynthesisTriggered
+        || rerunDiagnostics.validationRepairTriggered
+        || rerunDiagnostics.answerStreamRestarts > 0
+      ) {
+        actorInfoLog(this.role.name, "assignTask: rerun diagnostics summary", {
+          taskId: task.id,
+          elapsed,
+          spawnFollowUpRuns: rerunDiagnostics.spawnFollowUpRuns,
+          finalSynthesisTriggered: rerunDiagnostics.finalSynthesisTriggered,
+          validationRepairTriggered: rerunDiagnostics.validationRepairTriggered,
+          answerStreamRestarts: rerunDiagnostics.answerStreamRestarts,
+          finalResultPreview: String(result ?? "").slice(0, 160),
+        });
+      }
       this.setStatus("idle");
 
       // 自动提取记忆（对标 OpenClaw session-memory hook）
@@ -652,10 +757,27 @@ export class AgentActor {
 
       const error = e instanceof Error ? e.message : String(e);
       task.status = error === "Aborted" ? "aborted" : "error";
+      this.applyLatestRecallToTask(task);
       task.error = error;
       task.finishedAt = Date.now();
       const errorElapsed = task.finishedAt - (task.startedAt ?? task.finishedAt);
       actorErrorLog(this.role.name, `assignTask: ERROR - ${error}`);
+      if (
+        rerunDiagnostics.spawnFollowUpRuns > 0
+        || rerunDiagnostics.finalSynthesisTriggered
+        || rerunDiagnostics.validationRepairTriggered
+        || rerunDiagnostics.answerStreamRestarts > 0
+      ) {
+        actorWarnLog(this.role.name, "assignTask: rerun diagnostics before error exit", {
+          taskId: task.id,
+          elapsed: errorElapsed,
+          spawnFollowUpRuns: rerunDiagnostics.spawnFollowUpRuns,
+          finalSynthesisTriggered: rerunDiagnostics.finalSynthesisTriggered,
+          validationRepairTriggered: rerunDiagnostics.validationRepairTriggered,
+          answerStreamRestarts: rerunDiagnostics.answerStreamRestarts,
+          error,
+        });
+      }
       this.setStatus("idle");
       if (this.actorSystem && opts?.publishResult !== false) {
         this.actorSystem.publishResult(
@@ -908,6 +1030,14 @@ export class AgentActor {
     }
   }
 
+  private applyLatestRecallToTask(task: ActorTask): void {
+    task.memoryRecallAttempted = this._lastMemoryRecallAttempted;
+    task.appliedMemoryPreview = [...this._lastMemoryRecallPreview];
+    task.transcriptRecallAttempted = this._lastTranscriptRecallAttempted;
+    task.transcriptRecallHitCount = this._lastTranscriptRecallHitCount;
+    task.appliedTranscriptPreview = [...this._lastTranscriptRecallPreview];
+  }
+
   /**
    * Build the ActorRunContext from current actor state, run the middleware chain,
    * then create and execute the ReActAgent.
@@ -980,6 +1110,12 @@ export class AgentActor {
     };
 
     await runMiddlewareChain(createDefaultMiddlewares(), ctx);
+
+    this._lastMemoryRecallAttempted = ctx.memoryRecallAttempted === true;
+    this._lastMemoryRecallPreview = [...(ctx.appliedMemoryPreview ?? [])];
+    this._lastTranscriptRecallAttempted = ctx.transcriptRecallAttempted === true;
+    this._lastTranscriptRecallHitCount = Math.max(0, ctx.transcriptRecallHitCount ?? 0);
+    this._lastTranscriptRecallPreview = [...(ctx.appliedTranscriptPreview ?? [])];
 
     this.abortController = new AbortController();
     const signal = this.abortController.signal;

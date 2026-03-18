@@ -158,7 +158,7 @@ export default function ManagementCenter({ onBack }: MToolsPluginProps) {
           {activeTab === "settings" && <GeneralSettingsTab />}
           {activeTab === "ai-model" && <AIModelTab />}
           {activeTab === "skills" && (
-            <div className="max-w-xl mx-auto">
+            <div className="w-full">
               <SkillsManager />
             </div>
           )}
@@ -166,7 +166,7 @@ export default function ManagementCenter({ onBack }: MToolsPluginProps) {
           {activeTab === "memory" && <MemoryTab />}
           {activeTab === "server" && <ServerConfigTab />}
           {activeTab === "credentials" && (
-            <div className="max-w-xl mx-auto">
+            <div className="w-full">
               <CredentialSettings />
             </div>
           )}
@@ -218,7 +218,7 @@ function AccountTab({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
 
   if (!isLoggedIn) {
     return (
-      <div className="max-w-xl mx-auto space-y-2">
+      <div className="w-full space-y-2">
         <div className="bg-[var(--color-bg)] rounded-xl p-8 border border-[var(--color-border)] flex flex-col items-center gap-3">
           <div
             className="w-14 h-14 rounded-xl flex items-center justify-center border"
@@ -245,7 +245,7 @@ function AccountTab({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
   }
 
   return (
-    <div className="max-w-xl mx-auto space-y-2">
+    <div className="w-full space-y-2">
       {/* Profile Header */}
       <div className="bg-[var(--color-bg)] rounded-xl p-[var(--space-compact-3)] border border-[var(--color-border)] flex items-center gap-[var(--space-compact-3)]">
         <div
@@ -625,7 +625,7 @@ function GeneralSettingsTab() {
   }
 
   return (
-    <div className="max-w-xl mx-auto space-y-2">
+    <div className="w-full space-y-2">
       <div>
         <h2 className="text-sm font-semibold">通用设置</h2>
         <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">
@@ -846,7 +846,7 @@ function ToggleSwitch({
 
 function PaymentRecordsTab() {
   return (
-    <div className="max-w-xl mx-auto space-y-2">
+    <div className="w-full space-y-2">
       <div>
         <h2 className="text-sm font-semibold">支付记录</h2>
         <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">
@@ -868,7 +868,7 @@ function PaymentRecordsTab() {
 
 function DevicesTab() {
   return (
-    <div className="max-w-xl mx-auto space-y-2">
+    <div className="w-full space-y-2">
       <div>
         <h2 className="text-sm font-semibold">设备管理</h2>
         <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">

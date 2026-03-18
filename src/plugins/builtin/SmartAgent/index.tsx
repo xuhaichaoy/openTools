@@ -50,6 +50,7 @@ import {
   buildAgentPromptContextSnapshot,
   type AgentPromptContextSnapshot,
 } from "./core/prompt-context";
+import { getForegroundRuntimeSession, useRuntimeStateStore } from "@/core/agent/context-runtime/runtime-state";
 import {
   type ExecutionWaitingStage,
   type RunningPhase,
@@ -73,6 +74,7 @@ interface SmartAgentProps {
   onBack?: () => void;
   ai?: MToolsAI;
   headless?: boolean;
+  active?: boolean;
 }
 
 const EMPTY_AGENT_TASKS: AgentTask[] = [];
@@ -113,7 +115,7 @@ function saveAgentSettings(settings: AgentRuntimeSettings): void {
 }
 
 const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
-  function SmartAgentPlugin({ onBack, ai, headless }, ref) {
+  function SmartAgentPlugin({ onBack, ai, headless, active = true }, ref) {
     const [input, setInput] = useState("");
     const [running, setRunning] = useState(false);
     const [expandedSteps, setExpandedSteps] = useState<Set<string>>(new Set());
@@ -209,6 +211,7 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       revertCurrentSessionToPreviousTask,
       redoCurrentSession,
       restoreCurrentSession,
+      setWorkspaceLock,
       forkSession,
       enqueueFollowUp,
       dequeueFollowUp,
@@ -237,6 +240,7 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
         revertCurrentSessionToPreviousTask: s.revertCurrentSessionToPreviousTask,
         redoCurrentSession: s.redoCurrentSession,
         restoreCurrentSession: s.restoreCurrentSession,
+        setWorkspaceLock: s.setWorkspaceLock,
         forkSession: s.forkSession,
         enqueueFollowUp: s.enqueueFollowUp,
         dequeueFollowUp: s.dequeueFollowUp,
@@ -256,6 +260,30 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       () => sessions.find((session) => session.id === currentSessionId) ?? null,
       [currentSessionId, sessions],
     );
+
+    useEffect(() => {
+      useRuntimeStateStore.getState().setPanelVisible("agent", active);
+      if (!active) return;
+
+      const foregroundSessionId = getForegroundRuntimeSession("agent")?.sessionId;
+      const targetSessionId =
+        currentSessionId
+        || activeAgentRun?.sessionId
+        || foregroundSessionId
+        || null;
+      if (!targetSessionId || !sessions.some((session) => session.id === targetSessionId)) {
+        return;
+      }
+      if (currentSessionId !== targetSessionId) {
+        setCurrentSession(targetSessionId);
+      }
+      useRuntimeStateStore.getState().setForegroundSession("agent", targetSessionId);
+    }, [active, activeAgentRun?.sessionId, currentSessionId, sessions, setCurrentSession]);
+
+    useEffect(() => () => {
+      useRuntimeStateStore.getState().setPanelVisible("agent", false);
+    }, []);
+
     // 避免本地 UI 状态变化时每次都重新 slice，导致自动折叠/恢复 effect 被误触发。
     const tasks = useMemo(
       () => (currentSession ? getVisibleAgentTasks(currentSession) : EMPTY_AGENT_TASKS),
@@ -485,6 +513,11 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
         continuityStrategy: currentSession?.lastContinuityStrategy,
         continuityReason: currentSession?.lastContinuityReason,
         memoryItemCount: currentSession?.lastMemoryItemCount,
+        memoryRecallAttempted: currentSession?.lastMemoryRecallAttempted,
+        memoryRecallPreview: currentSession?.lastMemoryRecallPreview,
+        transcriptRecallAttempted: currentSession?.lastTranscriptRecallAttempted,
+        transcriptRecallHitCount: currentSession?.lastTranscriptRecallHitCount,
+        transcriptRecallPreview: currentSession?.lastTranscriptRecallPreview,
         historyContextMessageCount: currentSession?.compaction?.summary ? 2 : 0,
         knowledgeContextMessageCount: 0,
       });
@@ -765,6 +798,9 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
               hiddenTaskCount={hiddenTasks.length}
               onRedo={redoCurrentSession}
               onRestore={restoreCurrentSession}
+              onToggleWorkspaceLock={() => {
+                setWorkspaceLock(currentSession.id, !currentSession.workspaceLocked, "user");
+              }}
               onFork={() => {
                 forkSession(currentSession.id, { visibleOnly: true });
               }}

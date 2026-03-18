@@ -36,6 +36,12 @@ export interface DialogContextSnapshot {
   focusedSessionRunId?: string;
   focusedSessionLabel?: string;
   summaryPreview?: string;
+  memoryRecallAttempted: boolean;
+  memoryHitCount: number;
+  memoryPreview: string[];
+  transcriptRecallAttempted: boolean;
+  transcriptRecallHitCount: number;
+  transcriptPreview: string[];
   contextLines: string[];
 }
 
@@ -49,6 +55,8 @@ export function cloneDialogContextSnapshot(
   if (!snapshot) return null;
   return {
     ...snapshot,
+    memoryPreview: [...(snapshot.memoryPreview ?? [])],
+    transcriptPreview: [...(snapshot.transcriptPreview ?? [])],
     contextLines: [...snapshot.contextLines],
   };
 }
@@ -94,7 +102,9 @@ export function hasDialogContextSnapshotContent(
     || snapshot.focusedSessionLabel
     || snapshot.pendingInteractionCount > 0
     || snapshot.queuedFollowUpCount > 0
-    || snapshot.runningActorCount > 0,
+    || snapshot.runningActorCount > 0
+    || snapshot.memoryRecallAttempted
+    || snapshot.transcriptRecallAttempted,
   );
 }
 
@@ -130,6 +140,16 @@ export function buildDialogContextNarrative(
   }
   if (snapshot.runningActorCount > 0) {
     parts.push(`${snapshot.runningActorCount} 个 Agent 仍在运行`);
+  }
+  if (snapshot.memoryHitCount > 0) {
+    parts.push(`最近房间内命中了 ${snapshot.memoryHitCount} 条长期记忆`);
+  } else if (snapshot.memoryRecallAttempted) {
+    parts.push("最近房间内检索过长期记忆，但本轮没有命中");
+  }
+  if (snapshot.transcriptRecallHitCount > 0) {
+    parts.push(`最近房间内回补了 ${snapshot.transcriptRecallHitCount} 条会话轨迹`);
+  } else if (snapshot.transcriptRecallAttempted) {
+    parts.push("最近房间内检索过会话轨迹，但本轮没有命中");
   }
 
   if (parts.length === 0) {
@@ -180,6 +200,22 @@ export function buildDialogContextReport(
   if (snapshot.summaryPreview) {
     lines.push(`摘要提示：${snapshot.summaryPreview}`);
   }
+  if (snapshot.memoryHitCount > 0) {
+    lines.push(`长期记忆：命中 ${snapshot.memoryHitCount} 条`);
+  } else if (snapshot.memoryRecallAttempted) {
+    lines.push("长期记忆：已检索，本轮未命中");
+  }
+  if (snapshot.memoryPreview.length > 0) {
+    lines.push(`记忆命中预览：${snapshot.memoryPreview.join("；")}`);
+  }
+  if (snapshot.transcriptRecallHitCount > 0) {
+    lines.push(`会话轨迹回补：${snapshot.transcriptRecallHitCount} 条`);
+  } else if (snapshot.transcriptRecallAttempted) {
+    lines.push("会话轨迹回补：已检索，本轮未命中");
+  }
+  if (snapshot.transcriptPreview.length > 0) {
+    lines.push(`轨迹命中预览：${snapshot.transcriptPreview.join("；")}`);
+  }
 
   return lines;
 }
@@ -199,6 +235,12 @@ export function buildDialogContextSnapshot(params: {
   queuedFollowUpCount: number;
   focusedSessionRunId?: string | null;
   focusedSessionLabel?: string | null;
+  memoryRecallAttempted?: boolean;
+  memoryHitCount?: number;
+  memoryPreview?: string[];
+  transcriptRecallAttempted?: boolean;
+  transcriptRecallHitCount?: number;
+  transcriptPreview?: string[];
 }): DialogContextSnapshot {
   const pendingUserInteractions = params.pendingUserInteractions ?? [];
   const pendingApprovalCount = pendingUserInteractions.filter(
@@ -234,6 +276,18 @@ export function buildDialogContextSnapshot(params: {
     summaryPreview: params.dialogContextSummary?.summary
       ? compactText(params.dialogContextSummary.summary, 140)
       : undefined,
+    memoryRecallAttempted: params.memoryRecallAttempted === true,
+    memoryHitCount: Math.max(0, params.memoryHitCount ?? 0),
+    memoryPreview: (params.memoryPreview ?? [])
+      .map((item) => compactText(item, 72))
+      .filter((item): item is string => Boolean(item))
+      .slice(0, 4),
+    transcriptRecallAttempted: params.transcriptRecallAttempted === true,
+    transcriptRecallHitCount: Math.max(0, params.transcriptRecallHitCount ?? 0),
+    transcriptPreview: (params.transcriptPreview ?? [])
+      .map((item) => compactText(item, 88))
+      .filter((item): item is string => Boolean(item))
+      .slice(0, 4),
     contextLines: [],
   };
 

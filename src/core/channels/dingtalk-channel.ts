@@ -3,11 +3,14 @@
  *
  * 支持两种模式：
  * 1. Webhook 模式：通过 Webhook URL 发送消息（单向推送，适合通知场景）
- * 2. Stream 模式：通过钉钉 Stream SDK 接收+发送消息（双向，适合交互场景）
+ * 2. Stream 模式：通过 Tauri 后端建立钉钉 Stream 长连接接收消息（双向，适合交互场景）
  *
- * 当前实现 Webhook + HTTP 回调模式，Stream 模式需 Tauri 端转发。
+ * 当前实现：
+ * - 入站：优先使用钉钉 Stream 长连接（无需公网回调）
+ * - 出站：优先 OpenAPI，回退到 Webhook
  */
 
+import { invoke } from "@tauri-apps/api/core";
 import type {
   IMChannel,
   ChannelConfig,
@@ -29,8 +32,8 @@ export interface DingTalkConfig {
   appKey?: string;
   /** 应用 AppSecret */
   appSecret?: string;
-  /** 本地回调端口（Tauri 端监听 HTTP 回调） */
-  callbackPort?: number;
+  /** 机器人编码（群发 OpenAPI 使用；未填写时回退为 AppKey） */
+  robotCode?: string;
 }
 
 /** 签名计算（HmacSHA256 + Base64） */
@@ -52,11 +55,10 @@ export class DingTalkChannel implements IMChannel {
   readonly type = "dingtalk" as const;
 
   private _status: ChannelStatus = "disconnected";
+  private _channelId: string | null = null;
   private _config: DingTalkConfig | null = null;
   private _handlers: MessageHandler[] = [];
   private _pollTimer: ReturnType<typeof setInterval> | null = null;
-  private _accessToken: string | null = null;
-  private _tokenExpiresAt = 0;
 
   get status(): ChannelStatus {
     return this._status;
@@ -68,21 +70,27 @@ export class DingTalkChannel implements IMChannel {
 
   async connect(config: ChannelConfig): Promise<void> {
     const platform = config.platformConfig as unknown as DingTalkConfig;
-    if (!platform.webhookUrl && !platform.appKey) {
-      throw new Error("钉钉通道需要配置 webhookUrl 或 appKey");
+    const hasWebhook = !!platform.webhookUrl?.trim();
+    const hasAppPair = !!platform.appKey?.trim() && !!platform.appSecret?.trim();
+
+    if (!hasWebhook && !hasAppPair) {
+      throw new Error("钉钉通道需要配置 webhookUrl，或同时配置 appKey + appSecret");
     }
 
     this._config = platform;
+    this._channelId = config.id;
     this._status = "connecting";
 
     try {
-      // 如果配置了 appKey，获取 access_token（用于主动发消息等 API）
-      if (platform.appKey && platform.appSecret) {
-        await this._refreshAccessToken();
+      if (hasAppPair) {
+        await invoke("start_dingtalk_stream_channel", {
+          channelId: config.id,
+          clientId: platform.appKey!.trim(),
+          clientSecret: platform.appSecret!.trim(),
+        });
       }
 
-      // Webhook 模式只需要验证 URL 格式
-      if (platform.webhookUrl) {
+      if (hasWebhook) {
         const url = new URL(platform.webhookUrl);
         if (!url.hostname.includes("dingtalk")) {
           log.warn("Webhook URL does not appear to be a DingTalk URL");
@@ -103,17 +111,33 @@ export class DingTalkChannel implements IMChannel {
       clearInterval(this._pollTimer);
       this._pollTimer = null;
     }
+    if (this._channelId && this._config?.appKey && this._config?.appSecret) {
+      await invoke("stop_dingtalk_stream_channel", {
+        channelId: this._channelId,
+      }).catch((err) => {
+        log.warn("Failed to stop DingTalk Stream channel", err);
+      });
+    }
     this._status = "disconnected";
+    this._channelId = null;
     this._config = null;
-    this._accessToken = null;
     log.info("DingTalk channel disconnected");
   }
 
   async send(msg: ChannelOutgoingMessage): Promise<void> {
     if (!this._config) throw new Error("DingTalk channel not connected");
 
-    // 优先 API 模式：有 accessToken 且有明确的群会话 ID（非 "default"）
-    if (this._accessToken && msg.conversationId && msg.conversationId !== "default") {
+    if (msg.replyWebhookUrl && !isWebhookExpired(msg.replyWebhookExpiresAt)) {
+      try {
+        await this._sendByWebhookUrl(msg.replyWebhookUrl, msg);
+        return;
+      } catch (err) {
+        log.warn("DingTalk session webhook send failed, falling back to API/webhook", err);
+      }
+    }
+
+    // 优先 App API 模式：有应用凭证且有明确的群会话 ID（非 "default"）
+    if (this._config.appKey && this._config.appSecret && msg.conversationId && msg.conversationId !== "default") {
       await this._sendByApi(msg);
       return;
     }
@@ -122,35 +146,33 @@ export class DingTalkChannel implements IMChannel {
   }
 
   private async _sendByApi(msg: ChannelOutgoingMessage): Promise<void> {
-    await this._refreshAccessToken();
-    if (!this._accessToken) throw new Error("No access token available for API mode");
-
-    const body: Record<string, unknown> = {
-      openConversationId: msg.conversationId,
-      robotCode: this._config!.appKey,
-      msgKey: msg.messageType === "markdown" ? "sampleMarkdown" : "sampleText",
-      msgParam: msg.messageType === "markdown" && msg.markdown
-        ? JSON.stringify({ title: msg.markdown.title, text: msg.markdown.text })
-        : JSON.stringify({ content: msg.text || "" }),
-    };
-
-    const response = await fetch("https://api.dingtalk.com/v1.0/robot/groupMessages/send", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-acs-dingtalk-access-token": this._accessToken,
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (!response.ok) {
-      const text = await response.text();
-      log.warn(`DingTalk API send failed (${response.status}), falling back to webhook`, text);
-      await this._sendByWebhook(msg);
-      return;
+    const robotCode = msg.robotCode?.trim() || this._config!.robotCode?.trim() || this._config!.appKey?.trim();
+    if (!robotCode) {
+      throw new Error("钉钉发送缺少 robotCode（请在通道配置中补充，或使用会话回调回复）");
     }
 
-    log.info("Message sent via DingTalk API", { conversationId: msg.conversationId });
+    const outgoing = buildDingTalkAppPayload(msg);
+    const body: Record<string, unknown> = {
+      openConversationId: msg.conversationId,
+      robotCode,
+      msgKey: outgoing.msgKey,
+      msgParam: outgoing.msgParam,
+    };
+
+    try {
+      await invoke("dingtalk_send_app_message", {
+        clientId: this._config!.appKey,
+        clientSecret: this._config!.appSecret,
+        robotCode: body.robotCode,
+        openConversationId: body.openConversationId,
+        msgKey: body.msgKey,
+        msgParam: body.msgParam,
+      });
+      log.info("Message sent via DingTalk API", { conversationId: msg.conversationId });
+    } catch (err) {
+      log.warn("DingTalk API send failed, falling back to webhook", err);
+      await this._sendByWebhook(msg);
+    }
   }
 
   private async _sendByWebhook(msg: ChannelOutgoingMessage): Promise<void> {
@@ -165,26 +187,17 @@ export class DingTalkChannel implements IMChannel {
       url = `${url}${separator}timestamp=${timestamp}&sign=${encodeURIComponent(sign)}`;
     }
 
-    const body = this._buildMessageBody(msg);
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-
-    if (!response.ok) {
-      const text = await response.text();
-      log.error("DingTalk webhook send failed", { status: response.status, body: text });
-      throw new Error(`DingTalk send failed: ${response.status} ${text}`);
-    }
-
-    const result = await response.json() as { errcode: number; errmsg: string };
-    if (result.errcode !== 0) {
-      log.error("DingTalk API error", result);
-      throw new Error(`DingTalk API error: ${result.errmsg} (${result.errcode})`);
-    }
-
+    await this._sendByWebhookUrl(url, msg);
     log.info("Message sent via DingTalk webhook", { conversationId: msg.conversationId });
+  }
+
+  private async _sendByWebhookUrl(url: string, msg: ChannelOutgoingMessage): Promise<void> {
+    const body = this._buildMessageBody(msg);
+    await invoke("dingtalk_send_webhook_message", {
+      url,
+      body,
+    });
+    log.info("Message sent via DingTalk webhook URL", { conversationId: msg.conversationId });
   }
 
   onMessage(handler: MessageHandler): () => void {
@@ -195,8 +208,8 @@ export class DingTalkChannel implements IMChannel {
   }
 
   /**
-   * 处理来自 Tauri 后端转发的钉钉回调消息。
-   * Tauri 端通过 HTTP server 接收钉钉推送，再 emit 到前端。
+   * 处理来自 Tauri 后端转发的钉钉入站消息。
+   * Tauri 端可能通过 Stream 长连接或本地回调服务接收，再统一 emit 到前端。
    */
   async handleIncomingCallback(raw: Record<string, unknown>): Promise<string | undefined> {
     const msg = this._parseCallback(raw);
@@ -216,36 +229,16 @@ export class DingTalkChannel implements IMChannel {
 
   // ── Private ──
 
-  private async _refreshAccessToken(): Promise<void> {
-    if (!this._config?.appKey || !this._config?.appSecret) return;
-    if (Date.now() < this._tokenExpiresAt - 60_000) return;
-
-    const params = new URLSearchParams({
-      appkey: this._config.appKey,
-      appsecret: this._config.appSecret,
-    });
-
-    const response = await fetch(`https://oapi.dingtalk.com/gettoken?${params}`);
-    const data = await response.json() as { access_token: string; expires_in: number; errcode: number };
-
-    if (data.errcode === 0 && data.access_token) {
-      this._accessToken = data.access_token;
-      this._tokenExpiresAt = Date.now() + data.expires_in * 1000;
-      log.info("DingTalk access_token refreshed", { expiresIn: data.expires_in });
-    } else {
-      log.error("Failed to get DingTalk access_token", data);
-    }
-  }
-
   private _buildMessageBody(msg: ChannelOutgoingMessage): Record<string, unknown> {
     const at: Record<string, unknown> = {};
     if (msg.atAll) at.isAtAll = true;
     if (msg.atUsers?.length) at.atMobiles = msg.atUsers;
 
-    if (msg.messageType === "markdown" && msg.markdown) {
+    const explicitMarkdown = resolveMarkdownContent(msg);
+    if (explicitMarkdown) {
       return {
         msgtype: "markdown",
-        markdown: { title: msg.markdown.title, text: msg.markdown.text },
+        markdown: explicitMarkdown,
         at,
       };
     }
@@ -262,9 +255,21 @@ export class DingTalkChannel implements IMChannel {
       };
     }
 
+    const text = msg.text || "";
+    if (looksLikeMarkdown(text)) {
+      return {
+        msgtype: "markdown",
+        markdown: {
+          title: inferDingTalkMarkdownTitle(text),
+          text,
+        },
+        at,
+      };
+    }
+
     return {
       msgtype: "text",
-      text: { content: msg.text || "" },
+      text: { content: text },
       at,
     };
   }
@@ -281,7 +286,7 @@ export class DingTalkChannel implements IMChannel {
 
       const senderId = String(raw.senderStaffId || raw.senderId || raw.senderNick || "unknown");
       const senderName = String(raw.senderNick || raw.senderName || senderId);
-      const conversationId = String(raw.conversationId || raw.chatbotCorpId || "default");
+      const conversationId = String(raw.conversationId || raw.openConversationId || raw.chatbotCorpId || "default");
       const conversationType = String(raw.conversationType) === "1" ? "private" as const : "group" as const;
 
       const atUsers = raw.atUsers as Array<{ dingtalkId: string }> | undefined;
@@ -297,6 +302,9 @@ export class DingTalkChannel implements IMChannel {
         conversationType,
         timestamp: Number(raw.createAt || Date.now()),
         atBot,
+        replyWebhookUrl: typeof raw.sessionWebhook === "string" ? raw.sessionWebhook : undefined,
+        replyWebhookExpiresAt: toTimestamp(raw.sessionWebhookExpiredTime),
+        robotCode: typeof raw.robotCode === "string" ? raw.robotCode : undefined,
         raw,
       };
     } catch (err) {
@@ -304,4 +312,89 @@ export class DingTalkChannel implements IMChannel {
       return null;
     }
   }
+}
+
+function toTimestamp(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return value < 1_000_000_000_000 ? value * 1000 : value;
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed < 1_000_000_000_000 ? parsed * 1000 : parsed;
+    }
+  }
+  return undefined;
+}
+
+function isWebhookExpired(expiresAt?: number): boolean {
+  if (!expiresAt) return false;
+  return Date.now() >= expiresAt - 1000;
+}
+
+function resolveMarkdownContent(
+  msg: ChannelOutgoingMessage,
+): { title: string; text: string } | null {
+  if (msg.messageType === "markdown" && msg.markdown) {
+    return {
+      title: msg.markdown.title?.trim() || "消息",
+      text: msg.markdown.text,
+    };
+  }
+  return null;
+}
+
+function buildDingTalkAppPayload(msg: ChannelOutgoingMessage): {
+  msgKey: "sampleText" | "sampleMarkdown";
+  msgParam: string;
+} {
+  const explicitMarkdown = resolveMarkdownContent(msg);
+  if (explicitMarkdown) {
+    return {
+      msgKey: "sampleMarkdown",
+      msgParam: JSON.stringify(explicitMarkdown),
+    };
+  }
+
+  const text = msg.text || "";
+  if (looksLikeMarkdown(text)) {
+    return {
+      msgKey: "sampleMarkdown",
+      msgParam: JSON.stringify({
+        title: inferDingTalkMarkdownTitle(text),
+        text,
+      }),
+    };
+  }
+
+  return {
+    msgKey: "sampleText",
+    msgParam: JSON.stringify({ content: text }),
+  };
+}
+
+function looksLikeMarkdown(text: string): boolean {
+  if (!text.trim()) return false;
+  return /(^|\n)\s{0,3}(#{1,6}\s|[-*+]\s|>\s|\d+\.\s|\[[ xX]\]\s)/m.test(text)
+    || /(\*\*[^*]+\*\*|__[^_]+__|`[^`]+`|\[[^\]]+\]\([^)]+\))/m.test(text)
+    || /```[\s\S]*?```/.test(text)
+    || /\|.+\|[\r\n]+\|[-:| ]+\|/.test(text);
+}
+
+function inferDingTalkMarkdownTitle(text: string): string {
+  const firstHeading = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => /^#{1,6}\s+/.test(line));
+
+  if (firstHeading) {
+    return firstHeading.replace(/^#{1,6}\s+/, "").trim().slice(0, 80) || "消息";
+  }
+
+  const firstLine = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+
+  return firstLine?.slice(0, 80) || "消息";
 }

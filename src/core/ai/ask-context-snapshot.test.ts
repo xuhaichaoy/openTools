@@ -31,6 +31,9 @@ describe("buildAskContextSnapshot", () => {
           timestamp: 2,
           appliedMemoryIds: ["m1", "m2"],
           appliedMemoryPreview: ["用户偏好简洁输出", "项目默认使用 pnpm"],
+          transcriptRecallAttempted: true,
+          transcriptRecallHitCount: 1,
+          appliedTranscriptPreview: ["Agent：任务结果：已完成首页基础布局"],
         },
       ],
       draftInput: "顺便补一下移动端适配",
@@ -49,12 +52,14 @@ describe("buildAskContextSnapshot", () => {
     expect(snapshot.attachmentCount).toBe(1);
     expect(snapshot.contextBlockCount).toBe(1);
     expect(snapshot.recalledMemoryCount).toBe(2);
+    expect(snapshot.recalledTranscriptCount).toBe(1);
     expect(snapshot.lastRunStatus).toBe("success");
     expect(snapshot.lastSessionNotePreview).toContain("Ask 问题");
     expect(snapshot.draftAttachmentCount).toBe(2);
     expect(snapshot.isStreaming).toBe(true);
     expect(snapshot.contextLines.some((line) => line.includes("当前工作区"))).toBe(true);
     expect(snapshot.contextLines.some((line) => line.includes("长期记忆"))).toBe(true);
+    expect(snapshot.contextLines.some((line) => line.includes("会话轨迹"))).toBe(true);
     expect(snapshot.contextLines.some((line) => line.includes("最近运行"))).toBe(true);
     expect(snapshot.contextLines.some((line) => line.includes("最近会话笔记"))).toBe(true);
     expect(snapshot.contextLines.some((line) => line.includes("当前草稿"))).toBe(true);

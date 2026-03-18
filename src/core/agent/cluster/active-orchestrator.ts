@@ -1,4 +1,10 @@
 import type { ClusterOrchestrator } from "./cluster-orchestrator";
+import {
+  abortRuntimeSession,
+  registerRuntimeAbortHandler,
+  unregisterRuntimeAbortHandler,
+  useRuntimeStateStore,
+} from "@/core/agent/context-runtime/runtime-state";
 
 interface ActiveEntry {
   sessionId: string;
@@ -8,10 +14,10 @@ interface ActiveEntry {
 }
 
 const activeEntries = new Map<string, ActiveEntry>();
-let foregroundSessionId: string | null = null;
-let panelVisible = false;
 
 function ensureForegroundSession(): string | null {
+  const state = useRuntimeStateStore.getState();
+  const foregroundSessionId = state.foregroundSessionIds.cluster ?? null;
   if (foregroundSessionId && activeEntries.has(foregroundSessionId)) {
     return foregroundSessionId;
   }
@@ -22,22 +28,40 @@ function ensureForegroundSession(): string | null {
       latest = entry;
     }
   }
-  foregroundSessionId = latest?.sessionId ?? null;
-  return foregroundSessionId;
+  const nextSessionId = latest?.sessionId ?? null;
+  useRuntimeStateStore.getState().setForegroundSession("cluster", nextSessionId);
+  return nextSessionId;
 }
 
 export function setActiveOrchestrator(
   sessionId: string,
   orchestrator: ClusterOrchestrator,
   abortController: AbortController,
+  runtimeInfo?: {
+    query?: string;
+    workspaceRoot?: string;
+    status?: string;
+  },
 ): void {
+  const startedAt = Date.now();
   activeEntries.set(sessionId, {
     sessionId,
     orchestrator,
     abortController,
-    startedAt: Date.now(),
+    startedAt,
   });
-  foregroundSessionId = sessionId;
+  registerRuntimeAbortHandler("cluster", sessionId, async () => {
+    abortController.abort();
+    await orchestrator.abort();
+  });
+  useRuntimeStateStore.getState().upsertSession({
+    mode: "cluster",
+    sessionId,
+    query: runtimeInfo?.query?.trim() || sessionId,
+    startedAt,
+    workspaceRoot: runtimeInfo?.workspaceRoot,
+    status: runtimeInfo?.status || "running",
+  });
 }
 
 export function getActiveOrchestrator(sessionId?: string): ActiveEntry | null {
@@ -62,6 +86,8 @@ export function getActiveSessionIds(): string[] {
 export function clearActiveOrchestrator(sessionId?: string): void {
   if (sessionId) {
     activeEntries.delete(sessionId);
+    unregisterRuntimeAbortHandler("cluster", sessionId);
+    useRuntimeStateStore.getState().removeSession("cluster", sessionId);
     ensureForegroundSession();
     return;
   }
@@ -69,6 +95,8 @@ export function clearActiveOrchestrator(sessionId?: string): void {
   const current = ensureForegroundSession();
   if (!current) return;
   activeEntries.delete(current);
+  unregisterRuntimeAbortHandler("cluster", current);
+  useRuntimeStateStore.getState().removeSession("cluster", current);
   ensureForegroundSession();
 }
 
@@ -77,22 +105,17 @@ export async function abortActiveOrchestrator(sessionId?: string): Promise<void>
   if (!target) return;
 
   activeEntries.delete(target.sessionId);
+  await abortRuntimeSession("cluster", target.sessionId);
   ensureForegroundSession();
-
-  target.abortController.abort();
-  await target.orchestrator.abort();
 }
 
 export async function abortAllActiveOrchestrators(): Promise<void> {
   const entries = [...activeEntries.values()];
   activeEntries.clear();
-  foregroundSessionId = null;
+  useRuntimeStateStore.getState().setForegroundSession("cluster", null);
 
   await Promise.allSettled(
-    entries.map(async (entry) => {
-      entry.abortController.abort();
-      await entry.orchestrator.abort();
-    }),
+    entries.map((entry) => abortRuntimeSession("cluster", entry.sessionId)),
   );
 }
 
@@ -106,9 +129,9 @@ export function getActiveSessionId(): string | null {
 }
 
 export function setClusterPanelVisible(visible: boolean): void {
-  panelVisible = visible;
+  useRuntimeStateStore.getState().setPanelVisible("cluster", visible);
 }
 
 export function isClusterPanelVisible(): boolean {
-  return panelVisible;
+  return !!useRuntimeStateStore.getState().panelVisibility.cluster;
 }

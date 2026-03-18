@@ -1,17 +1,39 @@
 import { create } from "zustand";
 import type { ClusterPlan, PlanApprovalRequest } from "@/core/agent/cluster/types";
 
+export type ApprovalDialogPresentation =
+  | {
+      kind: "plan";
+    }
+  | {
+      kind: "boundary";
+      title?: string;
+      description?: string;
+      modeLabel: string;
+      taskPreview?: string;
+      summary: string;
+      coordinatorLabel?: string;
+      participantLabels: string[];
+      permissions: string[];
+      notes?: string[];
+    };
+
 interface ApprovalDialogRequest {
   id: string;
   plan: ClusterPlan;
   sessionId?: string;
+  presentation?: ApprovalDialogPresentation;
   resolve: (result: PlanApprovalRequest) => void;
 }
 
 interface ClusterPlanApprovalState {
   active: ApprovalDialogRequest | null;
   queue: ApprovalDialogRequest[];
-  open: (params: { plan: ClusterPlan; sessionId?: string }) => Promise<PlanApprovalRequest>;
+  open: (params: {
+    plan: ClusterPlan;
+    sessionId?: string;
+    presentation?: ApprovalDialogPresentation;
+  }) => Promise<PlanApprovalRequest>;
   approve: () => void;
   reject: () => void;
   clearAll: () => void;
@@ -30,12 +52,13 @@ function popNext(requests: ApprovalDialogRequest[]): [ApprovalDialogRequest | nu
 export const useClusterPlanApprovalStore = create<ClusterPlanApprovalState>((set, get) => ({
   active: null,
   queue: [],
-  open: ({ plan, sessionId }) =>
+  open: ({ plan, sessionId, presentation }) =>
     new Promise<PlanApprovalRequest>((resolve) => {
       const request: ApprovalDialogRequest = {
         id: nextId(),
         plan,
         sessionId,
+        presentation,
         resolve,
       };
       set((state) => {
