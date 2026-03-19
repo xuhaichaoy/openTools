@@ -28,7 +28,7 @@ import {
 
 const aiLog = createLogger("MToolsAI");
 const STREAM_STALL_TIMEOUT_MS = 120_000;
-const STREAM_FIRST_CHUNK_TIMEOUT_MS = 300_000; // Increased for image models
+const STREAM_FIRST_CHUNK_TIMEOUT_MS = 90_000;
 const STREAM_HARD_TIMEOUT_MS = 600_000;
 
 const generateId = () =>

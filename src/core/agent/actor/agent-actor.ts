@@ -209,8 +209,8 @@ export class AgentActor {
   readonly id: string;
   readonly role: AgentRole;
   readonly persistent: boolean;
-  readonly modelOverride?: string;
-  readonly capabilities?: AgentCapabilities;
+  modelOverride?: string;
+  private _capabilities?: AgentCapabilities;
 
   private _status: ActorStatus = "idle";
   private inbox: InboxMessage[] = [];
@@ -251,7 +251,7 @@ export class AgentActor {
     this.role = config.role;
     this.persistent = config.persistent !== false;
     this.modelOverride = config.modelOverride;
-    this.capabilities = config.capabilities;
+    this._capabilities = config.capabilities;
     this.maxIterations = config.maxIterations ?? config.role.maxIterations ?? 15;
     this.systemPromptOverride = config.systemPromptOverride;
     this.toolPolicy = config.toolPolicy;
@@ -378,6 +378,33 @@ export class AgentActor {
       disable: this._middlewareOverrides.disable ? [...this._middlewareOverrides.disable] : undefined,
       approvalLevel: this._middlewareOverrides.approvalLevel,
     };
+  }
+
+  get capabilities(): AgentCapabilities | undefined {
+    return this._capabilities;
+  }
+
+  /**
+   * 热更新 Actor 配置（仅 idle 状态允许）。
+   * 修改名称、模型、工作区、能力等，无需销毁重建。
+   */
+  updateConfig(patch: {
+    name?: string;
+    modelOverride?: string;
+    workspace?: string;
+    thinkingLevel?: ThinkingLevel;
+    toolPolicy?: ToolPolicy;
+    middlewareOverrides?: MiddlewareOverrides;
+    capabilities?: AgentCapabilities;
+  }): void {
+    if (this._status !== "idle") throw new Error("Cannot update config while running");
+    if (patch.name !== undefined) this.role.name = patch.name;
+    if (patch.modelOverride !== undefined) this.modelOverride = patch.modelOverride || undefined;
+    if (patch.workspace !== undefined) this._workspace = patch.workspace || undefined;
+    if (patch.thinkingLevel !== undefined) this._thinkingLevel = patch.thinkingLevel;
+    if (patch.toolPolicy !== undefined) this.toolPolicy = patch.toolPolicy;
+    if (patch.middlewareOverrides !== undefined) this._middlewareOverrides = patch.middlewareOverrides;
+    if (patch.capabilities !== undefined) this._capabilities = patch.capabilities;
   }
 
   get lastMemoryRecallAttempted(): boolean {
@@ -568,7 +595,7 @@ export class AgentActor {
 
       // 等待循环：如果有未完成的 spawned tasks，保持运行等待结果回送
       const WAIT_POLL_MS = 5_000;
-      const MAX_WAIT_ROUNDS = 60; // 最多等 5 分钟
+      const MAX_WAIT_ROUNDS = 600; // 由 _timeoutSeconds 控制实际上限
       let waitRound = 0;
       let processedSpawnFollowUps = 0;
       let hadFailedSpawnFollowUp = false;
@@ -619,6 +646,10 @@ export class AgentActor {
           processedSpawnFollowUps++;
         }
         waitRound++;
+        if (waitRound % 12 === 0) {
+          const activeNow = this.actorSystem?.getActiveSpawnedTasks(this.id).length ?? 0;
+          actorDebugLog(this.role.name, `assignTask: still waiting, round=${waitRound}, active=${activeNow}, elapsed=${waitRound * WAIT_POLL_MS / 1000}s`);
+        }
       }
 
       if (
@@ -748,7 +779,11 @@ export class AgentActor {
         actorWarnLog(this.role.name, `autoExtractMemories failed (non-blocking):`, err instanceof Error ? err.message : err);
       });
       if (this.actorSystem && opts?.publishResult !== false) {
-        const output = String(result ?? "").trim() || "（任务已完成，但未生成可展示的文本结果）";
+        let output = String(result ?? "").trim() || "（任务已完成，但未生成可展示的文本结果）";
+        const iterExhausted = task.steps?.some((s) => s.type === "error" && s.content === "iteration_exhausted");
+        if (iterExhausted) {
+          output += "\n\n（注意：任务在迭代限制内未能完全完成）";
+        }
         this.actorSystem.publishResult(this.id, output, { suppressLowSignal: false });
       }
       this.emit("task_completed", { taskId: task.id, result, elapsed });

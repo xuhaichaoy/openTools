@@ -368,10 +368,14 @@ async fn agent_stream_openai(
                                     tc.function.arguments = args.clone();
                                 }
                             }
+                            let tc_summary: Vec<String> = pending_tool_calls.iter().enumerate()
+                                .map(|(i, tc)| format!("#{}: id={} name={:?} args_len={}", i, &tc.id, &tc.function.name, tc.function.arguments.len()))
+                                .collect();
                             log::info!(
-                                "[ai_agent_stream/openai] tool calls conv={} count={}",
+                                "[ai_agent_stream/openai] tool calls conv={} count={} detail=[{}]",
                                 conversation_id,
-                                pending_tool_calls.len()
+                                pending_tool_calls.len(),
+                                tc_summary.join(", ")
                             );
                             let _ = app.emit(
                                 "ai-agent-tool-calls",
@@ -424,6 +428,15 @@ async fn agent_stream_openai(
                             emitted = true;
                             for tc in tcs {
                                 let idx = tc["index"].as_u64().unwrap_or(0) as usize;
+                                let tc_id = tc["id"].as_str().map(|s| s.to_string());
+                                let tc_name = tc["function"]["name"].as_str().map(|s| s.to_string());
+                                let tc_name_raw = tc.get("function").and_then(|f| f.get("name")).map(|v| v.to_string());
+                                if tc_id.is_some() || tc_name.is_some() {
+                                    log::info!(
+                                        "[ai_agent_stream/openai] tool_call chunk idx={} id={:?} name={:?} name_raw={:?} conv={}",
+                                        idx, tc_id, tc_name, tc_name_raw, conversation_id
+                                    );
+                                }
                                 while pending_tool_calls.len() <= idx {
                                     pending_tool_calls.push(ToolCall {
                                         id: String::new(),
@@ -434,12 +447,14 @@ async fn agent_stream_openai(
                                         },
                                     });
                                 }
-                                if let Some(id) = tc["id"].as_str() {
-                                    pending_tool_calls[idx].id = id.to_string();
+                                if let Some(id) = tc_id {
+                                    pending_tool_calls[idx].id = id;
                                 }
                                 if let Some(func) = tc["function"].as_object() {
                                     if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
-                                        pending_tool_calls[idx].function.name = name.to_string();
+                                        if !name.is_empty() {
+                                            pending_tool_calls[idx].function.name = name.to_string();
+                                        }
                                     }
                                     if let Some(args) =
                                         func.get("arguments").and_then(|a| a.as_str())

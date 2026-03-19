@@ -285,7 +285,7 @@ const QRCodePlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
                 type="text"
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && generateQR()}
+                onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229 && generateQR()}
                 placeholder="输入文本或 URL..."
                 className="flex-1 px-3 py-2 bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500/50"
               />

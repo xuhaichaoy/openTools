@@ -83,7 +83,7 @@ const ConversationItem = memo(function ConversationItem({
                 value={editTitle}
                 onChange={(e) => onEditTitleChange(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") onConfirmRename(conv.id);
+                  if (e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229) onConfirmRename(conv.id);
                   if (e.key === "Escape") onCancelEdit();
                 }}
                 className="flex-1 text-xs bg-[var(--color-bg-secondary)] text-[var(--color-text)] rounded px-1.5 py-0.5 outline-none border border-indigo-500/40"

@@ -115,6 +115,10 @@ const TEXT_ONLY_HINTS: &[&str] = &[
 const OPENAI_VISION_HINTS: &[&str] = &[
     "gpt-4o",
     "gpt-4.1",
+    "gpt-4.7",
+    "gpt-5",
+    "gpt-5.4",
+    "gpt-5.3-Codex",
     "claude",
     "gemini",
     "kimi",
@@ -125,6 +129,7 @@ const OPENAI_VISION_HINTS: &[&str] = &[
     "glm-4v",
     "glm-4.1v",
     "minimax-vl",
+    "vision",
 ];
 
 const ANTHROPIC_VISION_HINTS: &[&str] = &["claude", "minimax-vl"];

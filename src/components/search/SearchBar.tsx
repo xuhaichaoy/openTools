@@ -69,7 +69,7 @@ export function SearchBar({
           setMode("search");
         }
       }
-    } else if (e.key === "Enter") {
+    } else if (e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229) {
       const paths = pendingImages.map((img) => img.path);
       // 如果有图片，强制使用 AI 模式提交
       if (paths.length > 0) {

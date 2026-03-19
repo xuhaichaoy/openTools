@@ -14,6 +14,7 @@ import {
   Reply,
   AlertTriangle,
   ChevronDown,
+  ChevronUp,
   ChevronRight,
   FileDown,
   FolderOpen,
@@ -23,6 +24,9 @@ import {
   Brain,
   ShieldCheck,
   ArrowRightCircle,
+  Star,
+  Pencil,
+  Check,
   type LucideIcon,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
@@ -345,6 +349,33 @@ function describeAgentActivity(
   }
 
   return `${roleName} 正在思考`;
+}
+
+function buildActionDetail(toolName: string, input: Record<string, unknown>): string {
+  switch (toolName) {
+    case "read_file":
+    case "read_file_range":
+      return `文件: ${String(input.path ?? "")}`;
+    case "search_in_files":
+      return `搜索: "${String(input.query ?? "")}"${input.path ? ` in ${String(input.path)}` : ""}`;
+    case "list_directory":
+      return `目录: ${String(input.path ?? "")}`;
+    case "write_file":
+    case "str_replace_edit":
+    case "json_edit":
+      return `编辑: ${String(input.path ?? "")}`;
+    case "run_shell_command":
+    case "persistent_shell":
+      return `命令: ${String(input.command ?? "").slice(0, 80)}`;
+    case "web_search":
+      return `搜索: "${String(input.query ?? "")}"`;
+    case "web_fetch":
+      return `访问: ${String(input.url ?? "").slice(0, 60)}`;
+    case "spawn_task":
+      return `派发: ${String(input.target_agent ?? "")} - ${String(input.task ?? "").slice(0, 60)}`;
+    default:
+      return toolName;
+  }
 }
 
 type ToolStreamingPreview = {
@@ -1981,24 +2012,130 @@ function MentionPopup({
 function LiveActorRow({
   actor,
   index,
+  isCoordinator,
+  isFirst,
+  isLast,
   onRemove,
+  onMoveUp,
+  onMoveDown,
+  onSetDefault,
+  onUpdate,
+  models,
 }: {
   actor: ActorSnapshot;
   index: number;
+  isCoordinator: boolean;
+  isFirst: boolean;
+  isLast: boolean;
   onRemove: () => void;
+  onMoveUp: () => void;
+  onMoveDown: () => void;
+  onSetDefault: () => void;
+  onUpdate: (patch: {
+    name?: string;
+    modelOverride?: string;
+    workspace?: string;
+    thinkingLevel?: ThinkingLevel;
+    toolPolicy?: ToolPolicy;
+    middlewareOverrides?: MiddlewareOverrides;
+    capabilities?: AgentCapabilities;
+  }) => void;
+  models: ModelOption[];
 }) {
   const color = getActorColor(index);
   const isRunning = actor.status === "running";
+  const [editing, setEditing] = useState(false);
+  const [editName, setEditName] = useState(actor.roleName);
+  const [editModel, setEditModel] = useState(actor.modelOverride || "");
+  const [editWorkspace, setEditWorkspace] = useState(actor.workspace || "");
+  const [editThinking, setEditThinking] = useState<ThinkingLevel>(actor.thinkingLevel || "adaptive");
+  const [editCaps, setEditCaps] = useState<AgentCapability[]>(actor.capabilities?.tags ?? []);
+  const [showCapMenu, setShowCapMenu] = useState(false);
+
+  const handleOpenEdit = () => {
+    if (isRunning) return;
+    setEditName(actor.roleName);
+    setEditModel(actor.modelOverride || "");
+    setEditWorkspace(actor.workspace || "");
+    setEditThinking(actor.thinkingLevel || "adaptive");
+    setEditCaps(actor.capabilities?.tags ?? []);
+    setEditing(true);
+  };
+
+  const handleSave = () => {
+    onUpdate({
+      name: editName.trim() || undefined,
+      modelOverride: editModel,
+      workspace: editWorkspace.trim() || undefined,
+      thinkingLevel: editThinking !== "adaptive" ? editThinking : undefined,
+      capabilities: editCaps.length > 0 ? { tags: editCaps } : undefined,
+    });
+    setEditing(false);
+  };
+
+  const toggleCap = (cap: AgentCapability) => {
+    setEditCaps((prev) =>
+      prev.includes(cap) ? prev.filter((c) => c !== cap) : [...prev, cap]
+    );
+  };
+
   return (
-    <div className={`p-1.5 rounded-xl border ${color.border} ${color.bg}`}>
-      <div className="flex items-center gap-2">
+    <div className={`p-1.5 rounded-xl border ${isCoordinator ? "border-amber-400/50 ring-1 ring-amber-400/20" : color.border} ${color.bg}`}>
+      <div className="flex items-center gap-1.5">
+        {/* 排序按钮 */}
+        <div className="flex flex-col -space-y-0.5">
+          <button
+            onClick={onMoveUp}
+            disabled={isFirst || isRunning}
+            className="p-0 rounded hover:bg-white/20 text-[var(--color-text-tertiary)] hover:text-[var(--color-text)] disabled:opacity-20 disabled:cursor-not-allowed"
+            title="上移"
+          >
+            <ChevronUp className="w-3 h-3" />
+          </button>
+          <button
+            onClick={onMoveDown}
+            disabled={isLast || isRunning}
+            className="p-0 rounded hover:bg-white/20 text-[var(--color-text-tertiary)] hover:text-[var(--color-text)] disabled:opacity-20 disabled:cursor-not-allowed"
+            title="下移"
+          >
+            <ChevronDown className="w-3 h-3" />
+          </button>
+        </div>
+
         <div className={`w-2 h-2 rounded-full ${color.dot} ${isRunning ? "animate-pulse" : ""} shrink-0`} />
         <span className="text-[11px] font-medium min-w-[60px]">{actor.roleName}</span>
-        <span className="text-[10px] text-[var(--color-text-tertiary)] truncate max-w-[140px]">
+        <span className="text-[10px] text-[var(--color-text-tertiary)] truncate max-w-[100px]">
           {actor.modelOverride || "(默认模型)"}
         </span>
+        {isCoordinator && (
+          <span className="text-[8px] px-1 py-0.5 rounded-full bg-amber-500/20 text-amber-600 font-medium" title="默认发送 Agent">
+            默认
+          </span>
+        )}
         <div className="flex-1" />
         {isRunning && <Loader2 className="w-3 h-3 animate-spin opacity-50" />}
+
+        {/* 设为默认 */}
+        <button
+          onClick={onSetDefault}
+          disabled={isCoordinator || isRunning}
+          className={`p-0.5 rounded hover:bg-amber-500/10 transition-colors ${isCoordinator ? "text-amber-500 opacity-50 cursor-not-allowed" : "text-[var(--color-text-tertiary)] hover:text-amber-500"} disabled:opacity-30 disabled:cursor-not-allowed`}
+          title={isCoordinator ? "已是默认发送 Agent" : "设为默认发送"}
+        >
+          <Star className={`w-3 h-3 ${isCoordinator ? "fill-current" : ""}`} />
+        </button>
+
+        {/* 编辑 */}
+        <button
+          onClick={handleOpenEdit}
+          disabled={isRunning}
+          className="p-0.5 rounded hover:bg-blue-500/10 text-[var(--color-text-tertiary)] hover:text-blue-500 disabled:opacity-30 disabled:cursor-not-allowed"
+          title={isRunning ? "运行中，无法编辑" : "编辑配置"}
+        >
+          <Pencil className="w-3 h-3" />
+        </button>
+
+        {/* 移除 */}
         <button
           onClick={onRemove}
           disabled={isRunning}
@@ -2008,6 +2145,8 @@ function LiveActorRow({
           <X className="w-3 h-3" />
         </button>
       </div>
+
+      {/* 标签行 */}
       <div className="mt-1.5 flex flex-wrap gap-1">
         <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg)]/80 text-[var(--color-text-secondary)]">
           {summarizeToolPolicy(actor.toolPolicy)}
@@ -2026,6 +2165,92 @@ function LiveActorRow({
           </span>
         )}
       </div>
+
+      {/* 内联编辑面板 */}
+      {editing && (
+        <div className="mt-2 p-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] space-y-1.5">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <input
+              value={editName}
+              onChange={(e) => setEditName(e.target.value)}
+              placeholder="名称"
+              className="text-[10px] px-1.5 py-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] w-[96px]"
+            />
+            <select
+              value={editModel}
+              onChange={(e) => setEditModel(e.target.value)}
+              className="text-[10px] px-1.5 py-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] min-w-[108px] max-w-[160px]"
+            >
+              <option value="">(默认模型)</option>
+              {models.map((m) => (
+                <option key={m.id} value={m.model}>{m.name}</option>
+              ))}
+            </select>
+            <input
+              value={editWorkspace}
+              onChange={(e) => setEditWorkspace(e.target.value)}
+              placeholder="工作目录"
+              className="text-[10px] px-1.5 py-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] w-[120px]"
+            />
+            <select
+              value={editThinking}
+              onChange={(e) => setEditThinking(e.target.value as ThinkingLevel)}
+              className="text-[10px] px-1.5 py-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)]"
+            >
+              {THINKING_LEVELS.map((level) => (
+                <option key={level} value={level}>思考 {level}</option>
+              ))}
+            </select>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setShowCapMenu(!showCapMenu)}
+                className="text-[10px] px-1.5 py-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] flex items-center gap-1 hover:bg-[var(--color-bg-hover)]"
+              >
+                <span className="text-[var(--color-text-tertiary)]">能力:</span>
+                {editCaps.length > 0 ? (
+                  <span className="text-[var(--color-accent)]">{editCaps.length}</span>
+                ) : (
+                  <span className="text-[var(--color-text-tertiary)]">选择</span>
+                )}
+              </button>
+              {showCapMenu && (
+                <div className="absolute top-full mt-1 left-0 w-48 max-h-32 overflow-auto bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg shadow-xl z-50 p-1">
+                  {ALL_CAPABILITIES.map((cap) => (
+                    <label
+                      key={cap.value}
+                      className="flex items-center gap-1.5 px-2 py-1 text-[10px] hover:bg-[var(--color-bg-hover)] cursor-pointer rounded"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={editCaps.includes(cap.value)}
+                        onChange={() => toggleCap(cap.value)}
+                        className="w-3 h-3 rounded"
+                      />
+                      <span>{cap.label}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="flex-1" />
+            <button
+              onClick={() => setEditing(false)}
+              className="px-2 py-1 text-[10px] rounded-lg border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]"
+            >
+              取消
+            </button>
+            <button
+              onClick={handleSave}
+              className="flex items-center gap-0.5 px-2 py-1 text-[10px] rounded-lg bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity"
+            >
+              <Check className="w-3 h-3" /> 保存
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -2048,6 +2273,7 @@ const ALL_CAPABILITIES: { value: AgentCapability; label: string }[] = [
   { value: "data_analysis", label: "数据分析" },
   { value: "creative", label: "创意头脑风暴" },
   { value: "synthesis", label: "综合整合" },
+  { value: "vision", label: "视觉识别" },
 ];
 
 const AGENT_CAPABILITY_SET = new Set<AgentCapability>(ALL_CAPABILITIES.map((c) => c.value));
@@ -4097,6 +4323,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     init, spawnActor, killActor, destroyAll, sendMessage, broadcastMessage, broadcastAndResolve,
     abortAll, steer, focusSpawnedSession, closeSpawnedSession, resetSession, enqueueFollowUp, removeFollowUp, clearFollowUps,
     sync, routeTask, replyToMessage, getSystem, setSourceHandoff,
+    setCoordinator, reorderActors, updateActorConfig,
   } = useActorSystemStore(
     useShallow((state) => ({
       active: active ? state.active : false,
@@ -4132,6 +4359,9 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       replyToMessage: state.replyToMessage,
       getSystem: state.getSystem,
       setSourceHandoff: state.setSourceHandoff,
+      setCoordinator: state.setCoordinator,
+      reorderActors: state.reorderActors,
+      updateActorConfig: state.updateActorConfig,
     })),
   );
 
@@ -4419,17 +4649,25 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     useRuntimeStateStore.getState().setPanelVisible("dialog", false);
   }, []);
 
+  const prevDerivedDialogViewRef = useRef<DialogSessionViewKey>(derivedDialogView);
+
   useEffect(() => {
     const selectionKey = `${derivedDialogView}:${selectedDialogSessionId ?? ""}`;
     if (lastDialogSelectionRef.current === null) {
       lastDialogSelectionRef.current = selectionKey;
+      prevDerivedDialogViewRef.current = derivedDialogView;
       return;
     }
     if (lastDialogSelectionRef.current !== selectionKey) {
       lastDialogSelectionRef.current = selectionKey;
-      setManualDialogView(null);
+      // 仅当用户未手动选择视图时才跟随 derived 切换，避免本机发送时自动跳转到渠道 tab
+      // 如果当前没有手动指定，且是从 local 突然变成渠道，我们帮用户锁定在之前的视图
+      if (manualDialogView === null) {
+        setManualDialogView(prevDerivedDialogViewRef.current);
+      }
+      prevDerivedDialogViewRef.current = derivedDialogView;
     }
-  }, [derivedDialogView, selectedDialogSessionId]);
+  }, [derivedDialogView, manualDialogView, selectedDialogSessionId]);
 
   useEffect(() => {
     if (activeDialogView === "local" || !chatScrollRef.current) return;
@@ -4538,17 +4776,13 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     if (!hasRunningActors) return;
     if (dialogUserScrolledUpRef.current) return;
 
-    const now = Date.now();
-    if (now - dialogScrollThrottleRef.current < 150) return;
-    dialogScrollThrottleRef.current = now;
-
     const id = requestAnimationFrame(() => {
       const container = chatScrollRef.current;
       if (!container) return;
       container.scrollTop = container.scrollHeight;
     });
     return () => cancelAnimationFrame(id);
-  }, [hasRunningActors, runningActivityKey]);
+  }, [hasRunningActors]);
 
   useEffect(() => {
     if (active && systemActive) sync();
@@ -4720,6 +4954,27 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   const handleRemoveAgent = useCallback((actorId: string) => {
     killActor(actorId);
   }, [killActor]);
+
+  // 移动 Agent 位置
+  const handleMoveAgent = useCallback((actorId: string, direction: -1 | 1) => {
+    const ids = actors.map((a) => a.id);
+    const idx = ids.indexOf(actorId);
+    if (idx < 0) return;
+    const target = idx + direction;
+    if (target < 0 || target >= ids.length) return;
+    [ids[idx], ids[target]] = [ids[target], ids[idx]];
+    reorderActors(ids);
+  }, [actors, reorderActors]);
+
+  // 设为默认发送 Agent
+  const handleSetCoordinator = useCallback((actorId: string) => {
+    setCoordinator(actorId);
+  }, [setCoordinator]);
+
+  // 热更新 Agent 配置
+  const handleUpdateAgent = useCallback((actorId: string, patch: Parameters<typeof updateActorConfig>[1]) => {
+    updateActorConfig(actorId, patch);
+  }, [updateActorConfig]);
 
   // 应用预设：清除当前 agents，重新 spawn 预设参与者
   const handleApplyPreset = useCallback((presetId: string) => {
@@ -5316,7 +5571,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
         e.stopPropagation();
         return;
       }
-      if (e.key === "Enter" && !e.shiftKey) {
+      if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
         e.preventDefault();
         handleSend();
       }
@@ -6049,11 +6304,22 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                 const executionCardTitle = showExecutionCard || showThinkingSummaryOnly
                   ? describeAgentActivity(steps, a.roleName, false, a.currentTask?.status)
                   : "";
-                const executionCardDetail = latestExecutionToolPreview?.kind === "spawn"
-                  ? latestExecutionToolPreview.body
-                  : showThinkingSummaryOnly
-                    ? truncateWorkflowText(thinkingContent ?? "正在整理思路...", 72)
-                    : undefined;
+                const executionCardDetail = (() => {
+                  if (latestExecutionToolPreview?.kind === "spawn") return latestExecutionToolPreview.body;
+                  if (showThinkingSummaryOnly) return truncateWorkflowText(thinkingContent ?? "正在整理思路...", 72);
+                  const lastAction = reversedSteps.find((s) => s.type === "action");
+                  const lastObs = reversedSteps.find((s) => s.type === "observation");
+                  if (lastAction?.toolName) {
+                    const input = lastAction.toolInput ?? {};
+                    const toolDetail = buildActionDetail(lastAction.toolName, input);
+                    if (lastObs?.content) {
+                      const obsPreview = lastObs.content.slice(0, 120).replace(/\n/g, " ");
+                      return `${toolDetail}\n${obsPreview}${lastObs.content.length > 120 ? "..." : ""}`;
+                    }
+                    return toolDetail;
+                  }
+                  return undefined;
+                })();
                 const executionCardIcon = latestExecutionToolPreview?.kind === "spawn"
                   ? ArrowRightCircle
                   : showThinkingSummaryOnly
@@ -6514,7 +6780,15 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                       key={actor.id}
                       actor={actor}
                       index={i}
+                      isCoordinator={actor.id === coordinatorActorId}
+                      isFirst={i === 0}
+                      isLast={i === actors.length - 1}
                       onRemove={() => handleRemoveAgent(actor.id)}
+                      onMoveUp={() => handleMoveAgent(actor.id, -1)}
+                      onMoveDown={() => handleMoveAgent(actor.id, 1)}
+                      onSetDefault={() => handleSetCoordinator(actor.id)}
+                      onUpdate={(patch) => handleUpdateAgent(actor.id, patch)}
+                      models={models}
                     />
                   ))}
                   {actors.length === 0 && (

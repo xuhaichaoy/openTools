@@ -52,6 +52,10 @@ export const RETRYABLE_ERROR_PATTERNS = [
   /connection.*closed/i,
   /connection[\s_]?refused/i,
   /socket[\s_]?hang[\s_]?up/i,
+  /卡住/i,
+  /error decoding response body/i,
+  /流读取错误/i,
+  /stall/i,
 ];
 
 export const NON_RETRYABLE_PATTERNS = [

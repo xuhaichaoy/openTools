@@ -354,8 +354,47 @@ export function createActorCommunicationTools(
         to: getActorName(result.targetActorId),
         label: result.label,
         roleBoundary: result.roleBoundary,
-        hint: `任务已派发（mode=${result.mode}），${result.mode === "run" ? "完成后结果会自动发送到你的收件箱" : "子 agent 会保持活跃状态"}。你可以继续做其他事，或用 agents(action='list') 查看进度。`,
+        hint: `任务已派发（mode=${result.mode}）。如果是多任务协作，记住在派发完所有需要等待的子任务后调用 wait_for_spawned_tasks，而不是立刻得出最终结论。`,
       };
+    },
+  });
+
+  // ── wait_for_spawned_tasks ──
+  tools.push({
+    name: "wait_for_spawned_tasks",
+    description:
+      "挂起当前执行，等待所有你派发的子任务（跑在后台的）全部完成。必须在派发完所有需要联动的子任务后调用此工具。" +
+      "工具会一直阻塞直到所有目标子任务完成，返回它们成功或失败的完整结果。" +
+      "这样你可以拿到各方的完整详细报告，再往下执行综合梳理和总结，而不用依赖公屏的简短播报。",
+    parameters: {},
+    readonly: true,
+    execute: async () => {
+      while (true) {
+        const actor = system.get(actorId);
+        if (!actor || actor.status !== "running") {
+          return { error: "任务已终止或被叫停，结束等待。" };
+        }
+
+        const descendants = system.getDescendantTasks(actorId);
+        // 只等待当前 actor 直接派发出的子任务
+        const myTasks = descendants.filter((r) => r.spawnerActorId === actorId);
+        const running = myTasks.filter((r) => r.status === "running" || r.status === "pending");
+
+        if (running.length === 0) {
+          const results = myTasks.map(r => {
+            const targetName = getActorName(r.targetActorId);
+            return `[子任务执行方: ${targetName}]\n目标任务: ${r.task}\n最终状态: ${r.status}\n产出结果:\n${r.result ?? r.error ?? "（无明确返回内容）"}`;
+          });
+          return {
+            wait_complete: true,
+            summary: "所有派发的子任务均已完成。下方是各子任务的详细执行成果，请基于这些成果进行最后的排版总结。",
+            details: results.length > 0 ? results.join("\n\n------------------------\n\n") : "当前并未发现派发任何子任务。",
+          };
+        }
+
+        // sleep 3 短暂轮询
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+      }
     },
   });
 

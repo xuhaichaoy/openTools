@@ -12,6 +12,7 @@ import {
   Copy,
   Check,
   Settings2,
+  CheckCircle2,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -91,6 +92,7 @@ const STEP_ICONS: Record<string, React.ReactNode> = {
     <MessageCircle className="w-3.5 h-3.5 text-[var(--color-text-secondary)]" />
   ),
   error: <AlertCircle className="w-3.5 h-3.5 text-red-500" />,
+  checkpoint: <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />,
 };
 
 const STEP_LABELS: Record<string, string> = {
@@ -101,6 +103,7 @@ const STEP_LABELS: Record<string, string> = {
   observation: "观察",
   answer: "回答",
   error: "错误",
+  checkpoint: "阶段完成",
 };
 
 function summarizeToolStreaming(content: string): string {
@@ -393,6 +396,25 @@ function AgentTaskBlockInner({
           {task.steps.map((step, stepIdx) => {
             const stepKey = `${task.id}-${stepIdx}`;
             const isError = step.type === "error";
+            const isCheckpoint = step.type === "checkpoint";
+
+            if (isCheckpoint) {
+              return (
+                <div
+                  key={stepKey}
+                  className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-emerald-500/[0.06] border border-emerald-500/15"
+                >
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                  <span className="text-[12px] text-emerald-700 font-medium flex-1">
+                    {step.content}
+                  </span>
+                  <span className="text-[10px] text-[var(--color-text-secondary)] shrink-0">
+                    {formatClock(step.timestamp)}
+                  </span>
+                </div>
+              );
+            }
+
             return (
               <div
                 key={stepKey}

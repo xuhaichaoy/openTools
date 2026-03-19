@@ -721,6 +721,24 @@ export class ActorSystem {
     this.coordinatorActorId = actorId;
   }
 
+  /**
+   * 按指定 ID 顺序重排 actors Map。
+   * Map 迭代顺序由插入顺序决定，此方法通过重建 Map 实现排序。
+   */
+  reorderActors(orderedIds: string[]): void {
+    const reordered = new Map<string, AgentActor>();
+    for (const id of orderedIds) {
+      const actor = this.actors.get(id);
+      if (actor) reordered.set(id, actor);
+    }
+    // 追加未出现在 orderedIds 中的 actor（防御性）
+    for (const [id, actor] of this.actors) {
+      if (!reordered.has(id)) reordered.set(id, actor);
+    }
+    this.actors = reordered;
+    this.syncTranscriptActors();
+  }
+
   getDialogExecutionPlan(): DialogExecutionPlan | null {
     if (!this.dialogExecutionPlan) return null;
     return {
@@ -916,7 +934,7 @@ export class ActorSystem {
   }
 
   private activateDialogExecutionPlan(sourceMessageId: string): boolean {
-    if (!this.dialogExecutionPlan || this.dialogExecutionPlan.state === "active") return false;
+    if (!this.dialogExecutionPlan || this.dialogExecutionPlan.state !== "armed") return false;
     this.dialogExecutionPlan = {
       ...this.dialogExecutionPlan,
       state: "active",
@@ -925,6 +943,64 @@ export class ActorSystem {
     };
     log(`activateDialogExecutionPlan: sourceMessageId=${sourceMessageId}`);
     return true;
+  }
+
+  private tryFinalizeDialogExecutionPlan(): void {
+    const plan = this.dialogExecutionPlan;
+    if (!plan || plan.state !== "active") return;
+
+    const allRunning = [...this.spawnedTasks.values()].filter((r) => r.status === "running");
+    if (allRunning.length > 0) return;
+
+    const recipientIds = plan.initialRecipientActorIds ?? [];
+    const allIdle = recipientIds.every((id) => {
+      const actor = this.actors.get(id);
+      return !actor || actor.status === "idle";
+    });
+    if (!allIdle) return;
+
+    const hasError = [...this.spawnedTasks.values()].some(
+      (r) => r.status === "error" || r.status === "aborted",
+    );
+    const newState = hasError ? "failed" : "completed";
+    this.dialogExecutionPlan = { ...plan, state: newState };
+    log(`tryFinalizeDialogExecutionPlan: plan → ${newState}`);
+    this.emitEvent({
+      type: "dialog_plan_finalized",
+      actorId: this.coordinatorActorId ?? "",
+      timestamp: Date.now(),
+      detail: { state: newState, summary: plan.summary },
+    });
+  }
+
+  private _sessionStallTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private checkSessionProgress(): void {
+    if (this._sessionStallTimer) {
+      clearTimeout(this._sessionStallTimer);
+      this._sessionStallTimer = null;
+    }
+    const plan = this.dialogExecutionPlan;
+    if (!plan || plan.state !== "active") return;
+
+    this._sessionStallTimer = setTimeout(() => {
+      this._sessionStallTimer = null;
+      const running = [...this.spawnedTasks.values()].filter((r) => r.status === "running");
+      if (running.length > 0) return;
+
+      const busyActors = [...this.actors.values()].filter((a) => a.status !== "idle");
+      if (busyActors.length > 0) return;
+
+      if (this.dialogExecutionPlan?.state === "active") {
+        log("checkSessionProgress: session stall detected");
+        this.emitEvent({
+          type: "session_stalled",
+          actorId: this.coordinatorActorId ?? "",
+          timestamp: Date.now(),
+          detail: { planSummary: plan.summary },
+        });
+      }
+    }, 30_000);
   }
 
   private deliverDialogExecutionPlanBootstrap(sourceMessage: DialogMessage): void {
@@ -1753,6 +1829,7 @@ export class ActorSystem {
           if (expectsCompletionMessage) {
             this.announceWithRetry(resolvedTargetActorId, spawnerActorId, `[Task failed: ${label}]\n\nError: ${record.error}`, runId);
           }
+          this.cancelPendingInteractionsForActor(resolvedTargetActorId);
         } else {
           record.status = "completed";
           record.completedAt = Date.now();
@@ -1763,7 +1840,10 @@ export class ActorSystem {
           try { const { getTaskQueue } = require("@/core/task-center/task-queue"); getTaskQueue().complete(`spawn-${runId}`, taskResult.result?.slice(0, 500)); } catch { /* noop */ }
 
           if (expectsCompletionMessage) {
-            this.announceWithRetry(resolvedTargetActorId, spawnerActorId, `[Task completed: ${label}]\n\n${taskResult.result}`, runId);
+            const shortResult = taskResult.result && taskResult.result.length > 200
+              ? `${taskResult.result.slice(0, 200)}...\n\n（💡 完整详细报告已在后台送达协调者）`
+              : taskResult.result;
+            this.announceWithRetry(resolvedTargetActorId, spawnerActorId, `[Task completed: ${label}]\n\n${shortResult}`, runId);
           }
         }
       } else {
@@ -1778,6 +1858,7 @@ export class ActorSystem {
         if (expectsCompletionMessage) {
           this.announceWithRetry(resolvedTargetActorId, spawnerActorId, `[Task failed: ${label}]\n\nError: ${record.error}`, runId);
         }
+        this.cancelPendingInteractionsForActor(resolvedTargetActorId);
       }
 
       this.emitEvent({ type: "task_completed", actorId: resolvedTargetActorId, timestamp: Date.now(), detail: { runId } });
@@ -1832,6 +1913,9 @@ export class ActorSystem {
       } else if (cleanup === "delete" && mode !== "session" && target.persistent) {
         log(`spawnTask cleanup skipped: ${targetName} is persistent (runId=${runId})`);
       }
+
+      this.tryFinalizeDialogExecutionPlan();
+      this.checkSessionProgress();
     });
 
     return record;
@@ -2138,6 +2222,21 @@ export class ActorSystem {
       if (record.mode === "session") {
         this.closeSpawnedSessionRecord(record);
       }
+      this.emitEvent({
+        type: "spawned_task_failed",
+        actorId: record.targetActorId,
+        timestamp: Date.now(),
+        detail: {
+          runId: record.runId,
+          spawnerActorId: actorId,
+          targetActorId: record.targetActorId,
+          targetName: targetActor?.role.name ?? record.targetActorId,
+          spawnerName: this.actors.get(actorId)?.role.name ?? actorId,
+          task: record.task,
+          status: "aborted" as const,
+          error: "父任务被终止",
+        } satisfies SpawnedTaskEventDetail,
+      });
       log(`cascadeAbort: ${record.targetActorId} (spawned by ${actorId}), runId=${record.runId}`);
     }
   }
@@ -2156,13 +2255,18 @@ export class ActorSystem {
     const spawnedAt = this.spawnedTasks.get(runId)?.spawnedAt ?? Date.now();
     if (Date.now() - spawnedAt > ANNOUNCE_HARD_EXPIRY_MS) {
       logWarn(`announce HARD EXPIRY: runId=${runId}, skipping delivery after 30min`);
+      this.emitEvent({
+        type: "spawned_task_failed",
+        actorId: fromActorId,
+        timestamp: Date.now(),
+        detail: { runId, error: "announce delivery expired after hard timeout" } as SpawnedTaskEventDetail,
+      });
       return;
     }
 
     try {
       const spawner = this.actors.get(toActorId);
       if (!spawner) {
-        // spawner 不存在是 transient 错误，可以重试
         if (attempt < ANNOUNCE_RETRY_DELAYS_MS.length) {
           const delay = ANNOUNCE_RETRY_DELAYS_MS[attempt];
           log(`announce RETRY ${attempt + 1}/${ANNOUNCE_RETRY_DELAYS_MS.length}: spawner gone, retrying in ${delay / 1000}s, runId=${runId}`);
@@ -2170,24 +2274,34 @@ export class ActorSystem {
           return;
         }
         logWarn(`announce FAILED: spawner ${toActorId} not found after ${attempt} retries, runId=${runId}`);
+        this.emitEvent({
+          type: "spawned_task_failed",
+          actorId: fromActorId,
+          timestamp: Date.now(),
+          detail: { runId, error: "announce delivery failed: spawner not found after retries" } as SpawnedTaskEventDetail,
+        });
         return;
       }
       this.send(fromActorId, toActorId, content);
     } catch (err) {
       const errSummary = summarizeError(err);
 
-      // 只有 transient 错误才重试，permanent 错误直接失败
       if (isTransientAnnounceError(err) && attempt < ANNOUNCE_RETRY_DELAYS_MS.length) {
         const delay = ANNOUNCE_RETRY_DELAYS_MS[attempt];
         log(`announce RETRY ${attempt + 1}/${ANNOUNCE_RETRY_DELAYS_MS.length}: transient error="${errSummary}", retrying in ${delay / 1000}s, runId=${runId}`);
         setTimeout(() => this.announceWithRetry(fromActorId, toActorId, content, runId, attempt + 1), delay);
       } else if (!isTransientAnnounceError(err) && attempt < ANNOUNCE_RETRY_DELAYS_MS.length) {
-        // permanent 错误也重试一次（可能是未知错误）
         const delay = ANNOUNCE_RETRY_DELAYS_MS[attempt];
         log(`announce RETRY ${attempt + 1}/${ANNOUNCE_RETRY_DELAYS_MS.length}: unknown error="${errSummary}", retrying in ${delay / 1000}s, runId=${runId}`);
         setTimeout(() => this.announceWithRetry(fromActorId, toActorId, content, runId, attempt + 1), delay);
       } else {
         logWarn(`announce FAILED after ${attempt} retries (last error: "${errSummary}"), runId=${runId}`, err);
+        this.emitEvent({
+          type: "spawned_task_failed",
+          actorId: fromActorId,
+          timestamp: Date.now(),
+          detail: { runId, error: `announce delivery failed after retries: ${errSummary}` } as SpawnedTaskEventDetail,
+        });
       }
     }
   }

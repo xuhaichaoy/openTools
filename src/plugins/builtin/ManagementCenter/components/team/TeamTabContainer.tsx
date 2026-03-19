@@ -284,7 +284,7 @@ export function TeamTabContainer() {
                   type="text"
                   value={newTeamName}
                   onChange={(e) => setNewTeamName(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && handleCreateTeam()}
+                  onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229 && handleCreateTeam()}
                   placeholder="输入团队名称..."
                   className="mt-1 w-full bg-[var(--color-bg-secondary)] border-0 rounded-lg px-3 py-2 text-xs focus:ring-2 focus:ring-[#F28F36] transition-all text-[var(--color-text)]"
                 />

@@ -43,6 +43,8 @@ const TEXT_ONLY_HINTS = [
 const OPENAI_VISION_HINTS = [
   "gpt-4o",
   "gpt-4.1",
+  "gpt-4.7",
+  "gpt-5",
   "claude",
   "gemini",
   "kimi",
@@ -53,6 +55,7 @@ const OPENAI_VISION_HINTS = [
   "glm-4v",
   "glm-4.1v",
   "minimax-vl",
+  "vision",
 ];
 
 const ANTHROPIC_VISION_HINTS = [
@@ -107,17 +110,29 @@ export function resolveModelCapabilities(
     matchesRule(rule, normalizedModel, normalizedProtocol),
   );
   if (explicitRule) {
+    console.log(
+      `[ModelCapabilities] model="${model}" normalized="${normalizedModel}" protocol="${normalizedProtocol}" → EXPLICIT rule pattern="${explicitRule.pattern}" supportsImage=${explicitRule.supportsImageInput}`,
+    );
     return {
       supportsImageInput: explicitRule.supportsImageInput,
       source: explicitRule.source,
     };
   }
 
+  const fallbackResult = fallbackSupportsImageInput(
+    normalizedModel,
+    normalizedProtocol,
+  );
+  const matchedHint = normalizedProtocol === "anthropic"
+    ? ANTHROPIC_VISION_HINTS.find((h) => normalizedModel.includes(h))
+    : OPENAI_VISION_HINTS.find((h) => normalizedModel.includes(h));
+  const matchedTextOnly = TEXT_ONLY_HINTS.find((h) => normalizedModel.includes(h));
+  console.log(
+    `[ModelCapabilities] model="${model}" normalized="${normalizedModel}" protocol="${normalizedProtocol}" → FALLBACK supportsImage=${fallbackResult} matchedHint=${matchedHint ?? "none"} matchedTextOnly=${matchedTextOnly ?? "none"}`,
+  );
+
   return {
-    supportsImageInput: fallbackSupportsImageInput(
-      normalizedModel,
-      normalizedProtocol,
-    ),
+    supportsImageInput: fallbackResult,
     source: "fallback",
   };
 }

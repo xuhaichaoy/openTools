@@ -472,7 +472,7 @@ function SearchPanel() {
               placeholder="输入检索内容，从所有已索引文档中搜索..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleSearch()}
+              onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229 && handleSearch()}
             />
             <button
               onClick={handleSearch}

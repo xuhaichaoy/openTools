@@ -303,7 +303,7 @@ export function ColorPicker({ onBack }: { onBack: () => void }) {
                 onChange={(e) => setHexInput(e.target.value)}
                 onFocus={() => setHexInputFocused(true)}
                 onBlur={applyHexInput}
-                onKeyDown={(e) => e.key === "Enter" && applyHexInput()}
+                onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229 && applyHexInput()}
                 placeholder="#000000"
                 className="text-lg font-bold font-mono tracking-wide text-[var(--color-text)] bg-transparent border-b border-[var(--color-border)] outline-none focus:border-indigo-500 w-28 px-1 py-0.5"
               />

@@ -1129,6 +1129,20 @@ interface ActorSystemState {
   pendingUserInteractions: PendingInteraction[];
   /** 从 ActorSystem 同步最新状态到 store（供 UI 使用） */
   sync: () => void;
+  /** 设置默认发送 Agent（coordinator） */
+  setCoordinator: (actorId: string) => void;
+  /** 重排 Agent 顺序 */
+  reorderActors: (orderedIds: string[]) => void;
+  /** 热更新单个 Agent 配置 */
+  updateActorConfig: (actorId: string, patch: {
+    name?: string;
+    modelOverride?: string;
+    workspace?: string;
+    thinkingLevel?: ThinkingLevel;
+    toolPolicy?: ToolPolicy;
+    middlewareOverrides?: MiddlewareOverrides;
+    capabilities?: AgentCapabilities;
+  }) => void;
 }
 
 function snapshotActor(actor: AgentActor): ActorSnapshot {
@@ -1312,6 +1326,29 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
     const system = get()._system;
     if (!system) return;
     system.kill(actorId);
+    get().sync();
+  },
+
+  setCoordinator: (actorId) => {
+    const system = get()._system;
+    if (!system) return;
+    system.setCoordinator(actorId);
+    get().sync();
+  },
+
+  reorderActors: (orderedIds) => {
+    const system = get()._system;
+    if (!system) return;
+    system.reorderActors(orderedIds);
+    get().sync();
+  },
+
+  updateActorConfig: (actorId, patch) => {
+    const system = get()._system;
+    if (!system) return;
+    const actor = system.get(actorId);
+    if (!actor) return;
+    actor.updateConfig(patch);
     get().sync();
   },
 

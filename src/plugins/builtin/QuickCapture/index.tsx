@@ -182,7 +182,7 @@ const QuickCapturePlugin: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
               <input
                 value={newTagName}
                 onChange={(e) => setNewTagName(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleAddTag()}
+                onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229 && handleAddTag()}
                 placeholder="标签名..."
                 className="w-full px-2 py-1 text-xs bg-[var(--color-bg)] border border-[var(--color-border)] rounded"
                 autoFocus

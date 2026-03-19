@@ -363,6 +363,9 @@ export function useAgentExecution({
         aiConfig.model || "",
         aiConfig.protocol,
       );
+      console.log(
+        `[AgentExecution] Image support check: model="${aiConfig.model}" protocol="${aiConfig.protocol}" supportsImage=${supportsImageInput} images=${opts?.images?.length ?? 0}`,
+      );
       const skillContext = await loadAndResolveSkills(query);
       const skillsPrompt = skillContext.mergedSystemPrompt || undefined;
       const hasCodingWorkflowSkill = skillContext.visibleSkillIds.includes("builtin-coding-workflow");

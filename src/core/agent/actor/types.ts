@@ -98,7 +98,7 @@ export interface DialogExecutionPlan {
   allowedMessagePairs: DialogExecutionPlanEdge[];
   allowedSpawnPairs: DialogExecutionPlanEdge[];
   plannedSpawns?: DialogExecutionPlannedSpawn[];
-  state: "armed" | "active";
+  state: "armed" | "active" | "completed" | "failed";
   activatedAt?: number;
   sourceMessageId?: string;
 }
@@ -225,7 +225,8 @@ export type AgentCapability =
   | "file_write"         // 文件写入
   | "shell_execute"      // Shell 命令执行
   | "information_retrieval" // 信息检索
-  | "web_search";        // Web 搜索
+  | "web_search"         // Web 搜索
+  | "vision";            // 视觉识别
 
 /** Agent 能力描述 */
 export interface AgentCapabilities {
@@ -326,7 +327,9 @@ export type ActorEventType =
   | "spawned_task_completed"
   | "spawned_task_failed"
   | "spawned_task_timeout"
-  | "session_title_updated";
+  | "session_title_updated"
+  | "dialog_plan_finalized"
+  | "session_stalled";
 
 export interface ActorEvent {
   type: ActorEventType;
