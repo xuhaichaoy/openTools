@@ -6,6 +6,7 @@ import type { AgentStep } from "@/plugins/builtin/SmartAgent/core/react-agent";
 import type {
   AgentScheduledTask,
   AgentScheduleType,
+  AgentTaskOriginMode,
   AgentTaskSkippedEvent,
   AgentTaskStatus,
   AgentTaskStatusPatch,
@@ -249,10 +250,13 @@ interface AgentState {
     scheduleType: AgentScheduleType;
     scheduleValue: string;
     sessionId?: string;
+    originMode?: AgentTaskOriginMode;
+    originLabel?: string;
   }) => Promise<AgentScheduledTask | null>;
   pauseScheduledTask: (taskId: string) => Promise<void>;
   resumeScheduledTask: (taskId: string) => Promise<void>;
   cancelScheduledTask: (taskId: string) => Promise<void>;
+  deleteScheduledTask: (taskId: string) => Promise<void>;
   upsertScheduledTask: (task: AgentScheduledTask) => void;
   applyScheduledTaskPatch: (patch: AgentTaskStatusPatch) => void;
   applyScheduledTaskSkipped: (event: AgentTaskSkippedEvent) => void;
@@ -667,13 +671,15 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }
   },
 
-  createScheduledTask: async ({ query, scheduleType, scheduleValue, sessionId }) => {
+  createScheduledTask: async ({ query, scheduleType, scheduleValue, sessionId, originMode, originLabel }) => {
     try {
       const task = await invoke<AgentScheduledTask>("agent_task_create", {
         query,
         sessionId: sessionId || null,
         scheduleType,
         scheduleValue,
+        ...(originMode ? { originMode } : {}),
+        ...(originLabel?.trim() ? { originLabel: originLabel.trim() } : {}),
       });
       set((state) => ({
         scheduledTasks: [task, ...state.scheduledTasks.filter((t) => t.id !== task.id)],
@@ -732,6 +738,17 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       }));
     } catch (e) {
       handleError(e, { context: "取消 Agent 编排任务" });
+    }
+  },
+
+  deleteScheduledTask: async (taskId) => {
+    try {
+      await invoke("agent_task_delete", { taskId });
+      set((state) => ({
+        scheduledTasks: state.scheduledTasks.filter((task) => task.id !== taskId),
+      }));
+    } catch (e) {
+      handleError(e, { context: "删除 Agent 编排任务" });
     }
   },
 

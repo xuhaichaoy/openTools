@@ -19,4 +19,19 @@ describe("model-retry-middleware", () => {
     expect(isRetryableError(new Error("401 unauthorized"))).toBe(false);
     expect(isRetryableError(new Error("quota exceeded"))).toBe(false);
   });
+
+  it("does not retry invalid tool definition errors", () => {
+    expect(
+      isRetryableError(
+        new Error(
+          "invalid_parameter_error: tools[12].function.name: The length of the tool name cannot exceed 64",
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      isRetryableError(
+        new Error("invalid_request_error: function name cannot exceed 64 characters"),
+      ),
+    ).toBe(false);
+  });
 });

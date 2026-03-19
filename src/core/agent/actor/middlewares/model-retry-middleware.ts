@@ -58,11 +58,16 @@ export const NON_RETRYABLE_PATTERNS = [
   /\b(401|403)\b/,
   /unauthorized/i,
   /forbidden/i,
+  /invalid[_\s-]?parameter/i,
+  /invalid[_\s-]?request/i,
   /invalid[\s_]?api[\s_]?key/i,
   /quota[\s_]?exceeded/i,
   /billing/i,
   /content[\s_]?filter/i,
   /content[\s_]?policy/i,
+  /tool name cannot exceed\s*64/i,
+  /function name cannot exceed\s*64/i,
+  /length of the tool name cannot exceed\s*64/i,
 ];
 
 export function isRetryableError(error: unknown): boolean {

@@ -12,6 +12,7 @@ export interface McpMarketTemplate {
   envKeys?: string[];
   icon?: string;
   homepage?: string;
+  defaultAutoStart?: boolean;
 }
 
 export const MCP_MARKET_TEMPLATES: McpMarketTemplate[] = [
@@ -89,6 +90,17 @@ export const MCP_MARKET_TEMPLATES: McpMarketTemplate[] = [
     args: ["-y", "@modelcontextprotocol/server-brave-search"],
     envKeys: ["BRAVE_API_KEY"],
     homepage: "https://github.com/modelcontextprotocol/servers",
+  },
+  {
+    id: "chrome-devtools",
+    name: "Chrome DevTools MCP",
+    description: "官方 Chrome DevTools 浏览器控制与调试，支持页面导航、点击输入、截图、网络与性能分析",
+    category: "dev",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "chrome-devtools-mcp@latest"],
+    homepage: "https://github.com/ChromeDevTools/chrome-devtools-mcp",
+    defaultAutoStart: true,
   },
   {
     id: "puppeteer",
@@ -193,7 +205,7 @@ export function templateToConfig(
     url: template.url,
     env: Object.keys(env).length > 0 ? env : undefined,
     enabled: true,
-    auto_start: false,
+    auto_start: template.defaultAutoStart ?? false,
   };
 }
 

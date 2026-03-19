@@ -58,6 +58,8 @@ describe("agent-store orchestrator", () => {
       scheduleType: "interval",
       scheduleValue: "60000",
       sessionId: "s-1",
+      originMode: "dingtalk",
+      originLabel: "钉钉",
     });
 
     expect(invokeMock).toHaveBeenNthCalledWith(2, "agent_task_create", {
@@ -65,13 +67,15 @@ describe("agent-store orchestrator", () => {
       sessionId: "s-1",
       scheduleType: "interval",
       scheduleValue: "60000",
+      originMode: "dingtalk",
+      originLabel: "钉钉",
     });
 
     const tasks = useAgentStore.getState().scheduledTasks;
     expect(tasks.map((t) => t.id)).toEqual(["b", "a"]);
   });
 
-  it("should support pause/resume/cancel and patch updates", async () => {
+  it("should support pause/resume/cancel/delete and patch updates", async () => {
     const base = mkTask("x");
     useAgentStore.setState({ scheduledTasks: [base] });
     invokeMock.mockResolvedValue(null);
@@ -87,6 +91,12 @@ describe("agent-store orchestrator", () => {
     await useAgentStore.getState().cancelScheduledTask("x");
     expect(invokeMock).toHaveBeenNthCalledWith(3, "agent_task_cancel", { taskId: "x" });
     expect(useAgentStore.getState().scheduledTasks[0]?.status).toBe("cancelled");
+
+    await useAgentStore.getState().deleteScheduledTask("x");
+    expect(invokeMock).toHaveBeenNthCalledWith(4, "agent_task_delete", { taskId: "x" });
+    expect(useAgentStore.getState().scheduledTasks).toEqual([]);
+
+    useAgentStore.setState({ scheduledTasks: [base] });
 
     useAgentStore.getState().upsertScheduledTask({
       ...base,

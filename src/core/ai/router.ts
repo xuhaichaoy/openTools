@@ -26,6 +26,12 @@ const teamModelCache = new Map<
   { expiresAt: number; models: TeamModelInfo[] }
 >();
 const teamModelRequests = new Map<string, Promise<TeamModelInfo[]>>();
+const AI_AUTH_ERROR_PATTERNS = [
+  /\b401\b/,
+  /unauthorized/i,
+  /invalid token/i,
+  /http\s*401/i,
+];
 
 function normalizeProtocol(protocol?: string): "openai" | "anthropic" {
   return String(protocol || "").trim().toLowerCase() === "anthropic"
@@ -164,6 +170,81 @@ export function clearTeamModelCache(): void {
   teamModelRequests.clear();
 }
 
+function shouldUseManagedAuth(source?: AISource): boolean {
+  return source === "team" || source === "platform";
+}
+
+function isAIUnauthorizedError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return AI_AUTH_ERROR_PATTERNS.some((pattern) => pattern.test(message));
+}
+
+function promptReLogin(): void {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent("open-login-modal"));
+  }
+}
+
+export async function refreshAIAuthToken(): Promise<string | null> {
+  const auth = useAuthStore.getState();
+  if (!auth.refreshToken) return null;
+
+  try {
+    const res = await fetch(`${getServerUrl()}/v1/auth/refresh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: auth.refreshToken }),
+    });
+
+    if (!res.ok) {
+      auth.logout?.();
+      promptReLogin();
+      return null;
+    }
+
+    const data = await res.json();
+    if (!data?.access_token || !data?.user) {
+      return null;
+    }
+
+    auth.login?.(data.user, data.access_token, data.refresh_token);
+    return data.access_token;
+  } catch (error) {
+    console.warn("[AI Router] failed to refresh auth token:", error);
+    return null;
+  }
+}
+
+export async function withRoutedAIConfig<T>(
+  config: AIConfig,
+  runner: (routed: AIConfig) => Promise<T>,
+  options?: {
+    token?: string | null;
+    retryOnAuth?: boolean;
+  },
+): Promise<T> {
+  const allowRetry = options?.retryOnAuth !== false;
+  const source = (config.source || "own_key") as AISource;
+  const initialToken = options?.token;
+
+  try {
+    const routed = await resolveRoutedConfig(config, initialToken);
+    return await runner(routed);
+  } catch (error) {
+    if (!allowRetry || !shouldUseManagedAuth(source) || !isAIUnauthorizedError(error)) {
+      throw error;
+    }
+
+    const refreshedToken = await refreshAIAuthToken();
+    if (!refreshedToken || refreshedToken === initialToken) {
+      throw error;
+    }
+
+    const retriedConfig = await resolveRoutedConfig(config, refreshedToken);
+    return runner(retriedConfig);
+  }
+}
+
 /**
  * 根据 AI 来源，对 config 的 base_url / api_key 做路由修正。
  * - own_key: 原样返回
@@ -204,12 +285,15 @@ export function getRoutedConfig(config: AIConfig): AIConfig {
  */
 export async function routeAIRequest(options: RouteOptions) {
   const { messages, config, conversationId, token, extraTools } = options;
-  const routed = await resolveRoutedConfig(config, token);
-
-  return invoke("ai_chat_stream", {
-    messages,
-    config: routed,
-    conversationId,
-    extraTools: extraTools?.length ? extraTools : null,
-  });
+  return withRoutedAIConfig(
+    config,
+    (routed) =>
+      invoke("ai_chat_stream", {
+        messages,
+        config: routed,
+        conversationId,
+        extraTools: extraTools?.length ? extraTools : null,
+      }),
+    { token },
+  );
 }

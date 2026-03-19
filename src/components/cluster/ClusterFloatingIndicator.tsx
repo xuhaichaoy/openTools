@@ -126,24 +126,28 @@ export function ClusterFloatingIndicator() {
       const modeSessions = sessions
         .filter((session) => session.mode === mode)
         .sort((a, b) => b.startedAt - a.startedAt);
-      const record = pickVisibleRuntimeRecord(modeSessions, foregroundSessionIds[mode]);
-      if (!record) continue;
-
-      const meta = getRuntimeIndicatorMeta(mode);
-      nextItems.push({
-        key: record.key,
-        mode,
-        sessionId: record.sessionId,
-        label: meta.label,
-        detail: buildRuntimeIndicatorDetail(record, modeSessions.length),
-        elapsed: formatElapsed(Math.max(0, now - record.startedAt)),
-        onAbort: hasRuntimeAbortHandler(mode, record.sessionId)
-          ? () => stopRuntimeSession(mode, record.sessionId)
-          : undefined,
-        onOpen: () => openRuntimeSession(mode, record.sessionId),
-        color: meta.color,
-        pulse: shouldPulseRuntimeIndicator(record),
-      });
+      const records = mode === "dialog"
+        ? modeSessions
+        : [pickVisibleRuntimeRecord(modeSessions, foregroundSessionIds[mode])].filter(
+            (record): record is RuntimeSessionRecord => record !== null,
+          );
+      for (const record of records) {
+        const meta = getRuntimeIndicatorMeta(mode, record.displayLabel);
+        nextItems.push({
+          key: record.key,
+          mode,
+          sessionId: record.sessionId,
+          label: meta.label,
+          detail: buildRuntimeIndicatorDetail(record, modeSessions.length),
+          elapsed: formatElapsed(Math.max(0, now - record.startedAt)),
+          onAbort: hasRuntimeAbortHandler(mode, record.sessionId)
+            ? () => stopRuntimeSession(mode, record.sessionId)
+            : undefined,
+          onOpen: () => openRuntimeSession(mode, record.sessionId),
+          color: meta.color,
+          pulse: shouldPulseRuntimeIndicator(record),
+        });
+      }
     }
 
     return nextItems;

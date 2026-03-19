@@ -1,4 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo, lazy, Suspense } from "react";
+import { useShallow } from "zustand/shallow";
 import {
   Users,
   Square,
@@ -57,6 +58,7 @@ import {
 import { useConfirmDialogStore } from "@/store/confirm-dialog-store";
 import { useToolTrustStore } from "@/store/command-allowlist-store";
 import { api } from "@/core/api/client";
+import { getChannelManager } from "@/core/channels";
 import {
   buildAICenterHandoffScopedFileRefs,
   getAICenterHandoffImportPaths,
@@ -66,7 +68,13 @@ import { routeToAICenter } from "@/core/ai/ai-center-routing";
 import { buildDialogContextBreakdown, type DialogContextBreakdown } from "@/core/ai/dialog-context-breakdown";
 import { buildDialogWorkingSetSnapshot } from "@/core/ai/ai-working-set";
 import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
-import { getForegroundRuntimeSession, useRuntimeStateStore } from "@/core/agent/context-runtime/runtime-state";
+import {
+  abortRuntimeSession,
+  buildRuntimeSessionKey,
+  getForegroundRuntimeSession,
+  useRuntimeStateStore,
+  type RuntimeSessionRecord,
+} from "@/core/agent/context-runtime/runtime-state";
 import {
   hasDialogContextSnapshotContent,
   type DialogContextSnapshot,
@@ -128,6 +136,13 @@ import { DialogContextStrip } from "./DialogContextStrip";
 import { useToast } from "@/components/ui/Toast";
 import { modelSupportsImageInput } from "@/core/ai/model-capabilities";
 import { createLogger } from "@/core/logger";
+import {
+  useIMConversationRuntimeStore,
+  type IMConversationSnapshot,
+  type IMConversationRuntimeStatus,
+  type IMConversationSessionPreview,
+} from "@/store/im-conversation-runtime-store";
+import { getRuntimeIndicatorStatus } from "@/core/agent/context-runtime/runtime-indicator";
 
 const TaskCenterPanel = lazy(() => import("../TaskCenterPanel"));
 const KnowledgeGraphView = lazy(() => import("../KnowledgeGraphView"));
@@ -149,6 +164,18 @@ const DIALOG_STARTER_PROMPTS = [
     prompt: "请把这个需求拆成可执行方案，分别给出实现路径、风险和协作分工。",
   },
 ] as const;
+
+const EMPTY_DIALOG_ACTORS: ActorSnapshot[] = [];
+const EMPTY_DIALOG_HISTORY: DialogMessage[] = [];
+const EMPTY_PENDING_INTERACTIONS: PendingInteraction[] = [];
+const EMPTY_SPAWNED_TASKS: SpawnedTaskRecord[] = [];
+const EMPTY_DIALOG_ARTIFACTS: DialogArtifactRecord[] = [];
+const EMPTY_SESSION_UPLOADS: SessionUploadRecord[] = [];
+const EMPTY_QUEUED_FOLLOW_UPS: DialogQueuedFollowUp[] = [];
+const EMPTY_ACTOR_TODOS: Record<string, TodoItem[]> = {};
+const EMPTY_RUNTIME_SESSIONS: Record<string, RuntimeSessionRecord> = {};
+const EMPTY_IM_CONVERSATIONS: IMConversationSnapshot[] = [];
+const EMPTY_IM_SESSION_PREVIEWS: Record<string, IMConversationSessionPreview> = {};
 
 function basename(path: unknown): string {
   const s = String(path ?? "");
@@ -191,7 +218,12 @@ function getInteractionStatusLabel(status?: DialogMessage["interactionStatus"]):
   }
 }
 
-function describeAgentActivity(steps: AgentStep[], roleName: string, hasStreamingContent: boolean): string {
+function describeAgentActivity(
+  steps: AgentStep[],
+  roleName: string,
+  hasStreamingContent: boolean,
+  taskStatus?: "pending" | "running" | "completed" | "error" | "aborted",
+): string {
   if (hasStreamingContent) return "正在生成回复";
 
   const latest = steps[steps.length - 1];
@@ -302,8 +334,15 @@ function describeAgentActivity(steps: AgentStep[], roleName: string, hasStreamin
     return text.length > 60 ? text.slice(0, 60) + "…" : text;
   }
 
-  if (latest.type === "answer") return "生成回复中";
-  if (latest.type === "error") return "遇到错误，处理中";
+  if (latest.type === "answer") {
+    if (taskStatus === "completed") return "已生成最终回复";
+    return "生成回复中";
+  }
+  if (latest.type === "error") {
+    if (taskStatus === "error") return "处理失败";
+    if (taskStatus === "aborted") return "已中止";
+    return "遇到错误，处理中";
+  }
 
   return `${roleName} 正在思考`;
 }
@@ -3386,6 +3425,629 @@ function DialogWorkspaceDock({
 
 // ── Main Panel ──
 
+type DialogSessionViewKey = "local" | "dingtalk" | "feishu";
+
+type DialogChannelConversationItem = {
+  key: string;
+  conversationId: string;
+  channelType: "dingtalk" | "feishu";
+  label: string;
+  detail: string;
+  statusLabel: string;
+  updatedAt: number;
+  activeTopicId: string;
+  backgroundTopicCount: number;
+  activeSessionId?: string;
+  conversation: IMConversationSnapshot;
+  preview?: IMConversationSessionPreview;
+  runtimeRecord?: RuntimeSessionRecord;
+};
+
+type DialogChannelGroup = {
+  key: "dingtalk" | "feishu";
+  label: string;
+  detail: string;
+  statusLabel: string;
+  updatedAt: number;
+  conversations: DialogChannelConversationItem[];
+};
+
+type DialogTopSessionItem = {
+  key: DialogSessionViewKey;
+  label: string;
+  detail: string;
+  statusLabel: string;
+  updatedAt: number;
+};
+
+const CHANNEL_GROUP_META: Record<"dingtalk" | "feishu", { label: string; detail: string }> = {
+  dingtalk: {
+    label: "钉钉渠道",
+    detail: "查看钉钉 IM 会话",
+  },
+  feishu: {
+    label: "飞书渠道",
+    detail: "查看飞书 IM 会话",
+  },
+};
+
+function formatSessionStripTime(timestamp: number): string {
+  if (!timestamp) return "--";
+  return new Date(timestamp).toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function getDialogViewLabel(view: DialogSessionViewKey): string {
+  switch (view) {
+    case "dingtalk":
+      return "钉钉渠道";
+    case "feishu":
+      return "飞书渠道";
+    default:
+      return "本机";
+  }
+}
+
+function getIMRuntimeStatusLabel(status: IMConversationRuntimeStatus): string {
+  switch (status) {
+    case "running":
+      return "执行中";
+    case "waiting":
+      return "等待中";
+    case "queued":
+      return "排队中";
+    default:
+      return "空闲";
+  }
+}
+
+function inferIMChannelType(params: {
+  preview?: IMConversationSessionPreview | null;
+  runtimeRecord?: RuntimeSessionRecord | null;
+}): "dingtalk" | "feishu" | null {
+  if (params.preview?.channelType === "dingtalk" || params.preview?.channelType === "feishu") {
+    return params.preview.channelType;
+  }
+  const hint = `${params.runtimeRecord?.displayLabel || ""} ${params.runtimeRecord?.displayDetail || ""}`;
+  if (hint.includes("钉钉")) return "dingtalk";
+  if (hint.includes("飞书")) return "feishu";
+  return null;
+}
+
+function buildDialogChannelGroups(params: {
+  currentRoomSessionId?: string | null;
+  conversations: IMConversationSnapshot[];
+  runtimeSessions: Record<string, RuntimeSessionRecord>;
+  sessionPreviews: Record<string, IMConversationSessionPreview>;
+}): Record<"dingtalk" | "feishu", DialogChannelGroup> {
+  const groups: Record<"dingtalk" | "feishu", DialogChannelGroup> = {
+    dingtalk: {
+      key: "dingtalk",
+      label: CHANNEL_GROUP_META.dingtalk.label,
+      detail: CHANNEL_GROUP_META.dingtalk.detail,
+      statusLabel: "暂无会话",
+      updatedAt: 0,
+      conversations: [],
+    },
+    feishu: {
+      key: "feishu",
+      label: CHANNEL_GROUP_META.feishu.label,
+      detail: CHANNEL_GROUP_META.feishu.detail,
+      statusLabel: "暂无会话",
+      updatedAt: 0,
+      conversations: [],
+    },
+  };
+  const currentRoomSessionId = params.currentRoomSessionId?.trim() || "";
+
+  for (const conversation of params.conversations) {
+    const channelType = conversation.channelType;
+    if (channelType !== "dingtalk" && channelType !== "feishu") continue;
+    const activeSessionId = conversation.activeSessionId?.trim() || "";
+    const preview = activeSessionId ? params.sessionPreviews[activeSessionId] : undefined;
+    const runtimeRecord = activeSessionId
+      ? params.runtimeSessions[buildRuntimeSessionKey("dialog", activeSessionId)]
+      : undefined;
+    if (activeSessionId && activeSessionId === currentRoomSessionId) continue;
+    const statusLabel = runtimeRecord
+      ? getRuntimeIndicatorStatus(runtimeRecord)
+      : getIMRuntimeStatusLabel(conversation.activeStatus);
+    const detailParts = [conversation.displayDetail];
+    if (conversation.conversationType === "group") {
+      detailParts.push("群聊");
+    } else {
+      detailParts.push("私聊");
+    }
+    groups[channelType].conversations.push({
+      key: conversation.key,
+      conversationId: conversation.conversationId,
+      channelType,
+      label: conversation.displayLabel || "IM 会话",
+      detail: detailParts.filter(Boolean).join(" · "),
+      statusLabel,
+      updatedAt: Math.max(runtimeRecord?.updatedAt ?? 0, preview?.updatedAt ?? 0, conversation.updatedAt),
+      activeTopicId: conversation.activeTopicId,
+      backgroundTopicCount: conversation.backgroundTopicCount,
+      activeSessionId: conversation.activeSessionId,
+      conversation,
+      preview,
+      runtimeRecord,
+    });
+  }
+
+  for (const runtimeRecord of Object.values(params.runtimeSessions)) {
+    if (runtimeRecord.mode !== "dialog") continue;
+    if (runtimeRecord.sessionId === currentRoomSessionId) continue;
+    const alreadyCovered = Object.values(groups).some((group) =>
+      group.conversations.some((conversation) => conversation.activeSessionId === runtimeRecord.sessionId),
+    );
+    if (alreadyCovered) continue;
+    const preview = params.sessionPreviews[runtimeRecord.sessionId];
+    const channelType = inferIMChannelType({ preview, runtimeRecord });
+    if (!channelType) continue;
+    groups[channelType].conversations.push({
+      key: `runtime:${runtimeRecord.sessionId}`,
+      conversationId: preview?.conversationId ?? runtimeRecord.sessionId,
+      channelType,
+      label: runtimeRecord.displayLabel?.trim() || preview?.displayLabel || "IM 会话",
+      detail: runtimeRecord.displayDetail?.trim() || "外部运行时会话",
+      statusLabel: getRuntimeIndicatorStatus(runtimeRecord),
+      updatedAt: runtimeRecord.updatedAt,
+      activeTopicId: preview?.topicId ?? "default",
+      backgroundTopicCount: 0,
+      activeSessionId: runtimeRecord.sessionId,
+      conversation: {
+        key: `runtime:${runtimeRecord.sessionId}`,
+        channelId: preview?.channelId ?? "",
+        channelType,
+        conversationId: preview?.conversationId ?? runtimeRecord.sessionId,
+        conversationType: preview?.conversationType ?? "private",
+        displayLabel: runtimeRecord.displayLabel?.trim() || preview?.displayLabel || "IM 会话",
+        displayDetail: runtimeRecord.displayDetail?.trim() || preview?.displayDetail || "外部运行时会话",
+        activeTopicId: preview?.topicId ?? "default",
+        nextTopicSeq: 2,
+        updatedAt: runtimeRecord.updatedAt,
+        activeSessionId: runtimeRecord.sessionId,
+        activeStatus: preview?.status ?? "running",
+        activeQueueLength: preview?.queueLength ?? 0,
+        backgroundTopicCount: 0,
+        topics: preview
+          ? [{
+              runtimeKey: preview.runtimeKey,
+              topicId: preview.topicId,
+              sessionId: preview.sessionId,
+              status: preview.status,
+              queueLength: preview.queueLength,
+              updatedAt: preview.updatedAt,
+              startedAt: preview.startedAt,
+              lastInputText: preview.lastInputText,
+            }]
+          : [],
+      },
+      preview,
+      runtimeRecord,
+    });
+  }
+
+  for (const channelType of ["dingtalk", "feishu"] as const) {
+    groups[channelType].conversations.sort((a, b) => b.updatedAt - a.updatedAt);
+    if (groups[channelType].conversations.length > 1) {
+      // 当前产品策略：每个渠道只展示一个逻辑会话。
+      // 底层 runtime 仍可能保留历史/后台会话，但渠道页先收敛成“最近一条”。
+      groups[channelType].conversations = [groups[channelType].conversations[0]];
+    }
+    groups[channelType].updatedAt = groups[channelType].conversations[0]?.updatedAt ?? 0;
+    groups[channelType].statusLabel = groups[channelType].conversations[0]?.statusLabel ?? "暂无会话";
+    groups[channelType].detail = groups[channelType].conversations.length > 0
+      ? "当前会话"
+      : CHANNEL_GROUP_META[channelType].detail;
+  }
+
+  return groups;
+}
+
+function RuntimeSessionPreview({
+  preview,
+  currentRoomSessionId,
+  onReturnToCurrentRoom,
+  compact = false,
+  hideHeader = false,
+}: {
+  preview: IMConversationSessionPreview;
+  currentRoomSessionId?: string | null;
+  onReturnToCurrentRoom?: (() => void) | null;
+  compact?: boolean;
+  hideHeader?: boolean;
+}) {
+  const actorById = useMemo(
+    () => new Map(preview.actors.map((actor) => [actor.id, actor] as const)),
+    [preview.actors],
+  );
+  const actorIdToIndex = useMemo(
+    () => new Map(preview.actors.map((actor, index) => [actor.id, index] as const)),
+    [preview.actors],
+  );
+
+  return (
+    <div className={compact ? "flex min-h-0 flex-1 flex-col gap-2.5" : "space-y-3"}>
+      {!hideHeader && (
+        <div className={`rounded-2xl border border-sky-500/15 bg-sky-500/5 ${compact ? "px-3.5 py-2.5" : "px-4 py-3"}`}>
+          <div className="flex flex-wrap items-start gap-2">
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Users className="h-4 w-4 text-sky-600" />
+                <span className="text-[13px] font-semibold text-[var(--color-text)]">
+                  {preview.displayLabel || "IM 会话"}
+                </span>
+                <span className="rounded-full bg-sky-500/10 px-2 py-0.5 text-[10px] text-sky-700">
+                  只读预览
+                </span>
+                <span className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
+                  {getIMRuntimeStatusLabel(preview.status)}
+                </span>
+              </div>
+              <div className="mt-1 text-[11px] text-[var(--color-text-secondary)]">
+                {[preview.displayDetail, preview.topicId].filter(Boolean).join(" · ")}
+              </div>
+              <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-[var(--color-text-tertiary)]">
+                <span className="rounded-full border border-[var(--color-border)] px-2 py-0.5">
+                  {preview.actors.length} 个 Agent
+                </span>
+                <span className="rounded-full border border-[var(--color-border)] px-2 py-0.5">
+                  {preview.dialogHistory.length} 条消息
+                </span>
+                <span className="rounded-full border border-[var(--color-border)] px-2 py-0.5">
+                  最近更新 {formatSessionStripTime(preview.updatedAt)}
+                </span>
+              </div>
+            </div>
+            {currentRoomSessionId && onReturnToCurrentRoom && (
+              <button
+                onClick={onReturnToCurrentRoom}
+                className="inline-flex items-center gap-1.5 rounded-full border border-sky-500/20 bg-[var(--color-bg)] px-3 py-1 text-[10px] text-sky-700 hover:border-sky-500/35 hover:bg-sky-500/10 transition-colors"
+              >
+                返回当前房间
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {preview.dialogHistory.length === 0 ? (
+        <div className={`rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-secondary)]/20 text-center text-[12px] text-[var(--color-text-secondary)] ${compact ? "flex min-h-[220px] flex-1 items-center justify-center px-3.5 py-3.5" : "px-4 py-4"}`}>
+          这个 IM 会话还没有可展示的 Dialog 内容。
+        </div>
+      ) : (
+        <div className={compact ? "min-h-0 flex-1 space-y-2 overflow-y-auto pr-1" : "space-y-3"}>
+          {preview.dialogHistory.map((msg) => {
+            const isUser = msg.from === "user";
+            const actorIdx = actorIdToIndex.get(msg.from) ?? 0;
+            const actor = actorById.get(msg.from);
+            const actorName = isUser ? "你" : (actor?.roleName ?? msg.from);
+            const targetName = msg.to
+              ? (msg.to === "user" ? "你" : (actorById.get(msg.to)?.roleName ?? msg.to))
+              : undefined;
+
+            return (
+              <div key={msg.id} className="max-w-full">
+                <MessageBubble
+                  message={msg}
+                  actorIndex={actorIdx}
+                  actorName={actorName}
+                  targetName={targetName}
+                  isUser={isUser}
+                  isWaitingReply={false}
+                  pendingInteraction={undefined}
+                  onReplyToInteraction={() => {}}
+                  onOpenApprovalDrawer={() => {}}
+                />
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RuntimeSessionPreviewPlaceholder({
+  sessionId,
+  runtimeRecord,
+  currentRoomSessionId,
+  onReturnToCurrentRoom,
+  compact = false,
+  hideHeader = false,
+}: {
+  sessionId: string;
+  runtimeRecord?: RuntimeSessionRecord | null;
+  currentRoomSessionId?: string | null;
+  onReturnToCurrentRoom?: (() => void) | null;
+  compact?: boolean;
+  hideHeader?: boolean;
+}) {
+  const label = runtimeRecord?.displayLabel?.trim() || "外部会话";
+  const detail = runtimeRecord?.displayDetail?.trim() || "会话已切换，但还没有同步到可展示的预览内容。";
+  const statusLabel = runtimeRecord ? getRuntimeIndicatorStatus(runtimeRecord) : "等待同步";
+  const updatedAt = runtimeRecord?.updatedAt ?? 0;
+
+  return (
+    <div className={compact ? "flex min-h-0 flex-1 flex-col gap-2.5" : "space-y-3"}>
+      {!hideHeader && (
+        <div className={`rounded-2xl border border-sky-500/15 bg-sky-500/5 ${compact ? "px-3.5 py-2.5" : "px-4 py-3"}`}>
+          <div className="flex flex-wrap items-start gap-2">
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Users className="h-4 w-4 text-sky-600" />
+                <span className="text-[13px] font-semibold text-[var(--color-text)]">{label}</span>
+                <span className="rounded-full bg-sky-500/10 px-2 py-0.5 text-[10px] text-sky-700">
+                  已切换会话
+                </span>
+              </div>
+              <div className="mt-1 text-[11px] text-[var(--color-text-secondary)]">{detail}</div>
+              <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-[var(--color-text-tertiary)]">
+                <span className="rounded-full border border-[var(--color-border)] px-2 py-0.5">
+                  {statusLabel}
+                </span>
+                {updatedAt > 0 && (
+                  <span className="rounded-full border border-[var(--color-border)] px-2 py-0.5">
+                    最近更新 {formatSessionStripTime(updatedAt)}
+                  </span>
+                )}
+                <span className="rounded-full border border-[var(--color-border)] px-2 py-0.5">
+                  {sessionId}
+                </span>
+              </div>
+            </div>
+            {currentRoomSessionId && onReturnToCurrentRoom && (
+              <button
+                onClick={onReturnToCurrentRoom}
+                className="inline-flex items-center gap-1.5 rounded-full border border-sky-500/20 bg-[var(--color-bg)] px-3 py-1 text-[10px] text-sky-700 hover:border-sky-500/35 hover:bg-sky-500/10 transition-colors"
+              >
+                返回当前房间
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      <div className={`rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-secondary)]/20 text-center ${compact ? "flex min-h-[220px] flex-1 items-center justify-center px-3.5 py-3.5" : "px-4 py-4"}`}>
+        <div className="text-[13px] font-medium text-[var(--color-text)]">会话已经切换</div>
+        <div className="mt-1 text-[11px] leading-relaxed text-[var(--color-text-secondary)]">
+          当前外部会话还没有同步到可展示的历史内容，或者这条记录只保留了运行时状态。
+          <br />
+          如果这是一个刚启动的会话，等首条消息写入后这里会自动出现预览。
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ChannelSessionBoard({
+  group,
+  selectedConversationKey,
+  currentRoomSessionId,
+  onSelectConversation,
+  onClearExtraConversations,
+  onReturnToCurrentRoom,
+}: {
+  group: DialogChannelGroup;
+  selectedConversationKey?: string | null;
+  currentRoomSessionId?: string | null;
+  onSelectConversation: (conversationKey: string) => void;
+  onClearExtraConversations?: (() => void) | null;
+  onReturnToCurrentRoom?: (() => void) | null;
+}) {
+  const selectedConversation = group.conversations.find((item) => item.key === selectedConversationKey)
+    ?? group.conversations[0]
+    ?? null;
+
+  if (group.conversations.length === 0) {
+    return (
+      <div className="rounded-[26px] border border-sky-500/15 bg-[linear-gradient(135deg,rgba(14,165,233,0.10),rgba(255,255,255,0.65)_55%)] px-4 py-4 shadow-[0_20px_45px_-38px_rgba(14,165,233,0.55)]">
+        <div className="flex flex-wrap items-start gap-2">
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <Users className="h-4 w-4 text-sky-600" />
+              <span className="text-[13px] font-semibold text-[var(--color-text)]">{group.label}</span>
+              <span className="rounded-full bg-sky-500/10 px-2 py-0.5 text-[10px] text-sky-700">
+                暂无会话
+              </span>
+            </div>
+            <div className="mt-1 text-[11px] text-[var(--color-text-secondary)]">
+              等该渠道收到消息后，这里会显示最近的会话和预览内容。
+            </div>
+          </div>
+          {currentRoomSessionId && onReturnToCurrentRoom && (
+            <button
+              onClick={onReturnToCurrentRoom}
+              className="inline-flex items-center gap-1.5 rounded-full border border-sky-500/20 bg-[var(--color-bg)] px-3 py-1 text-[10px] text-sky-700 hover:border-sky-500/35 hover:bg-sky-500/10 transition-colors"
+            >
+              返回本机
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (group.conversations.length === 1 && selectedConversation) {
+    return (
+      <div className="flex min-h-full flex-col gap-2.5">
+        <div className="rounded-[24px] border border-sky-500/15 bg-[linear-gradient(135deg,rgba(14,165,233,0.09),rgba(255,255,255,0.76)_58%)] px-3.5 py-3 shadow-[0_18px_40px_-36px_rgba(14,165,233,0.55)]">
+          <div className="flex flex-wrap items-start gap-2">
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Users className="h-4 w-4 text-sky-600" />
+                <span className="text-[13px] font-semibold text-[var(--color-text)]">{group.label}</span>
+                <span className="rounded-full bg-sky-500/10 px-2 py-0.5 text-[10px] text-sky-700">
+                  1 个会话
+                </span>
+                <span className="rounded-full border border-white/80 bg-white/75 px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
+                  {selectedConversation.statusLabel}
+                </span>
+              </div>
+              <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] text-[var(--color-text-secondary)]">
+                <span>{selectedConversation.label}</span>
+                <span>·</span>
+                <span>{selectedConversation.detail}</span>
+                <span>·</span>
+                <span>{formatSessionStripTime(selectedConversation.updatedAt)}</span>
+              </div>
+            </div>
+            {currentRoomSessionId && onReturnToCurrentRoom && (
+              <button
+                onClick={onReturnToCurrentRoom}
+                className="inline-flex items-center gap-1.5 rounded-full border border-sky-500/20 bg-[var(--color-bg)] px-3 py-1 text-[10px] text-sky-700 hover:border-sky-500/35 hover:bg-sky-500/10 transition-colors"
+              >
+                返回本机
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="min-h-0 flex-1">
+          {selectedConversation.preview ? (
+            <RuntimeSessionPreview
+              preview={selectedConversation.preview}
+              currentRoomSessionId={currentRoomSessionId}
+              onReturnToCurrentRoom={onReturnToCurrentRoom}
+              compact
+              hideHeader
+            />
+          ) : (
+            <RuntimeSessionPreviewPlaceholder
+              sessionId={selectedConversation.activeSessionId || selectedConversation.conversationId}
+              runtimeRecord={selectedConversation.runtimeRecord}
+              currentRoomSessionId={currentRoomSessionId}
+              onReturnToCurrentRoom={onReturnToCurrentRoom}
+              compact
+              hideHeader
+            />
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid min-h-full gap-3 xl:grid-cols-[300px_minmax(0,1fr)]">
+      <div className="flex min-h-0 flex-col rounded-[26px] border border-sky-500/15 bg-[linear-gradient(145deg,rgba(14,165,233,0.10),rgba(255,255,255,0.70)_58%)] p-3 shadow-[0_20px_45px_-38px_rgba(14,165,233,0.55)]">
+        <div className="flex flex-wrap items-start gap-2">
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <Users className="h-4 w-4 text-sky-600" />
+              <span className="text-[13px] font-semibold text-[var(--color-text)]">{group.label}</span>
+              <span className="rounded-full bg-sky-500/10 px-2 py-0.5 text-[10px] text-sky-700">
+                {group.conversations.length} 个会话
+              </span>
+            </div>
+            <div className="mt-1 text-[11px] text-[var(--color-text-secondary)]">{group.detail}</div>
+            <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-[var(--color-text-tertiary)]">
+              <span className="rounded-full border border-white/70 bg-white/60 px-2 py-0.5">
+                当前状态 {group.statusLabel}
+              </span>
+              {group.updatedAt > 0 && (
+                <span className="rounded-full border border-white/70 bg-white/60 px-2 py-0.5">
+                  最近更新 {formatSessionStripTime(group.updatedAt)}
+                </span>
+              )}
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {group.conversations.length > 1 && onClearExtraConversations && (
+              <button
+                onClick={onClearExtraConversations}
+                className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/20 bg-[var(--color-bg)] px-3 py-1 text-[10px] text-amber-700 hover:border-amber-500/35 hover:bg-amber-500/10 transition-colors"
+              >
+                清理多余会话
+              </button>
+            )}
+            {currentRoomSessionId && onReturnToCurrentRoom && (
+              <button
+                onClick={onReturnToCurrentRoom}
+                className="inline-flex items-center gap-1.5 rounded-full border border-sky-500/20 bg-[var(--color-bg)] px-3 py-1 text-[10px] text-sky-700 hover:border-sky-500/35 hover:bg-sky-500/10 transition-colors"
+              >
+                返回本机
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="mt-3 flex min-h-0 flex-1 flex-col rounded-[22px] border border-white/70 bg-white/70 p-2.5 backdrop-blur-sm">
+          <div className="flex items-center justify-between gap-2 px-1">
+            <span className="text-[10px] font-medium tracking-[0.02em] text-[var(--color-text-secondary)]">
+              会话列表
+            </span>
+            <span className="text-[10px] text-[var(--color-text-tertiary)]">
+              选择后在右侧查看
+            </span>
+          </div>
+          <div className="mt-2 min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
+            {group.conversations.map((conversation) => {
+              const isSelected = conversation.key === selectedConversation?.key;
+              const topicHint = conversation.backgroundTopicCount > 0
+                ? ` · ${conversation.backgroundTopicCount} 个后台话题`
+                : "";
+              return (
+                <button
+                  key={conversation.key}
+                  onClick={() => onSelectConversation(conversation.key)}
+                  className={`w-full rounded-[20px] border px-3 py-2.5 text-left transition-all ${
+                    isSelected
+                      ? "border-sky-500/35 bg-sky-500/12 shadow-[0_14px_28px_-24px_rgba(14,165,233,0.65)]"
+                      : "border-[var(--color-border)] bg-[var(--color-bg)]/90 hover:border-sky-500/20 hover:bg-[var(--color-bg)]"
+                  }`}
+                >
+                  <div className="flex items-start gap-2">
+                    <div className={`mt-1 h-2 w-2 rounded-full shrink-0 ${isSelected ? "bg-sky-500" : "bg-[var(--color-border)]"}`} />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-[11px] font-semibold text-[var(--color-text)]">
+                        {conversation.label}
+                      </div>
+                      <div className="mt-1 truncate text-[10px] text-[var(--color-text-secondary)]">
+                        {conversation.detail}
+                      </div>
+                      <div className="mt-1 truncate text-[9px] text-[var(--color-text-tertiary)]">
+                        当前话题 {conversation.activeTopicId}{topicHint}
+                      </div>
+                      <div className="mt-1 flex items-center gap-1.5 text-[9px] text-[var(--color-text-tertiary)]">
+                        <span>{conversation.statusLabel}</span>
+                        <span>·</span>
+                        <span>{formatSessionStripTime(conversation.updatedAt)}</span>
+                      </div>
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      <div className="min-w-0 min-h-0 flex">
+        {selectedConversation?.preview ? (
+          <RuntimeSessionPreview
+            preview={selectedConversation.preview}
+            currentRoomSessionId={currentRoomSessionId}
+            onReturnToCurrentRoom={onReturnToCurrentRoom}
+            compact
+          />
+        ) : selectedConversation ? (
+          <RuntimeSessionPreviewPlaceholder
+            sessionId={selectedConversation.activeSessionId || selectedConversation.conversationId}
+            runtimeRecord={selectedConversation.runtimeRecord}
+            currentRoomSessionId={currentRoomSessionId}
+            onReturnToCurrentRoom={onReturnToCurrentRoom}
+            compact
+          />
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 export function ActorChatPanel({ active = true }: { active?: boolean }) {
   const [showConfig, setShowConfig] = useState(false);
   const [overlay, setOverlay] = useState<DialogOverlay>(null);
@@ -3402,6 +4064,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   const [inputNotice, setInputNotice] = useState<string | null>(null);
   const [selectedSpawnRunId, setSelectedSpawnRunId] = useState<string | null>(null);
   const [lastCommittedDispatchInsight, setLastCommittedDispatchInsight] = useState<DialogDispatchInsight | null>(null);
+  const [manualDialogView, setManualDialogView] = useState<DialogSessionViewKey | null>(null);
   const [requirePlanApproval, setRequirePlanApproval] = useState<boolean>(() => {
     try {
       return localStorage.getItem(DIALOG_PLAN_APPROVAL_KEY) === "1";
@@ -3425,6 +4088,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     lastVisibleLength: number;
   }>>({});
   const queuedFollowUpDispatchRef = useRef(false);
+  const lastDialogSelectionRef = useRef<string | null>(null);
 
   const {
     active: systemActive, actors, dialogHistory, pendingUserInteractions, spawnedTasks, artifacts: structuredArtifacts,
@@ -3433,7 +4097,43 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     init, spawnActor, killActor, destroyAll, sendMessage, broadcastMessage, broadcastAndResolve,
     abortAll, steer, focusSpawnedSession, closeSpawnedSession, resetSession, enqueueFollowUp, removeFollowUp, clearFollowUps,
     sync, routeTask, replyToMessage, getSystem, setSourceHandoff,
-  } = useActorSystemStore();
+  } = useActorSystemStore(
+    useShallow((state) => ({
+      active: active ? state.active : false,
+      actors: active ? state.actors : EMPTY_DIALOG_ACTORS,
+      dialogHistory: active ? state.dialogHistory : EMPTY_DIALOG_HISTORY,
+      pendingUserInteractions: active ? state.pendingUserInteractions : EMPTY_PENDING_INTERACTIONS,
+      spawnedTasks: active ? state.spawnedTasks : EMPTY_SPAWNED_TASKS,
+      artifacts: active ? state.artifacts : EMPTY_DIALOG_ARTIFACTS,
+      sessionUploads: active ? state.sessionUploads : EMPTY_SESSION_UPLOADS,
+      queuedFollowUps: active ? state.queuedFollowUps : EMPTY_QUEUED_FOLLOW_UPS,
+      focusedSpawnedSessionRunId: active ? state.focusedSpawnedSessionRunId : null,
+      coordinatorActorId: active ? state.coordinatorActorId : null,
+      actorTodos: active ? state.actorTodos : EMPTY_ACTOR_TODOS,
+      sourceHandoff: active ? state.sourceHandoff : null,
+      contextSnapshot: active ? state.contextSnapshot : null,
+      init: state.init,
+      spawnActor: state.spawnActor,
+      killActor: state.killActor,
+      destroyAll: state.destroyAll,
+      sendMessage: state.sendMessage,
+      broadcastMessage: state.broadcastMessage,
+      broadcastAndResolve: state.broadcastAndResolve,
+      abortAll: state.abortAll,
+      steer: state.steer,
+      focusSpawnedSession: state.focusSpawnedSession,
+      closeSpawnedSession: state.closeSpawnedSession,
+      resetSession: state.resetSession,
+      enqueueFollowUp: state.enqueueFollowUp,
+      removeFollowUp: state.removeFollowUp,
+      clearFollowUps: state.clearFollowUps,
+      sync: state.sync,
+      routeTask: state.routeTask,
+      replyToMessage: state.replyToMessage,
+      getSystem: state.getSystem,
+      setSourceHandoff: state.setSourceHandoff,
+    })),
+  );
 
   const models = useAvailableModels();
   const openPlanApprovalDialog = useClusterPlanApprovalStore((state) => state.open);
@@ -3465,9 +4165,21 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     ])],
     [attachments, imagePaths],
   );
-  const pendingAICenterHandoff = useAppStore((s) => s.pendingAICenterHandoff);
+  const pendingAICenterHandoff = useAppStore((s) => (active ? s.pendingAICenterHandoff : null));
   const config = useAIStore((s) => s.config);
   const { toast } = useToast();
+  const { runtimeSessions, foregroundDialogSessionId } = useRuntimeStateStore(
+    useShallow((state) => ({
+      runtimeSessions: active ? state.sessions : EMPTY_RUNTIME_SESSIONS,
+      foregroundDialogSessionId: active ? state.foregroundSessionIds.dialog : undefined,
+    })),
+  );
+  const { imConversations, imSessionPreviews } = useIMConversationRuntimeStore(
+    useShallow((state) => ({
+      imConversations: active ? state.conversations : EMPTY_IM_CONVERSATIONS,
+      imSessionPreviews: active ? state.sessionPreviews : EMPTY_IM_SESSION_PREVIEWS,
+    })),
+  );
 
   const runningActors = useMemo(() => actors.filter((a) => a.status === "running"), [actors]);
   const confirmDangerousAction = useCallback(
@@ -3484,6 +4196,95 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     [openConfirmDialog],
   );
   const hasRunningActors = runningActors.length > 0;
+  const currentRoomSessionId = getSystem()?.sessionId ?? null;
+  const dialogChannelGroups = useMemo(
+    () =>
+      buildDialogChannelGroups({
+        currentRoomSessionId,
+        conversations: imConversations,
+        runtimeSessions,
+        sessionPreviews: imSessionPreviews,
+      }),
+    [currentRoomSessionId, imConversations, imSessionPreviews, runtimeSessions],
+  );
+  const selectedDialogSessionId = useMemo(() => {
+    const normalized = foregroundDialogSessionId?.trim() || "";
+    if (normalized) return normalized;
+    return currentRoomSessionId;
+  }, [currentRoomSessionId, foregroundDialogSessionId]);
+  const derivedDialogView = useMemo<DialogSessionViewKey>(() => {
+    if (!selectedDialogSessionId || selectedDialogSessionId === currentRoomSessionId) {
+      return "local";
+    }
+    const preview = imSessionPreviews[selectedDialogSessionId];
+    const runtimeRecord = runtimeSessions[buildRuntimeSessionKey("dialog", selectedDialogSessionId)];
+    return inferIMChannelType({ preview, runtimeRecord }) ?? "local";
+  }, [currentRoomSessionId, imSessionPreviews, runtimeSessions, selectedDialogSessionId]);
+  const activeDialogView = manualDialogView ?? derivedDialogView;
+  const dialogTopSessionItems = useMemo<DialogTopSessionItem[]>(() => {
+    const localRuntimeRecord = currentRoomSessionId
+      ? runtimeSessions[buildRuntimeSessionKey("dialog", currentRoomSessionId)]
+      : null;
+    return [
+      {
+        key: "local",
+        label: "本机",
+        detail: "本地 Dialog 协作房间",
+        statusLabel: localRuntimeRecord ? getRuntimeIndicatorStatus(localRuntimeRecord) : "本机协作",
+        updatedAt: localRuntimeRecord?.updatedAt ?? (dialogHistory[dialogHistory.length - 1]?.timestamp ?? 0),
+      },
+      {
+        key: "dingtalk",
+        label: "钉钉渠道",
+        detail: dialogChannelGroups.dingtalk.detail,
+        statusLabel: dialogChannelGroups.dingtalk.statusLabel,
+        updatedAt: dialogChannelGroups.dingtalk.updatedAt,
+      },
+      {
+        key: "feishu",
+        label: "飞书渠道",
+        detail: dialogChannelGroups.feishu.detail,
+        statusLabel: dialogChannelGroups.feishu.statusLabel,
+        updatedAt: dialogChannelGroups.feishu.updatedAt,
+      },
+    ];
+  }, [currentRoomSessionId, dialogChannelGroups, dialogHistory, runtimeSessions]);
+  const activeChannelGroup = activeDialogView === "local"
+    ? null
+    : dialogChannelGroups[activeDialogView];
+  const activeChannelConversationKey = useMemo(() => {
+    if (!activeChannelGroup) return null;
+    const matchedForeground = activeChannelGroup.conversations.find((item) =>
+      item.activeSessionId === selectedDialogSessionId
+      || item.conversation.topics.some((topic) => topic.sessionId === selectedDialogSessionId),
+    );
+    return matchedForeground?.key ?? activeChannelGroup.conversations[0]?.key ?? null;
+  }, [activeChannelGroup, selectedDialogSessionId]);
+  const activeChannelConversation = activeChannelGroup?.conversations.find((item) => item.key === activeChannelConversationKey)
+    ?? activeChannelGroup?.conversations[0]
+    ?? null;
+  const handleSelectDialogView = useCallback((viewKey: DialogSessionViewKey) => {
+    setManualDialogView(viewKey);
+    if (viewKey === "local") {
+      if (currentRoomSessionId) {
+        useRuntimeStateStore.getState().setForegroundSession("dialog", currentRoomSessionId);
+      }
+      return;
+    }
+    const targetGroup = dialogChannelGroups[viewKey];
+    const targetConversation =
+      targetGroup.conversations.find((conversation) =>
+        conversation.activeSessionId === selectedDialogSessionId
+        || conversation.conversation.topics.some((topic) => topic.sessionId === selectedDialogSessionId),
+      )
+      ?? targetGroup.conversations[0];
+    const targetSessionId =
+      targetConversation?.activeSessionId
+      || targetConversation?.conversation.topics[0]?.sessionId;
+    if (targetSessionId) {
+      useRuntimeStateStore.getState().setForegroundSession("dialog", targetSessionId);
+    }
+  }, [currentRoomSessionId, dialogChannelGroups, selectedDialogSessionId]);
   const actorSupportsImageInput = useCallback((actorId?: string | null) => {
     if (!actorId) {
       return modelSupportsImageInput(config.model || "", config.protocol);
@@ -3607,19 +4408,33 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   useEffect(() => {
     useRuntimeStateStore.getState().setPanelVisible("dialog", active);
     if (!active) return;
-
-    const sessionId =
-      getSystem()?.sessionId
-      || getForegroundRuntimeSession("dialog")?.sessionId
-      || null;
-    if (sessionId) {
-      useRuntimeStateStore.getState().setForegroundSession("dialog", sessionId);
+    const foregroundSessionId = getForegroundRuntimeSession("dialog")?.sessionId ?? foregroundDialogSessionId ?? null;
+    if (foregroundSessionId) return;
+    if (currentRoomSessionId) {
+      useRuntimeStateStore.getState().setForegroundSession("dialog", currentRoomSessionId);
     }
-  }, [active, getSystem, systemActive]);
+  }, [active, currentRoomSessionId, foregroundDialogSessionId, systemActive]);
 
   useEffect(() => () => {
     useRuntimeStateStore.getState().setPanelVisible("dialog", false);
   }, []);
+
+  useEffect(() => {
+    const selectionKey = `${derivedDialogView}:${selectedDialogSessionId ?? ""}`;
+    if (lastDialogSelectionRef.current === null) {
+      lastDialogSelectionRef.current = selectionKey;
+      return;
+    }
+    if (lastDialogSelectionRef.current !== selectionKey) {
+      lastDialogSelectionRef.current = selectionKey;
+      setManualDialogView(null);
+    }
+  }, [derivedDialogView, selectedDialogSessionId]);
+
+  useEffect(() => {
+    if (activeDialogView === "local" || !chatScrollRef.current) return;
+    chatScrollRef.current.scrollTop = 0;
+  }, [activeChannelConversationKey, activeDialogView]);
 
   useEffect(() => {
     if (!pendingAICenterHandoff || pendingAICenterHandoff.mode !== "dialog") return;
@@ -4195,6 +5010,12 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     const trimmed = input.trim();
     if (!trimmed && !hasAttachments) return;
 
+    if (activeDialogView !== "local") {
+      setInputNotice(`当前正在查看 ${getDialogViewLabel(activeDialogView)}，请先返回本机再发送消息。`);
+      inputRef.current?.focus();
+      return;
+    }
+
     ensureSystem();
     const currentSystem = useActorSystemStore.getState().getSystem() ?? getSystem();
     if (!currentSystem) {
@@ -4461,7 +5282,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     clearAttachments();
     setSourceHandoff(null);
     inputRef.current?.focus();
-  }, [input, hasAttachments, imagePaths, attachments, fileContextBlock, attachmentSummary, ensureSystem, pendingUserInteractions, pendingInteractionByMessageId, selectedPendingMessageId, parseMention, actors, sendMessage, broadcastMessage, broadcastAndResolve, steer, replyToMessage, routingMode, routeTask, clearAttachments, requirePlanApproval, openPlanApprovalDialog, getSystem, coordinatorActorId, focusedSessionTask, messageById, queueDialogUserMemoryCapture, inputAttachmentPaths, incomingHandoff, actorSupportsImageInput, toast, enqueueFollowUp, hasRunningActors, setSourceHandoff]);
+  }, [input, hasAttachments, imagePaths, attachments, fileContextBlock, attachmentSummary, ensureSystem, pendingUserInteractions, pendingInteractionByMessageId, selectedPendingMessageId, parseMention, actors, sendMessage, broadcastMessage, broadcastAndResolve, steer, replyToMessage, routingMode, routeTask, clearAttachments, requirePlanApproval, openPlanApprovalDialog, getSystem, coordinatorActorId, focusedSessionTask, messageById, queueDialogUserMemoryCapture, inputAttachmentPaths, incomingHandoff, actorSupportsImageInput, toast, enqueueFollowUp, hasRunningActors, setSourceHandoff, activeDialogView]);
 
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value;
@@ -4608,6 +5429,54 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     setWorkspacePanel(nextPanel);
   }, []);
 
+  const handleClearExtraChannelConversations = useCallback(async () => {
+    if (!activeChannelGroup || activeChannelGroup.conversations.length <= 1) return;
+
+    const groupedByChannelId = new Map<string, typeof activeChannelGroup.conversations>();
+    const runtimeOnlySessions: string[] = [];
+    for (const conversation of activeChannelGroup.conversations) {
+      const channelId = conversation.conversation.channelId?.trim();
+      if (!channelId) {
+        const sessionId = conversation.activeSessionId?.trim();
+        if (sessionId && sessionId !== activeChannelConversation?.activeSessionId) {
+          runtimeOnlySessions.push(sessionId);
+        }
+        continue;
+      }
+      const existing = groupedByChannelId.get(channelId) ?? [];
+      existing.push(conversation);
+      groupedByChannelId.set(channelId, existing);
+    }
+
+    if (groupedByChannelId.size === 0 && runtimeOnlySessions.length === 0) {
+      toast("warning", `当前${activeDialogView === "dingtalk" ? "钉钉" : "飞书"}会话缺少有效清理目标，暂时无法清理`);
+      return;
+    }
+
+    let removedTotal = 0;
+    for (const [channelId, conversations] of groupedByChannelId) {
+      const keepConversationId = conversations.find(
+        (item) => item.key === activeChannelConversation?.key,
+      )?.conversationId ?? conversations[0]?.conversationId;
+      removedTotal += getChannelManager().clearChannelConversations(channelId, {
+        keepConversationId,
+      });
+    }
+    for (const sessionId of runtimeOnlySessions) {
+      await abortRuntimeSession("dialog", sessionId);
+      removedTotal += 1;
+    }
+
+    if (removedTotal > 0) {
+      if (activeChannelConversation?.activeSessionId) {
+        useRuntimeStateStore.getState().setForegroundSession("dialog", activeChannelConversation.activeSessionId);
+      }
+      toast("success", `已清理 ${removedTotal} 个多余${activeDialogView === "dingtalk" ? "钉钉" : "飞书"}会话`);
+    } else {
+      toast("info", "没有需要清理的多余会话");
+    }
+  }, [activeChannelConversation, activeChannelGroup, activeDialogView, toast]);
+
   const draftDispatchBundle = useMemo(() => {
     const trimmed = input.trim();
     const hasContext = fileContextBlock.trim().length > 0;
@@ -4745,6 +5614,28 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                 {routingModeMeta.icon} {routingModeMeta.label}
               </span>
             </div>
+            {dialogTopSessionItems.length > 0 && (
+              <div className="flex shrink-0 items-center gap-1 rounded-full border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/80 p-0.5">
+                <span className="px-1.5 text-[9px] font-medium text-[var(--color-text-tertiary)]">视图</span>
+                {dialogTopSessionItems.map((item) => {
+                  const isSelected = item.key === activeDialogView;
+                  return (
+                    <button
+                      key={item.key}
+                      onClick={() => handleSelectDialogView(item.key)}
+                      className={`rounded-full px-2 py-1 text-[10px] transition-colors ${
+                        isSelected
+                          ? "bg-[var(--color-accent)]/12 text-[var(--color-accent)]"
+                          : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg)] hover:text-[var(--color-text)]"
+                      }`}
+                      title={`${item.label} · ${item.statusLabel}`}
+                    >
+                      {item.label}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
             <div className="ml-auto flex flex-wrap items-center gap-1.5">
               <button
                 onClick={handleToggleConfig}
@@ -4792,7 +5683,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
             </div>
           </div>
 
-          {(pendingUserInteractions.length > 0 || hasRunningActors || openSessionCount > 0 || activeTodoCount > 0 || queuedFollowUps.length > 0 || dialogHistory.length > 0) && (
+          {activeDialogView === "local" && (pendingUserInteractions.length > 0 || hasRunningActors || openSessionCount > 0 || activeTodoCount > 0 || queuedFollowUps.length > 0 || dialogHistory.length > 0) && (
             <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-[var(--color-text-secondary)]">
               {pendingUserInteractions.length > 0 && (
                 <span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-amber-700">
@@ -4842,7 +5733,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
             </div>
           )}
 
-          {actors.length > 0 && (
+          {activeDialogView === "local" && actors.length > 0 && (
             <div className="flex flex-wrap items-center gap-2">
               <ActorStatusBar actors={actors} compact />
               <div className="min-w-0 flex-1" />
@@ -4878,307 +5769,397 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       </div>
 
       <div ref={chatScrollRef} className="min-h-0 flex-1 overflow-y-auto px-3 py-2.5 sm:px-4 lg:px-5">
-        <div className="flex w-full min-w-0 flex-col gap-3.5">
-          {dialogHistory.length === 0 && (
-            <div className="rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-secondary)]/20 px-4 py-4 text-center">
-              <div className="flex flex-col items-center gap-1.5">
-                <Bot className="w-5 h-5 text-[var(--color-text-tertiary)] opacity-60" />
-                <div className="text-[13px] font-medium text-[var(--color-text)]">
-                  {actors.length > 0 ? "从下方发起一条协作任务" : "先搭一个协作房间，再开始对话"}
-                </div>
-                <div className="text-[11px] text-[var(--color-text-secondary)]">
-                  {actors.length > 0
-                    ? "适合 review、debug、brainstorm 这类持续协作；如果目标是直接改代码，优先切到 Agent。"
-                    : "建议先保留一个协调者，再按分析、编写或审查角色继续补充。"}
-                </div>
-                <div className="mt-0.5 flex flex-wrap justify-center gap-2">
-                  {actors.length > 0
-                    ? DIALOG_STARTER_PROMPTS.map((item) => (
-                      <button
-                        key={item.label}
-                        onClick={() => handleUseStarterPrompt(item.prompt)}
-                        className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[11px] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/25 hover:text-[var(--color-accent)] transition-colors"
-                      >
-                        {item.label}
-                      </button>
-                    ))
-                    : (
-                      <>
-                        <button
-                          onClick={() => handleApplyPreset("code_review")}
-                          className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[11px] text-[var(--color-text-secondary)] hover:border-cyan-500/25 hover:text-cyan-600 transition-colors"
-                        >
-                          快速建 Review 房间
-                        </button>
-                        <button
-                          onClick={() => handleApplyPreset("debug_session")}
-                          className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[11px] text-[var(--color-text-secondary)] hover:border-amber-500/25 hover:text-amber-600 transition-colors"
-                        >
-                          快速建 Debug 房间
-                        </button>
-                        <button
-                          onClick={() => handleApplyPreset("brainstorming")}
-                          className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[11px] text-[var(--color-text-secondary)] hover:border-emerald-500/25 hover:text-emerald-600 transition-colors"
-                        >
-                          快速建 Brainstorm 房间
-                        </button>
-                      </>
-                    )}
-                </div>
-                <div className="flex flex-wrap justify-center gap-2 text-[10px] text-[var(--color-text-secondary)]">
-                  <button
-                    onClick={() => {
-                      setOverlay(null);
-                      setWorkspacePanel(null);
-                      setShowConfig(true);
-                    }}
-                    className="inline-flex items-center gap-1 rounded-full border border-transparent px-2 py-1 hover:border-[var(--color-border)] hover:bg-[var(--color-bg)] hover:text-[var(--color-text)] transition-colors"
-                  >
-                    <Settings2 className="w-3 h-3" />
-                    {actors.length > 0 ? "调整 Agent 阵容" : "管理 Agent"}
-                  </button>
-                  {actors.length > 0 && (
-                    <button
-                      onClick={() => handleWorkspacePanelChange("plan")}
-                      className="inline-flex items-center gap-1 rounded-full border border-transparent px-2 py-1 hover:border-[var(--color-border)] hover:bg-[var(--color-bg)] hover:text-[var(--color-text)] transition-colors"
-                    >
-                      <ShieldCheck className="w-3 h-3" />
-                      查看执行计划
-                    </button>
-                  )}
-                  {actors.length === 0 && (
-                    <button
-                      onClick={() => setRoutingMode("smart")}
-                      className="inline-flex items-center gap-1 rounded-full border border-transparent px-2 py-1 hover:border-[var(--color-border)] hover:bg-[var(--color-bg)] hover:text-[var(--color-text)] transition-colors"
-                    >
-                      <span>⚡</span>
-                      默认改为智能路由
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {dialogHistory.length > 100 && !showAllMessages && (
-            <button
-              onClick={() => setShowAllMessages(true)}
-              className="self-center rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-4 py-2 text-[11px] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/25 hover:text-[var(--color-accent)] transition-colors"
-            >
-              加载更早的 {dialogHistory.length - 100} 条消息
-            </button>
-          )}
-
-          {visibleMessages.map((msg) => {
-            const isUser = msg.from === "user";
-            const actorIdx = actorIdToIndex.get(msg.from) ?? 0;
-            const actor = actorById.get(msg.from);
-            const actorName = isUser ? "你" : (actor?.roleName ?? msg.from);
-            const targetName = msg.to
-              ? (msg.to === "user" ? "你" : (actorById.get(msg.to)?.roleName ?? msg.to))
-              : undefined;
-            const isWaiting = !isUser && msg.expectReply && pendingUserReplySet.has(msg.id);
-            const pendingInteraction = pendingInteractionByMessageId.get(msg.id);
-
-            return (
-              <div key={msg.id} className="max-w-full">
-                <MessageBubble
-                  message={msg}
-                  actorIndex={actorIdx}
-                  actorName={actorName}
-                  targetName={targetName}
-                  isUser={isUser}
-                  isWaitingReply={isWaiting}
-                  pendingInteraction={pendingInteraction}
-                  onReplyToInteraction={replyToMessage}
-                  onOpenApprovalDrawer={handleOpenApprovalDrawer}
+        <div className="flex min-h-full w-full min-w-0 flex-col gap-3.5">
+          {activeDialogView !== "local" ? (
+            activeChannelGroup ? (
+              <div className="flex min-h-0 flex-1 flex-col">
+                <ChannelSessionBoard
+                  group={activeChannelGroup}
+                  selectedConversationKey={activeChannelConversationKey}
+                  currentRoomSessionId={currentRoomSessionId}
+                  onSelectConversation={(conversationKey) => {
+                    setManualDialogView(activeDialogView);
+                    const targetConversation = activeChannelGroup.conversations.find((item) => item.key === conversationKey);
+                    const targetSessionId = targetConversation?.activeSessionId
+                      || targetConversation?.conversation.topics[0]?.sessionId;
+                    if (targetSessionId) {
+                      useRuntimeStateStore.getState().setForegroundSession("dialog", targetSessionId);
+                    }
+                  }}
+                  onClearExtraConversations={handleClearExtraChannelConversations}
+                  onReturnToCurrentRoom={currentRoomSessionId
+                    ? () => useRuntimeStateStore.getState().setForegroundSession("dialog", currentRoomSessionId)
+                    : null}
                 />
               </div>
-            );
-          })}
-
-          {runningActors.map((a, i) => {
-            const color = getActorColor(actorIdToIndex.get(a.id) ?? i);
-            const steps = a.currentTask?.steps ?? [];
-            const hasPendingApproval = pendingUserInteractions.some(
-              (interaction) => interaction.fromActorId === a.id && interaction.type === "approval",
-            );
-            const reversedSteps = [...steps].reverse();
-
-            const latestStreamingAnswer = reversedSteps.find((s) => s.streaming && s.type === "answer");
-            const latestThinkingStep = reversedSteps.find((s) => s.type === "thinking");
-            const latestThoughtToolStep = hasPendingApproval
-              ? undefined
-              : reversedSteps.find((s) => {
-                if (s.type !== "tool_streaming") return false;
-                return buildToolStreamingPreview(s.content).kind === "thinking";
-              });
-            const latestThoughtToolPreview = latestThoughtToolStep
-              ? buildToolStreamingPreview(latestThoughtToolStep.content)
-              : null;
-            const latestExecutionToolStep = hasPendingApproval
-              ? undefined
-              : reversedSteps.find((s) => {
-                if (s.type !== "tool_streaming" || !s.streaming) return false;
-                const kind = buildToolStreamingPreview(s.content).kind;
-                return kind !== "thinking" && kind !== "artifact";
-              });
-            const latestExecutionToolPreview = latestExecutionToolStep
-              ? buildToolStreamingPreview(latestExecutionToolStep.content)
-              : null;
-            const latestToolStreamingStep = hasPendingApproval
-              ? undefined
-              : reversedSteps.find((s) => {
-                if (s.type !== "tool_streaming" || !s.streaming) return false;
-                return buildToolStreamingPreview(s.content).kind === "artifact";
-              });
-            const latestToolStreamingPreview = latestToolStreamingStep
-              ? buildToolStreamingPreview(latestToolStreamingStep.content)
-              : null;
-            const latestExecutionStateStep = reversedSteps.find(
-              (s) => s.type === "action" || s.type === "observation" || s.type === "error",
-            );
-            const derivedThinkingContent = !latestThinkingStep && latestThoughtToolPreview?.kind === "thinking"
-              ? latestThoughtToolPreview.body
-              : undefined;
-
-            const streamingContent = latestStreamingAnswer?.content;
-            const thinkingContent = latestThinkingStep?.content ?? derivedThinkingContent;
-            const toolStreamingContent = latestToolStreamingStep?.content;
-            const showExecutionCard = Boolean(
-              !streamingContent
-              && !(latestThinkingStep || derivedThinkingContent)
-              && !latestToolStreamingStep
-              && (latestExecutionToolStep || latestExecutionStateStep),
-            );
-            const showThinkingPlaceholder = Boolean(
-              !streamingContent
-              && !latestToolStreamingStep
-              && !showExecutionCard
-              && !(latestThinkingStep || derivedThinkingContent)
-              && a.currentTask?.status === "running",
-            );
-            const showThinkingBlock = Boolean(
-              !hasActiveCollaborationFlow
-              && !streamingContent
-              && !latestToolStreamingStep
-              && !showExecutionCard
-              && (latestThinkingStep || derivedThinkingContent || showThinkingPlaceholder),
-            );
-            const showThinkingSummaryOnly = Boolean(
-              hasActiveCollaborationFlow
-              && !streamingContent
-              && !latestToolStreamingStep
-              && !showExecutionCard
-              && (latestThinkingStep || derivedThinkingContent || showThinkingPlaceholder),
-            );
-            const executionCardTitle = showExecutionCard || showThinkingSummaryOnly
-              ? describeAgentActivity(steps, a.roleName, false)
-              : "";
-            const executionCardDetail = latestExecutionToolPreview?.kind === "spawn"
-              ? latestExecutionToolPreview.body
-              : showThinkingSummaryOnly
-                ? truncateWorkflowText(thinkingContent ?? "正在整理思路...", 72)
-              : undefined;
-            const executionCardIcon = latestExecutionToolPreview?.kind === "spawn"
-              ? ArrowRightCircle
-              : showThinkingSummaryOnly
-                ? Brain
-              : Settings2;
-            const executionCardStartedAt = latestExecutionToolStep?.timestamp
-              ?? latestThinkingStep?.timestamp
-              ?? latestThoughtToolStep?.timestamp
-              ?? latestExecutionStateStep?.timestamp
-              ?? Date.now();
-            const thinkingStartedAt = latestThinkingStep?.timestamp
-              ?? latestThoughtToolStep?.timestamp
-              ?? a.currentTask?.steps[0]?.timestamp
-              ?? actorThinkingAnchorRef.current[a.id]?.startedAt
-              ?? Date.now();
-            const thinkingIsStreaming = showThinkingPlaceholder
-              || latestThinkingStep?.streaming
-              || latestThoughtToolStep?.streaming
-              || false;
-            const hasRichLiveBlock = Boolean(
-              showThinkingBlock
-              || showExecutionCard
-              || showThinkingSummaryOnly
-              || (latestToolStreamingStep && latestToolStreamingPreview?.kind === "artifact")
-              || streamingContent,
-            );
-
-            return (
-              <div key={`thinking-${a.id}`} className="space-y-2">
-                {showThinkingBlock && (
-                  <ThinkingBlock
-                    roleName={a.roleName}
-                    content={thinkingContent ?? ""}
-                    startedAt={thinkingStartedAt}
-                    isStreaming={thinkingIsStreaming}
-                    color={color}
-                  />
-                )}
-
-                {(showExecutionCard || showThinkingSummaryOnly) && (
-                  <LiveExecutionCard
-                    roleName={a.roleName}
-                    title={executionCardTitle}
-                    detail={executionCardDetail}
-                    startedAt={executionCardStartedAt}
-                    isStreaming={showThinkingSummaryOnly ? thinkingIsStreaming : true}
-                    color={color}
-                    icon={executionCardIcon}
-                  />
-                )}
-
-                {latestToolStreamingStep && latestToolStreamingPreview?.kind === "artifact" && (
-                  <ToolStreamingBlock
-                    roleName={a.roleName}
-                    content={toolStreamingContent ?? ""}
-                    startedAt={latestToolStreamingStep.timestamp}
-                    isStreaming={latestToolStreamingStep.streaming ?? false}
-                    color={color}
-                  />
-                )}
-
-                {streamingContent && (
-                  <div className={`flex gap-2 ${color.text}`}>
-                    <div className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 ${color.bg}`}>
-                      <Bot className="w-3.5 h-3.5" />
+            ) : (
+              <div className="rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-secondary)]/20 px-4 py-4 text-center text-[12px] text-[var(--color-text-secondary)]">
+                当前渠道暂无可展示内容。
+              </div>
+            )
+          ) : (
+            <>
+              {dialogHistory.length === 0 && (
+                <div className="rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-secondary)]/20 px-4 py-4 text-center">
+                  <div className="flex flex-col items-center gap-1.5">
+                    <Bot className="w-5 h-5 text-[var(--color-text-tertiary)] opacity-60" />
+                    <div className="text-[13px] font-medium text-[var(--color-text)]">
+                      {actors.length > 0 ? "从下方发起一条协作任务" : "先搭一个协作房间，再开始对话"}
                     </div>
-                    <div className="max-w-[88%] lg:max-w-[78%]">
-                      <div className="text-[10px] mb-0.5">
-                        {a.roleName}
-                        <span className="text-[var(--color-text-tertiary)] ml-1">
-                          正在输入中...
-                        </span>
-                      </div>
-                      <div className={`inline-block text-[13px] leading-relaxed rounded-xl px-3 py-2 ${color.bg}`}>
-                        <div className="prose prose-sm dark:prose-invert max-w-none prose-p:my-1 [&_p]:whitespace-pre-wrap [&_li]:whitespace-pre-wrap">
-                          <ReactMarkdown remarkPlugins={MARKDOWN_REMARK_PLUGINS}>
-                            {streamingContent}
-                          </ReactMarkdown>
-                          <span className="inline-block w-2 h-4 bg-current animate-pulse ml-0.5" />
+                    <div className="text-[11px] text-[var(--color-text-secondary)]">
+                      {actors.length > 0
+                        ? "适合 review、debug、brainstorm 这类持续协作；如果目标是直接改代码，优先切到 Agent。"
+                        : "建议先保留一个协调者，再按分析、编写或审查角色继续补充。"}
+                    </div>
+                    <div className="mt-0.5 flex flex-wrap justify-center gap-2">
+                      {actors.length > 0
+                        ? DIALOG_STARTER_PROMPTS.map((item) => (
+                          <button
+                            key={item.label}
+                            onClick={() => handleUseStarterPrompt(item.prompt)}
+                            className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[11px] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/25 hover:text-[var(--color-accent)] transition-colors"
+                          >
+                            {item.label}
+                          </button>
+                        ))
+                        : (
+                          <>
+                            <button
+                              onClick={() => handleApplyPreset("code_review")}
+                              className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[11px] text-[var(--color-text-secondary)] hover:border-cyan-500/25 hover:text-cyan-600 transition-colors"
+                            >
+                              快速建 Review 房间
+                            </button>
+                            <button
+                              onClick={() => handleApplyPreset("debug_session")}
+                              className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[11px] text-[var(--color-text-secondary)] hover:border-amber-500/25 hover:text-amber-600 transition-colors"
+                            >
+                              快速建 Debug 房间
+                            </button>
+                            <button
+                              onClick={() => handleApplyPreset("brainstorming")}
+                              className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[11px] text-[var(--color-text-secondary)] hover:border-emerald-500/25 hover:text-emerald-600 transition-colors"
+                            >
+                              快速建 Brainstorm 房间
+                            </button>
+                          </>
+                        )}
+                    </div>
+                    <div className="flex flex-wrap justify-center gap-2 text-[10px] text-[var(--color-text-secondary)]">
+                      <button
+                        onClick={() => {
+                          setOverlay(null);
+                          setWorkspacePanel(null);
+                          setShowConfig(true);
+                        }}
+                        className="inline-flex items-center gap-1 rounded-full border border-transparent px-2 py-1 hover:border-[var(--color-border)] hover:bg-[var(--color-bg)] hover:text-[var(--color-text)] transition-colors"
+                      >
+                        <Settings2 className="w-3 h-3" />
+                        {actors.length > 0 ? "调整 Agent 阵容" : "管理 Agent"}
+                      </button>
+                      {actors.length > 0 && (
+                        <button
+                          onClick={() => handleWorkspacePanelChange("plan")}
+                          className="inline-flex items-center gap-1 rounded-full border border-transparent px-2 py-1 hover:border-[var(--color-border)] hover:bg-[var(--color-bg)] hover:text-[var(--color-text)] transition-colors"
+                        >
+                          <ShieldCheck className="w-3 h-3" />
+                          查看执行计划
+                        </button>
+                      )}
+                      {actors.length === 0 && (
+                        <button
+                          onClick={() => setRoutingMode("smart")}
+                          className="inline-flex items-center gap-1 rounded-full border border-transparent px-2 py-1 hover:border-[var(--color-border)] hover:bg-[var(--color-bg)] hover:text-[var(--color-text)] transition-colors"
+                        >
+                          <span>⚡</span>
+                          默认改为智能路由
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {dialogHistory.length > 100 && !showAllMessages && (
+                <button
+                  onClick={() => setShowAllMessages(true)}
+                  className="self-center rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-4 py-2 text-[11px] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/25 hover:text-[var(--color-accent)] transition-colors"
+                >
+                  加载更早的 {dialogHistory.length - 100} 条消息
+                </button>
+              )}
+
+              {visibleMessages.map((msg) => {
+                const isUser = msg.from === "user";
+                const actorIdx = actorIdToIndex.get(msg.from) ?? 0;
+                const actor = actorById.get(msg.from);
+                const actorName = isUser ? "你" : (actor?.roleName ?? msg.from);
+                const targetName = msg.to
+                  ? (msg.to === "user" ? "你" : (actorById.get(msg.to)?.roleName ?? msg.to))
+                  : undefined;
+                const isWaiting = !isUser && msg.expectReply && pendingUserReplySet.has(msg.id);
+                const pendingInteraction = pendingInteractionByMessageId.get(msg.id);
+
+                return (
+                  <div key={msg.id} className="max-w-full">
+                    <MessageBubble
+                      message={msg}
+                      actorIndex={actorIdx}
+                      actorName={actorName}
+                      targetName={targetName}
+                      isUser={isUser}
+                      isWaitingReply={isWaiting}
+                      pendingInteraction={pendingInteraction}
+                      onReplyToInteraction={replyToMessage}
+                      onOpenApprovalDrawer={handleOpenApprovalDrawer}
+                    />
+                  </div>
+                );
+              })}
+
+              {runningActors.map((a, i) => {
+                const color = getActorColor(actorIdToIndex.get(a.id) ?? i);
+                const steps = a.currentTask?.steps ?? [];
+                const hasPendingApproval = pendingUserInteractions.some(
+                  (interaction) => interaction.fromActorId === a.id && interaction.type === "approval",
+                );
+                const reversedSteps = [...steps].reverse();
+                const findLastStepIndex = (predicate: (step: AgentStep) => boolean) => {
+                  for (let index = steps.length - 1; index >= 0; index -= 1) {
+                    if (predicate(steps[index])) return index;
+                  }
+                  return -1;
+                };
+
+                const latestStreamingAnswer = reversedSteps.find((s) => s.streaming && s.type === "answer");
+                const latestStreamingAnswerIndex = findLastStepIndex(
+                  (s) => s.streaming && s.type === "answer",
+                );
+                const latestThinkingStep = reversedSteps.find(
+                  (s) => s.type === "thinking" || s.type === "thought",
+                );
+                const latestThinkingStepIndex = findLastStepIndex(
+                  (s) => s.type === "thinking" || s.type === "thought",
+                );
+                const latestThoughtToolStep = hasPendingApproval
+                  ? undefined
+                  : reversedSteps.find((s) => {
+                    if (s.type !== "tool_streaming") return false;
+                    return buildToolStreamingPreview(s.content).kind === "thinking";
+                  });
+                const latestThoughtToolStepIndex = hasPendingApproval
+                  ? -1
+                  : findLastStepIndex((s) => {
+                    if (s.type !== "tool_streaming") return false;
+                    return buildToolStreamingPreview(s.content).kind === "thinking";
+                  });
+                const latestThoughtToolPreview = latestThoughtToolStep
+                  ? buildToolStreamingPreview(latestThoughtToolStep.content)
+                  : null;
+                const latestExecutionToolStep = hasPendingApproval
+                  ? undefined
+                  : reversedSteps.find((s) => {
+                    if (s.type !== "tool_streaming" || !s.streaming) return false;
+                    const kind = buildToolStreamingPreview(s.content).kind;
+                    return kind !== "thinking" && kind !== "artifact";
+                  });
+                const latestExecutionToolStepIndex = hasPendingApproval
+                  ? -1
+                  : findLastStepIndex((s) => {
+                    if (s.type !== "tool_streaming" || !s.streaming) return false;
+                    const kind = buildToolStreamingPreview(s.content).kind;
+                    return kind !== "thinking" && kind !== "artifact";
+                  });
+                const latestExecutionToolPreview = latestExecutionToolStep
+                  ? buildToolStreamingPreview(latestExecutionToolStep.content)
+                  : null;
+                const latestToolStreamingStep = hasPendingApproval
+                  ? undefined
+                  : reversedSteps.find((s) => {
+                    if (s.type !== "tool_streaming" || !s.streaming) return false;
+                    return buildToolStreamingPreview(s.content).kind === "artifact";
+                  });
+                const latestToolStreamingStepIndex = hasPendingApproval
+                  ? -1
+                  : findLastStepIndex((s) => {
+                    if (s.type !== "tool_streaming" || !s.streaming) return false;
+                    return buildToolStreamingPreview(s.content).kind === "artifact";
+                  });
+                const latestToolStreamingPreview = latestToolStreamingStep
+                  ? buildToolStreamingPreview(latestToolStreamingStep.content)
+                  : null;
+                const latestExecutionStateStep = reversedSteps.find(
+                  (s) => s.type === "action" || s.type === "observation" || s.type === "error",
+                );
+                const latestExecutionStateStepIndex = findLastStepIndex(
+                  (s) => s.type === "action" || s.type === "observation" || s.type === "error",
+                );
+                const prefersThoughtToolPreview = latestThoughtToolStepIndex > latestThinkingStepIndex;
+                const derivedThinkingContent = latestThoughtToolPreview?.kind === "thinking"
+                  ? latestThoughtToolPreview.body
+                  : undefined;
+                const effectiveThinkingIndex = Math.max(latestThinkingStepIndex, latestThoughtToolStepIndex);
+                const effectiveExecutionIndex = Math.max(latestExecutionToolStepIndex, latestExecutionStateStepIndex);
+                const effectiveArtifactIndex = latestToolStreamingStepIndex;
+                const effectiveLiveBlockIndex = Math.max(
+                  effectiveThinkingIndex,
+                  effectiveExecutionIndex,
+                  effectiveArtifactIndex,
+                );
+
+                const streamingContent = latestStreamingAnswer?.content;
+                const thinkingContent = prefersThoughtToolPreview
+                  ? derivedThinkingContent
+                  : latestThinkingStep?.content ?? derivedThinkingContent;
+                const toolStreamingContent = latestToolStreamingStep?.content;
+                const showExecutionCard = Boolean(
+                  !streamingContent
+                  && latestStreamingAnswerIndex < effectiveExecutionIndex
+                  && effectiveExecutionIndex >= 0
+                  && effectiveExecutionIndex === effectiveLiveBlockIndex,
+                );
+                const showThinkingPlaceholder = Boolean(
+                  !streamingContent
+                  && latestStreamingAnswerIndex < 0
+                  && !showExecutionCard
+                  && effectiveLiveBlockIndex < 0
+                  && a.currentTask?.status === "running",
+                );
+                const hasDetailedThinkingContent = Boolean(latestThinkingStep || derivedThinkingContent);
+                const showThinkingBlock = Boolean(
+                  !streamingContent
+                  && hasDetailedThinkingContent
+                  && latestStreamingAnswerIndex < effectiveThinkingIndex
+                  && effectiveThinkingIndex >= 0
+                  && effectiveThinkingIndex === effectiveLiveBlockIndex,
+                );
+                const showThinkingSummaryOnly = Boolean(
+                  hasActiveCollaborationFlow
+                  && !streamingContent
+                  && !showExecutionCard
+                  && !hasDetailedThinkingContent
+                  && showThinkingPlaceholder,
+                );
+                const showArtifactBlock = Boolean(
+                  !streamingContent
+                  && latestStreamingAnswerIndex < effectiveArtifactIndex
+                  && effectiveArtifactIndex >= 0
+                  && effectiveArtifactIndex === effectiveLiveBlockIndex,
+                );
+                const executionCardTitle = showExecutionCard || showThinkingSummaryOnly
+                  ? describeAgentActivity(steps, a.roleName, false, a.currentTask?.status)
+                  : "";
+                const executionCardDetail = latestExecutionToolPreview?.kind === "spawn"
+                  ? latestExecutionToolPreview.body
+                  : showThinkingSummaryOnly
+                    ? truncateWorkflowText(thinkingContent ?? "正在整理思路...", 72)
+                    : undefined;
+                const executionCardIcon = latestExecutionToolPreview?.kind === "spawn"
+                  ? ArrowRightCircle
+                  : showThinkingSummaryOnly
+                    ? Brain
+                  : Settings2;
+                const executionCardStartedAt = latestExecutionToolStep?.timestamp
+                  ?? latestExecutionStateStep?.timestamp
+                  ?? Date.now();
+                const thinkingStartedAt = prefersThoughtToolPreview
+                  ? latestThoughtToolStep?.timestamp
+                  ?? latestThinkingStep?.timestamp
+                  ?? a.currentTask?.steps[0]?.timestamp
+                  ?? actorThinkingAnchorRef.current[a.id]?.startedAt
+                  ?? Date.now()
+                  : latestThinkingStep?.timestamp
+                  ?? latestThoughtToolStep?.timestamp
+                  ?? a.currentTask?.steps[0]?.timestamp
+                  ?? actorThinkingAnchorRef.current[a.id]?.startedAt
+                  ?? Date.now();
+                const thinkingIsStreaming = showThinkingPlaceholder
+                  || (prefersThoughtToolPreview
+                    ? latestThoughtToolStep?.streaming
+                    : latestThinkingStep?.streaming || latestThoughtToolStep?.streaming)
+                  || false;
+                const hasRichLiveBlock = Boolean(
+                  showThinkingBlock
+                  || showExecutionCard
+                  || showThinkingSummaryOnly
+                  || showArtifactBlock
+                  || streamingContent,
+                );
+
+                return (
+                  <div key={`thinking-${a.id}`} className="space-y-2">
+                    {showThinkingBlock && (
+                      <ThinkingBlock
+                        roleName={a.roleName}
+                        content={thinkingContent ?? ""}
+                        startedAt={thinkingStartedAt}
+                        isStreaming={thinkingIsStreaming}
+                        color={color}
+                      />
+                    )}
+
+                    {(showExecutionCard || showThinkingSummaryOnly) && (
+                      <LiveExecutionCard
+                        roleName={a.roleName}
+                        title={executionCardTitle}
+                        detail={executionCardDetail}
+                        startedAt={executionCardStartedAt}
+                        isStreaming={showThinkingSummaryOnly ? thinkingIsStreaming : true}
+                        color={color}
+                        icon={executionCardIcon}
+                      />
+                    )}
+
+                    {showArtifactBlock && latestToolStreamingStep && latestToolStreamingPreview?.kind === "artifact" && (
+                      <ToolStreamingBlock
+                        roleName={a.roleName}
+                        content={toolStreamingContent ?? ""}
+                        startedAt={latestToolStreamingStep.timestamp}
+                        isStreaming={latestToolStreamingStep.streaming ?? false}
+                        color={color}
+                      />
+                    )}
+
+                    {streamingContent && (
+                      <div className={`flex gap-2 ${color.text}`}>
+                        <div className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 ${color.bg}`}>
+                          <Bot className="w-3.5 h-3.5" />
+                        </div>
+                        <div className="max-w-[88%] lg:max-w-[78%]">
+                          <div className="text-[10px] mb-0.5">
+                            {a.roleName}
+                            <span className="text-[var(--color-text-tertiary)] ml-1">
+                              正在输入中...
+                            </span>
+                          </div>
+                          <div className={`inline-block text-[13px] leading-relaxed rounded-xl px-3 py-2 ${color.bg}`}>
+                            <div className="prose prose-sm dark:prose-invert max-w-none prose-p:my-1 [&_p]:whitespace-pre-wrap [&_li]:whitespace-pre-wrap">
+                              <ReactMarkdown remarkPlugins={MARKDOWN_REMARK_PLUGINS}>
+                                {streamingContent}
+                              </ReactMarkdown>
+                              <span className="inline-block w-2 h-4 bg-current animate-pulse ml-0.5" />
+                            </div>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  </div>
-                )}
+                    )}
 
-                {!hasRichLiveBlock && (
-                  <div className={`flex items-center gap-2 ${color.text}`}>
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    <span className="text-[11px] truncate max-w-[88%] lg:max-w-[78%]">
-                      <span className="font-medium">{a.roleName}</span>
-                      <span className="opacity-70 ml-1">
-                        {describeAgentActivity(steps, a.roleName, !!streamingContent)}
-                      </span>
-                    </span>
+                    {!hasRichLiveBlock && (
+                      <div className={`flex items-center gap-2 ${color.text}`}>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span className="text-[11px] truncate max-w-[88%] lg:max-w-[78%]">
+                          <span className="font-medium">{a.roleName}</span>
+                          <span className="opacity-70 ml-1">
+                            {describeAgentActivity(steps, a.roleName, !!streamingContent, a.currentTask?.status)}
+                          </span>
+                        </span>
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
-            );
-          })}
+                );
+              })}
+            </>
+          )}
 
           <div ref={chatEndRef} />
         </div>
@@ -5200,217 +6181,260 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
           />
 
           <div className="overflow-visible rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-[0_12px_32px_-24px_rgba(15,23,42,0.35)]">
-            {(incomingHandoff || dialogMemoryWorkspaceId || dialogContextSummary || dialogHistory.length > 0 || focusedSessionTask || queuedFollowUps.length > 0 || pendingUserInteractions.length > 0 || attachments.length > 0 || inputNotice) && (
+            {(incomingHandoff || dialogMemoryWorkspaceId || dialogContextSummary || dialogHistory.length > 0 || focusedSessionTask || queuedFollowUps.length > 0 || pendingUserInteractions.length > 0 || attachments.length > 0 || inputNotice || activeDialogView !== "local") && (
               <div className="space-y-2 border-b border-[var(--color-border)] bg-[linear-gradient(135deg,rgba(15,23,42,0.02),transparent_45%)] px-3 py-2.5">
-                <DialogContextStrip snapshot={contextSnapshot} />
-
-                {incomingHandoff?.sourceMode && (
-                  <AICenterHandoffCard
-                    handoff={incomingHandoff}
-                    dismissLabel="仅隐藏提示"
-                    onDismiss={() => setSourceHandoff(null)}
-                  />
-                )}
-
-                {focusedSessionTask && (
-                  <div className="flex flex-wrap items-center gap-2 rounded-xl border border-blue-500/15 bg-blue-500/10 px-3 py-1.5 text-[10px] text-blue-700">
-                    <Network className="w-3 h-3" />
-                    <span>
-                      当前正在聚焦子会话：
-                      {focusedSessionLabel}
+                {activeDialogView !== "local" ? (
+                  <div className="flex flex-wrap items-center gap-2 rounded-full border border-sky-500/15 bg-sky-500/10 px-3 py-1.5 text-[10px] text-sky-700">
+                    <Users className="w-3 h-3" />
+                    <span className="min-w-0 flex-1">
+                      {inputNotice || `当前正在查看 ${getDialogViewLabel(activeDialogView)}，返回本机后再发送消息。`}
                     </span>
-                    <button
-                      onClick={() => focusSpawnedSession(null)}
-                      className="ml-auto rounded-full border border-blue-500/20 px-2.5 py-1 text-[10px] hover:border-blue-500/40 transition-colors"
-                    >
-                      退出聚焦
-                    </button>
-                  </div>
-                )}
-
-                {queuedFollowUps.length > 0 && (
-                  <DialogFollowUpDock
-                    items={queuedFollowUps}
-                    disabled={hasRunningActors || pendingUserInteractions.length > 0 || queuedFollowUpDispatchRef.current}
-                    onRunNext={() => {
-                      void handleRunNextQueuedFollowUp();
-                    }}
-                    onRemove={removeFollowUp}
-                    onClear={clearFollowUps}
-                  />
-                )}
-
-                {pendingUserInteractions.length > 0 && pendingAgentNames && (
-                  <div className="space-y-2">
-                    <div className="flex flex-wrap items-center gap-2 rounded-xl border border-amber-500/15 bg-amber-500/10 px-3 py-1.5 text-[10px] text-amber-700">
-                      <Reply className="w-3 h-3" />
-                      <span>
-                        {pendingAgentNames} 正在等待你的回复
-                        {pendingUserInteractions.length > 1 ? "，请先选择要回复的问题" : "，发送消息将回复当前问题"}
-                      </span>
-                    </div>
-                    <div className="flex flex-wrap gap-1.5">
-                      {pendingUserInteractions.map((interaction) => {
-                        const actorName = actorById.get(interaction.fromActorId)?.roleName ?? interaction.fromActorId;
-                        const isSelected = selectedPendingMessageId === interaction.messageId;
-                        const kindLabel = interaction.type === "approval"
-                          ? "审批"
-                          : interaction.type === "clarification"
-                            ? "澄清"
-                            : "提问";
-                        return (
-                          <button
-                            key={interaction.messageId}
-                            onClick={() => {
-                              setSelectedPendingMessageId(interaction.messageId);
-                              setInputNotice(null);
-                              inputRef.current?.focus();
-                            }}
-                            className={`rounded-full border px-2.5 py-1 text-[10px] transition-colors ${
-                              isSelected
-                                ? "border-amber-500/50 bg-amber-500/15 text-amber-700"
-                                : "border-[var(--color-border)] bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)] hover:border-amber-500/40 hover:text-amber-600"
-                            }`}
-                            title={interaction.question}
-                          >
-                            {actorName} · {kindLabel}
-                          </button>
-                        );
-                      })}
-                      {selectedPendingMessageId !== NEW_MESSAGE_TARGET && (
-                        <button
-                          onClick={() => setSelectedPendingMessageId(NEW_MESSAGE_TARGET)}
-                          className="rounded-full border border-dashed border-[var(--color-border)] px-2.5 py-1 text-[10px] text-[var(--color-text-tertiary)] hover:border-[var(--color-accent)]/40 hover:text-[var(--color-accent)] transition-colors"
-                        >
-                          作为新消息发送
-                        </button>
-                      )}
-                    </div>
-                    {inputNotice && (
-                      <div className="px-1 text-[10px] text-amber-700">{inputNotice}</div>
+                    {currentRoomSessionId && (
+                      <button
+                        onClick={() => useRuntimeStateStore.getState().setForegroundSession("dialog", currentRoomSessionId)}
+                        className="rounded-full border border-sky-500/20 px-2.5 py-1 text-[10px] hover:border-sky-500/40 transition-colors"
+                      >
+                        返回本机
+                      </button>
                     )}
                   </div>
-                )}
+                ) : (
+                  <>
+                    <DialogContextStrip snapshot={contextSnapshot} />
 
-                {attachments.length > 0 && (
-                  <div className="flex max-h-[96px] flex-wrap gap-1.5 overflow-y-auto pr-1">
-                    {attachments.map((att) => (
-                      <div
-                        key={att.id}
-                        className="flex items-center gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1 text-[10px]"
-                        title={att.name}
-                      >
-                        {att.type === "image" && att.preview ? (
-                          <img src={att.preview} alt="" className="h-6 w-6 rounded-lg object-cover" />
-                        ) : att.type === "folder" ? (
-                          <FolderOpen className="w-3.5 h-3.5 text-[var(--color-text-tertiary)]" />
-                        ) : (
-                          <FileDown className="w-3.5 h-3.5 text-[var(--color-text-tertiary)]" />
-                        )}
-                        <span className="max-w-[140px] truncate text-[var(--color-text-secondary)]">{att.name}</span>
+                    {incomingHandoff?.sourceMode && (
+                      <AICenterHandoffCard
+                        handoff={incomingHandoff}
+                        dismissLabel="仅隐藏提示"
+                        onDismiss={() => setSourceHandoff(null)}
+                      />
+                    )}
+
+                    {focusedSessionTask && (
+                      <div className="flex flex-wrap items-center gap-2 rounded-xl border border-blue-500/15 bg-blue-500/10 px-3 py-1.5 text-[10px] text-blue-700">
+                        <Network className="w-3 h-3" />
+                        <span>
+                          当前正在聚焦子会话：
+                          {focusedSessionLabel}
+                        </span>
                         <button
-                          onClick={() => removeAttachment(att.id)}
-                          className="rounded-full p-1 text-[var(--color-text-tertiary)] hover:bg-red-500/10 hover:text-red-500 transition-colors"
+                          onClick={() => focusSpawnedSession(null)}
+                          className="ml-auto rounded-full border border-blue-500/20 px-2.5 py-1 text-[10px] hover:border-blue-500/40 transition-colors"
                         >
-                          <X className="w-3 h-3" />
+                          退出聚焦
                         </button>
                       </div>
-                    ))}
-                  </div>
-                )}
+                    )}
 
-                {inputNotice && pendingUserInteractions.length === 0 && (
-                  <div className="rounded-xl border border-amber-500/15 bg-amber-500/10 px-3 py-1.5 text-[10px] text-amber-700">
-                    {inputNotice}
-                  </div>
+                    {queuedFollowUps.length > 0 && (
+                      <DialogFollowUpDock
+                        items={queuedFollowUps}
+                        disabled={hasRunningActors || pendingUserInteractions.length > 0 || queuedFollowUpDispatchRef.current}
+                        onRunNext={() => {
+                          void handleRunNextQueuedFollowUp();
+                        }}
+                        onRemove={removeFollowUp}
+                        onClear={clearFollowUps}
+                      />
+                    )}
+
+                    {pendingUserInteractions.length > 0 && pendingAgentNames && (
+                      <div className="space-y-2">
+                        <div className="flex flex-wrap items-center gap-2 rounded-xl border border-amber-500/15 bg-amber-500/10 px-3 py-1.5 text-[10px] text-amber-700">
+                          <Reply className="w-3 h-3" />
+                          <span>
+                            {pendingAgentNames} 正在等待你的回复
+                            {pendingUserInteractions.length > 1 ? "，请先选择要回复的问题" : "，发送消息将回复当前问题"}
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {pendingUserInteractions.map((interaction) => {
+                            const actorName = actorById.get(interaction.fromActorId)?.roleName ?? interaction.fromActorId;
+                            const isSelected = selectedPendingMessageId === interaction.messageId;
+                            const kindLabel = interaction.type === "approval"
+                              ? "审批"
+                              : interaction.type === "clarification"
+                                ? "澄清"
+                                : "提问";
+                            return (
+                              <button
+                                key={interaction.messageId}
+                                onClick={() => {
+                                  setSelectedPendingMessageId(interaction.messageId);
+                                  setInputNotice(null);
+                                  inputRef.current?.focus();
+                                }}
+                                className={`rounded-full border px-2.5 py-1 text-[10px] transition-colors ${
+                                  isSelected
+                                    ? "border-amber-500/50 bg-amber-500/15 text-amber-700"
+                                    : "border-[var(--color-border)] bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)] hover:border-amber-500/40 hover:text-amber-600"
+                                }`}
+                                title={interaction.question}
+                              >
+                                {actorName} · {kindLabel}
+                              </button>
+                            );
+                          })}
+                          {selectedPendingMessageId !== NEW_MESSAGE_TARGET && (
+                            <button
+                              onClick={() => setSelectedPendingMessageId(NEW_MESSAGE_TARGET)}
+                              className="rounded-full border border-dashed border-[var(--color-border)] px-2.5 py-1 text-[10px] text-[var(--color-text-tertiary)] hover:border-[var(--color-accent)]/40 hover:text-[var(--color-accent)] transition-colors"
+                            >
+                              作为新消息发送
+                            </button>
+                          )}
+                        </div>
+                        {inputNotice && (
+                          <div className="px-1 text-[10px] text-amber-700">{inputNotice}</div>
+                        )}
+                      </div>
+                    )}
+
+                    {attachments.length > 0 && (
+                      <div className="flex max-h-[96px] flex-wrap gap-1.5 overflow-y-auto pr-1">
+                        {attachments.map((att) => (
+                          <div
+                            key={att.id}
+                            className="flex items-center gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1 text-[10px]"
+                            title={att.name}
+                          >
+                            {att.type === "image" && att.preview ? (
+                              <img src={att.preview} alt="" className="h-6 w-6 rounded-lg object-cover" />
+                            ) : att.type === "folder" ? (
+                              <FolderOpen className="w-3.5 h-3.5 text-[var(--color-text-tertiary)]" />
+                            ) : (
+                              <FileDown className="w-3.5 h-3.5 text-[var(--color-text-tertiary)]" />
+                            )}
+                            <span className="max-w-[140px] truncate text-[var(--color-text-secondary)]">{att.name}</span>
+                            <button
+                              onClick={() => removeAttachment(att.id)}
+                              className="rounded-full p-1 text-[var(--color-text-tertiary)] hover:bg-red-500/10 hover:text-red-500 transition-colors"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {inputNotice && pendingUserInteractions.length === 0 && (
+                      <div className="rounded-xl border border-amber-500/15 bg-amber-500/10 px-3 py-1.5 text-[10px] text-amber-700">
+                        {inputNotice}
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             )}
 
-            <div className="relative" ref={inputWrapRef}>
-              {showMention && (
-                <MentionPopup
-                  actors={actors}
-                  filter={mentionFilter}
-                  onSelect={handleMentionSelect}
-                  onClose={() => setShowMention(false)}
-                />
-              )}
-              <textarea
-                ref={inputRef}
-                className="w-full resize-none bg-transparent px-3 pt-2.5 pb-2 text-[14px] leading-6 focus:outline-none min-h-[56px] max-h-[160px]"
-                rows={1}
-                placeholder={selectedPendingMessageId === NEW_MESSAGE_TARGET
-                  ? "作为新消息发送，不会绑定到待回复问题..."
-                  : selectedPendingInteractionLabel
-                    ? `回复${selectedPendingInteractionLabel}...`
-                    : focusedSessionLabel
-                      ? `继续和 ${focusedSessionLabel} 的子会话...`
-                      : pendingUserInteractions.length > 0
-                        ? `有 ${pendingUserInteractions.length} 条待回复交互，先选择要回复的问题...`
-                        : "输入消息，Shift+Enter 换行，输入 @ 可指定发送给某个 Agent"}
-                value={input}
-                onChange={handleInputChange}
-                onKeyDown={handleKeyDown}
-                onPaste={handlePaste}
-                onBlur={() => setTimeout(() => setShowMention(false), 150)}
-              />
-            </div>
-
-            <div className="flex flex-col gap-2 border-t border-[var(--color-border)] px-3 py-1.5 sm:flex-row sm:items-center sm:justify-between">
-              <div className="flex flex-wrap items-center gap-2">
-                <AttachDropdown
-                  onFileClick={() => {
-                    if ("__TAURI_INTERNALS__" in window) {
-                      void handleFileSelectNative();
-                    } else {
-                      fileInputRef.current?.click();
-                    }
-                  }}
-                  onFolderClick={handleFolderSelect}
-                  accent="accent"
-                />
-                <RoutingModeButton value={routingMode} onChange={setRoutingMode} />
-                {activeDispatchInsight?.autoModeLabel && (
-                  <span
-                    className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-[10px] text-emerald-700"
-                    title={activeDispatchInsight.reasons.join(" · ")}
+            {activeDialogView !== "local" ? (
+              <div className="flex flex-wrap items-center gap-3 px-3 py-3">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[12px] font-medium text-[var(--color-text)]">
+                    当前正在查看 {getDialogViewLabel(activeDialogView)}
+                  </div>
+                  <div className="mt-0.5 text-[10px] text-[var(--color-text-secondary)]">
+                    不在渠道页里输入，返回本机后继续发送和协作。
+                  </div>
+                </div>
+                {currentRoomSessionId && (
+                  <button
+                    onClick={() => useRuntimeStateStore.getState().setForegroundSession("dialog", currentRoomSessionId)}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-sky-500/20 bg-sky-500/8 px-3 py-1.5 text-[11px] text-sky-700 hover:border-sky-500/35 hover:bg-sky-500/12 transition-colors"
                   >
-                    {draftDispatchInsight ? "自动" : "当前任务"} {activeDispatchInsight.autoModeLabel}
-                    {activeDispatchInsight.focusLabel
-                      ? ` · ${activeDispatchInsight.focusLabel}`
-                      : ""}
-                  </span>
+                    <Users className="h-3.5 w-3.5" />
+                    返回本机继续
+                  </button>
                 )}
-                {selectedPendingInteractionLabel ? (
-                  <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-2.5 py-1 text-[10px] text-amber-700">
-                    当前回复 {selectedPendingInteractionLabel}
-                  </span>
-                ) : focusedSessionTask ? (
-                  <span className="rounded-full border border-blue-500/20 bg-blue-500/10 px-2.5 py-1 text-[10px] text-blue-700">
-                    已聚焦子会话
-                  </span>
-                ) : coordinatorName ? (
-                  <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2.5 py-1 text-[10px] text-[var(--color-text-secondary)]">
-                    默认发给 {coordinatorName}
-                  </span>
-                ) : null}
               </div>
+            ) : (
+              <>
+                <div className="relative" ref={inputWrapRef}>
+                  {showMention && (
+                    <MentionPopup
+                      actors={actors}
+                      filter={mentionFilter}
+                      onSelect={handleMentionSelect}
+                      onClose={() => setShowMention(false)}
+                    />
+                  )}
+                  <textarea
+                    ref={inputRef}
+                    className="w-full resize-none bg-transparent px-3 pt-2.5 pb-2 text-[14px] leading-6 focus:outline-none min-h-[56px] max-h-[160px]"
+                    rows={1}
+                    placeholder={selectedPendingMessageId === NEW_MESSAGE_TARGET
+                      ? "作为新消息发送，不会绑定到待回复问题..."
+                      : selectedPendingInteractionLabel
+                        ? `回复${selectedPendingInteractionLabel}...`
+                        : focusedSessionLabel
+                          ? `继续和 ${focusedSessionLabel} 的子会话...`
+                          : pendingUserInteractions.length > 0
+                            ? `有 ${pendingUserInteractions.length} 条待回复交互，先选择要回复的问题...`
+                            : "输入消息，Shift+Enter 换行，输入 @ 可指定发送给某个 Agent"}
+                    value={input}
+                    onChange={handleInputChange}
+                    onKeyDown={handleKeyDown}
+                    onPaste={handlePaste}
+                    onBlur={() => setTimeout(() => setShowMention(false), 150)}
+                  />
+                </div>
 
-              <div className="flex items-center justify-between gap-3 sm:justify-end">
-                <span className="hidden text-[10px] text-[var(--color-text-tertiary)] sm:inline">
-                  Enter 发送 · Shift+Enter 换行
-                </span>
-                <button
-                  onClick={handleSend}
-                  disabled={!input.trim() && !hasAttachments}
-                  className="inline-flex h-9 items-center gap-2 rounded-xl bg-[var(--color-accent)] px-3.5 text-[11px] font-medium text-white hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  <Send className="w-3.5 h-3.5" />
-                  发送
-                </button>
-              </div>
-            </div>
+                <div className="flex flex-col gap-2 border-t border-[var(--color-border)] px-3 py-1.5 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <AttachDropdown
+                      onFileClick={() => {
+                        if ("__TAURI_INTERNALS__" in window) {
+                          void handleFileSelectNative();
+                        } else {
+                          fileInputRef.current?.click();
+                        }
+                      }}
+                      onFolderClick={handleFolderSelect}
+                      accent="accent"
+                    />
+                    <RoutingModeButton value={routingMode} onChange={setRoutingMode} />
+                    {activeDispatchInsight?.autoModeLabel && (
+                      <span
+                        className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-[10px] text-emerald-700"
+                        title={activeDispatchInsight.reasons.join(" · ")}
+                      >
+                        {draftDispatchInsight ? "自动" : "当前任务"} {activeDispatchInsight.autoModeLabel}
+                        {activeDispatchInsight.focusLabel
+                          ? ` · ${activeDispatchInsight.focusLabel}`
+                          : ""}
+                      </span>
+                    )}
+                    {selectedPendingInteractionLabel ? (
+                      <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-2.5 py-1 text-[10px] text-amber-700">
+                        当前回复 {selectedPendingInteractionLabel}
+                      </span>
+                    ) : focusedSessionTask ? (
+                      <span className="rounded-full border border-blue-500/20 bg-blue-500/10 px-2.5 py-1 text-[10px] text-blue-700">
+                        已聚焦子会话
+                      </span>
+                    ) : coordinatorName ? (
+                      <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2.5 py-1 text-[10px] text-[var(--color-text-secondary)]">
+                        默认发给 {coordinatorName}
+                      </span>
+                    ) : null}
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3 sm:justify-end">
+                    <span className="hidden text-[10px] text-[var(--color-text-tertiary)] sm:inline">
+                      Enter 发送 · Shift+Enter 换行
+                    </span>
+                    <button
+                      onClick={handleSend}
+                      disabled={!input.trim() && !hasAttachments}
+                      className="inline-flex h-9 items-center gap-2 rounded-xl bg-[var(--color-accent)] px-3.5 text-[11px] font-medium text-white hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      <Send className="w-3.5 h-3.5" />
+                      发送
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -5523,17 +6547,17 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
             className={`absolute inset-3 z-[35] flex flex-col overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-2xl md:inset-y-3 md:right-3 md:left-auto ${
               overlay === "graph"
                 ? "md:w-[min(680px,calc(100%-1rem))]"
-                : "md:w-[min(520px,calc(100%-1rem))]"
+                : "md:w-[min(760px,calc(100%-1rem))]"
             }`}
           >
             <div className="flex items-center justify-between gap-3 border-b border-[var(--color-border)] bg-[var(--color-bg)]/95 px-4 py-3 backdrop-blur-sm">
               <div>
                 <div className="text-[13px] font-medium text-[var(--color-text)]">
-                  {overlay === "tasks" ? "任务中心" : "协作图"}
+                  {overlay === "tasks" ? "定时任务" : "协作图"}
                 </div>
                 <div className="mt-1 text-[10px] text-[var(--color-text-secondary)]">
                   {overlay === "tasks"
-                    ? "查看全局任务执行情况，不打断当前对话流。"
+                    ? "统一查看和维护 Agent 创建的定时任务，不打断当前对话流。"
                     : "用于观察角色关系、消息流和子任务派发，本身不会改变对话结果。"}
                 </div>
               </div>

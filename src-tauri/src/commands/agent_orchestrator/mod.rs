@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
+use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_store::StoreExt;
 
 const TASK_STORE_FILE: &str = "agent-tasks.json";
@@ -50,11 +51,69 @@ impl AgentScheduleType {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskOriginMode {
+    Local,
+    Dingtalk,
+    Feishu,
+}
+
+impl AgentTaskOriginMode {
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "local" => Some(Self::Local),
+            "dingtalk" => Some(Self::Dingtalk),
+            "feishu" => Some(Self::Feishu),
+            _ => None,
+        }
+    }
+
+    fn default_label(&self) -> &'static str {
+        match self {
+            Self::Local => "本机",
+            Self::Dingtalk => "钉钉",
+            Self::Feishu => "飞书",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskTriggerAction {
+    RunAgent,
+    DeliverMessage,
+}
+
+impl AgentTaskTriggerAction {
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "run_agent" => Some(Self::RunAgent),
+            "deliver_message" => Some(Self::DeliverMessage),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentOrchestratorTask {
     pub id: String,
     pub session_id: Option<String>,
     pub query: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_action: Option<AgentTaskTriggerAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_mode: Option<AgentTaskOriginMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_channel_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_conversation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule_type: Option<AgentScheduleType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -151,7 +210,12 @@ fn save_tasks(app: &AppHandle, tasks: &[AgentOrchestratorTask]) -> Result<(), St
 }
 
 fn emit_status(app: &AppHandle, task: &AgentOrchestratorTask) {
-    let payload = AgentTaskStatusPatch {
+    let payload = build_status_patch(task);
+    let _ = app.emit("agent-task-status", &payload);
+}
+
+fn build_status_patch(task: &AgentOrchestratorTask) -> AgentTaskStatusPatch {
+    AgentTaskStatusPatch {
         task_id: task.id.clone(),
         status: task.status.clone(),
         retry_count: task.retry_count,
@@ -163,8 +227,7 @@ fn emit_status(app: &AppHandle, task: &AgentOrchestratorTask) {
         last_result_status: task.last_result_status.clone(),
         last_skip_reason: task.last_skip_reason.clone(),
         updated_at: task.updated_at,
-    };
-    let _ = app.emit("agent-task-status", &payload);
+    }
 }
 
 fn emit_skipped(app: &AppHandle, event: AgentTaskSkippedEvent) {
@@ -196,6 +259,17 @@ fn apply_task_action(current: AgentTaskStatus, action: TaskAction) -> AgentTaskS
         },
         TaskAction::Cancel => AgentTaskStatus::Cancelled,
     }
+}
+
+fn is_user_locked_status(status: &AgentTaskStatus) -> bool {
+    matches!(status, AgentTaskStatus::Paused | AgentTaskStatus::Cancelled)
+}
+
+fn should_preserve_user_locked_status(
+    current: &AgentTaskStatus,
+    incoming: &AgentTaskStatus,
+) -> bool {
+    is_user_locked_status(current) && !is_user_locked_status(incoming)
 }
 
 fn parse_once_timestamp(value: &str) -> Result<i64, String> {
@@ -501,6 +575,210 @@ fn collect_schedulable_tasks(tasks: &[AgentOrchestratorTask]) -> Vec<AgentOrches
         .collect()
 }
 
+fn is_task_active_for_dedupe(task: &AgentOrchestratorTask) -> bool {
+    let once_done = task.schedule_type == Some(AgentScheduleType::Once)
+        && matches!(
+            task.status,
+            AgentTaskStatus::Success | AgentTaskStatus::Cancelled
+        );
+
+    task.schedule_type.is_some()
+        && task
+            .schedule_value
+            .as_ref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        && !matches!(task.status, AgentTaskStatus::Paused | AgentTaskStatus::Cancelled)
+        && !once_done
+}
+
+fn unwrap_scheduled_query_title(query: &str) -> String {
+    let mut current = query.trim().to_string();
+    let marker = "」职责执行以下长期任务：";
+
+    loop {
+        let Some(rest) = current.strip_prefix("请按「") else {
+            break;
+        };
+        let Some(index) = rest.find(marker) else {
+            break;
+        };
+        let next = rest[(index + marker.len())..].trim();
+        if next.is_empty() || next == current {
+            break;
+        }
+        current = next.to_string();
+    }
+
+    current
+}
+
+fn strip_known_prefix<'a>(mut value: &'a str, tokens: &[&str]) -> &'a str {
+    loop {
+        let mut changed = false;
+        for token in tokens {
+            if let Some(rest) = value.strip_prefix(token) {
+                value = rest.trim_start();
+                changed = true;
+                break;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    value
+}
+
+fn normalize_task_subject_for_dedupe(query: &str) -> String {
+    let title = unwrap_scheduled_query_title(query);
+    let normalized = title.replace("\r\n", "\n");
+    let trimmed = normalized.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let stripped = strip_known_prefix(trimmed, &["请", "提醒", "通知", "一下", "用户", "我", "去", "要", "记得"]);
+    let separators = ['：', ':', '\n', '，', ',', '-', '（', '('];
+    let mut end = stripped.len();
+    for separator in separators {
+        if let Some(index) = stripped.find(separator) {
+            if index < end {
+                end = index;
+            }
+        }
+    }
+    for marker in ["任务要求", "示例格式"] {
+        if let Some(index) = stripped.find(marker) {
+            if index < end {
+                end = index;
+            }
+        }
+    }
+    let root = stripped[..end].trim();
+    let compact_root = root.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    if compact_root.is_empty() {
+        trimmed.split_whitespace().collect::<Vec<_>>().join(" ")
+    } else {
+        compact_root
+    }
+}
+
+fn build_task_dedupe_scope(task: &AgentOrchestratorTask) -> String {
+    let origin_channel_id = task.origin_channel_id.as_deref().unwrap_or("").trim();
+    let origin_conversation_id = task.origin_conversation_id.as_deref().unwrap_or("").trim();
+    if !origin_channel_id.is_empty() && !origin_conversation_id.is_empty() {
+        return format!("im:{}::{}", origin_channel_id, origin_conversation_id);
+    }
+
+    let origin_session_id = task.origin_session_id.as_deref().unwrap_or("").trim();
+    if !origin_session_id.is_empty() {
+        return format!("session:{}", origin_session_id);
+    }
+
+    let mode = task
+        .origin_mode
+        .as_ref()
+        .map(|value| match value {
+            AgentTaskOriginMode::Local => "local",
+            AgentTaskOriginMode::Dingtalk => "dingtalk",
+            AgentTaskOriginMode::Feishu => "feishu",
+        })
+        .unwrap_or("local");
+    let label = task.origin_label.as_deref().unwrap_or("").trim();
+    if label.is_empty() {
+        format!("mode:{}", mode)
+    } else {
+        format!("mode:{}::{}", mode, label)
+    }
+}
+
+fn build_task_dedupe_key(task: &AgentOrchestratorTask) -> Option<String> {
+    if !is_task_active_for_dedupe(task) {
+        return None;
+    }
+
+    let schedule_type = task.schedule_type.as_ref()?;
+    let schedule_value = task.schedule_value.as_deref()?.trim();
+    if schedule_value.is_empty() {
+        return None;
+    }
+
+    let schedule_type_label = match schedule_type {
+        AgentScheduleType::Once => "once",
+        AgentScheduleType::Interval => "interval",
+        AgentScheduleType::Cron => "cron",
+    };
+    let scope = build_task_dedupe_scope(task);
+    let subject = normalize_task_subject_for_dedupe(&task.query);
+    if subject.is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        "{}::{}::{}::{}",
+        scope, schedule_type_label, schedule_value, subject
+    ))
+}
+
+fn task_dedupe_priority(task: &AgentOrchestratorTask) -> (i32, i64, i64) {
+    let trigger_rank = match task.trigger_action {
+        Some(AgentTaskTriggerAction::DeliverMessage) => 2,
+        Some(AgentTaskTriggerAction::RunAgent) => 1,
+        None => 0,
+    };
+
+    (trigger_rank, task.created_at, task.updated_at)
+}
+
+fn repair_duplicate_scheduled_tasks(
+    tasks: &mut [AgentOrchestratorTask],
+    now: i64,
+) -> Vec<AgentOrchestratorTask> {
+    let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
+    for (index, task) in tasks.iter().enumerate() {
+        if let Some(key) = build_task_dedupe_key(task) {
+            groups.entry(key).or_default().push(index);
+        }
+    }
+
+    let mut changed = Vec::new();
+
+    for indices in groups.into_values() {
+        if indices.len() <= 1 {
+            continue;
+        }
+
+        let keep_index = indices
+            .iter()
+            .copied()
+            .max_by_key(|index| task_dedupe_priority(&tasks[*index]))
+            .unwrap_or(indices[0]);
+
+        for index in indices {
+            if index == keep_index {
+                continue;
+            }
+
+            let task = &mut tasks[index];
+            if task.status == AgentTaskStatus::Cancelled {
+                continue;
+            }
+
+            task.status = AgentTaskStatus::Cancelled;
+            task.next_run_at = None;
+            task.last_error = None;
+            task.last_result_status = Some(AgentTaskResultStatus::Skipped);
+            task.last_skip_reason = Some("cancelled_duplicate_schedule".to_string());
+            task.updated_at = now;
+            changed.push(task.clone());
+        }
+    }
+
+    changed
+}
+
 async fn trigger_scheduled_task(app: &AppHandle, task_id: &str) -> Result<(), String> {
     let mut tasks = load_tasks(app)?;
     let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) else {
@@ -634,8 +912,15 @@ pub async fn agent_task_create(
     app: AppHandle,
     query: String,
     session_id: Option<String>,
+    trigger_action: Option<String>,
+    delivery_text: Option<String>,
     schedule_type: Option<String>,
     schedule_value: Option<String>,
+    origin_mode: Option<String>,
+    origin_label: Option<String>,
+    origin_channel_id: Option<String>,
+    origin_conversation_id: Option<String>,
+    origin_session_id: Option<String>,
 ) -> Result<AgentOrchestratorTask, String> {
     let query = query.trim().to_string();
     if query.is_empty() {
@@ -650,6 +935,28 @@ pub async fn agent_task_create(
         ),
         None => None,
     };
+    let parsed_trigger_action = match trigger_action.as_deref() {
+        Some(raw) => Some(
+            AgentTaskTriggerAction::from_str(raw)
+                .ok_or_else(|| "不支持的 trigger_action，仅支持 run_agent/deliver_message".to_string())?,
+        ),
+        None => Some(AgentTaskTriggerAction::RunAgent),
+    };
+    let parsed_origin_mode = match origin_mode.as_deref() {
+        Some(raw) => Some(
+            AgentTaskOriginMode::from_str(raw)
+                .ok_or_else(|| "不支持的 origin_mode，仅支持 local/dingtalk/feishu".to_string())?,
+        ),
+        None => Some(AgentTaskOriginMode::Local),
+    };
+    let normalized_origin_label = origin_label
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            parsed_origin_mode
+                .as_ref()
+                .map(|mode| mode.default_label().to_string())
+        });
 
     let next_run_at = if let (Some(st), Some(sv)) = (&parsed_schedule_type, &schedule_value) {
         Some(compute_next_run_at(st, sv, now)?)
@@ -661,6 +968,21 @@ pub async fn agent_task_create(
         id: generate_id(),
         session_id,
         query,
+        trigger_action: parsed_trigger_action,
+        delivery_text: delivery_text
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        origin_mode: parsed_origin_mode,
+        origin_label: normalized_origin_label,
+        origin_channel_id: origin_channel_id
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        origin_conversation_id: origin_conversation_id
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        origin_session_id: origin_session_id
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
         schedule_type: parsed_schedule_type,
         schedule_value,
         status: AgentTaskStatus::Pending,
@@ -678,9 +1000,14 @@ pub async fn agent_task_create(
 
     let mut tasks = load_tasks(&app)?;
     tasks.push(task.clone());
+    let repaired = repair_duplicate_scheduled_tasks(&mut tasks, now);
     save_tasks(&app, &tasks)?;
 
     emit_status(&app, &task);
+    for repaired_task in &repaired {
+        stop_schedule_task(&repaired_task.id);
+        emit_status(&app, repaired_task);
+    }
 
     if task.schedule_type.is_some() {
         agent_scheduler_reload(app.clone(), task.id.clone()).await?;
@@ -698,6 +1025,7 @@ pub async fn agent_task_pause(app: AppHandle, task_id: String) -> Result<(), Str
 
     task.status = apply_task_action(task.status.clone(), TaskAction::Pause);
     task.updated_at = now_ms();
+    task.next_run_at = None;
 
     let snapshot = task.clone();
     save_tasks(&app, &tasks)?;
@@ -762,6 +1090,21 @@ pub async fn agent_task_cancel(app: AppHandle, task_id: String) -> Result<(), St
 }
 
 #[tauri::command]
+pub async fn agent_task_delete(app: AppHandle, task_id: String) -> Result<(), String> {
+    let mut tasks = load_tasks(&app)?;
+    let original_len = tasks.len();
+    tasks.retain(|task| task.id != task_id);
+
+    if tasks.len() == original_len {
+        return Err("任务不存在".to_string());
+    }
+
+    save_tasks(&app, &tasks)?;
+    stop_schedule_task(&task_id);
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn agent_task_set_status(
     app: AppHandle,
     task_id: String,
@@ -774,7 +1117,7 @@ pub async fn agent_task_set_status(
     last_duration_ms: Option<i64>,
     last_result_status: Option<String>,
     last_skip_reason: Option<String>,
-) -> Result<(), String> {
+) -> Result<AgentTaskStatusPatch, String> {
     let status = match status.as_str() {
         "pending" => AgentTaskStatus::Pending,
         "running" => AgentTaskStatus::Running,
@@ -799,12 +1142,18 @@ pub async fn agent_task_set_status(
     };
 
     let now = now_ms();
-    task.status = status;
-    if let Some(rc) = retry_count {
-        task.retry_count = rc;
+    let preserve_user_locked_status =
+        should_preserve_user_locked_status(&task.status, &status);
+
+    if !preserve_user_locked_status {
+        task.status = status;
+        if let Some(rc) = retry_count {
+            task.retry_count = rc;
+        }
+        task.next_run_at = next_run_at;
+        task.last_error = last_error;
     }
-    task.next_run_at = next_run_at;
-    task.last_error = last_error;
+
     if let Some(v) = last_started_at {
         task.last_started_at = Some(v);
     } else if task.status == AgentTaskStatus::Running {
@@ -837,6 +1186,7 @@ pub async fn agent_task_set_status(
     task.updated_at = now;
 
     let snapshot = task.clone();
+    let patch = build_status_patch(&snapshot);
     save_tasks(&app, &tasks)?;
     emit_status(&app, &snapshot);
 
@@ -844,7 +1194,7 @@ pub async fn agent_task_set_status(
         emit_retry(&app, &snapshot);
     }
 
-    Ok(())
+    Ok(patch)
 }
 
 #[tauri::command]
@@ -858,7 +1208,8 @@ pub async fn agent_scheduler_start(app: AppHandle) -> Result<String, String> {
     let mut tasks = load_tasks(&app)?;
     let now = now_ms();
     let recovered = recover_tasks_for_scheduler_start(&mut tasks, now);
-    if recovered {
+    let repaired = repair_duplicate_scheduled_tasks(&mut tasks, now);
+    if recovered || !repaired.is_empty() {
         save_tasks(&app, &tasks)?;
         for task in &tasks {
             emit_status(&app, task);
@@ -902,6 +1253,30 @@ pub async fn agent_scheduler_status() -> Result<Vec<String>, String> {
     Ok(guard.keys().cloned().collect())
 }
 
+#[tauri::command]
+pub async fn agent_show_notification(
+    app: AppHandle,
+    title: String,
+    body: String,
+) -> Result<(), String> {
+    let normalized_title = title.trim();
+    let normalized_body = body.trim();
+    if normalized_body.is_empty() {
+        return Ok(());
+    }
+    app.notification()
+        .builder()
+        .title(if normalized_title.is_empty() {
+            "51ToolBox"
+        } else {
+            normalized_title
+        })
+        .body(normalized_body)
+        .show()
+        .map_err(|e| format!("发送系统通知失败: {}", e))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -911,6 +1286,13 @@ mod tests {
             id: id.to_string(),
             session_id: None,
             query: "test".to_string(),
+            trigger_action: Some(AgentTaskTriggerAction::RunAgent),
+            delivery_text: None,
+            origin_mode: Some(AgentTaskOriginMode::Local),
+            origin_label: Some("本机".to_string()),
+            origin_channel_id: None,
+            origin_conversation_id: None,
+            origin_session_id: None,
             schedule_type: Some(AgentScheduleType::Interval),
             schedule_value: Some("1000".to_string()),
             status,
@@ -971,6 +1353,26 @@ mod tests {
             apply_task_action(AgentTaskStatus::Running, TaskAction::Cancel),
             AgentTaskStatus::Cancelled
         );
+    }
+
+    #[test]
+    fn user_locked_status_is_preserved_against_runtime_updates() {
+        assert!(should_preserve_user_locked_status(
+            &AgentTaskStatus::Paused,
+            &AgentTaskStatus::Success,
+        ));
+        assert!(should_preserve_user_locked_status(
+            &AgentTaskStatus::Cancelled,
+            &AgentTaskStatus::Pending,
+        ));
+        assert!(!should_preserve_user_locked_status(
+            &AgentTaskStatus::Paused,
+            &AgentTaskStatus::Paused,
+        ));
+        assert!(!should_preserve_user_locked_status(
+            &AgentTaskStatus::Pending,
+            &AgentTaskStatus::Success,
+        ));
     }
 
     #[test]

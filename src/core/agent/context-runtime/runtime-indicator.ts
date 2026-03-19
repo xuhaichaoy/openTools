@@ -54,8 +54,14 @@ function normalizeStatusLabel(status?: string): string {
   }
 }
 
-export function getRuntimeIndicatorMeta(mode: RuntimeSessionMode): RuntimeIndicatorMeta {
-  return MODE_META[mode];
+export function getRuntimeIndicatorMeta(
+  mode: RuntimeSessionMode,
+  displayLabel?: string,
+): RuntimeIndicatorMeta {
+  const meta = MODE_META[mode];
+  return displayLabel?.trim()
+    ? { ...meta, label: displayLabel.trim() }
+    : meta;
 }
 
 export function getRuntimeIndicatorStatus(record: RuntimeSessionRecord): string {
@@ -91,6 +97,10 @@ export function buildRuntimeIndicatorDetail(
   modeCount = 1,
 ): string {
   const status = getRuntimeIndicatorStatus(record);
+  const displayDetail = record.displayDetail?.trim();
+  if (displayDetail) {
+    return `${status} · ${displayDetail}`;
+  }
   if (record.mode === "cluster" && modeCount > 1) {
     return `${status} · ${modeCount} 个任务`;
   }

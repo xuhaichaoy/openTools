@@ -1023,6 +1023,50 @@ export class ReActAgent {
     return patterns.some((pattern) => text.includes(pattern));
   }
 
+  private hasToolNamed(toolName: string): boolean {
+    return this.tools.some((tool) => tool.name === toolName);
+  }
+
+  private canUseInteractiveAskUser(): boolean {
+    return this.hasToolNamed("ask_user");
+  }
+
+  private buildUserInteractionRules(): string {
+    if (this.canUseInteractiveAskUser()) {
+      return [
+        "- **严禁在回复文本中向用户提问**。需要用户输入时，必须调用 ask_user 工具（会弹出交互对话框让用户选择/输入）",
+        "- 以下情况必须调用 ask_user 工具：",
+        "  · 任务目标模糊（如\"帮我处理文件\"但未指定哪个文件）",
+        "  · 有多个合理方案需要用户选择（如保存格式、目标路径）",
+        "  · 操作不可逆且影响范围不明确（如批量删除、覆盖文件）",
+        "  · 缺少必要的参数（如收件人、密码、具体日期等）",
+        "- **ask_user 最多调用 2 次**。第一次调用时用 extra_questions 参数把所有相关问题合并到一次调用中",
+        "- 获得用户回答后立即执行任务，不要反复追问。如果用户回答不够详细，基于合理推断继续",
+      ].join("\n");
+    }
+
+    return [
+      "- 当前环境不提供 ask_user 交互弹窗。",
+      "- 如果信息不足，允许直接用自然语言向用户提一个简洁问题，并等待用户下一条消息。",
+      "- 一次只问最关键的一个问题，不要拼复杂表单，也不要暴露 ask_user、审批弹窗、计划模式等内部机制。",
+      "- 不要为了“是否继续执行”发起确认；能直接执行就继续，确实必须人工确认时明确说明需要回到本机确认。",
+    ].join("\n");
+  }
+
+  private buildTextModeUserInteractionRules(): string {
+    if (this.canUseInteractiveAskUser()) {
+      return [
+        "7. **严禁在 Final Answer 中向用户提问**。需要信息时必须用 ask_user 工具",
+        "8. ask_user **最多调用 2 次**，第一次就用 extra_questions 把所有问题问完",
+      ].join("\n");
+    }
+
+    return [
+      "7. 当前环境不提供 ask_user 交互弹窗；若缺少关键信息，可在 Final Answer 中直接向用户提出一个简洁问题",
+      "8. 不要为了“是否继续执行”向用户索要确认；能直接执行就继续，确实必须人工确认时明确说明需要回到本机确认",
+    ].join("\n");
+  }
+
   /**
    * 检查模型回答是否触发 guard rail 拦截。
    * 返回需要追加的纠正提示，null 表示通过。
@@ -1032,11 +1076,14 @@ export class ReActAgent {
     userInput: string,
     rejectedDangerousActionCount: number,
   ): string | null {
+    const canUseInteractiveAskUser = this.canUseInteractiveAskUser();
     if (
       (this.hasAnyToolAction() || this.hasSaveLikeIntent(userInput)) &&
       this.isLikelyExecutionConfirmation(answer)
     ) {
-      return "不要在文本里向用户请求“是否继续执行/请确认继续”。如需用户确认，必须调用 ask_user 工具并在拿到回答后继续执行。";
+      return canUseInteractiveAskUser
+        ? "不要在文本里向用户请求“是否继续执行/请确认继续”。如需用户确认，必须调用 ask_user 工具并在拿到回答后继续执行。"
+        : "不要在文本里向用户请求“是否继续执行/请确认继续”。若能直接执行，请继续执行；若确实必须人工确认，请明确说明需要回到本机确认。";
     }
     if (
       this.hasSaveLikeIntent(userInput) &&
@@ -1051,7 +1098,7 @@ export class ReActAgent {
     ) {
       return "不要假设用户已经拒绝授权。仅可基于真实工具调用结果给出结论；若未触发确认，请继续执行并给出结果。";
     }
-    if (!this.hasAnyToolAction() && this.isLikelyAskingUser(answer)) {
+    if (canUseInteractiveAskUser && !this.hasAnyToolAction() && this.isLikelyAskingUser(answer)) {
       return "严禁在回复文本中向用户提问。如果需要用户提供信息，必须调用 ask_user 工具（会弹出交互对话框）。请调用 ask_user 工具来提问，不要用文字回复提问。";
     }
     const toolCallInText = this.detectToolCallInText(answer);
@@ -1638,6 +1685,7 @@ export class ReActAgent {
 
   private buildSystemPrompt(userInput?: string): string {
     const s = this.buildSharedPromptSections(userInput);
+    const textModeUserInteractionRules = this.buildTextModeUserInteractionRules();
 
     const availableTools = this.getAvailableTools();
     const toolDescriptions = availableTools
@@ -1685,8 +1733,7 @@ Final Answer: [最终回答]
 4. 仔细分析 Observation 结果再决定下一步
 5. **工具返回成功结果后，禁止用相同参数再次调用同一工具**
 6. 如果信息不足但可推断，做合理假设并继续
-7. **严禁在 Final Answer 中向用户提问**。需要信息时必须用 ask_user 工具
-8. ask_user **最多调用 2 次**，第一次就用 extra_questions 把所有问题问完
+${textModeUserInteractionRules}
 9. **严禁在 Final Answer 中写工具调用**，必须用 Action/Action Input 格式真正调用
 10. **所有文件路径必须使用绝对路径**
 11. **sequential_thinking 仅用于梳理复杂逻辑，禁止连续调用超过 3 次**
@@ -1945,6 +1992,7 @@ ${s.taskStrategy}
 
   private buildFCSystemPrompt(userInput?: string): string {
     const s = this.buildSharedPromptSections(userInput);
+    const userInteractionRules = this.buildUserInteractionRules();
 
     const modeHint = this.mode === "plan"
       ? `\n\n## 当前模式: Plan（只读分析）\n你正处于 Plan 模式，只能使用只读工具（信息收集、搜索、读取）。不能执行修改操作。\n完成分析后调用 exit_plan_mode 切换到 Execute 模式再执行修改。`
@@ -1957,14 +2005,7 @@ ${s.taskStrategy}
 ## 核心行为
 - 收到任务后立即开始执行，尽量自主完成
 - 如果信息不足但可以合理推断，直接假设并继续
-- **严禁在回复文本中向用户提问**。需要用户输入时，必须调用 ask_user 工具（会弹出交互对话框让用户选择/输入）
-- 以下情况必须调用 ask_user 工具：
-  · 任务目标模糊（如"帮我处理文件"但未指定哪个文件）
-  · 有多个合理方案需要用户选择（如保存格式、目标路径）
-  · 操作不可逆且影响范围不明确（如批量删除、覆盖文件）
-  · 缺少必要的参数（如收件人、密码、具体日期等）
-- **ask_user 最多调用 2 次**。第一次调用时用 extra_questions 参数把所有相关问题合并到一次调用中
-- 获得用户回答后立即执行任务，不要反复追问。如果用户回答不够详细，基于合理推断继续
+${userInteractionRules}
 - 用中文回答
 
 ${s.modeSwitching}

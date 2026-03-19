@@ -26,9 +26,14 @@ import {
   type ChannelConfig,
   type ChannelType,
   type ChannelStatus,
+  loadSavedChannels,
+  saveSavedChannels,
+  type SavedChannelEntry,
 } from "@/core/channels";
-
-const CHANNEL_STORAGE_KEY = "mtools_im_channels";
+import {
+  useIMConversationRuntimeStore,
+  type IMConversationRuntimeStatus,
+} from "@/store/im-conversation-runtime-store";
 
 const STATUS_MAP: Record<ChannelStatus, { icon: React.ReactNode; label: string; color: string }> = {
   connected: { icon: <CheckCircle2 className="w-3 h-3" />, label: "已连接", color: "text-green-500" },
@@ -42,9 +47,12 @@ const CHANNEL_TYPE_LABELS: Record<ChannelType, string> = {
   feishu: "飞书",
 };
 
-interface SavedChannel {
-  config: ChannelConfig;
-}
+const IM_RUNTIME_STATUS_MAP: Record<IMConversationRuntimeStatus, { label: string; color: string }> = {
+  idle: { label: "空闲", color: "text-[var(--color-text-secondary)]" },
+  running: { label: "运行中", color: "text-blue-500" },
+  waiting: { label: "等待中", color: "text-amber-500" },
+  queued: { label: "排队中", color: "text-purple-500" },
+};
 
 interface ImCallbackServerStatus {
   running: boolean;
@@ -68,16 +76,17 @@ interface FeishuWsStatus {
   lastError?: string | null;
 }
 
-function loadSavedChannels(): SavedChannel[] {
+function formatRuntimeTime(timestamp: number): string {
+  if (!timestamp) return "--";
   try {
-    const raw = localStorage.getItem(CHANNEL_STORAGE_KEY);
-    if (!raw) return [];
-    return JSON.parse(raw) as SavedChannel[];
-  } catch { return []; }
-}
-
-function saveSavedChannels(channels: SavedChannel[]): void {
-  localStorage.setItem(CHANNEL_STORAGE_KEY, JSON.stringify(channels));
+    return new Date(timestamp).toLocaleTimeString("zh-CN", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  } catch {
+    return "--";
+  }
 }
 
 function canConnectChannel(params: {
@@ -111,7 +120,8 @@ function isDingTalkStreamMode(config: ChannelConfig): boolean {
 }
 
 const ChannelConfigPanel: React.FC = () => {
-  const [channels, setChannels] = useState<SavedChannel[]>([]);
+  const [channels, setChannels] = useState<SavedChannelEntry[]>([]);
+  const conversations = useIMConversationRuntimeStore((state) => state.conversations);
   const [statuses, setStatuses] = useState<Record<string, ChannelStatus>>({});
   const [callbackServer, setCallbackServer] = useState<ImCallbackServerStatus | null>(null);
   const [dingtalkStreams, setDingtalkStreams] = useState<Record<string, DingTalkStreamStatus | null>>({});
@@ -121,6 +131,8 @@ const ChannelConfigPanel: React.FC = () => {
   const [testChannelId, setTestChannelId] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [conversationActionKey, setConversationActionKey] = useState<string | null>(null);
+  const [conversationNotice, setConversationNotice] = useState<string | null>(null);
 
   // Form state for new channel
   const [formType, setFormType] = useState<ChannelType>("dingtalk");
@@ -130,6 +142,7 @@ const ChannelConfigPanel: React.FC = () => {
   const [formAppKey, setFormAppKey] = useState("");
   const [formAppSecret, setFormAppSecret] = useState("");
   const [formRobotCode, setFormRobotCode] = useState("");
+  const [formAutoConnect, setFormAutoConnect] = useState(true);
   const [showSecret, setShowSecret] = useState(false);
   const canSubmit = canConnectChannel({
     type: formType,
@@ -277,6 +290,7 @@ const ChannelConfigPanel: React.FC = () => {
       type: formType,
       name: formName.trim(),
       enabled: true,
+      autoConnect: formAutoConnect,
       platformConfig: {
         ...(formWebhookUrl.trim() ? { webhookUrl: formWebhookUrl.trim() } : {}),
         ...(formSecret ? { secret: formSecret.trim() } : {}),
@@ -296,7 +310,7 @@ const ChannelConfigPanel: React.FC = () => {
       const mgr = getChannelManager();
       await mgr.register(config);
 
-      const saved: SavedChannel = { config };
+      const saved: SavedChannelEntry = { config };
       const updated = [...channels, saved];
       setChannels(updated);
       saveSavedChannels(updated);
@@ -311,11 +325,12 @@ const ChannelConfigPanel: React.FC = () => {
       setFormAppKey("");
       setFormAppSecret("");
       setFormRobotCode("");
+      setFormAutoConnect(true);
       setShowAdd(false);
     } catch (err) {
       alert(`连接失败: ${err instanceof Error ? err.message : String(err)}`);
     }
-  }, [formType, formName, formWebhookUrl, formSecret, formAppKey, formAppSecret, formRobotCode, channels, refreshStatuses, refreshFeishuSockets, refreshDingTalkStreams]);
+  }, [formType, formName, formWebhookUrl, formSecret, formAppKey, formAppSecret, formRobotCode, formAutoConnect, channels, refreshStatuses, refreshFeishuSockets, refreshDingTalkStreams]);
 
   const handleRemove = useCallback(async (id: string) => {
     const mgr = getChannelManager();
@@ -328,18 +343,43 @@ const ChannelConfigPanel: React.FC = () => {
     void refreshDingTalkStreams();
   }, [channels, refreshStatuses, refreshFeishuSockets, refreshDingTalkStreams]);
 
-  const handleToggle = useCallback(async (ch: SavedChannel) => {
+  const handleToggle = useCallback(async (ch: SavedChannelEntry) => {
     const mgr = getChannelManager();
-    const current = statuses[ch.config.id];
-    if (current === "connected") {
-      await mgr.unregister(ch.config.id);
+    const nextConfig: ChannelConfig = {
+      ...ch.config,
+      enabled: ch.config.enabled === false,
+    };
+    if (nextConfig.enabled) {
+      await mgr.register(nextConfig);
     } else {
-      await mgr.register({ ...ch.config, enabled: true });
+      await mgr.unregister(ch.config.id);
     }
+    const updated = channels.map((entry) => (
+      entry.config.id === ch.config.id
+        ? { config: nextConfig }
+        : entry
+    ));
+    setChannels(updated);
+    saveSavedChannels(updated);
     refreshStatuses();
     void refreshFeishuSockets();
     void refreshDingTalkStreams();
-  }, [statuses, refreshStatuses, refreshFeishuSockets, refreshDingTalkStreams]);
+  }, [channels, refreshStatuses, refreshFeishuSockets, refreshDingTalkStreams]);
+
+  const handleAutoConnectToggle = useCallback((id: string, autoConnect: boolean) => {
+    const updated = channels.map((entry) => (
+      entry.config.id === id
+        ? {
+            config: {
+              ...entry.config,
+              autoConnect,
+            },
+          }
+        : entry
+    ));
+    setChannels(updated);
+    saveSavedChannels(updated);
+  }, [channels]);
 
   const handleSendTest = useCallback(async () => {
     if (!testChannelId || !testMsg.trim()) return;
@@ -355,6 +395,30 @@ const ChannelConfigPanel: React.FC = () => {
       setSending(false);
     }
   }, [testChannelId, testMsg]);
+
+  const handleConversationAction = useCallback((
+    action: "new" | "reset" | "stop" | "status",
+    channelId: string,
+    conversationId: string,
+  ) => {
+    const actionKey = `${action}:${channelId}:${conversationId}`;
+    setConversationActionKey(actionKey);
+    try {
+      const mgr = getChannelManager();
+      const message = action === "new"
+        ? mgr.createNewTopic(channelId, conversationId)
+        : action === "reset"
+          ? mgr.resetActiveConversation(channelId, conversationId)
+          : action === "stop"
+            ? mgr.stopActiveConversation(channelId, conversationId)
+            : mgr.getConversationStatusText(channelId, conversationId);
+      setConversationNotice(message);
+    } catch (err) {
+      alert(`会话操作失败: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setConversationActionKey(null);
+    }
+  }, []);
 
   return (
     <div className="flex flex-col h-full">
@@ -472,6 +536,15 @@ const ChannelConfigPanel: React.FC = () => {
           <p className="text-[10px] text-[var(--color-text-secondary)]">
             飞书优先使用 `App + WebSocket 长连接`，钉钉优先使用 `App + Stream 长连接`；发送仍可回退到 Webhook。
           </p>
+          <label className="flex items-center gap-2 text-[11px] text-[var(--color-text-secondary)]">
+            <input
+              type="checkbox"
+              checked={formAutoConnect}
+              onChange={(e) => setFormAutoConnect(e.target.checked)}
+              className="rounded border-[var(--color-border)]"
+            />
+            <span>启动时自动连接</span>
+          </label>
           <div className="flex items-center gap-2">
             <button
               onClick={handleAdd}
@@ -519,6 +592,151 @@ const ChannelConfigPanel: React.FC = () => {
         </p>
       </div>
 
+      <div className="px-4 py-3 border-b border-[var(--color-border)] bg-[var(--color-bg-secondary)]">
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <div className="text-xs font-medium">当前 IM 会话</div>
+            <div className="mt-0.5 text-[10px] text-[var(--color-text-secondary)]">
+              桌面端可直接管理外部会话；钉钉和飞书里仍支持 `/new`、`/reset`、`/stop`、`/status`。
+            </div>
+          </div>
+          <span className="text-[10px] text-[var(--color-text-secondary)] bg-[var(--color-bg)] px-1.5 py-0.5 rounded-full">
+            {conversations.length} 个
+          </span>
+        </div>
+
+        {conversationNotice && (
+          <div className="mt-2 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-2 text-[10px] leading-5 whitespace-pre-wrap text-[var(--color-text-secondary)]">
+            {conversationNotice}
+          </div>
+        )}
+
+        {conversations.length === 0 ? (
+          <div className="mt-3 rounded-md border border-dashed border-[var(--color-border)] px-3 py-4 text-center text-[10px] text-[var(--color-text-secondary)]">
+            暂无活跃 IM 会话。先在钉钉或飞书里给机器人发一条消息，桌面端会自动出现对应会话。
+          </div>
+        ) : (
+          <div className="mt-3 space-y-2 max-h-64 overflow-auto pr-1">
+            {conversations.map((conversation) => {
+              const channelEntry = channels.find((item) => item.config.id === conversation.channelId);
+              const statusInfo = IM_RUNTIME_STATUS_MAP[conversation.activeStatus];
+              const conversationTypeLabel = conversation.conversationType === "group" ? "群聊" : "私聊";
+              const currentActionKeyPrefix = `${conversation.channelId}:${conversation.conversationId}`;
+              return (
+                <div
+                  key={conversation.key}
+                  className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2.5"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="text-xs font-medium">
+                          {channelEntry?.config.name ?? conversation.displayLabel}
+                        </span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]">
+                          {CHANNEL_TYPE_LABELS[conversation.channelType]}
+                        </span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]">
+                          {conversationTypeLabel}
+                        </span>
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg-secondary)] ${statusInfo.color}`}>
+                          {statusInfo.label}
+                        </span>
+                      </div>
+                      <div className="mt-1 text-[10px] text-[var(--color-text-secondary)]">
+                        {conversation.displayDetail}
+                      </div>
+                    </div>
+                    <div className="text-right text-[10px] text-[var(--color-text-secondary)]">
+                      <div>更新时间</div>
+                      <div className="mt-0.5 font-mono">{formatRuntimeTime(conversation.updatedAt)}</div>
+                    </div>
+                  </div>
+
+                  <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[10px] text-[var(--color-text-secondary)]">
+                    <div>当前话题: <span className="font-mono">{conversation.activeTopicId}</span></div>
+                    <div>后台话题: {conversation.backgroundTopicCount}</div>
+                    <div>排队消息: {conversation.activeQueueLength}</div>
+                    <div>下一个序号: {conversation.nextTopicSeq}</div>
+                  </div>
+
+                  <div className="mt-2 space-y-1">
+                    {conversation.topics.length > 0 ? conversation.topics.map((topic) => {
+                      const topicStatus = IM_RUNTIME_STATUS_MAP[topic.status];
+                      const isActiveTopic = topic.topicId === conversation.activeTopicId;
+                      return (
+                        <div
+                          key={topic.runtimeKey}
+                          className={`rounded-md border px-2 py-1.5 text-[10px] ${
+                            isActiveTopic
+                              ? "border-blue-500/40 bg-blue-500/5"
+                              : "border-[var(--color-border)] bg-[var(--color-bg-secondary)]"
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span className="font-mono truncate">{topic.topicId}</span>
+                              {isActiveTopic && (
+                                <span className="px-1 py-0.5 rounded bg-blue-500/10 text-blue-500">当前</span>
+                              )}
+                              <span className={topicStatus.color}>{topicStatus.label}</span>
+                            </div>
+                            <div className="text-[var(--color-text-secondary)]">队列 {topic.queueLength}</div>
+                          </div>
+                          <div className="mt-1 font-mono text-[var(--color-text-secondary)] truncate">
+                            {topic.sessionId}
+                          </div>
+                          {topic.lastInputText && (
+                            <div className="mt-1 truncate text-[var(--color-text-secondary)]">
+                              {topic.lastInputText}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    }) : (
+                      <div className="rounded-md border border-dashed border-[var(--color-border)] px-2 py-2 text-[10px] text-[var(--color-text-secondary)]">
+                        当前会话还没有创建运行时。下一条消息会进入话题 <span className="font-mono">{conversation.activeTopicId}</span>。
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    <button
+                      onClick={() => handleConversationAction("new", conversation.channelId, conversation.conversationId)}
+                      disabled={conversationActionKey === `new:${currentActionKeyPrefix}`}
+                      className="px-2 py-1 rounded border border-[var(--color-border)] text-[10px] hover:bg-[var(--color-bg-secondary)] disabled:opacity-50"
+                    >
+                      新话题
+                    </button>
+                    <button
+                      onClick={() => handleConversationAction("reset", conversation.channelId, conversation.conversationId)}
+                      disabled={conversationActionKey === `reset:${currentActionKeyPrefix}`}
+                      className="px-2 py-1 rounded border border-[var(--color-border)] text-[10px] hover:bg-[var(--color-bg-secondary)] disabled:opacity-50"
+                    >
+                      重置
+                    </button>
+                    <button
+                      onClick={() => handleConversationAction("stop", conversation.channelId, conversation.conversationId)}
+                      disabled={conversationActionKey === `stop:${currentActionKeyPrefix}`}
+                      className="px-2 py-1 rounded border border-[var(--color-border)] text-[10px] hover:bg-[var(--color-bg-secondary)] disabled:opacity-50"
+                    >
+                      停止
+                    </button>
+                    <button
+                      onClick={() => handleConversationAction("status", conversation.channelId, conversation.conversationId)}
+                      disabled={conversationActionKey === `status:${currentActionKeyPrefix}`}
+                      className="px-2 py-1 rounded border border-[var(--color-border)] text-[10px] hover:bg-[var(--color-bg-secondary)] disabled:opacity-50"
+                    >
+                      状态
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
       {/* Channel list */}
       <div className="flex-1 overflow-auto px-4 py-2">
         {channels.length === 0 && !showAdd && (
@@ -535,6 +753,7 @@ const ChannelConfigPanel: React.FC = () => {
           const status = statuses[ch.config.id] ?? "disconnected";
           const statusInfo = STATUS_MAP[status];
           const isExpanded = expandedId === ch.config.id;
+          const isEnabled = ch.config.enabled !== false;
           const platformConfig = ch.config.platformConfig as {
             webhookUrl?: string;
             secret?: string;
@@ -606,10 +825,10 @@ const ChannelConfigPanel: React.FC = () => {
                 <div className="flex items-center gap-1">
                   <button
                     onClick={(e) => { e.stopPropagation(); handleToggle(ch); }}
-                    className={`p-1 rounded transition-colors ${status === "connected" ? "text-green-500 hover:bg-green-500/10" : "text-gray-400 hover:bg-gray-400/10"}`}
-                    title={status === "connected" ? "断开连接" : "连接"}
+                    className={`p-1 rounded transition-colors ${isEnabled ? "text-green-500 hover:bg-green-500/10" : "text-gray-400 hover:bg-gray-400/10"}`}
+                    title={isEnabled ? "停用通道" : "启用通道"}
                   >
-                    {status === "connected" ? <Power className="w-3.5 h-3.5" /> : <PowerOff className="w-3.5 h-3.5" />}
+                    {isEnabled ? <Power className="w-3.5 h-3.5" /> : <PowerOff className="w-3.5 h-3.5" />}
                   </button>
                   <button
                     onClick={(e) => { e.stopPropagation(); handleRemove(ch.config.id); }}
@@ -625,6 +844,15 @@ const ChannelConfigPanel: React.FC = () => {
               {isExpanded && (
                 <div className="px-3 pb-3 border-t border-[var(--color-border)] bg-[var(--color-bg-secondary)]">
                   <div className="mt-2 space-y-1.5 text-[10px] text-[var(--color-text-secondary)]">
+                    <label className="flex items-center gap-2 text-[11px]">
+                      <input
+                        type="checkbox"
+                        checked={ch.config.autoConnect !== false}
+                        onChange={(e) => handleAutoConnectToggle(ch.config.id, e.target.checked)}
+                        className="rounded border-[var(--color-border)]"
+                      />
+                      <span>启动时自动连接</span>
+                    </label>
                     {platformConfig.webhookUrl && (
                       <div>Webhook: <span className="font-mono">{String(platformConfig.webhookUrl || "").slice(0, 60)}…</span></div>
                     )}

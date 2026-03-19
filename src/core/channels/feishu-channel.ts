@@ -150,17 +150,21 @@ export class FeishuChannel implements IMChannel {
   }
 
   async startTypingForMessage(msg: ChannelIncomingMessage): Promise<void> {
-    if (!this._config?.appId || !this._config?.appSecret) return;
-    const conversationId = msg.conversationId.trim();
-    const messageId = msg.messageId.trim();
-    if (!conversationId || !messageId) return;
+    await this.startTypingIndicator(msg.conversationId, msg.messageId);
+  }
 
-    const existing = this._typingStates.get(conversationId);
-    if (existing?.messageId === messageId) {
+  async startTypingIndicator(conversationId: string, messageId: string): Promise<void> {
+    if (!this._config?.appId || !this._config?.appSecret) return;
+    const normalizedConversationId = conversationId.trim();
+    const normalizedMessageId = messageId.trim();
+    if (!normalizedConversationId || !normalizedMessageId) return;
+
+    const existing = this._typingStates.get(normalizedConversationId);
+    if (existing?.messageId === normalizedMessageId) {
       return;
     }
     if (existing) {
-      await this.stopTypingForConversation(conversationId);
+      await this.stopTypingForConversation(normalizedConversationId);
     }
 
     try {
@@ -168,13 +172,13 @@ export class FeishuChannel implements IMChannel {
         appId: this._config.appId,
         appSecret: this._config.appSecret,
         baseUrl: this._getOpenBaseUrl(),
-        messageId,
+        messageId: normalizedMessageId,
       });
       const timeoutId = setTimeout(() => {
-        void this.stopTypingForConversation(conversationId);
+        void this.stopTypingForConversation(normalizedConversationId);
       }, FEISHU_TYPING_TTL_MS);
-      this._typingStates.set(conversationId, {
-        messageId,
+      this._typingStates.set(normalizedConversationId, {
+        messageId: normalizedMessageId,
         reactionId: result.reactionId,
         timeoutId,
       });
@@ -203,6 +207,20 @@ export class FeishuChannel implements IMChannel {
     } catch (err) {
       log.warn("Failed to stop Feishu typing indicator", err);
     }
+  }
+
+  async stopTypingIfMessageMatches(
+    conversationId: string,
+    messageId?: string | null,
+  ): Promise<void> {
+    const normalizedConversationId = conversationId.trim();
+    const expectedMessageId = String(messageId || "").trim();
+    const state = this._typingStates.get(normalizedConversationId);
+    if (!state) return;
+    if (expectedMessageId && state.messageId !== expectedMessageId) {
+      return;
+    }
+    await this.stopTypingForConversation(normalizedConversationId);
   }
 
   private async _sendByApi(msg: ChannelOutgoingMessage): Promise<void> {

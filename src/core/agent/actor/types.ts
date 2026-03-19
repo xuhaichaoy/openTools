@@ -108,6 +108,20 @@ export interface DialogMessage extends InboxMessage {
   to?: string;
   /** UI 显示用的简短内容（附件摘要），完整上下文仍在 content 中发送给 Agent */
   _briefContent?: string;
+  /** 外部 IM 来源通道类型（用于 runtime 展示） */
+  externalChannelType?: "dingtalk" | "feishu";
+  /** 外部 IM 来源通道 ID（用于回投提醒等长期任务） */
+  externalChannelId?: string;
+  /** 外部 IM 来源会话 ID（用于回投提醒等长期任务） */
+  externalConversationId?: string;
+  /** 外部 IM 会话类型（用于 runtime 展示） */
+  externalConversationType?: "private" | "group";
+  /** 外部 IM runtime session id（用于恢复展示上下文） */
+  externalSessionId?: string;
+  /** runtime 展示层标签（避免直接泄露内部模式名） */
+  runtimeDisplayLabel?: string;
+  /** runtime 展示层附加说明（如来源平台 / 会话类型） */
+  runtimeDisplayDetail?: string;
   /** 对话协议中的消息类型 */
   kind?: DialogMessageKind;
   /** 与用户交互时的交互类型 */

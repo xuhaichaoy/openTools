@@ -1,4 +1,5 @@
 import { inferCodingExecutionProfile } from "@/core/agent/coding-profile";
+import type { AgentStep } from "@/plugins/builtin/SmartAgent/core/react-agent";
 import type { DialogArtifactRecord, SpawnedTaskRecord } from "./types";
 
 export interface SpawnedTaskResultValidation {
@@ -21,6 +22,24 @@ const RESULT_EVIDENCE_PATTERNS = [
   /已创建|已生成|已修改|已修复|文件|路径|产物|artifact|patch|diff|lint|test|验证/i,
 ];
 
+const SCHEDULE_MUTATION_TASK_PATTERNS = [
+  /(创建|新建|设置|添加|安排|开启|启动).*(提醒|定时任务|任务|闹钟)/iu,
+  /(取消|删除|暂停|恢复|修改|调整|改成).*(提醒|定时任务|任务|闹钟)/iu,
+  /每隔.+(?:秒|分钟|小时|天).*(提醒|通知)/iu,
+  /(?:\d+|一|二|三|四|五|六|七|八|九|十|两).*(?:秒|分钟|小时|天)后提醒/iu,
+];
+
+const SCHEDULE_MUTATION_SUCCESS_PATTERNS = [
+  /已创建|已新建|已设置|已添加|已取消|已暂停|已恢复/iu,
+  /任务\s*ID|首次提醒|下次执行|提醒计划|当前定时任务汇总|间隔[:：]/iu,
+];
+
+const SCHEDULE_MUTATION_TOOL_NAMES = new Set([
+  "schedule_task",
+  "cancel_schedule",
+  "native_reminder_create",
+]);
+
 function normalizeText(input?: string | null): string {
   return String(input ?? "").replace(/\s+/g, " ").trim();
 }
@@ -38,6 +57,21 @@ function requiresConcreteOutput(task: string): boolean {
   const inferredCoding = inferCodingExecutionProfile({ query: task });
   if (inferredCoding.profile.codingMode) return true;
   return CONCRETE_OUTPUT_PATTERNS.some((pattern) => pattern.test(task));
+}
+
+function isScheduleMutationTask(task: string): boolean {
+  return SCHEDULE_MUTATION_TASK_PATTERNS.some((pattern) => pattern.test(task));
+}
+
+function claimsScheduleMutationSuccess(result: string): boolean {
+  return SCHEDULE_MUTATION_SUCCESS_PATTERNS.some((pattern) => pattern.test(result));
+}
+
+function hasScheduleMutationToolEvidence(steps: readonly AgentStep[] | undefined): boolean {
+  if (!steps?.length) return false;
+  return steps.some(
+    (step) => step.type === "action" && Boolean(step.toolName) && SCHEDULE_MUTATION_TOOL_NAMES.has(step.toolName),
+  );
 }
 
 function collectRelatedArtifacts(
@@ -134,12 +168,26 @@ export function validateActorTaskResult(params: {
   startedAt?: number;
   completedAt?: number;
   artifacts?: readonly DialogArtifactRecord[];
+  steps?: readonly AgentStep[];
 }): SpawnedTaskResultValidation {
   const taskText = normalizeText(params.taskText);
   const resultText = normalizeText(params.result);
   const needsConcreteOutput = requiresConcreteOutput(taskText);
+  const scheduleMutationTask = isScheduleMutationTask(taskText);
 
   if (!needsConcreteOutput) {
+    if (
+      scheduleMutationTask
+      && resultText
+      && claimsScheduleMutationSuccess(resultText)
+      && !hasScheduleMutationToolEvidence(params.steps)
+    ) {
+      return {
+        accepted: false,
+        requiresConcreteOutput: false,
+        reason: "最终答复声称已经创建或更新了提醒/定时任务，但本轮没有对应的真实工具调用证据。",
+      };
+    }
     return {
       accepted: true,
       requiresConcreteOutput: false,
@@ -177,6 +225,18 @@ export function validateActorTaskResult(params: {
       accepted: false,
       requiresConcreteOutput: true,
       reason: "最终答复缺少文件、代码片段或验证证据，且内容过短，不像真正完成了产物型任务。",
+    };
+  }
+
+  if (
+    scheduleMutationTask
+    && claimsScheduleMutationSuccess(resultText)
+    && !hasScheduleMutationToolEvidence(params.steps)
+  ) {
+    return {
+      accepted: false,
+      requiresConcreteOutput: true,
+      reason: "最终答复声称已经创建或更新了提醒/定时任务，但本轮没有对应的真实工具调用证据。",
     };
   }
 

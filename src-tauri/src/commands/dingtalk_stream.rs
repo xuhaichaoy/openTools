@@ -3,6 +3,8 @@ use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::env;
+use std::error::Error as StdError;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -15,6 +17,8 @@ const DINGTALK_BOT_MESSAGE_TOPIC: &str = "/v1.0/im/bot/messages/get";
 const DINGTALK_STREAM_UA: &str = "51toolbox-dingtalk-stream/1.0.0";
 const INITIAL_CONNECT_TIMEOUT_SECS: u64 = 20;
 const RECONNECT_DELAY_SECS: u64 = 3;
+const DINGTALK_HTTP_CONNECT_TIMEOUT_SECS: u64 = 15;
+const DINGTALK_HTTP_REQUEST_TIMEOUT_SECS: u64 = 30;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -29,6 +33,11 @@ struct DingTalkStreamRuntime {
     state: String,
     last_error: Option<String>,
     stop_tx: Option<oneshot::Sender<()>>,
+}
+
+struct DingTalkHttpClientContext {
+    client: reqwest::Client,
+    network_mode: String,
 }
 
 impl DingTalkStreamRuntime {
@@ -237,8 +246,9 @@ pub async fn dingtalk_send_app_message(
     msg_param: String,
 ) -> Result<(), String> {
     let access_token = request_dingtalk_access_token(&client_id, &client_secret).await?;
-    let client = reqwest::Client::new();
-    let response = client
+    let client_ctx = build_dingtalk_http_client()?;
+    let response = client_ctx
+        .client
         .post("https://api.dingtalk.com/v1.0/robot/groupMessages/send")
         .header("x-acs-dingtalk-access-token", access_token)
         .json(&json!({
@@ -249,7 +259,9 @@ pub async fn dingtalk_send_app_message(
         }))
         .send()
         .await
-        .map_err(|e| format!("钉钉 API 发送失败: {}", e))?;
+        .map_err(|e| {
+            format_reqwest_transport_error("钉钉 API 发送失败", &e, &client_ctx.network_mode)
+        })?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -282,13 +294,16 @@ pub async fn dingtalk_send_app_message(
 
 #[tauri::command]
 pub async fn dingtalk_send_webhook_message(url: String, body: Value) -> Result<(), String> {
-    let client = reqwest::Client::new();
-    let response = client
+    let client_ctx = build_dingtalk_http_client()?;
+    let response = client_ctx
+        .client
         .post(url)
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("钉钉 Webhook 发送失败: {}", e))?;
+        .map_err(|e| {
+            format_reqwest_transport_error("钉钉 Webhook 发送失败", &e, &client_ctx.network_mode)
+        })?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -443,7 +458,7 @@ async fn open_stream_connection(
     client_id: &str,
     client_secret: &str,
 ) -> Result<StreamOpenResponse, String> {
-    let client = reqwest::Client::new();
+    let client_ctx = build_dingtalk_http_client()?;
     let request = StreamOpenRequest {
         client_id: client_id.to_string(),
         client_secret: client_secret.to_string(),
@@ -454,12 +469,20 @@ async fn open_stream_connection(
         ua: DINGTALK_STREAM_UA.to_string(),
     };
 
-    let response = client
+    log::info!(
+        "[DingTalk] opening stream registration with network={}",
+        client_ctx.network_mode
+    );
+
+    let response = client_ctx
+        .client
         .post(DINGTALK_STREAM_OPEN_URL)
         .json(&request)
         .send()
         .await
-        .map_err(|e| format!("钉钉 Stream 凭证注册失败: {}", e))?;
+        .map_err(|e| {
+            format_reqwest_transport_error("钉钉 Stream 凭证注册失败", &e, &client_ctx.network_mode)
+        })?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -481,13 +504,20 @@ async fn request_dingtalk_access_token(
     client_secret: &str,
 ) -> Result<String, String> {
     let params = [("appkey", client_id), ("appsecret", client_secret)];
-    let client = reqwest::Client::new();
-    let response = client
+    let client_ctx = build_dingtalk_http_client()?;
+    let response = client_ctx
+        .client
         .get("https://oapi.dingtalk.com/gettoken")
         .query(&params)
         .send()
         .await
-        .map_err(|e| format!("钉钉 access_token 请求失败: {}", e))?;
+        .map_err(|e| {
+            format_reqwest_transport_error(
+                "钉钉 access_token 请求失败",
+                &e,
+                &client_ctx.network_mode,
+            )
+        })?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -623,6 +653,105 @@ fn build_ack_message(message_id: &str, data: Value) -> String {
     serde_json::to_string(&ack).unwrap_or_else(|_| {
         "{\"code\":200,\"message\":\"OK\",\"headers\":{\"contentType\":\"application/json\",\"messageId\":\"\"},\"data\":\"{}\"}".to_string()
     })
+}
+
+fn build_dingtalk_http_client() -> Result<DingTalkHttpClientContext, String> {
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(DINGTALK_HTTP_CONNECT_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(DINGTALK_HTTP_REQUEST_TIMEOUT_SECS))
+        .no_gzip()
+        .no_brotli()
+        .no_deflate();
+
+    let mut proxy_notes = Vec::new();
+
+    if let Some(proxy_url) =
+        read_proxy_env(&["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"])
+    {
+        let proxy_label = redact_proxy_url(&proxy_url);
+        let proxy = reqwest::Proxy::https(&proxy_url)
+            .map_err(|e| format!("钉钉 HTTPS 代理配置无效({proxy_label}): {e}"))?;
+        builder = builder.proxy(proxy);
+        proxy_notes.push(format!("https={proxy_label}"));
+    }
+
+    if let Some(proxy_url) = read_proxy_env(&["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"])
+    {
+        let proxy_label = redact_proxy_url(&proxy_url);
+        let proxy = reqwest::Proxy::http(&proxy_url)
+            .map_err(|e| format!("钉钉 HTTP 代理配置无效({proxy_label}): {e}"))?;
+        builder = builder.proxy(proxy);
+        proxy_notes.push(format!("http={proxy_label}"));
+    }
+
+    let network_mode = if proxy_notes.is_empty() {
+        "system-proxy-or-direct".to_string()
+    } else {
+        format!("env+system-proxy [{}]", proxy_notes.join(", "))
+    };
+
+    let client = builder
+        .build()
+        .map_err(|e| format!("钉钉 HTTP 客户端初始化失败: {}", e))?;
+
+    Ok(DingTalkHttpClientContext {
+        client,
+        network_mode,
+    })
+}
+
+fn read_proxy_env(keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        env::var(key)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn redact_proxy_url(proxy_url: &str) -> String {
+    match url::Url::parse(proxy_url) {
+        Ok(mut url) => {
+            if !url.username().is_empty() {
+                let _ = url.set_username("****");
+            }
+            if url.password().is_some() {
+                let _ = url.set_password(Some("****"));
+            }
+            url.to_string()
+        }
+        Err(_) => "<invalid-proxy-url>".to_string(),
+    }
+}
+
+fn format_reqwest_transport_error(label: &str, err: &reqwest::Error, network_mode: &str) -> String {
+    let mut details = vec![format!("{label}: {err}")];
+
+    if let Some(url) = err.url() {
+        details.push(format!("url={url}"));
+    }
+    if err.is_timeout() {
+        details.push("kind=timeout".to_string());
+    }
+    if err.is_connect() {
+        details.push("kind=connect".to_string());
+    }
+
+    let mut source_chain = Vec::new();
+    let mut source = err.source();
+    while let Some(current) = source {
+        source_chain.push(current.to_string());
+        if source_chain.len() >= 6 {
+            break;
+        }
+        source = current.source();
+    }
+    if !source_chain.is_empty() {
+        details.push(format!("source={}", source_chain.join(" <- ")));
+    }
+
+    details.push(format!("network={network_mode}"));
+    details.join(" | ")
 }
 
 fn update_runtime_state(

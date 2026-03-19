@@ -2,7 +2,6 @@ import { useState, useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { LoginModal } from "@/components/auth/LoginModal";
 import { SyncManager } from "@/components/auth/SyncManager";
-import { ClusterFloatingIndicator } from "@/components/cluster/ClusterFloatingIndicator";
 import { GlobalAskUserDialog } from "@/components/global/GlobalAskUserDialog";
 import { GlobalConfirmDialog } from "@/components/global/GlobalConfirmDialog";
 import { GlobalClusterPlanApprovalDialog } from "@/components/global/GlobalClusterPlanApprovalDialog";
@@ -207,7 +206,6 @@ function MainApp() {
 
       <LoginModal />
       <SyncManager />
-      <ClusterFloatingIndicator />
       <GlobalConfirmDialog />
       <GlobalClusterPlanApprovalDialog />
       <GlobalAskUserDialog />

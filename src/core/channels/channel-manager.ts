@@ -19,8 +19,12 @@ import type {
 } from "./types";
 import { DingTalkChannel } from "./dingtalk-channel";
 import { FeishuChannel } from "./feishu-channel";
+import { ChannelProgressEmitter } from "./channel-progress-emitter";
+import { IMConversationRuntimeManager } from "./im-conversation-runtime-manager";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { createLogger } from "@/core/logger";
+import type { IMConversationSnapshot } from "@/store/im-conversation-runtime-store";
+import type { AgentScheduledTask } from "@/core/ai/types";
 
 const log = createLogger("ChannelManager");
 
@@ -38,6 +42,7 @@ export interface ChannelEntry {
 
 interface ConversationRoute {
   channelId: string;
+  conversationId: string;
   lastActiveAt: number;
   messageId?: string;
   replyWebhookUrl?: string;
@@ -46,16 +51,23 @@ interface ConversationRoute {
 }
 
 export class ChannelManager {
+  private static readonly CALLBACK_DEDUPE_TTL_MS = 15_000;
+
   private channels = new Map<string, ChannelEntry>();
   private _globalHandlers: MessageHandler[] = [];
   private _actorSystemUnsubscribe: (() => void) | null = null;
+  private _conversationRuntimeManager: IMConversationRuntimeManager | null = null;
+  private _progressEmitter: ChannelProgressEmitter | null = null;
+  private _callbackListenerUnlisten: UnlistenFn | null = null;
+  private _callbackListenerPromise: Promise<UnlistenFn> | null = null;
+  private _recentCallbackFingerprints = new Map<string, number>();
 
   /**
    * IM 会话路由表：将 IM conversationId 映射到来源通道，
    * 使回复能精准送回触发消息的 IM 会话。
    */
   private _conversationRoutes = new Map<
-    string, // conversationId
+    string, // channelId::conversationId
     ConversationRoute
   >();
 
@@ -63,55 +75,90 @@ export class ChannelManager {
   private static readonly ROUTE_TTL_MS = 30 * 60 * 1000;
 
   /**
-   * 将 ChannelManager 连接到 ActorSystem，实现 IM 消息自动路由到 Agent。
-   * 入站：IM 消息 → broadcastAndResolve → Agent 处理
-   * 出站：agent_result 事件 → 回发到来源通道的对应会话
+   * 将 ChannelManager 连接到 IM runtime 管理器。
+   * 入站：IM 消息 → 独立 runtime → Agent 处理
+   * 出站：runtime agent_result → 回发到来源通道的对应会话
    */
   connectToActorSystem(
-    actorSystem: {
-      broadcastAndResolve: (from: string, content: string, opts?: { _briefContent?: string; _imConversationId?: string }) => void;
+    _actorSystem: {
+      broadcastAndResolve: (
+        from: string,
+        content: string,
+        opts?: {
+          _briefContent?: string;
+          images?: string[];
+          externalChannelType?: ChannelType;
+          externalConversationType?: ChannelIncomingMessage["conversationType"];
+          runtimeDisplayLabel?: string;
+          runtimeDisplayDetail?: string;
+        },
+      ) => void;
       getAll: () => Array<{ id: string }>;
       onEvent: (handler: (event: Record<string, unknown>) => void) => () => void;
     },
   ): () => void {
-    const unsub = this.onMessage(async (msg) => {
-      const actors = actorSystem.getAll();
-      if (actors.length === 0) {
-        log.warn("No actor available to handle IM message");
-        return;
-      }
-
-      log.info(`Routing IM message to ActorSystem: "${msg.text.slice(0, 60)}" (conv=${msg.conversationId})`);
-      actorSystem.broadcastAndResolve("user", msg.text, {
-        _briefContent: `[IM:${msg.senderName}] ${msg.text.slice(0, 40)}`,
-        _imConversationId: msg.conversationId,
-      });
+    this._actorSystemUnsubscribe?.();
+    this._progressEmitter?.dispose();
+    this._conversationRuntimeManager?.dispose();
+    this._progressEmitter = new ChannelProgressEmitter({
+      sendProgress: async ({ channelId, conversationId, message }) => {
+        const route = this._getConversationRoute(channelId, conversationId);
+        if (!route) return;
+        await this._sendProgressThroughRoute(conversationId, route, message);
+      },
+      startFeishuTyping: async ({ channelId, conversationId, messageId }) => {
+        const entry = this.channels.get(channelId);
+        if (!(entry?.channel instanceof FeishuChannel)) return;
+        await entry.channel.startTypingIndicator(conversationId, messageId);
+      },
+    });
+    this._conversationRuntimeManager = new IMConversationRuntimeManager({
+      onReply: async ({ channelId, conversationId, text, messageId }) => {
+        const route = this._getConversationRoute(channelId, conversationId);
+        if (route) {
+          await this._sendReplyThroughRoute(conversationId, route, text, messageId);
+        }
+      },
+      onProgress: async (event) => {
+        await this._progressEmitter?.emit(event);
+      },
+      onFinalized: ({ channelId, conversationId, topicId }) => {
+        this._progressEmitter?.clear(channelId, conversationId, topicId);
+      },
     });
 
-    const eventUnsub = actorSystem.onEvent((event) => {
-      const dialogEvent = event as { kind?: string; content?: string };
-      if (dialogEvent.kind !== "agent_result") return;
-
-      const text = String(dialogEvent.content || "").slice(0, 2000);
-      if (!text.trim()) return;
-
-      // 回退：查找最近活跃的路由
-      const recentRoute = this._findMostRecentRoute();
-      if (recentRoute) {
-        void this._sendReplyThroughRoute(recentRoute.conversationId, recentRoute, text);
+    const unsub = this.onMessage(async (msg) => {
+      const sourceChannelId = this._findChannelIdForMessage(msg);
+      if (!sourceChannelId) {
+        log.warn(`No channel route available for IM conversation ${msg.conversationId}`);
+        return;
+      }
+      const sourceChannelType = this.channels.get(sourceChannelId)?.config.type;
+      if (!sourceChannelType) {
+        log.warn(`Channel ${sourceChannelId} has no runtime config for IM message`);
         return;
       }
 
-      // 最终回退：广播到所有已连接通道
-      for (const entry of this.channels.values()) {
-        if (entry.channel.status === "connected") {
-          entry.channel.send({ conversationId: "default", text })
-            .catch((err) => log.error("Failed to forward reply to IM", err));
+      log.info(`Routing IM message to isolated runtime: "${msg.text.slice(0, 60)}" (conv=${msg.conversationId})`);
+      const result = await this._conversationRuntimeManager?.handleIncoming({
+        channelId: sourceChannelId,
+        channelType: sourceChannelType,
+        msg,
+      });
+      if (result?.handled && result.replyText) {
+        const route = this._getConversationRoute(sourceChannelId, msg.conversationId);
+        if (route) {
+          await this._sendReplyThroughRoute(msg.conversationId, route, result.replyText);
         }
       }
     });
-
-    this._actorSystemUnsubscribe = () => { unsub(); eventUnsub(); };
+    this._actorSystemUnsubscribe = () => {
+      unsub();
+      this._progressEmitter?.dispose();
+      this._progressEmitter = null;
+      this._conversationRuntimeManager?.dispose();
+      this._conversationRuntimeManager = null;
+    };
 
     // 定期清理过期路由条目
     const cleanupInterval = setInterval(() => this._cleanupStaleRoutes(), ChannelManager.ROUTE_TTL_MS);
@@ -124,15 +171,12 @@ export class ChannelManager {
     return this._actorSystemUnsubscribe;
   }
 
-  /** 查找最近活跃的路由条目 */
-  private _findMostRecentRoute(): ({ conversationId: string } & ConversationRoute) | null {
-    let best: ({ conversationId: string } & ConversationRoute) | null = null;
-    for (const [conversationId, route] of this._conversationRoutes) {
-      if (!best || route.lastActiveAt > best.lastActiveAt) {
-        best = { ...route, conversationId };
-      }
-    }
-    return best;
+  private _buildConversationRouteKey(channelId: string, conversationId: string): string {
+    return `${channelId.trim()}::${conversationId.trim()}`;
+  }
+
+  private _getConversationRoute(channelId: string, conversationId: string): ConversationRoute | null {
+    return this._conversationRoutes.get(this._buildConversationRouteKey(channelId, conversationId)) ?? null;
   }
 
   /** 清理超时的路由条目 */
@@ -142,6 +186,14 @@ export class ChannelManager {
       if (now - route.lastActiveAt > ChannelManager.ROUTE_TTL_MS) {
         this._conversationRoutes.delete(conversationId);
       }
+    }
+  }
+
+  private _clearConversationRoutes(channelId: string, conversationIds: string[]): void {
+    if (conversationIds.length === 0) return;
+    for (const conversationId of conversationIds) {
+      this._progressEmitter?.clear(channelId, conversationId);
+      this._conversationRoutes.delete(this._buildConversationRouteKey(channelId, conversationId));
     }
   }
 
@@ -176,6 +228,13 @@ export class ChannelManager {
     const entry = this.channels.get(id);
     if (!entry) return;
 
+    this._conversationRuntimeManager?.disposeChannel(id);
+    for (const [key, route] of this._conversationRoutes) {
+      if (route.channelId === id) {
+        this._progressEmitter?.clear(id, route.conversationId);
+        this._conversationRoutes.delete(key);
+      }
+    }
     entry.unsubscribe?.();
     await entry.channel.disconnect();
     this.channels.delete(id);
@@ -195,6 +254,96 @@ export class ChannelManager {
       name: entry.config.name,
       status: entry.channel.getStatus(),
     }));
+  }
+
+  /** 获取当前活跃的 IM 会话快照 */
+  getConversationSnapshots(channelId?: string): IMConversationSnapshot[] {
+    const conversations = this._conversationRuntimeManager?.getConversationSnapshots() ?? [];
+    if (!channelId) return conversations;
+    return conversations.filter((item) => item.channelId === channelId);
+  }
+
+  /** 为指定会话创建新话题 */
+  createNewTopic(channelId: string, conversationId: string): string {
+    return this._conversationRuntimeManager?.createNewTopic(channelId, conversationId)
+      ?? "IM 会话管理器尚未初始化。";
+  }
+
+  /** 重置指定会话的当前话题 */
+  resetActiveConversation(channelId: string, conversationId: string): string {
+    return this._conversationRuntimeManager?.resetActiveTopic(channelId, conversationId)
+      ?? "IM 会话管理器尚未初始化。";
+  }
+
+  /** 停止指定会话的当前话题 */
+  stopActiveConversation(channelId: string, conversationId: string): string {
+    return this._conversationRuntimeManager?.stopActiveTopic(channelId, conversationId)
+      ?? "IM 会话管理器尚未初始化。";
+  }
+
+  /** 获取指定会话的状态摘要 */
+  getConversationStatusText(channelId: string, conversationId: string): string {
+    return this._conversationRuntimeManager?.getConversationStatus(channelId, conversationId)
+      ?? "IM 会话管理器尚未初始化。";
+  }
+
+  clearConversation(channelId: string, conversationId: string): number {
+    const removedConversationIds = this._conversationRuntimeManager?.clearConversation(channelId, conversationId) ?? [];
+    this._clearConversationRoutes(channelId, removedConversationIds);
+    return removedConversationIds.length;
+  }
+
+  clearChannelConversations(channelId: string, options?: { keepConversationId?: string | null }): number {
+    const removedConversationIds = this._conversationRuntimeManager?.clearChannelConversations(channelId, options) ?? [];
+    this._clearConversationRoutes(channelId, removedConversationIds);
+    return removedConversationIds.length;
+  }
+
+  async sendScheduledReminder(task: Pick<
+    AgentScheduledTask,
+    "origin_channel_id" | "origin_conversation_id" | "origin_mode" | "id"
+  >, text: string): Promise<boolean> {
+    const channelId = task.origin_channel_id?.trim() || "";
+    const conversationId = task.origin_conversation_id?.trim() || "";
+    const content = text.trim();
+    if (!channelId || !conversationId || !content) {
+      return false;
+    }
+
+    const route = this._getConversationRoute(channelId, conversationId);
+    const entry = this.channels.get(channelId);
+    let delivered = false;
+
+    if (entry?.channel && entry.channel.status === "connected") {
+      try {
+        await entry.channel.send({
+          conversationId,
+          ...(route?.messageId ? { replyToMessageId: route.messageId } : {}),
+          ...(route?.replyWebhookUrl ? { replyWebhookUrl: route.replyWebhookUrl } : {}),
+          ...(route?.replyWebhookExpiresAt ? { replyWebhookExpiresAt: route.replyWebhookExpiresAt } : {}),
+          ...(route?.robotCode ? { robotCode: route.robotCode } : {}),
+          text: content,
+        });
+        delivered = true;
+        if (route) {
+          route.lastActiveAt = Date.now();
+        }
+      } catch (err) {
+        log.error("Failed to send scheduled reminder through channel", err);
+      }
+    }
+
+    const recorded = this._conversationRuntimeManager?.recordOutboundReminder(
+      channelId,
+      conversationId,
+      content,
+      entry?.config.type ?? (task.origin_mode === "feishu"
+        ? "feishu"
+        : task.origin_mode === "dingtalk"
+          ? "dingtalk"
+          : undefined),
+    ) ?? false;
+    return delivered || recorded;
   }
 
   /** 向指定通道发送消息 */
@@ -225,6 +374,10 @@ export class ChannelManager {
 
   /** 断开所有通道 */
   async disconnectAll(): Promise<void> {
+    this._progressEmitter?.dispose();
+    this._progressEmitter = null;
+    this._conversationRuntimeManager?.dispose();
+    this._conversationRuntimeManager = null;
     for (const [id] of this.channels) {
       await this.unregister(id);
     }
@@ -257,12 +410,23 @@ export class ChannelManager {
    * 返回取消监听的函数。
    */
   async listenForCallbacks(): Promise<UnlistenFn> {
-    const unlisten = await listen<{ channelId: string; payload: Record<string, unknown> }>(
+    if (this._callbackListenerUnlisten) {
+      return this._callbackListenerUnlisten;
+    }
+    if (this._callbackListenerPromise) {
+      return this._callbackListenerPromise;
+    }
+
+    this._callbackListenerPromise = listen<{ channelId: string; payload: Record<string, unknown> }>(
       "im-channel-callback",
       async (event) => {
         const { channelId, payload } = event.payload;
         if (!channelId || !payload) {
           log.warn("Invalid im-channel-callback event", event.payload);
+          return;
+        }
+        if (this._isDuplicateCallback(channelId, payload)) {
+          log.info(`Ignoring duplicated IM callback for channel ${channelId}`);
           return;
         }
         log.info(`Received IM callback for channel ${channelId}`);
@@ -272,19 +436,39 @@ export class ChannelManager {
           log.error("Error handling IM callback", err);
         }
       },
-    );
-    log.info("Listening for IM channel callbacks (im-channel-callback)");
-    return unlisten;
+    ).then((unlisten) => {
+      this._callbackListenerUnlisten = () => {
+        unlisten();
+        if (this._callbackListenerUnlisten) {
+          this._callbackListenerUnlisten = null;
+        }
+        this._callbackListenerPromise = null;
+      };
+      this._callbackListenerPromise = null;
+      log.info("Listening for IM channel callbacks (im-channel-callback)");
+      return this._callbackListenerUnlisten;
+    }).catch((error) => {
+      this._callbackListenerPromise = null;
+      throw error;
+    });
+
+    return this._callbackListenerPromise;
   }
 
   // ── Private ──
 
   /** 根据 incoming message 查找来源 channel ID */
   private _findChannelIdForMessage(msg: ChannelIncomingMessage): string | null {
-    // 优先：检查路由表是否已有此 conversationId 的记录
-    const existing = this._conversationRoutes.get(msg.conversationId);
-    if (existing && this.channels.has(existing.channelId)) {
-      return existing.channelId;
+    let best: ConversationRoute | null = null;
+    for (const route of this._conversationRoutes.values()) {
+      if (route.conversationId !== msg.conversationId) continue;
+      if (!this.channels.has(route.channelId)) continue;
+      if (!best || route.lastActiveAt > best.lastActiveAt) {
+        best = route;
+      }
+    }
+    if (best) {
+      return best.channelId;
     }
 
     // 回退：从已连接通道中查找（单通道场景直接返回）
@@ -308,19 +492,15 @@ export class ChannelManager {
 
   private async _dispatchMessage(channelId: string, msg: ChannelIncomingMessage): Promise<string | void> {
     log.info(`Message from ${channelId}: [${msg.senderName}] ${msg.text.slice(0, 60)}`);
-    this._conversationRoutes.set(msg.conversationId, {
+    this._conversationRoutes.set(this._buildConversationRouteKey(channelId, msg.conversationId), {
       channelId,
+      conversationId: msg.conversationId,
       lastActiveAt: Date.now(),
       messageId: msg.messageId,
       replyWebhookUrl: msg.replyWebhookUrl,
       replyWebhookExpiresAt: msg.replyWebhookExpiresAt,
       robotCode: msg.robotCode,
     });
-
-    const entry = this.channels.get(channelId);
-    if (entry?.channel instanceof FeishuChannel) {
-      void entry.channel.startTypingForMessage(msg);
-    }
 
     for (const handler of this._globalHandlers) {
       try {
@@ -336,6 +516,7 @@ export class ChannelManager {
     conversationId: string,
     route: ConversationRoute,
     text: string,
+    expectedTypingMessageId?: string,
   ): Promise<void> {
     const entry = this.channels.get(route.channelId);
     if (!entry?.channel || entry.channel.status !== "connected") {
@@ -351,7 +532,7 @@ export class ChannelManager {
         robotCode: route.robotCode,
         text,
       });
-      const storedRoute = this._conversationRoutes.get(conversationId);
+      const storedRoute = this._getConversationRoute(route.channelId, conversationId);
       if (storedRoute) {
         storedRoute.lastActiveAt = Date.now();
       }
@@ -359,18 +540,113 @@ export class ChannelManager {
       log.error("Failed to forward reply to source IM channel", err);
     } finally {
       if (entry.channel instanceof FeishuChannel) {
-        await entry.channel.stopTypingForConversation(conversationId);
+        await entry.channel.stopTypingIfMessageMatches(
+          conversationId,
+          expectedTypingMessageId ?? route.messageId,
+        );
       }
     }
   }
+
+  private async _sendProgressThroughRoute(
+    conversationId: string,
+    route: ConversationRoute,
+    message: ChannelOutgoingMessage,
+  ): Promise<void> {
+    const entry = this.channels.get(route.channelId);
+    if (!entry?.channel || entry.channel.status !== "connected") {
+      return;
+    }
+
+    try {
+      await entry.channel.send({
+        conversationId,
+        replyToMessageId: route.messageId,
+        replyWebhookUrl: route.replyWebhookUrl,
+        replyWebhookExpiresAt: route.replyWebhookExpiresAt,
+        robotCode: route.robotCode,
+        ...message,
+      });
+    } catch (err) {
+      log.error("Failed to forward progress to source IM channel", err);
+    }
+  }
+
+  private _isDuplicateCallback(channelId: string, payload: Record<string, unknown>): boolean {
+    this._pruneRecentCallbackFingerprints();
+    const fingerprint = this._buildCallbackFingerprint(channelId, payload);
+    if (!fingerprint) return false;
+
+    const now = Date.now();
+    const recentAt = this._recentCallbackFingerprints.get(fingerprint);
+    if (typeof recentAt === "number" && now - recentAt <= ChannelManager.CALLBACK_DEDUPE_TTL_MS) {
+      return true;
+    }
+
+    this._recentCallbackFingerprints.set(fingerprint, now);
+    return false;
+  }
+
+  private _pruneRecentCallbackFingerprints(): void {
+    if (this._recentCallbackFingerprints.size <= 300) return;
+    const expireBefore = Date.now() - ChannelManager.CALLBACK_DEDUPE_TTL_MS;
+    for (const [fingerprint, timestamp] of this._recentCallbackFingerprints) {
+      if (timestamp < expireBefore) {
+        this._recentCallbackFingerprints.delete(fingerprint);
+      }
+    }
+  }
+
+  private _buildCallbackFingerprint(channelId: string, payload: Record<string, unknown>): string {
+    const pickString = (...values: unknown[]): string => {
+      for (const value of values) {
+        if (typeof value !== "string") continue;
+        const trimmed = value.trim();
+        if (trimmed) return trimmed;
+      }
+      return "";
+    };
+
+    const textPayload = payload.text;
+    const nestedText = textPayload && typeof textPayload === "object"
+      ? pickString((textPayload as Record<string, unknown>).content)
+      : "";
+    const messageId = pickString(payload.msgId, payload.messageId, payload.eventId);
+    const conversationId = pickString(
+      payload.conversationId,
+      payload.openConversationId,
+      payload.chatId,
+      payload.openThreadId,
+      payload.sessionWebhook,
+    );
+    const senderId = pickString(
+      payload.senderStaffId,
+      payload.senderId,
+      payload.openId,
+      payload.userId,
+      payload.senderNick,
+    );
+    const content = pickString(payload.content, payload.text, nestedText).replace(/\s+/g, " ").trim();
+
+    if (messageId) {
+      return `${channelId}::msg::${messageId}`;
+    }
+    if (!conversationId && !senderId && !content) {
+      return "";
+    }
+    return `${channelId}::fp::${conversationId}::${senderId}::${content.slice(0, 500)}`;
+  }
 }
 
-/** 全局单例 */
-let _instance: ChannelManager | null = null;
+declare global {
+  interface globalThis {
+    __MTOOLS_CHANNEL_MANAGER__?: ChannelManager;
+  }
+}
 
 export function getChannelManager(): ChannelManager {
-  if (!_instance) {
-    _instance = new ChannelManager();
+  if (!globalThis.__MTOOLS_CHANNEL_MANAGER__) {
+    globalThis.__MTOOLS_CHANNEL_MANAGER__ = new ChannelManager();
   }
-  return _instance;
+  return globalThis.__MTOOLS_CHANNEL_MANAGER__;
 }

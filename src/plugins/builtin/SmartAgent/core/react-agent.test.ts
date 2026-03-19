@@ -217,6 +217,27 @@ describe("ReActAgent FC compatibility cache", () => {
     expect(fcCalls).toBe(2);
   });
 
+  it("should allow direct user questions when ask_user tool is unavailable", async () => {
+    let fcCalls = 0;
+    const ai = createMockAI(async () => {
+      fcCalls += 1;
+      return {
+        type: "content",
+        content: "要继续接入飞书，我还缺少你的 appId。请直接发我 appId。",
+      };
+    });
+
+    const agent = new ReActAgent(ai, noopTools, {
+      maxIterations: 3,
+      fcCompatibilityKey: "external-im-direct-question-without-ask-user",
+    });
+
+    const answer = await agent.run("继续完成飞书渠道接入");
+
+    expect(answer).toContain("请直接发我 appId");
+    expect(fcCalls).toBe(1);
+  });
+
   it("should require write_file tool call before accepting file-save outcome claim", async () => {
     let fcCalls = 0;
     const ai = createMockAI(async () => {

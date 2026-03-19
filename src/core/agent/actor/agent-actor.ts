@@ -659,6 +659,7 @@ export class AgentActor {
         startedAt: task.startedAt,
         completedAt: Date.now(),
         artifacts: this.actorSystem?.getArtifactRecordsSnapshot(),
+        steps: task.steps,
       });
 
       let finalValidation = validateFinalResult(result);

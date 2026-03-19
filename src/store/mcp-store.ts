@@ -34,6 +34,52 @@ export interface McpPromptDef {
   arguments?: unknown[];
 }
 
+function hashToBase36(input: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+export function buildMcpServerAlias(serverId: string): string {
+  return `s${hashToBase36(serverId).slice(0, 6)}`;
+}
+
+export function buildMcpToolName(serverId: string, realToolName: string): string {
+  return `mcp_${buildMcpServerAlias(serverId)}_${realToolName}`;
+}
+
+export function parseMcpToolName(
+  toolName: string,
+  servers: readonly Pick<McpServerConfig, "id">[],
+): { serverId: string; realToolName: string } | null {
+  if (!toolName.startsWith("mcp_")) return null;
+
+  for (const server of servers) {
+    const legacyPrefix = `mcp_${server.id}_`;
+    if (toolName.startsWith(legacyPrefix)) {
+      return {
+        serverId: server.id,
+        realToolName: toolName.slice(legacyPrefix.length),
+      };
+    }
+  }
+
+  const parts = toolName.match(/^mcp_([^_]+)_(.+)$/);
+  if (!parts) return null;
+
+  const [, alias, realToolName] = parts;
+  const matchedServer = servers.find((server) => buildMcpServerAlias(server.id) === alias);
+  if (!matchedServer) return null;
+
+  return {
+    serverId: matchedServer.id,
+    realToolName,
+  };
+}
+
 interface McpState {
   servers: McpServerConfig[];
   serverStatus: Record<string, "online" | "offline" | "starting">;
@@ -106,12 +152,32 @@ export const useMcpStore = create<McpState>((set, get) => ({
     set({ isLoading: true });
     try {
       const configs = await invoke<McpServerConfig[]>("mcp_load_config");
-      set({ servers: configs });
-      for (const c of configs) {
-        if (c.enabled && c.auto_start) {
-          get().startServer(c.id).catch(() => {});
-        }
-      }
+      const statusEntries = await Promise.all(
+        configs.map(async (config) => {
+          if (!config.enabled) return [config.id, "offline"] as const;
+          try {
+            const running = await invoke<boolean>("mcp_get_server_status", { serverId: config.id });
+            return [config.id, running ? "online" : "offline"] as const;
+          } catch {
+            return [config.id, "offline"] as const;
+          }
+        }),
+      );
+      const serverStatus = Object.fromEntries(statusEntries) as Record<string, "online" | "offline" | "starting">;
+
+      set({ servers: configs, serverStatus });
+
+      await Promise.allSettled(
+        configs
+          .filter((config) => config.enabled && serverStatus[config.id] === "online")
+          .map((config) => get().refreshTools(config.id)),
+      );
+
+      await Promise.allSettled(
+        configs
+          .filter((config) => config.enabled && config.auto_start && serverStatus[config.id] !== "online")
+          .map((config) => get().startServer(config.id)),
+      );
     } catch (e) {
       handleError(e, { context: "加载 MCP 配置" });
     }
@@ -131,6 +197,13 @@ export const useMcpStore = create<McpState>((set, get) => ({
     const next = [...get().servers, config];
     set({ servers: next });
     await get().saveServers(next);
+    if (config.enabled && config.auto_start) {
+      try {
+        await get().startServer(config.id);
+      } catch (e) {
+        handleError(e, { context: `启动 MCP 服务器 (${config.name})`, silent: true });
+      }
+    }
   },
 
   removeServer: async (id) => {
@@ -168,6 +241,7 @@ export const useMcpStore = create<McpState>((set, get) => ({
   startServer: async (id) => {
     const server = get().servers.find((s) => s.id === id);
     if (!server) return;
+    if (get().serverStatus[id] === "online" || get().serverStatus[id] === "starting") return;
 
     set((s) => ({
       serverStatus: { ...s.serverStatus, [id]: "starting" },
@@ -187,7 +261,11 @@ export const useMcpStore = create<McpState>((set, get) => ({
           capabilities: {},
           clientInfo: { name: "51ToolBox", version: "0.1.0" },
         });
-        await sendRpc(id, "notifications/initialized");
+        // NOTE:
+        // `notifications/initialized` is a JSON-RPC notification, not a request.
+        // Our current bridge only supports request/response style RPC, so sending it
+        // here as a normal request will make compliant MCP servers reply with
+        // "Method not found" and falsely mark startup as failed.
       }
       // SSE servers don't need start — they're always available
 
@@ -300,7 +378,7 @@ export const useMcpStore = create<McpState>((set, get) => ({
       for (const tool of st) {
         tools.push({
           ...tool,
-          name: `mcp_${server.id}_${tool.name}`,
+          name: buildMcpToolName(server.id, tool.name),
           description: `[MCP:${server.name}] ${tool.description ?? ""}`,
         });
       }
@@ -311,18 +389,17 @@ export const useMcpStore = create<McpState>((set, get) => ({
 
 /**
  * 执行一个 MCP 工具调用（通过已注册的 MCP 服务器）。
- * toolName 格式: mcp_{serverId}_{realToolName}
+ * toolName 格式: mcp_{serverAlias}_{realToolName}
  */
 export async function executeMcpTool(
   toolName: string,
   argsJson: string,
 ): Promise<{ success: boolean; result: string }> {
-  const parts = toolName.match(/^mcp_([^_]+)_(.+)$/);
-  if (!parts) return { success: false, result: `无法解析工具名: ${toolName}` };
-
-  const serverId = parts[1];
-  const realToolName = parts[2];
   const mcpState = useMcpStore.getState();
+  const parsedTool = parseMcpToolName(toolName, mcpState.servers);
+  if (!parsedTool) return { success: false, result: `无法解析工具名: ${toolName}` };
+
+  const { serverId, realToolName } = parsedTool;
   const server = mcpState.servers.find((s) => s.id === serverId);
   if (!server) return { success: false, result: `MCP 服务器 ${serverId} 未找到` };
 

@@ -7,6 +7,8 @@ export interface RuntimeSessionRecord {
   mode: RuntimeSessionMode;
   sessionId: string;
   query: string;
+  displayLabel?: string;
+  displayDetail?: string;
   startedAt: number;
   updatedAt: number;
   workspaceRoot?: string;
@@ -25,6 +27,8 @@ interface RuntimeStateStore extends RuntimeStateSnapshot {
     mode: RuntimeSessionMode;
     sessionId: string;
     query: string;
+    displayLabel?: string;
+    displayDetail?: string;
     startedAt?: number;
     updatedAt?: number;
     workspaceRoot?: string;
@@ -34,7 +38,7 @@ interface RuntimeStateStore extends RuntimeStateSnapshot {
   patchSession: (
     mode: RuntimeSessionMode,
     sessionId: string,
-    patch: Partial<Pick<RuntimeSessionRecord, "query" | "workspaceRoot" | "waitingStage" | "status" | "updatedAt">>,
+    patch: Partial<Pick<RuntimeSessionRecord, "query" | "displayLabel" | "displayDetail" | "workspaceRoot" | "waitingStage" | "status" | "updatedAt">>,
   ) => void;
   removeSession: (mode: RuntimeSessionMode, sessionId: string) => void;
   clearMode: (mode: RuntimeSessionMode) => void;
@@ -111,6 +115,24 @@ function selectSnapshot(state: RuntimeStateStore): RuntimeStateSnapshot {
   };
 }
 
+function areRuntimeSessionRecordsEqual(
+  left: RuntimeSessionRecord,
+  right: RuntimeSessionRecord,
+  options?: { ignoreUpdatedAt?: boolean },
+): boolean {
+  return left.key === right.key
+    && left.mode === right.mode
+    && left.sessionId === right.sessionId
+    && left.query === right.query
+    && left.displayLabel === right.displayLabel
+    && left.displayDetail === right.displayDetail
+    && left.startedAt === right.startedAt
+    && left.workspaceRoot === right.workspaceRoot
+    && left.waitingStage === right.waitingStage
+    && left.status === right.status
+    && (options?.ignoreUpdatedAt ? true : left.updatedAt === right.updatedAt);
+}
+
 function pickLatestSessionId(
   sessions: Record<string, RuntimeSessionRecord>,
   mode: RuntimeSessionMode,
@@ -149,6 +171,12 @@ export const useRuntimeStateStore = create<RuntimeStateStore>((set, get) => ({
         ? {
             ...existing,
             query,
+            ...(typeof input.displayLabel === "string"
+              ? { displayLabel: input.displayLabel || undefined }
+              : {}),
+            ...(typeof input.displayDetail === "string"
+              ? { displayDetail: input.displayDetail || undefined }
+              : {}),
             updatedAt: now,
             ...(input.workspaceRoot ? { workspaceRoot: input.workspaceRoot } : {}),
             ...(typeof input.waitingStage === "string"
@@ -161,22 +189,38 @@ export const useRuntimeStateStore = create<RuntimeStateStore>((set, get) => ({
             mode: input.mode,
             sessionId,
             query,
+            ...(input.displayLabel ? { displayLabel: input.displayLabel } : {}),
+            ...(input.displayDetail ? { displayDetail: input.displayDetail } : {}),
             startedAt,
             updatedAt: now,
             ...(input.workspaceRoot ? { workspaceRoot: input.workspaceRoot } : {}),
             ...(input.waitingStage ? { waitingStage: input.waitingStage } : {}),
             status: input.status ?? "running",
           };
+      const foregroundSessionId = state.foregroundSessionIds[input.mode] ?? "";
+      if (
+        existing
+        && areRuntimeSessionRecordsEqual(existing, nextRecord, { ignoreUpdatedAt: true })
+        && foregroundSessionId === sessionId
+      ) {
+        created = existing;
+        return state;
+      }
       created = nextRecord;
+      const nextForegroundSessionIds = { ...state.foregroundSessionIds };
+      const hasValidForegroundSession = Boolean(
+        foregroundSessionId
+        && state.sessions[buildRuntimeSessionKey(input.mode, foregroundSessionId)],
+      );
+      if (!hasValidForegroundSession) {
+        nextForegroundSessionIds[input.mode] = sessionId;
+      }
       const nextState: RuntimeStateSnapshot = {
         sessions: {
           ...state.sessions,
           [key]: nextRecord,
         },
-        foregroundSessionIds: {
-          ...state.foregroundSessionIds,
-          [input.mode]: sessionId,
-        },
+        foregroundSessionIds: nextForegroundSessionIds,
         panelVisibility: state.panelVisibility,
       };
       persistRuntimeSnapshot(nextState);
@@ -194,6 +238,12 @@ export const useRuntimeStateStore = create<RuntimeStateStore>((set, get) => ({
       const nextRecord: RuntimeSessionRecord = {
         ...existing,
         ...(typeof patch.query === "string" ? { query: patch.query } : {}),
+        ...(typeof patch.displayLabel === "string"
+          ? { displayLabel: patch.displayLabel || undefined }
+          : {}),
+        ...(typeof patch.displayDetail === "string"
+          ? { displayDetail: patch.displayDetail || undefined }
+          : {}),
         ...(typeof patch.workspaceRoot === "string"
           ? { workspaceRoot: patch.workspaceRoot || undefined }
           : {}),
@@ -203,6 +253,9 @@ export const useRuntimeStateStore = create<RuntimeStateStore>((set, get) => ({
         ...(typeof patch.status === "string" ? { status: patch.status } : {}),
         updatedAt: patch.updatedAt ?? Date.now(),
       };
+      if (areRuntimeSessionRecordsEqual(existing, nextRecord, { ignoreUpdatedAt: true })) {
+        return state;
+      }
       const nextState: RuntimeStateSnapshot = {
         sessions: {
           ...state.sessions,
@@ -246,6 +299,9 @@ export const useRuntimeStateStore = create<RuntimeStateStore>((set, get) => ({
       const nextSessions = Object.fromEntries(
         Object.entries(state.sessions).filter(([, session]) => session.mode !== mode),
       ) as Record<string, RuntimeSessionRecord>;
+      if (Object.keys(nextSessions).length === Object.keys(state.sessions).length && !state.foregroundSessionIds[mode]) {
+        return state;
+      }
       const nextForeground = { ...state.foregroundSessionIds };
       delete nextForeground[mode];
       const nextState: RuntimeStateSnapshot = {
@@ -262,6 +318,10 @@ export const useRuntimeStateStore = create<RuntimeStateStore>((set, get) => ({
     set((state) => {
       const nextForeground = { ...state.foregroundSessionIds };
       const normalized = sessionId?.trim() || "";
+      const currentForeground = state.foregroundSessionIds[mode] ?? "";
+      if (currentForeground === normalized) {
+        return state;
+      }
       if (normalized) {
         nextForeground[mode] = normalized;
       } else {
@@ -279,6 +339,9 @@ export const useRuntimeStateStore = create<RuntimeStateStore>((set, get) => ({
 
   setPanelVisible: (mode, visible) => {
     set((state) => {
+      if ((state.panelVisibility[mode] ?? false) === visible) {
+        return state;
+      }
       const nextState: RuntimeStateSnapshot = {
         sessions: state.sessions,
         foregroundSessionIds: state.foregroundSessionIds,

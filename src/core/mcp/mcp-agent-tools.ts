@@ -1,5 +1,5 @@
 import type { AgentTool } from "@/plugins/builtin/SmartAgent/core/react-agent";
-import { executeMcpTool, useMcpStore } from "@/store/mcp-store";
+import { buildMcpToolName, executeMcpTool, useMcpStore } from "@/store/mcp-store";
 
 function buildToolParameters(inputSchema: Record<string, unknown> | undefined): Record<string, { type: string; description?: string }> | undefined {
   if (!inputSchema || typeof inputSchema !== "object") return undefined;
@@ -29,7 +29,7 @@ export function getEnabledMcpAgentTools(serverIds?: string[]): AgentTool[] {
 
     const defs = state.serverTools[server.id] ?? [];
     for (const def of defs) {
-      const toolName = `mcp_${server.id}_${def.name}`;
+      const toolName = buildMcpToolName(server.id, def.name);
       tools.push({
         name: toolName,
         description: def.description ?? `[MCP:${server.name}] ${def.name}`,

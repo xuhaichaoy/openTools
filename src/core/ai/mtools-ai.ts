@@ -18,7 +18,7 @@ import { useAIStore } from "@/store/ai-store";
 import type { AIConfig } from "@/core/ai/types";
 import { AssistantReasoningStreamNormalizer } from "@/core/ai/reasoning-tag-stream";
 import { resolveModelCapabilities } from "@/core/ai/model-capabilities";
-import { resolveRoutedConfig } from "@/core/ai/router";
+import { withRoutedAIConfig } from "@/core/ai/router";
 import { mergeStreamChunk } from "@/core/ai/stream-chunk-merge";
 import { createLogger } from "@/core/logger";
 import {
@@ -611,16 +611,16 @@ export function createMToolsAI(): MToolsAI {
                 effectiveConfig,
                 conversationId,
               );
-          const routed = await resolveRoutedConfig(effectiveConfig);
-
           kickWatchdog("invoke_start");
           aiLog.info("[chat] invoke ai_chat_stream", { conversationId });
-          await invoke("ai_chat_stream", {
-            messages: requestMessages,
-            config: routed,
-            conversationId,
-            skipTools: !!options.skipTools,
-          });
+          await withRoutedAIConfig(effectiveConfig, (routed) =>
+            invoke("ai_chat_stream", {
+              messages: requestMessages,
+              config: routed,
+              conversationId,
+              skipTools: !!options.skipTools,
+            }),
+          );
         })().catch((e) => {
           if (abortBridge.isAborted()) {
             safeReject(new Error("Aborted"));
@@ -802,15 +802,15 @@ export function createMToolsAI(): MToolsAI {
             effectiveConfig,
             conversationId,
           );
-          const routed = await resolveRoutedConfig(effectiveConfig);
-
           kickWatchdog("invoke_start");
           aiLog.info("[stream] invoke ai_chat_stream", { conversationId });
-          await invoke("ai_chat_stream", {
-            messages: enrichedMessages,
-            config: routed,
-            conversationId,
-          });
+          await withRoutedAIConfig(effectiveConfig, (routed) =>
+            invoke("ai_chat_stream", {
+              messages: enrichedMessages,
+              config: routed,
+              conversationId,
+            }),
+          );
         })().catch((e) => {
           if (abortBridge.isAborted()) {
             safeReject(new Error("Aborted"));
@@ -1466,37 +1466,38 @@ export function createMToolsAI(): MToolsAI {
           }));
 
           kickWatchdog("invoke_start");
-          const routed = await resolveRoutedConfig(config);
-          dump("invoke:resolved-config", {
-            model: routed.model,
-            protocol: routed.protocol ?? "openai",
-            source: routed.source ?? "own_key",
-            base_url: routed.base_url,
-            team_id: routed.team_id,
-            team_config_id: routed.team_config_id,
-            thinking_level: routed.thinking_level,
-            messageCount: finalMessages.length,
-            toolCount: options.tools?.length ?? 0,
-          });
-          logStreamWithToolsContext(
-            conversationId,
-            routed,
-            finalMessages,
-            options.tools?.length ?? 0,
-          );
-          dump("invoke:messages", finalMessages);
-          markStage("tools_ready", {
-            toolCount: options.tools?.length ?? 0,
-            messageCount: finalMessages.length,
-            model: routed.model,
-            source: routed.source ?? "own_key",
-          });
-          dump("invoke:tools", options.tools ?? []);
-          await invoke("ai_agent_stream", {
-            messages: finalMessages,
-            config: routed,
-            tools: options.tools,
-            conversationId,
+          await withRoutedAIConfig(config, async (routed) => {
+            dump("invoke:resolved-config", {
+              model: routed.model,
+              protocol: routed.protocol ?? "openai",
+              source: routed.source ?? "own_key",
+              base_url: routed.base_url,
+              team_id: routed.team_id,
+              team_config_id: routed.team_config_id,
+              thinking_level: routed.thinking_level,
+              messageCount: finalMessages.length,
+              toolCount: options.tools?.length ?? 0,
+            });
+            logStreamWithToolsContext(
+              conversationId,
+              routed,
+              finalMessages,
+              options.tools?.length ?? 0,
+            );
+            dump("invoke:messages", finalMessages);
+            markStage("tools_ready", {
+              toolCount: options.tools?.length ?? 0,
+              messageCount: finalMessages.length,
+              model: routed.model,
+              source: routed.source ?? "own_key",
+            });
+            dump("invoke:tools", options.tools ?? []);
+            return invoke("ai_agent_stream", {
+              messages: finalMessages,
+              config: routed,
+              tools: options.tools,
+              conversationId,
+            });
           });
           dump("invoke:dispatched");
         })().catch((e) => {
@@ -1541,84 +1542,88 @@ export async function chatDirect(options: {
   signal?: AbortSignal;
 }): Promise<{ content: string }> {
   const config = getConfig();
-  const routed = await resolveRoutedConfig({
-    ...config,
-    ...(options.model ? { model: options.model } : {}),
-    ...(options.temperature != null ? { temperature: options.temperature } : {}),
-  });
-  const isAnthropic = routed.protocol === "anthropic";
-  const url = isAnthropic
-    ? `${routed.base_url}/v1/messages`
-    : `${routed.base_url}/chat/completions`;
-  const supportsImageInput = resolveModelCapabilities(
-    routed.model,
-    routed.protocol,
-  ).supportsImageInput;
+  return withRoutedAIConfig(
+    {
+      ...config,
+      ...(options.model ? { model: options.model } : {}),
+      ...(options.temperature != null ? { temperature: options.temperature } : {}),
+    },
+    async (routed) => {
+      const isAnthropic = routed.protocol === "anthropic";
+      const url = isAnthropic
+        ? `${routed.base_url}/v1/messages`
+        : `${routed.base_url}/chat/completions`;
+      const supportsImageInput = resolveModelCapabilities(
+        routed.model,
+        routed.protocol,
+      ).supportsImageInput;
 
-  const systemMessages = options.messages
-    .filter((message) => message.role === "system" && message.content.trim())
-    .map((message) => message.content.trim());
-  const directMessages = await Promise.all(
-    options.messages
-      .filter((message) => !isAnthropic || message.role !== "system")
-      .map((message) => isAnthropic
-        ? buildDirectAnthropicMessage(message, supportsImageInput)
-        : buildDirectOpenAIMessage(message, supportsImageInput)),
-  );
-  const body: Record<string, unknown> = isAnthropic
-    ? {
-        model: routed.model,
-        messages: directMessages,
-        temperature: routed.temperature ?? 0.7,
-        max_tokens: routed.max_tokens ?? 2048,
-        ...(systemMessages.length > 0
-          ? { system: systemMessages.join("\n\n") }
-          : {}),
+      const systemMessages = options.messages
+        .filter((message) => message.role === "system" && message.content.trim())
+        .map((message) => message.content.trim());
+      const directMessages = await Promise.all(
+        options.messages
+          .filter((message) => !isAnthropic || message.role !== "system")
+          .map((message) => isAnthropic
+            ? buildDirectAnthropicMessage(message, supportsImageInput)
+            : buildDirectOpenAIMessage(message, supportsImageInput)),
+      );
+      const body: Record<string, unknown> = isAnthropic
+        ? {
+            model: routed.model,
+            messages: directMessages,
+            temperature: routed.temperature ?? 0.7,
+            max_tokens: routed.max_tokens ?? 2048,
+            ...(systemMessages.length > 0
+              ? { system: systemMessages.join("\n\n") }
+              : {}),
+          }
+        : {
+            model: routed.model,
+            messages: directMessages,
+            temperature: routed.temperature ?? 0.7,
+          };
+      if (!isAnthropic && routed.max_tokens) body.max_tokens = routed.max_tokens;
+      if (routed.team_id) {
+        body.team_id = routed.team_id;
+        if (routed.team_config_id) body.team_config_id = routed.team_config_id;
       }
-    : {
-        model: routed.model,
-        messages: directMessages,
-        temperature: routed.temperature ?? 0.7,
+
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
       };
-  if (!isAnthropic && routed.max_tokens) body.max_tokens = routed.max_tokens;
-  if (routed.team_id) {
-    body.team_id = routed.team_id;
-    if (routed.team_config_id) body.team_config_id = routed.team_config_id;
-  }
+      if (isAnthropic && routed.source === "own_key") {
+        headers["x-api-key"] = routed.api_key;
+        headers["anthropic-version"] = "2023-06-01";
+      } else {
+        headers.Authorization = `Bearer ${routed.api_key}`;
+      }
+      if (url.includes("coding.dashscope") || url.includes("coding-intl.dashscope")) {
+        headers["User-Agent"] = "openclaw/1.0.0";
+      }
 
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
-  if (isAnthropic && routed.source === "own_key") {
-    headers["x-api-key"] = routed.api_key;
-    headers["anthropic-version"] = "2023-06-01";
-  } else {
-    headers.Authorization = `Bearer ${routed.api_key}`;
-  }
-  if (url.includes("coding.dashscope") || url.includes("coding-intl.dashscope")) {
-    headers["User-Agent"] = "openclaw/1.0.0";
-  }
+      const resp = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal: options.signal,
+      });
 
-  const resp = await fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-    signal: options.signal,
-  });
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => "");
+        throw new Error(`API 错误 (HTTP ${resp.status}): ${text}`);
+      }
 
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => "");
-    throw new Error(`API 错误: ${text}`);
-  }
-
-  const data = await resp.json();
-  const content = isAnthropic
-    ? Array.isArray(data?.content)
-      ? data.content
-          .filter((part: { type?: string }) => part?.type === "text")
-          .map((part: { text?: string }) => part?.text ?? "")
-          .join("")
-      : ""
-    : data?.choices?.[0]?.message?.content ?? "";
-  return { content };
+      const data = await resp.json();
+      const content = isAnthropic
+        ? Array.isArray(data?.content)
+          ? data.content
+              .filter((part: { type?: string }) => part?.type === "text")
+              .map((part: { text?: string }) => part?.text ?? "")
+              .join("")
+          : ""
+        : data?.choices?.[0]?.message?.content ?? "";
+      return { content };
+    },
+  );
 }

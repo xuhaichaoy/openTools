@@ -8,6 +8,7 @@ import { createBuiltinAgentTools } from "@/plugins/builtin/SmartAgent/core/defau
 import { createActorCommunicationTools } from "../actor-tools";
 import { createActorMemoryTools } from "../actor-memory";
 import { createCodeSearchTools } from "@/core/code-index/code-search-tools";
+import { getEnabledMcpAgentTools } from "@/core/mcp/mcp-agent-tools";
 import { filterAssistantToolsByConfig } from "@/core/ai/assistant-config";
 import { useAIStore } from "@/store/ai-store";
 import type { ActorMiddleware, ActorRunContext } from "../actor-middleware";
@@ -57,6 +58,7 @@ export class ToolResolverMiddleware implements ActorMiddleware {
         codeSearchTools = createCodeSearchTools(projectId, ctx.workspace);
       } catch { /* code index not available */ }
     }
+    const mcpTools = getEnabledMcpAgentTools();
 
     const allTools = dedupeToolsByName([
       ...getPluginTools(),
@@ -65,6 +67,7 @@ export class ToolResolverMiddleware implements ActorMiddleware {
       ...commTools,
       ...memoryTools,
       ...codeSearchTools,
+      ...mcpTools,
     ]);
     ctx.tools = filterAssistantToolsByConfig(allTools, useAIStore.getState().config);
 

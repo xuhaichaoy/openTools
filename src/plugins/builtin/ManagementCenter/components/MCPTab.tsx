@@ -20,6 +20,7 @@ import {
   Edit2,
 } from "lucide-react";
 import { useMcpStore, type McpServerConfig } from "@/store/mcp-store";
+import { handleError } from "@/core/errors";
 import {
   MCP_MARKET_TEMPLATES,
   templateToConfig,
@@ -58,9 +59,12 @@ export function MCPTab() {
     setActionLoading((p) => ({ ...p, [id]: true }));
     try {
       await startServer(id);
-    } catch { /* handled by store */ }
+    } catch (error) {
+      const serverName = servers.find((item) => item.id === id)?.name ?? id;
+      handleError(error, { context: `启动 MCP 服务器 (${serverName})` });
+    }
     setActionLoading((p) => ({ ...p, [id]: false }));
-  }, [startServer]);
+  }, [startServer, servers]);
 
   const handleStop = useCallback(async (id: string) => {
     setActionLoading((p) => ({ ...p, [id]: true }));
@@ -83,6 +87,18 @@ export function MCPTab() {
     if (expandedId === id) setExpandedId(null);
   }, [removeServer, expandedId]);
 
+  const handleToggleMarket = useCallback(() => {
+    setShowMarket((v) => !v);
+  }, []);
+
+  const handleOpenMarket = useCallback(() => {
+    setShowMarket(true);
+  }, []);
+
+  const handleCloseMarket = useCallback(() => {
+    setShowMarket(false);
+  }, []);
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-10">
@@ -102,7 +118,7 @@ export function MCPTab() {
         </div>
         <div className="flex items-center gap-1.5">
           <button
-            onClick={() => setShowMarket((v) => !v)}
+            onClick={handleToggleMarket}
             className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--color-border)] text-xs font-medium hover:bg-[var(--color-bg-secondary)] transition-colors"
           >
             <Globe className="w-3 h-3" />
@@ -125,7 +141,7 @@ export function MCPTab() {
             await addServer(config);
             setShowMarket(false);
           }}
-          onClose={() => setShowMarket(false)}
+          onClose={handleCloseMarket}
         />
       )}
 
@@ -153,6 +169,26 @@ export function MCPTab() {
           </p>
           <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5 opacity-60">
             添加 MCP 服务器后，Agent 将自动获得新的工具能力
+          </p>
+          <div className="mt-3 flex items-center justify-center gap-2">
+            <button
+              onClick={handleOpenMarket}
+              className="inline-flex items-center gap-1 rounded-lg border border-[var(--color-border)] px-2.5 py-1.5 text-[11px] font-medium hover:bg-[var(--color-bg-secondary)] transition-colors"
+            >
+              <Globe className="w-3 h-3" />
+              打开市场
+            </button>
+            <button
+              onClick={() => { setShowAddForm(true); setEditingId(null); }}
+              className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[11px] font-medium text-white"
+              style={{ background: BRAND }}
+            >
+              <Plus className="w-3 h-3" />
+              手动添加
+            </button>
+          </div>
+          <p className="mt-2 text-[10px] text-[var(--color-text-secondary)] opacity-70">
+            推荐先从市场安装 `Chrome DevTools MCP`
           </p>
         </div>
       )}
@@ -662,6 +698,16 @@ function MCPMarketPanel({
                   <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
                     {template.description}
                   </p>
+                  {template.transport === "stdio" && template.command && (
+                    <p className="mt-1 truncate text-[10px] font-mono text-[var(--color-text-secondary)] opacity-80">
+                      {template.command} {(template.args ?? []).join(" ")}
+                    </p>
+                  )}
+                  {template.defaultAutoStart && (
+                    <p className="mt-1 text-[10px] text-emerald-600">
+                      安装后默认自动连接
+                    </p>
+                  )}
                   {template.envKeys && template.envKeys.length > 0 && (
                     <div className="mt-1 space-y-0.5">
                       {template.envKeys.map((key) => (

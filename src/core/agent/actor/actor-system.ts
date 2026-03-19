@@ -851,8 +851,9 @@ export class ActorSystem {
       mergeToolPolicies(spawner.toolPolicyConfig, inferredBoundary.toolPolicy),
       explicitToolPolicy,
     );
+    const spawnerBasePrompt = spawner.getSystemPromptOverride() ?? spawner.role.systemPrompt;
     const systemPromptBlocks = [
-      DIALOG_FULL_ROLE.systemPrompt,
+      spawnerBasePrompt || DIALOG_FULL_ROLE.systemPrompt,
       `你是由 ${spawner.role.name} 临时创建的专用子 Agent。`,
       opts.description ? `你的职责定位：${opts.description}` : "",
       opts.capabilities?.length ? `优先能力聚焦：${opts.capabilities.join("、")}` : "",
@@ -1250,7 +1251,21 @@ export class ActorSystem {
    * - 默认仅投递给协调者，其他 Agent 等待 spawn_task 激活
    * - 消息始终记录到 dialogHistory，UI 上所有人可见
    */
-  broadcastAndResolve(from: string, content: string, opts?: { _briefContent?: string; images?: string[] }): DialogMessage {
+  broadcastAndResolve(
+    from: string,
+    content: string,
+    opts?: {
+      _briefContent?: string;
+      images?: string[];
+      externalChannelType?: DialogMessage["externalChannelType"];
+      externalChannelId?: DialogMessage["externalChannelId"];
+      externalConversationId?: DialogMessage["externalConversationId"];
+      externalConversationType?: DialogMessage["externalConversationType"];
+      externalSessionId?: DialogMessage["externalSessionId"];
+      runtimeDisplayLabel?: string;
+      runtimeDisplayDetail?: string;
+    },
+  ): DialogMessage {
     const fromName = from === "user" ? "用户" : (this.actors.get(from)?.role.name ?? from);
     log(`broadcastAndResolve: ${fromName} → all, content="${content.slice(0, 80)}", pendingInteractions=${this.pendingInteractions.size}`);
 
@@ -1276,6 +1291,13 @@ export class ActorSystem {
       relatedRunId: activePending.length === 1
         ? this.dialogHistory.find((message) => message.id === activePending[0][0])?.relatedRunId
         : undefined,
+      ...(opts?.externalChannelType ? { externalChannelType: opts.externalChannelType } : {}),
+      ...(opts?.externalChannelId ? { externalChannelId: opts.externalChannelId } : {}),
+      ...(opts?.externalConversationId ? { externalConversationId: opts.externalConversationId } : {}),
+      ...(opts?.externalConversationType ? { externalConversationType: opts.externalConversationType } : {}),
+      ...(opts?.externalSessionId ? { externalSessionId: opts.externalSessionId } : {}),
+      ...(opts?.runtimeDisplayLabel ? { runtimeDisplayLabel: opts.runtimeDisplayLabel } : {}),
+      ...(opts?.runtimeDisplayDetail ? { runtimeDisplayDetail: opts.runtimeDisplayDetail } : {}),
       ...(from !== "user" ? this.buildDialogMessageRecallPatch(from) : {}),
       ...(opts?.images?.length ? { images: opts.images } : {}),
     };
@@ -2229,6 +2251,32 @@ export class ActorSystem {
       }
     }
 
+    return msg;
+  }
+
+  publishSystemNotice(
+    content: string,
+    opts?: {
+      from?: string;
+      relatedRunId?: string;
+    },
+  ): DialogMessage | null {
+    const trimmed = content.trim();
+    if (!trimmed) return null;
+
+    const msg: DialogMessage = {
+      id: generateId(),
+      from: opts?.from?.trim() || "system",
+      to: undefined,
+      content: trimmed,
+      timestamp: Date.now(),
+      priority: "normal",
+      kind: "system_notice",
+      ...(opts?.relatedRunId ? { relatedRunId: opts.relatedRunId } : {}),
+    };
+    this.dialogHistory.push(msg);
+    appendDialogMessage(this.sessionId, msg);
+    this.emitEvent(msg);
     return msg;
   }
 

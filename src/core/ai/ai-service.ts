@@ -34,14 +34,13 @@ export async function quickChat(
   messages: Array<{ role: string; content: string }>,
   options?: { config?: AIConfig },
 ): Promise<string> {
-  const { resolveRoutedConfig } = await import('./router')
+  const { withRoutedAIConfig } = await import('./router')
   const {
     buildAssistantMemoryPromptForQuery,
     queueAssistantMemoryCandidates,
   } = await import('./assistant-memory')
 
   const config = options?.config ?? (await getAIConfig())
-  const routedConfig = await resolveRoutedConfig(config)
 
   let enriched = [...messages]
 
@@ -61,7 +60,10 @@ export async function quickChat(
     }
   }
 
-  const result = await invoke<string>('ai_chat', { messages: enriched, config: routedConfig })
+  const result = await withRoutedAIConfig(
+    config,
+    (routedConfig) => invoke<string>('ai_chat', { messages: enriched, config: routedConfig }),
+  )
 
   if (config.enable_long_term_memory && config.enable_memory_auto_save) {
     const lastUser = [...messages].reverse().find((m) => m.role === 'user' && m.content?.trim())

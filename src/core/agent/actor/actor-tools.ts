@@ -1,6 +1,13 @@
 import type { AgentTool } from "@/plugins/builtin/SmartAgent/core/react-agent";
 import type { ActorSystem } from "./actor-system";
 import type { AgentCapability, SpawnedTaskRoleBoundary } from "./types";
+import type { AgentScheduledTask, AgentTaskOriginMode } from "@/core/ai/types";
+import {
+  buildPersistentScheduledQuery,
+  inferDirectScheduledDelivery,
+  isScheduledTaskActive,
+  parsePersistentScheduledQuery,
+} from "@/core/agent/scheduled-task-utils";
 import {
   readSessionHistory,
   getSessionSummary,
@@ -36,6 +43,98 @@ const KNOWN_ROLE_BOUNDARIES = new Set<SpawnedTaskRoleBoundary>([
   "reviewer",
   "validator",
 ]);
+
+async function invokeTauriCommand<T = unknown>(
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<T> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<T>(command, args);
+}
+
+function formatScheduledTaskTime(timestamp?: number | null): string | null {
+  if (typeof timestamp !== "number" || !Number.isFinite(timestamp) || timestamp <= 0) {
+    return null;
+  }
+  return new Date(timestamp).toLocaleString("zh-CN");
+}
+
+function getScheduledTaskOriginMode(task: Pick<AgentScheduledTask, "origin_mode">): AgentTaskOriginMode {
+  return task.origin_mode ?? "local";
+}
+
+function getScheduledTaskOriginLabel(task: Pick<AgentScheduledTask, "origin_mode" | "origin_label">): string {
+  if (task.origin_label?.trim()) return task.origin_label.trim();
+  switch (getScheduledTaskOriginMode(task)) {
+    case "dingtalk":
+      return "钉钉";
+    case "feishu":
+      return "飞书";
+    default:
+      return "本机";
+  }
+}
+
+function describeScheduledTaskState(task: AgentScheduledTask): string {
+  const active = isScheduledTaskActive(task);
+  if (task.status === "running") {
+    return "正在执行中";
+  }
+  if (active) {
+    if (task.last_result_status === "success") {
+      return "已启用，最近一次执行成功，仍会继续执行";
+    }
+    if (task.last_result_status === "error") {
+      return "已启用，最近一次执行失败，仍会继续重试后续调度";
+    }
+    if (task.last_result_status === "skipped") {
+      return `已启用，最近一次跳过${task.last_skip_reason ? `（${task.last_skip_reason}）` : ""}`;
+    }
+    return "已启用，等待下次执行";
+  }
+  if (task.status === "paused") return "已暂停";
+  if (task.status === "cancelled") return "已取消";
+  if (task.status === "success") return "已完成";
+  if (task.status === "error") return "已停止，最近一次执行失败";
+  return "等待执行";
+}
+
+function inferScheduledTaskOrigin(system: ActorSystem): {
+  originMode: AgentTaskOriginMode;
+  originLabel: string;
+  channelId?: string;
+  conversationId?: string;
+  sessionId?: string;
+} {
+  const latestUserMessage = [...system.getDialogHistory()]
+    .reverse()
+    .find((message) => message.from === "user" && message.kind === "user_input");
+
+  switch (latestUserMessage?.externalChannelType) {
+    case "dingtalk":
+      return {
+        originMode: "dingtalk",
+        originLabel: "钉钉",
+        channelId: latestUserMessage.externalChannelId,
+        conversationId: latestUserMessage.externalConversationId,
+        sessionId: latestUserMessage.externalSessionId ?? system.sessionId,
+      };
+    case "feishu":
+      return {
+        originMode: "feishu",
+        originLabel: "飞书",
+        channelId: latestUserMessage.externalChannelId,
+        conversationId: latestUserMessage.externalConversationId,
+        sessionId: latestUserMessage.externalSessionId ?? system.sessionId,
+      };
+    default:
+      return {
+        originMode: "local",
+        originLabel: "本机",
+        sessionId: system.sessionId,
+      };
+  }
+}
 
 /**
  * 创建 Actor 间通信工具集（对标 OpenClaw sessions_spawn / subagents / sessions_send）。
@@ -487,37 +586,95 @@ export function createActorCommunicationTools(
     },
     readonly: false,
     execute: async (params) => {
+      const coordinatorId = system.getCoordinatorId();
+      if (coordinatorId && actorId !== coordinatorId) {
+        return {
+          error: `schedule_task 只能由协调者调用；请将定时任务方案回传给 ${getActorName(coordinatorId)} 统一创建。`,
+          coordinator: getActorName(coordinatorId),
+          delegated: true,
+        };
+      }
+
       const targetInput = String(params.target_agent);
       const target = resolveTarget(targetInput);
-      const task = String(params.task);
+      const targetName = getActorName(target);
+      const task = String(params.task).trim();
       const delaySec = Number(params.delay_seconds);
       const type = params.type ? String(params.type) : "once";
       const maxRuns = params.max_runs ? Number(params.max_runs) : undefined;
-      const cron = system.cron;
 
+      if (!task) {
+        return { error: "task 不能为空" };
+      }
       if (isNaN(delaySec) || delaySec <= 0) {
         return { error: "delay_seconds 必须是正数" };
       }
 
       const delayMs = delaySec * 1000;
-      let result;
-      if (type === "interval") {
-        result = cron.scheduleInterval(target, task, delayMs, maxRuns);
-      } else {
-        result = cron.scheduleOnce(target, task, delayMs);
+      const normalizedType = type === "interval" ? "interval" : "once";
+      const { originMode, originLabel, channelId, conversationId, sessionId } = inferScheduledTaskOrigin(system);
+      const directDelivery = inferDirectScheduledDelivery(task);
+
+      try {
+        const scheduledTask = await invokeTauriCommand<AgentScheduledTask>("agent_task_create", {
+          query: buildPersistentScheduledQuery(targetName, task),
+          sessionId: null,
+          triggerAction: directDelivery ? "deliver_message" : "run_agent",
+          ...(directDelivery?.text ? { deliveryText: directDelivery.text } : {}),
+          scheduleType: normalizedType,
+          scheduleValue: normalizedType === "interval"
+            ? String(delayMs)
+            : String(Date.now() + delayMs),
+          originMode,
+          originLabel,
+          ...(channelId ? { originChannelId: channelId } : {}),
+          ...(conversationId ? { originConversationId: conversationId } : {}),
+          ...(sessionId ? { originSessionId: sessionId } : {}),
+        });
+        try {
+          const { useAgentStore } = await import("@/store/agent-store");
+          const store = useAgentStore.getState();
+          store.upsertScheduledTask(scheduledTask);
+          void store.loadScheduledTasks();
+        } catch {
+          // ignore store sync errors; backend task is already created
+        }
+        return {
+          scheduled: true,
+          jobId: scheduledTask.id,
+          target: targetName,
+          type: scheduledTask.schedule_type ?? normalizedType,
+          delaySeconds: delayMs / 1000,
+          nextRunAt: formatScheduledTaskTime(scheduledTask.next_run_at),
+          maxRuns: maxRuns ?? "无限",
+          persistent: true,
+          note: normalizedType === "interval" && typeof maxRuns === "number"
+            ? "长期任务中心当前未接入 max_runs，已按持续重复任务创建。"
+            : "已创建为可在长期任务中心查看的持久化任务。",
+        };
+      } catch {
+        const cron = system.cron;
+        let result;
+        if (normalizedType === "interval") {
+          result = cron.scheduleInterval(target, task, delayMs, maxRuns);
+        } else {
+          result = cron.scheduleOnce(target, task, delayMs);
+        }
+
+        if ("error" in result) return result;
+
+        return {
+          scheduled: true,
+          jobId: result.id,
+          target: targetName,
+          type: result.type,
+          delaySeconds: result.delayMs / 1000,
+          nextRunAt: new Date(result.nextRunAt).toLocaleTimeString("zh-CN"),
+          maxRuns: result.maxRuns ?? "无限",
+          persistent: false,
+          note: "当前环境未启用长期任务后端，已回退到本房间临时定时任务。",
+        };
       }
-
-      if ("error" in result) return result;
-
-      return {
-        scheduled: true,
-        jobId: result.id,
-        target: getActorName(target),
-        type: result.type,
-        delaySeconds: result.delayMs / 1000,
-        nextRunAt: new Date(result.nextRunAt).toLocaleTimeString("zh-CN"),
-        maxRuns: result.maxRuns ?? "无限",
-      };
     },
   });
 
@@ -534,24 +691,80 @@ export function createActorCommunicationTools(
     },
     readonly: true,
     execute: async (params) => {
-      const cron = system.cron;
       const activeOnly = String(params.active_only) === "true";
-      const jobs = activeOnly ? cron.listActive() : cron.list();
+      try {
+        const tasks = await invokeTauriCommand<AgentScheduledTask[]>("agent_task_list");
+        const enabledTasks = tasks.filter((task) => task.schedule_type).filter((task) => isScheduledTaskActive(task));
+        const jobs = tasks
+          .filter((task) => task.schedule_type)
+          .filter((task) => {
+            if (!activeOnly) return true;
+            return isScheduledTaskActive(task);
+          });
 
-      return {
-        jobs: jobs.map((j) => ({
-          id: j.id,
-          agent: getActorName(j.actorId),
-          task: j.task.slice(0, 100),
-          type: j.type,
-          status: j.status,
-          intervalSeconds: j.delayMs / 1000,
-          runCount: j.runCount,
-          maxRuns: j.maxRuns ?? "无限",
-          nextRunAt: j.status === "active" ? new Date(j.nextRunAt).toLocaleTimeString("zh-CN") : null,
-          lastRunAt: j.lastRunAt ? new Date(j.lastRunAt).toLocaleTimeString("zh-CN") : null,
-        })),
-      };
+        return {
+          summary: {
+            total: tasks.filter((task) => task.schedule_type).length,
+            enabled: enabledTasks.length,
+            running: enabledTasks.filter((task) => task.status === "running").length,
+            paused: tasks.filter((task) => task.schedule_type && task.status === "paused").length,
+            attention: tasks.filter(
+              (task) => task.schedule_type && (task.status === "error" || task.last_result_status === "skipped"),
+            ).length,
+          },
+          jobs: jobs.map((task) => {
+            const parsed = parsePersistentScheduledQuery(task.query);
+            return {
+              id: task.id,
+              agent: task.session_id ? `Agent 会话 ${task.session_id}` : "Agent 编排",
+              targetAgent: parsed.agentName ?? null,
+              task: parsed.title.slice(0, 100),
+              type: task.schedule_type,
+              status: task.status,
+              active: isScheduledTaskActive(task),
+              currentlyRunning: task.status === "running",
+              stateSummary: describeScheduledTaskState(task),
+              originMode: getScheduledTaskOriginMode(task),
+              originLabel: getScheduledTaskOriginLabel(task),
+              intervalSeconds: task.schedule_type === "interval" && task.schedule_value
+                ? Number(task.schedule_value) / 1000
+                : null,
+              scheduleValue: task.schedule_value ?? null,
+              runCount: task.retry_count ?? 0,
+              maxRuns: "未知/未限制",
+              nextRunAt: formatScheduledTaskTime(task.next_run_at),
+              lastRunAt: formatScheduledTaskTime(task.last_finished_at ?? task.last_started_at),
+              persistent: true,
+            };
+          }),
+        };
+      } catch {
+        const cron = system.cron;
+        const jobs = activeOnly ? cron.listActive() : cron.list();
+
+        return {
+          summary: {
+            total: cron.list().length,
+            enabled: cron.listActive().length,
+            running: cron.list().filter((job) => job.status === "running").length,
+            paused: cron.list().filter((job) => job.status === "paused").length,
+            attention: 0,
+          },
+          jobs: jobs.map((j) => ({
+            id: j.id,
+            agent: getActorName(j.actorId),
+            task: j.task.slice(0, 100),
+            type: j.type,
+            status: j.status,
+            intervalSeconds: j.delayMs / 1000,
+            runCount: j.runCount,
+            maxRuns: j.maxRuns ?? "无限",
+            nextRunAt: j.status === "active" ? new Date(j.nextRunAt).toLocaleTimeString("zh-CN") : null,
+            lastRunAt: j.lastRunAt ? new Date(j.lastRunAt).toLocaleTimeString("zh-CN") : null,
+            persistent: false,
+          })),
+        };
+      }
     },
   });
 
@@ -569,10 +782,15 @@ export function createActorCommunicationTools(
     readonly: false,
     execute: async (params) => {
       const jobId = String(params.job_id);
-      const cancelled = system.cron.cancel(jobId);
-      return cancelled
-        ? { cancelled: true, jobId }
-        : { cancelled: false, error: `任务 ${jobId} 不存在或已结束` };
+      try {
+        await invokeTauriCommand("agent_task_cancel", { taskId: jobId });
+        return { cancelled: true, jobId, persistent: true };
+      } catch {
+        const cancelled = system.cron.cancel(jobId);
+        return cancelled
+          ? { cancelled: true, jobId, persistent: false }
+          : { cancelled: false, error: `任务 ${jobId} 不存在或已结束` };
+      }
     },
   });
 

@@ -107,6 +107,8 @@ export interface AIConfig {
 
 export type AgentRuntimeMode = "host" | "hybrid" | "container_preferred";
 export type AgentScheduleType = "once" | "interval" | "cron";
+export type AgentTaskOriginMode = "local" | "dingtalk" | "feishu";
+export type AgentTaskTriggerAction = "run_agent" | "deliver_message";
 export type AgentTaskStatus =
   | "pending"
   | "running"
@@ -120,6 +122,13 @@ export interface AgentScheduledTask {
   id: string;
   session_id?: string;
   query: string;
+  trigger_action?: AgentTaskTriggerAction;
+  delivery_text?: string;
+  origin_mode?: AgentTaskOriginMode;
+  origin_label?: string;
+  origin_channel_id?: string;
+  origin_conversation_id?: string;
+  origin_session_id?: string;
   schedule_type?: AgentScheduleType;
   schedule_value?: string;
   status: AgentTaskStatus;

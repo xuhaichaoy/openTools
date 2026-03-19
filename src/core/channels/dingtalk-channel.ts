@@ -59,6 +59,9 @@ export class DingTalkChannel implements IMChannel {
   private _config: DingTalkConfig | null = null;
   private _handlers: MessageHandler[] = [];
   private _pollTimer: ReturnType<typeof setInterval> | null = null;
+  private _recentIncomingMessageIds = new Map<string, number>();
+  private _recentIncomingFingerprints = new Map<string, number>();
+  private _recentOutboundFingerprints = new Map<string, number>();
 
   get status(): ChannelStatus {
     return this._status;
@@ -121,11 +124,15 @@ export class DingTalkChannel implements IMChannel {
     this._status = "disconnected";
     this._channelId = null;
     this._config = null;
+    this._recentIncomingMessageIds.clear();
+    this._recentIncomingFingerprints.clear();
+    this._recentOutboundFingerprints.clear();
     log.info("DingTalk channel disconnected");
   }
 
   async send(msg: ChannelOutgoingMessage): Promise<void> {
     if (!this._config) throw new Error("DingTalk channel not connected");
+    this._rememberOutboundMessage(msg);
 
     if (msg.replyWebhookUrl && !isWebhookExpired(msg.replyWebhookExpiresAt)) {
       try {
@@ -214,6 +221,46 @@ export class DingTalkChannel implements IMChannel {
   async handleIncomingCallback(raw: Record<string, unknown>): Promise<string | undefined> {
     const msg = this._parseCallback(raw);
     if (!msg) return;
+    const now = Date.now();
+
+    this._pruneRecentIncomingMessageIds();
+    if (this._recentIncomingMessageIds.has(msg.messageId)) {
+      log.info("Ignoring duplicated DingTalk callback", {
+        messageId: msg.messageId,
+        conversationId: msg.conversationId,
+      });
+      return;
+    }
+    this._recentIncomingMessageIds.set(msg.messageId, now);
+
+    this._pruneRecentIncomingFingerprints();
+    const inboundFingerprint = buildDingTalkIncomingFingerprint(msg);
+    const recentInboundAt = inboundFingerprint
+      ? this._recentIncomingFingerprints.get(inboundFingerprint)
+      : undefined;
+    if (recentInboundAt && now - recentInboundAt <= 10_000) {
+      log.info("Ignoring replayed DingTalk callback by fingerprint", {
+        messageId: msg.messageId,
+        conversationId: msg.conversationId,
+        senderId: msg.senderId,
+      });
+      return;
+    }
+    if (inboundFingerprint) {
+      this._recentIncomingFingerprints.set(inboundFingerprint, now);
+    }
+
+    this._pruneRecentOutboundFingerprints();
+    const recentOutboundAt = getRecentDingTalkOutboundFingerprintCandidates(msg)
+      .map((fingerprint) => this._recentOutboundFingerprints.get(fingerprint))
+      .find((timestamp): timestamp is number => typeof timestamp === "number");
+    if (recentOutboundAt && now - recentOutboundAt <= 15_000) {
+      log.info("Ignoring echoed DingTalk outbound message", {
+        messageId: msg.messageId,
+        conversationId: msg.conversationId,
+      });
+      return;
+    }
 
     log.info("Incoming DingTalk message", { sender: msg.senderName, text: msg.text.slice(0, 50) });
 
@@ -228,6 +275,45 @@ export class DingTalkChannel implements IMChannel {
   }
 
   // ── Private ──
+
+  private _pruneRecentIncomingMessageIds(): void {
+    if (this._recentIncomingMessageIds.size <= 200) return;
+    const expireBefore = Date.now() - 10 * 60_000;
+    for (const [messageId, timestamp] of this._recentIncomingMessageIds) {
+      if (timestamp < expireBefore) {
+        this._recentIncomingMessageIds.delete(messageId);
+      }
+    }
+  }
+
+  private _pruneRecentIncomingFingerprints(): void {
+    if (this._recentIncomingFingerprints.size <= 400) return;
+    const expireBefore = Date.now() - 2 * 60_000;
+    for (const [fingerprint, timestamp] of this._recentIncomingFingerprints) {
+      if (timestamp < expireBefore) {
+        this._recentIncomingFingerprints.delete(fingerprint);
+      }
+    }
+  }
+
+  private _pruneRecentOutboundFingerprints(): void {
+    if (this._recentOutboundFingerprints.size <= 400) return;
+    const expireBefore = Date.now() - 2 * 60_000;
+    for (const [fingerprint, timestamp] of this._recentOutboundFingerprints) {
+      if (timestamp < expireBefore) {
+        this._recentOutboundFingerprints.delete(fingerprint);
+      }
+    }
+  }
+
+  private _rememberOutboundMessage(msg: ChannelOutgoingMessage): void {
+    const text = normalizeDingTalkMessageText(msg);
+    if (!text) return;
+    this._pruneRecentOutboundFingerprints();
+    for (const fingerprint of buildDingTalkOutboundFingerprints(msg.conversationId, text)) {
+      this._recentOutboundFingerprints.set(fingerprint, Date.now());
+    }
+  }
 
   private _buildMessageBody(msg: ChannelOutgoingMessage): Record<string, unknown> {
     const at: Record<string, unknown> = {};
@@ -284,17 +370,39 @@ export class DingTalkChannel implements IMChannel {
 
       if (!text.trim()) return null;
 
-      const senderId = String(raw.senderStaffId || raw.senderId || raw.senderNick || "unknown");
-      const senderName = String(raw.senderNick || raw.senderName || senderId);
-      const conversationId = String(raw.conversationId || raw.openConversationId || raw.chatbotCorpId || "default");
-      const conversationType = String(raw.conversationType) === "1" ? "private" as const : "group" as const;
+      const senderId = pickFirstString(
+        raw.senderStaffId,
+        raw.senderId,
+        raw.senderNick,
+      );
+      if (isDingTalkSelfMessage(raw, senderId)) {
+        log.info("Ignoring self-sent DingTalk callback", {
+          senderId,
+          chatbotUserId: pickFirstString(raw.chatbotUserId),
+          robotCode: pickFirstString(raw.robotCode),
+        });
+        return null;
+      }
+
+      const senderName = String(raw.senderNick || raw.senderName || senderId || "unknown");
+      const conversationType = resolveDingTalkConversationType(raw.conversationType);
+      const conversationId = resolveDingTalkConversationId(raw, conversationType, senderId);
+      if (!conversationId) {
+        log.warn("Ignoring DingTalk callback without stable conversation id", {
+          messageId: pickFirstString(raw.msgId),
+          senderId,
+          conversationType,
+          availableKeys: Object.keys(raw),
+        });
+        return null;
+      }
 
       const atUsers = raw.atUsers as Array<{ dingtalkId: string }> | undefined;
       const atBot = atUsers?.some((u) => u.dingtalkId === "$:LWCP_v1:$") ?? false;
 
       return {
         messageId: String(raw.msgId || Date.now()),
-        senderId,
+        senderId: senderId || "unknown",
         senderName,
         text: text.replace(/@\S+\s*/g, "").trim(),
         messageType: msgType as ChannelIncomingMessage["messageType"],
@@ -312,6 +420,102 @@ export class DingTalkChannel implements IMChannel {
       return null;
     }
   }
+}
+
+function pickFirstString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const trimmed = value.trim();
+    if (trimmed) return trimmed;
+  }
+  return "";
+}
+
+function resolveDingTalkConversationType(value: unknown): "private" | "group" {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "1" || normalized === "private" || normalized === "single" || normalized === "p2p") {
+    return "private";
+  }
+  return "group";
+}
+
+function isDingTalkSelfMessage(raw: Record<string, unknown>, senderId: string): boolean {
+  const chatbotUserId = pickFirstString(raw.chatbotUserId);
+  if (chatbotUserId && senderId === chatbotUserId) {
+    return true;
+  }
+
+  const robotCode = pickFirstString(raw.robotCode);
+  if (robotCode && senderId === robotCode) {
+    return true;
+  }
+
+  return false;
+}
+
+function resolveDingTalkConversationId(
+  raw: Record<string, unknown>,
+  conversationType: "private" | "group",
+  senderId: string,
+): string {
+  if (conversationType === "private") {
+    return pickFirstString(
+      raw.conversationId,
+      raw.openConversationId,
+      raw.sessionWebhook,
+      raw.senderId,
+      raw.senderStaffId,
+      senderId,
+    );
+  }
+
+  return pickFirstString(
+    raw.conversationId,
+    raw.openConversationId,
+    raw.openThreadId,
+    raw.sessionWebhook,
+  );
+}
+
+function normalizeDingTalkText(text: string): string {
+  return text
+    .replace(/\r\n/g, "\n")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 4000);
+}
+
+function buildDingTalkIncomingFingerprint(msg: ChannelIncomingMessage): string {
+  const normalizedText = normalizeDingTalkText(msg.text);
+  if (!normalizedText) return "";
+  return [
+    msg.conversationType,
+    msg.conversationId || "unknown-conversation",
+    msg.senderId || "unknown-sender",
+    normalizedText,
+  ].join("::");
+}
+
+function buildDingTalkOutboundFingerprints(conversationId: string | undefined, normalizedText: string): string[] {
+  if (!normalizedText) return [];
+  const fingerprints = [normalizedText];
+  const normalizedConversationId = (conversationId || "").trim();
+  if (normalizedConversationId) {
+    fingerprints.unshift(`${normalizedConversationId}::${normalizedText}`);
+  }
+  return fingerprints;
+}
+
+function getRecentDingTalkOutboundFingerprintCandidates(msg: ChannelIncomingMessage): string[] {
+  const normalizedText = normalizeDingTalkText(msg.text);
+  if (!normalizedText) return [];
+  return buildDingTalkOutboundFingerprints(msg.conversationId, normalizedText);
+}
+
+function normalizeDingTalkMessageText(msg: ChannelOutgoingMessage): string {
+  const explicitMarkdown = resolveMarkdownContent(msg);
+  const text = explicitMarkdown?.text ?? msg.text ?? "";
+  return normalizeDingTalkText(text);
 }
 
 function toTimestamp(value: unknown): number | undefined {

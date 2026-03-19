@@ -75,6 +75,8 @@ export interface ChannelConfig {
   name: string;
   /** 是否启用 */
   enabled: boolean;
+  /** 启动时是否自动连接 */
+  autoConnect?: boolean;
   /** 平台特定配置 */
   platformConfig: Record<string, unknown>;
 }

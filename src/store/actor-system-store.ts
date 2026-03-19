@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { ActorSystem, type ActorSystemOptions } from "@/core/agent/actor/actor-system";
 import type { AgentActor } from "@/core/agent/actor/agent-actor";
 import { DIALOG_FULL_ROLE } from "@/core/agent/actor/agent-actor";
+import { spawnDefaultDialogActors } from "@/core/agent/actor/default-dialog-actors";
 import type { AICenterHandoff } from "@/store/app-store";
 import type {
   AgentCapabilities,
@@ -21,7 +22,7 @@ import type {
 } from "@/core/agent/actor/types";
 import type { AgentStep } from "@/plugins/builtin/SmartAgent/core/react-agent";
 import { createLogger } from "@/core/logger";
-import { getChannelManager } from "@/core/channels/channel-manager";
+import { getChannelManager, loadSavedChannels } from "@/core/channels";
 import { getTaskQueue, createActorSystemExecutor } from "@/core/task-center";
 import {
   getLatestActiveSessionId,
@@ -384,6 +385,50 @@ function buildPersistableDialogContextSnapshot(params: {
 /** Max session age: discard sessions older than 7 days */
 const MAX_SESSION_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
+function getImChannelDisplayLabel(channelType?: DialogMessage["externalChannelType"]): string | undefined {
+  switch (channelType) {
+    case "dingtalk":
+      return "钉钉会话";
+    case "feishu":
+      return "飞书会话";
+    default:
+      return undefined;
+  }
+}
+
+function getImConversationDisplayDetail(
+  channelType?: DialogMessage["externalChannelType"],
+  conversationType?: DialogMessage["externalConversationType"],
+): string | undefined {
+  const platform = channelType === "dingtalk"
+    ? "钉钉"
+    : channelType === "feishu"
+      ? "飞书"
+      : "";
+  const conversation = conversationType === "group"
+    ? "群聊"
+    : conversationType === "private"
+      ? "私聊"
+      : "";
+  if (platform && conversation) return `${platform} · ${conversation}`;
+  return platform || conversation || undefined;
+}
+
+function extractDialogRuntimeDisplay(
+  dialogHistory?: readonly DialogMessage[],
+): { label?: string; detail?: string } | null {
+  if (!dialogHistory?.length) return null;
+  for (let index = dialogHistory.length - 1; index >= 0; index -= 1) {
+    const message = dialogHistory[index];
+    if (message.from !== "user") continue;
+    const label = message.runtimeDisplayLabel?.trim() || getImChannelDisplayLabel(message.externalChannelType);
+    const detail = message.runtimeDisplayDetail?.trim()
+      || getImConversationDisplayDetail(message.externalChannelType, message.externalConversationType);
+    return label || detail ? { label, detail } : null;
+  }
+  return null;
+}
+
 function extractDialogRuntimeTitle(dialogHistory?: readonly DialogMessage[]): string | undefined {
   if (!dialogHistory?.length) return undefined;
   for (const message of dialogHistory) {
@@ -395,6 +440,21 @@ function extractDialogRuntimeTitle(dialogHistory?: readonly DialogMessage[]): st
     if (preview) return preview;
   }
   return undefined;
+}
+
+async function bootstrapSavedIMChannels(): Promise<void> {
+  const channelMgr = getChannelManager();
+  const savedChannels = loadSavedChannels();
+  for (const { config } of savedChannels) {
+    if (config.enabled === false || config.autoConnect === false) {
+      continue;
+    }
+    try {
+      await channelMgr.register(config);
+    } catch (error) {
+      log.warn(`Failed to auto-connect IM channel: ${config.name}`, error);
+    }
+  }
 }
 
 function buildDialogRuntimeSummary(
@@ -469,7 +529,8 @@ function syncDialogRuntimeSession(
   },
 ): void {
   const runtimeStore = useAISessionRuntimeStore.getState();
-  const title = extractDialogRuntimeTitle(options?.dialogHistory);
+  const display = extractDialogRuntimeDisplay(options?.dialogHistory);
+  const title = display?.label || extractDialogRuntimeTitle(options?.dialogHistory);
   const summary = buildDialogRuntimeSummary(
     options?.dialogHistory,
     options?.spawnedTasks,
@@ -553,6 +614,7 @@ function syncDialogRuntimeState(params: {
   sourceHandoff?: AICenterHandoff | null;
   updatedAt?: number;
 }): void {
+  const display = extractDialogRuntimeDisplay(params.dialogHistory);
   const pendingApprovals = params.pendingUserInteractions?.filter(
     (interaction) => interaction.status === "pending" && interaction.type === "approval",
   ).length ?? 0;
@@ -595,6 +657,7 @@ function syncDialogRuntimeState(params: {
           : "running";
   const query =
     extractDialogRuntimeTitle(params.dialogHistory)
+    || display?.label
     || summarizeAISessionRuntimeText(params.sourceHandoff?.query || "", 96)
     || "Dialog 房间";
   const startedAt =
@@ -611,6 +674,8 @@ function syncDialogRuntimeState(params: {
     mode: "dialog",
     sessionId: params.sessionId,
     query,
+    displayLabel: display?.label ?? "",
+    displayDetail: display?.detail ?? "",
     startedAt,
     updatedAt: params.updatedAt,
     workspaceRoot,
@@ -959,27 +1024,6 @@ async function loadPersistedSessionSnapshot(): Promise<PersistedSession | null> 
   return loadLegacySession();
 }
 
-function spawnDefaultActors(system: ActorSystem): void {
-  const makeId = () => Math.random().toString(36).substring(2, 8);
-  system.spawn({
-    id: `agent-${makeId()}`,
-    role: { ...DIALOG_FULL_ROLE, name: "Coordinator" },
-    capabilities: {
-      tags: ["coordinator", "synthesis", "code_analysis"],
-      description: "默认协调者，负责理解任务、分配讨论方向并收束结论。",
-    },
-    middlewareOverrides: { approvalLevel: "permissive" },
-  });
-  system.spawn({
-    id: `agent-${makeId()}`,
-    role: { ...DIALOG_FULL_ROLE, name: "Specialist" },
-    capabilities: {
-      tags: ["code_analysis", "code_write", "debugging"],
-      description: "默认执行者，负责深入分析、修复建议和具体实现细节。",
-    },
-  });
-}
-
 // ── Actor snapshot for UI ──
 
 export interface ActorSnapshot {
@@ -1052,7 +1096,18 @@ interface ActorSystemState {
   destroyAll: () => void;
   sendMessage: (from: string, to: string, content: string, opts?: { expectReply?: boolean; replyTo?: string; _briefContent?: string; images?: string[] }) => void;
   broadcastMessage: (from: string, content: string, opts?: { _briefContent?: string; images?: string[] }) => void;
-  broadcastAndResolve: (from: string, content: string, opts?: { _briefContent?: string; images?: string[] }) => void;
+  broadcastAndResolve: (
+    from: string,
+    content: string,
+    opts?: {
+      _briefContent?: string;
+      images?: string[];
+      externalChannelType?: DialogMessage["externalChannelType"];
+      externalConversationType?: DialogMessage["externalConversationType"];
+      runtimeDisplayLabel?: string;
+      runtimeDisplayDetail?: string;
+    },
+  ) => void;
   /** 智能路由：根据内容自动选择合适的 Agent */
   routeTask: (content: string, preferredCapabilities?: string[]) => { agentId: string; reason: string }[];
   assignTask: (actorId: string, query: string, images?: string[]) => void;
@@ -1221,21 +1276,24 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
           contextSnapshot: cloneDialogContextSnapshot(persisted.contextSnapshot),
         });
       } else if (system.getAll().length === 0) {
-        spawnDefaultActors(system);
+        spawnDefaultDialogActors(system);
       }
+      await bootstrapSavedIMChannels();
       saveActiveSessionPointer(system.sessionId);
       syncDialogRuntimeSession(system.sessionId, {
         sourceHandoff: persisted?.sourceHandoff,
       });
       get().sync();
-    })().catch((err) => {
+    })().catch(async (err) => {
       log.warn("Failed to hydrate dialog session snapshot", err);
       if (system.getAll().length === 0) {
-        spawnDefaultActors(system);
-        get().sync();
+        spawnDefaultDialogActors(system);
       }
       set({ queuedFollowUps: [], sourceHandoff: null, contextSnapshot: null });
+      await bootstrapSavedIMChannels();
+      saveActiveSessionPointer(system.sessionId);
       syncDialogRuntimeSession(system.sessionId);
+      get().sync();
     });
     return system;
   },

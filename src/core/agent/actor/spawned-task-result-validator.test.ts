@@ -5,6 +5,7 @@ import {
   validateSpawnedTaskResult,
 } from "./spawned-task-result-validator";
 import type { DialogArtifactRecord, SpawnedTaskRecord } from "./types";
+import type { AgentStep } from "@/plugins/builtin/SmartAgent/core/react-agent";
 
 function makeTask(task: string, label?: string): SpawnedTaskRecord {
   return {
@@ -103,5 +104,41 @@ describe("spawned-task-result-validator", () => {
 
     expect(validation.accepted).toBe(true);
     expect(validation.requiresConcreteOutput).toBe(true);
+  });
+
+  it("rejects schedule success claims without real scheduling tool calls", () => {
+    const validation = validateActorTaskResult({
+      taskText: "再创建一个任务 每隔两分钟提醒我喝水",
+      result: "已创建新的喝水提醒任务，首次提醒 10:27，任务 ID：agt-old-id",
+      steps: [],
+    });
+
+    expect(validation.accepted).toBe(false);
+    expect(validation.reason).toContain("真实工具调用证据");
+  });
+
+  it("accepts schedule success claims when schedule_task was actually called", () => {
+    const steps: AgentStep[] = [
+      {
+        type: "action",
+        content: "调用 schedule_task",
+        toolName: "schedule_task",
+        toolInput: {
+          target_agent: "邪恶小菠萝",
+          task: "提醒用户喝水",
+          type: "interval",
+          delay_seconds: 120,
+        },
+        timestamp: 1000,
+      },
+    ];
+
+    const validation = validateActorTaskResult({
+      taskText: "再创建一个任务 每隔两分钟提醒我喝水",
+      result: "已创建新的喝水提醒任务，首次提醒 10:27，任务 ID：agt-new-id",
+      steps,
+    });
+
+    expect(validation.accepted).toBe(true);
   });
 });

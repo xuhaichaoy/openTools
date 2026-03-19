@@ -1,6 +1,6 @@
 import { useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen, emit } from "@tauri-apps/api/event";
+import { listen, emit, type UnlistenFn } from "@tauri-apps/api/event";
 import { useAIStore } from "@/store/ai-store";
 import { useAgentStore } from "@/store/agent-store";
 import { useWorkflowStore } from "@/store/workflow-store";
@@ -9,6 +9,7 @@ import { useBookmarkStore } from "@/store/bookmark-store";
 import { useAppStore } from "@/store/app-store";
 import { agentRunnerService } from "@/core/agent/agent-runner-service";
 import { handleError, ErrorLevel } from "@/core/errors";
+import { createLogger } from "@/core/logger";
 import { registry } from "@/core/plugin-system/registry";
 import { getMToolsAI } from "@/core/ai/mtools-ai";
 import {
@@ -28,6 +29,54 @@ import {
 } from "@/core/ui/local-ui-preferences";
 import { resizeManagedWindowHeight } from "@/shell/WindowSizeManager";
 
+const log = createLogger("AppInitializer");
+
+function registerAsyncListener<T>(
+  eventName: string,
+  handler: Parameters<typeof listen<T>>[1],
+  options?: {
+    effectId?: string;
+    onErrorContext?: string;
+  },
+): () => void {
+  let released = false;
+  let unlisten: UnlistenFn | null = null;
+
+  listen<T>(eventName, handler)
+    .then((fn) => {
+      if (released) {
+        fn();
+        log.warn("listener resolved after cleanup", {
+          effectId: options?.effectId,
+          eventName,
+        });
+        return;
+      }
+      unlisten = fn;
+      log.info("listener registered", {
+        effectId: options?.effectId,
+        eventName,
+      });
+    })
+    .catch((e) =>
+      handleError(e, {
+        context: options?.onErrorContext ?? `注册事件监听失败(${eventName})`,
+        level: ErrorLevel.Warning,
+      }),
+    );
+
+  return () => {
+    released = true;
+    if (!unlisten) return;
+    unlisten();
+    unlisten = null;
+    log.info("listener unregistered", {
+      effectId: options?.effectId,
+      eventName,
+    });
+  };
+}
+
 /**
  * App-level initialization: loads stores, starts schedulers,
  * and sets up Tauri event listeners.
@@ -39,6 +88,11 @@ export function useAppInitializer(
   // ── Store loading & scheduler startup (once) ──
   useEffect(() => {
     let cancelled = false;
+    const effectId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    log.warn("effect mount", {
+      effectId,
+      dev: import.meta.env.DEV,
+    });
 
     applyGlobalFontScale(loadLocalFontScalePreference());
 
@@ -62,40 +116,49 @@ export function useAppInitializer(
       handleError(e, { context: "Agent 编排调度启动", level: ErrorLevel.Warning }),
     );
 
-    let unlistenScheduled: (() => void) | undefined;
-    let unlistenAgentTrigger: (() => void) | undefined;
-    let unlistenAgentStatus: (() => void) | undefined;
-    let unlistenAgentSkipped: (() => void) | undefined;
-    listen<{ workflowId: string; workflowName: string }>(
+    const releaseWorkflowScheduled = registerAsyncListener<{ workflowId: string; workflowName: string }>(
       "workflow-scheduled-trigger",
       (event) => {
         if (cancelled) return;
         const { workflowId } = event.payload;
         useWorkflowStore.getState().executeWorkflow(workflowId);
       },
-    ).then((fn) => {
-      unlistenScheduled = fn;
-    });
-    listen<AgentScheduledTask>("agent-task-trigger", (event) => {
-      if (cancelled) return;
-      const task = event.payload;
-      useAgentStore.getState().upsertScheduledTask(task);
-      agentRunnerService.enqueue(task);
-    }).then((fn) => {
-      unlistenAgentTrigger = fn;
-    });
-    listen<AgentTaskStatusPatch>("agent-task-status", (event) => {
-      if (cancelled) return;
-      useAgentStore.getState().applyScheduledTaskPatch(event.payload);
-    }).then((fn) => {
-      unlistenAgentStatus = fn;
-    });
-    listen<AgentTaskSkippedEvent>("agent-task-skipped", (event) => {
-      if (cancelled) return;
-      useAgentStore.getState().applyScheduledTaskSkipped(event.payload);
-    }).then((fn) => {
-      unlistenAgentSkipped = fn;
-    });
+      {
+        effectId,
+      },
+    );
+    const releaseAgentTrigger = registerAsyncListener<AgentScheduledTask>(
+      "agent-task-trigger",
+      (event) => {
+        if (cancelled) return;
+        const task = event.payload;
+        useAgentStore.getState().upsertScheduledTask(task);
+        agentRunnerService.enqueue(task);
+      },
+      {
+        effectId,
+      },
+    );
+    const releaseAgentStatus = registerAsyncListener<AgentTaskStatusPatch>(
+      "agent-task-status",
+      (event) => {
+        if (cancelled) return;
+        useAgentStore.getState().applyScheduledTaskPatch(event.payload);
+      },
+      {
+        effectId,
+      },
+    );
+    const releaseAgentSkipped = registerAsyncListener<AgentTaskSkippedEvent>(
+      "agent-task-skipped",
+      (event) => {
+        if (cancelled) return;
+        useAgentStore.getState().applyScheduledTaskSkipped(event.payload);
+      },
+      {
+        effectId,
+      },
+    );
 
     invoke<string>("load_general_settings")
       .then((json) => {
@@ -109,10 +172,11 @@ export function useAppInitializer(
 
     return () => {
       cancelled = true;
-      unlistenScheduled?.();
-      unlistenAgentTrigger?.();
-      unlistenAgentStatus?.();
-      unlistenAgentSkipped?.();
+      log.warn("effect cleanup", { effectId });
+      releaseWorkflowScheduled();
+      releaseAgentTrigger();
+      releaseAgentStatus();
+      releaseAgentSkipped();
     };
   }, []);
 
@@ -149,57 +213,63 @@ export function useAppInitializer(
 
   // ── Context action event from Rust ──
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    listen<{ text: string }>("context-action", (event) => {
-      setContextText(event.payload.text);
-      pushView(CONTEXT_ACTION_VIEW_ID);
-      void resizeManagedWindowHeight(getPreferredWindowHeight("expanded"));
-    }).then((fn) => {
-      unlisten = fn;
-    });
-    return () => unlisten?.();
+    const release = registerAsyncListener<{ text: string }>(
+      "context-action",
+      (event) => {
+        setContextText(event.payload.text);
+        pushView(CONTEXT_ACTION_VIEW_ID);
+        void resizeManagedWindowHeight(getPreferredWindowHeight("expanded"));
+      },
+      {
+        onErrorContext: "注册 context-action 监听失败",
+      },
+    );
+    return () => release();
   }, [pushView, setContextText]);
 
   // ── Workflow plugin action relay (backend → frontend) ──
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    listen<{
+    const release = registerAsyncListener<{
       requestId: string;
       pluginId: string;
       actionName: string;
       params: string;
-    }>("workflow-plugin-action", async (event) => {
-      const { requestId, pluginId, actionName, params } = event.payload;
-      try {
-        const allActions = registry.getAllActions();
-        const found = allActions.find(
-          (a) => a.pluginId === pluginId && a.action.name === actionName,
-        );
-        if (!found) {
-          throw new Error(`找不到插件动作: ${pluginId}/${actionName}`);
-        }
-        let parsedParams: Record<string, unknown> = {};
+    }>(
+      "workflow-plugin-action",
+      async (event) => {
+        const { requestId, pluginId, actionName, params } = event.payload;
         try {
-          parsedParams = JSON.parse(params);
-        } catch (e) {
-          handleError(e, { context: "解析工作流参数", silent: true });
+          const allActions = registry.getAllActions();
+          const found = allActions.find(
+            (a) => a.pluginId === pluginId && a.action.name === actionName,
+          );
+          if (!found) {
+            throw new Error(`找不到插件动作: ${pluginId}/${actionName}`);
+          }
+          let parsedParams: Record<string, unknown> = {};
+          try {
+            parsedParams = JSON.parse(params);
+          } catch (e) {
+            handleError(e, { context: "解析工作流参数", silent: true });
+          }
+          const result = await found.action.execute(parsedParams, {
+            ai: getMToolsAI(),
+          });
+          await emit("workflow-plugin-action-result", {
+            requestId,
+            result: typeof result === "string" ? result : JSON.stringify(result),
+          });
+        } catch (e: unknown) {
+          await emit("workflow-plugin-action-result", {
+            requestId,
+            error: e instanceof Error ? e.message : String(e),
+          });
         }
-        const result = await found.action.execute(parsedParams, {
-          ai: getMToolsAI(),
-        });
-        await emit("workflow-plugin-action-result", {
-          requestId,
-          result: typeof result === "string" ? result : JSON.stringify(result),
-        });
-      } catch (e: unknown) {
-        await emit("workflow-plugin-action-result", {
-          requestId,
-          error: e instanceof Error ? e.message : String(e),
-        });
-      }
-    }).then((fn) => {
-      unlisten = fn;
-    });
-    return () => unlisten?.();
+      },
+      {
+        onErrorContext: "注册 workflow-plugin-action 监听失败",
+      },
+    );
+    return () => release();
   }, []);
 }

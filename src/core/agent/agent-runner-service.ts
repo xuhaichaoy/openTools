@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getMToolsAI } from "@/core/ai/mtools-ai";
 import type {
   AgentScheduledTask,
+  AgentTaskStatusPatch,
   AgentTaskStatus,
 } from "@/core/ai/types";
 import { handleError, ErrorLevel } from "@/core/errors";
@@ -19,6 +20,12 @@ import {
 import { applyIncomingAgentStep } from "@/plugins/builtin/SmartAgent/core/agent-task-state";
 import { loadAndResolveSkills } from "@/store/skill-store";
 import { applySkillToolFilter } from "@/core/agent/skills/skill-resolver";
+import { useActorSystemStore } from "@/store/actor-system-store";
+import { getChannelManager } from "@/core/channels";
+import {
+  inferDirectScheduledDelivery,
+  parsePersistentScheduledQuery,
+} from "@/core/agent/scheduled-task-utils";
 import {
   buildAssistantSupplementalPrompt,
   filterAssistantToolsByConfig,
@@ -327,7 +334,7 @@ export class AgentRunnerService {
         const nextRunAt = Date.now() + delay;
         task.next_run_at = nextRunAt;
 
-        await this.patchStatus(task.id, "pending", {
+        const patch = await this.patchStatus(task.id, "pending", {
           retryCount: nextAttempt,
           nextRunAt,
           lastError: message,
@@ -335,6 +342,10 @@ export class AgentRunnerService {
           lastDurationMs: Date.now() - startedAt,
           lastResultStatus: "error",
         });
+
+        if (patch?.status === "paused" || patch?.status === "cancelled") {
+          return;
+        }
 
         this.setTimeoutFn(() => {
           this.enqueue(task, nextAttempt);
@@ -354,6 +365,13 @@ export class AgentRunnerService {
   }
 
   private async executeTaskInternal(task: AgentScheduledTask, attempt: number) {
+    const shouldDeliverDirectly = task.trigger_action === "deliver_message"
+      || (!task.trigger_action && (!!task.delivery_text?.trim() || !!inferDirectScheduledDelivery(task.query)));
+    if (shouldDeliverDirectly) {
+      await this.executeDirectDeliveryTask(task);
+      return;
+    }
+
     const ai = getMToolsAI();
     const aiConfig = useAIStore.getState().config;
     const availableTools = filterAssistantToolsByConfig(buildRunnerTools(), aiConfig);
@@ -501,6 +519,51 @@ export class AgentRunnerService {
     });
   }
 
+  private async executeDirectDeliveryTask(task: AgentScheduledTask): Promise<void> {
+    const parsed = parsePersistentScheduledQuery(task.query);
+    const inferred = inferDirectScheduledDelivery(task.query);
+    const deliveryText =
+      task.delivery_text?.trim()
+      || inferred?.text
+      || (parsed.title.trim() ? `提醒：${parsed.title.trim()}` : "提醒时间到了。");
+
+    try {
+      await invoke("agent_show_notification", {
+        title: "51ToolBox 提醒",
+        body: deliveryText,
+      });
+    } catch (error) {
+      handleError(error, {
+        context: `发送系统通知失败(${task.id})`,
+        level: ErrorLevel.Warning,
+        silent: true,
+      });
+    }
+
+    if (task.origin_channel_id?.trim() && task.origin_conversation_id?.trim()) {
+      try {
+        await getChannelManager().sendScheduledReminder(task, deliveryText);
+      } catch (error) {
+        handleError(error, {
+          context: `发送渠道提醒失败(${task.id})`,
+          level: ErrorLevel.Warning,
+          silent: true,
+        });
+      }
+    }
+
+    const system = useActorSystemStore.getState().getSystem();
+    if (system && task.origin_session_id === system.sessionId) {
+      system.publishSystemNotice(deliveryText, { from: "scheduler" });
+      useActorSystemStore.getState().sync();
+    }
+
+    useAgentStore.getState().upsertScheduledTask({
+      ...task,
+      delivery_text: deliveryText,
+    });
+  }
+
   private async patchStatus(
     taskId: string,
     status: AgentTaskStatus,
@@ -513,9 +576,9 @@ export class AgentRunnerService {
       lastDurationMs?: number;
       lastResultStatus?: "success" | "error" | "skipped";
     },
-  ) {
+  ): Promise<AgentTaskStatusPatch | null> {
     try {
-      await invoke("agent_task_set_status", {
+      const patch = await invoke<AgentTaskStatusPatch>("agent_task_set_status", {
         taskId,
         status,
         retryCount: extra.retryCount,
@@ -526,24 +589,15 @@ export class AgentRunnerService {
         lastDurationMs: extra.lastDurationMs ?? null,
         lastResultStatus: extra.lastResultStatus ?? null,
       });
-      useAgentStore.getState().applyScheduledTaskPatch({
-        task_id: taskId,
-        status,
-        retry_count: extra.retryCount,
-        next_run_at: extra.nextRunAt,
-        last_error: extra.lastError,
-        last_started_at: extra.lastStartedAt,
-        last_finished_at: extra.lastFinishedAt,
-        last_duration_ms: extra.lastDurationMs,
-        last_result_status: extra.lastResultStatus,
-        updated_at: Date.now(),
-      });
+      useAgentStore.getState().applyScheduledTaskPatch(patch);
+      return patch;
     } catch (e) {
       handleError(e, {
         context: `更新 Agent 任务状态(${taskId})`,
         level: ErrorLevel.Warning,
         silent: true,
       });
+      return null;
     }
   }
 }

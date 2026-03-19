@@ -3,7 +3,10 @@ import type { AIConfig } from "./types";
 
 const mocks = vi.hoisted(() => ({
   apiGet: vi.fn(),
-  getAuthState: vi.fn(() => ({ token: "token" })),
+  getAuthState: vi.fn(),
+  login: vi.fn(),
+  logout: vi.fn(),
+  fetch: vi.fn(),
 }));
 
 vi.mock("@/core/api/client", () => ({
@@ -23,13 +26,23 @@ vi.mock("@/store/auth-store", () => ({
 }));
 
 import { clearTeamModelCache, resolveRoutedConfig, resolveTeamModelConfig } from "./router";
+import { withRoutedAIConfig } from "./router";
 
 describe("resolveTeamModelConfig", () => {
   beforeEach(() => {
     clearTeamModelCache();
     mocks.apiGet.mockReset();
     mocks.getAuthState.mockReset();
-    mocks.getAuthState.mockReturnValue({ token: "token" });
+    mocks.login.mockReset();
+    mocks.logout.mockReset();
+    mocks.fetch.mockReset();
+    globalThis.fetch = mocks.fetch as typeof fetch;
+    mocks.getAuthState.mockReturnValue({
+      token: "token",
+      refreshToken: "refresh-token",
+      login: mocks.login,
+      logout: mocks.logout,
+    });
   });
 
   it("should reuse auth store token when caller omits token", async () => {
@@ -42,7 +55,12 @@ describe("resolveTeamModelConfig", () => {
         },
       ],
     });
-    mocks.getAuthState.mockReturnValueOnce({ token: "session-token" });
+    mocks.getAuthState.mockReturnValueOnce({
+      token: "session-token",
+      refreshToken: "refresh-token",
+      login: mocks.login,
+      logout: mocks.logout,
+    });
 
     const config: AIConfig = {
       base_url: "http://127.0.0.1:3000/v1/ai/team",
@@ -141,5 +159,53 @@ describe("resolveTeamModelConfig", () => {
     expect(resolved.team_config_id).toBe("cfg-minimax");
     expect(resolved.model).toBe("MiniMax-M2.5");
     expect(resolved.protocol).toBe("anthropic");
+  });
+
+  it("retries managed AI requests after refreshing auth token", async () => {
+    mocks.fetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        access_token: "refreshed-token",
+        refresh_token: "refreshed-refresh-token",
+        user: { id: "user-1" },
+      }),
+    });
+
+    const config: AIConfig = {
+      base_url: "https://api.openai.com/v1",
+      api_key: "",
+      model: "gpt-5.4",
+      temperature: 0.7,
+      max_tokens: null,
+      enable_advanced_tools: true,
+      system_prompt: "",
+      enable_rag_auto_search: true,
+      enable_native_tools: true,
+      enable_long_term_memory: true,
+      enable_memory_auto_recall: true,
+      enable_memory_auto_save: true,
+      enable_memory_sync: true,
+      source: "platform",
+      protocol: "openai",
+    };
+
+    const runner = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new Error('API 错误 (HTTP 401): {"code":"UNAUTHORIZED","message":"Invalid token"}'),
+      )
+      .mockResolvedValueOnce("ok");
+
+    const result = await withRoutedAIConfig(config, runner);
+
+    expect(result).toBe("ok");
+    expect(runner).toHaveBeenCalledTimes(2);
+    expect(runner.mock.calls[0]?.[0]?.api_key).toBe("token");
+    expect(runner.mock.calls[1]?.[0]?.api_key).toBe("refreshed-token");
+    expect(mocks.login).toHaveBeenCalledWith(
+      { id: "user-1" },
+      "refreshed-token",
+      "refreshed-refresh-token",
+    );
   });
 });
