@@ -299,6 +299,38 @@ describe("ActorSystem.spawnTask", () => {
     expect(specialist.lastAssignedImages).toEqual(["/tmp/design.png"]);
   });
 
+  it("wraps spawned work in a contract-style delegation prompt", () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+    const specialist = system.spawn(buildActorConfig("specialist", "Specialist")) as unknown as {
+      lastAssignedQuery?: string;
+    };
+
+    const record = system.spawnTask("coordinator", "specialist", "修复 Dialog 房间里 Coordinator 仍然 25 步停止的问题", {
+      label: "修复 25 步上限",
+      context: "只检查 Dialog / Actor 运行时，不要顺手改普通 Agent 路径。",
+      attachments: [
+        "/repo/src/core/agent/actor/agent-actor.ts",
+        "/repo/src/plugins/builtin/SmartAgent/components/actor/ActorChatPanel.tsx",
+      ],
+      roleBoundary: "executor",
+    });
+
+    expect("error" in record).toBe(false);
+    if ("error" in record) return;
+    expect(specialist.lastAssignedQuery).toContain("## 任务目标");
+    expect(specialist.lastAssignedQuery).toContain("## 任务焦点");
+    expect(specialist.lastAssignedQuery).toContain("## 协作方式");
+    expect(specialist.lastAssignedQuery).toContain("自行决定执行步骤");
+    expect(specialist.lastAssignedQuery).toContain("## 本轮职责边界");
+    expect(specialist.lastAssignedQuery).toContain("执行角色");
+    expect(specialist.lastAssignedQuery).toContain("## 已知上下文");
+    expect(specialist.lastAssignedQuery).toContain("只检查 Dialog / Actor 运行时");
+    expect(specialist.lastAssignedQuery).toContain("## 工作集 / 附件文件");
+    expect(specialist.lastAssignedQuery).toContain("/repo/src/core/agent/actor/agent-actor.ts");
+    expect(specialist.lastAssignedQuery).toContain("## 交付要求");
+  });
+
   it("can create a temporary child agent when the target does not exist", () => {
     const system = new ActorSystem();
     system.spawn(buildActorConfig("coordinator", "Coordinator"));
@@ -649,8 +681,9 @@ describe("ActorSystem.spawnTask", () => {
 
     expect(record.roleBoundary).toBe("validator");
     expect(record.label).toBe("验证支援");
-    expect(specialist.lastAssignedQuery).toContain("[本轮职责边界]");
+    expect(specialist.lastAssignedQuery).toContain("## 本轮职责边界");
     expect(specialist.lastAssignedQuery).toContain("你本轮是验证角色");
+    expect(specialist.lastAssignedQuery).toContain("## 已知上下文");
     expect(specialist.lastAssignedQuery).toContain("重点覆盖回归与复现路径");
   });
 });

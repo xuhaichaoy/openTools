@@ -5,6 +5,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use super::request::{build_anthropic_request, build_api_request};
 use super::stream::{extract_sse_data_line, StreamCancellation};
+use super::tool_call_stream::{apply_openai_tool_call_delta, finalize_openai_tool_calls};
 use super::types::{AIConfig, ChatMessage, FunctionCall, ToolCall};
 use crate::error::AppError;
 
@@ -363,27 +364,45 @@ async fn agent_stream_openai(
                     };
                     if data == "[DONE]" {
                         if !pending_tool_calls.is_empty() {
-                            for (idx, args) in &tc_args_buffer {
-                                if let Some(tc) = pending_tool_calls.get_mut(*idx) {
-                                    tc.function.arguments = args.clone();
-                                }
+                            let dropped = finalize_openai_tool_calls(
+                                &mut pending_tool_calls,
+                                &tc_args_buffer,
+                            );
+                            if dropped > 0 {
+                                log::warn!(
+                                    "[ai_agent_stream/openai] dropped {} incomplete tool_calls conv={}",
+                                    dropped,
+                                    conversation_id
+                                );
                             }
-                            let tc_summary: Vec<String> = pending_tool_calls.iter().enumerate()
-                                .map(|(i, tc)| format!("#{}: id={} name={:?} args_len={}", i, &tc.id, &tc.function.name, tc.function.arguments.len()))
+                            let tc_summary: Vec<String> = pending_tool_calls
+                                .iter()
+                                .enumerate()
+                                .map(|(i, tc)| {
+                                    format!(
+                                        "#{}: id={} name={:?} args_len={}",
+                                        i,
+                                        &tc.id,
+                                        &tc.function.name,
+                                        tc.function.arguments.len()
+                                    )
+                                })
                                 .collect();
-                            log::info!(
-                                "[ai_agent_stream/openai] tool calls conv={} count={} detail=[{}]",
-                                conversation_id,
-                                pending_tool_calls.len(),
-                                tc_summary.join(", ")
-                            );
-                            let _ = app.emit(
-                                "ai-agent-tool-calls",
-                                serde_json::json!({
-                                    "conversation_id": conversation_id,
-                                    "tool_calls": &pending_tool_calls,
-                                }),
-                            );
+                            if !pending_tool_calls.is_empty() {
+                                log::info!(
+                                    "[ai_agent_stream/openai] tool calls conv={} count={} detail=[{}]",
+                                    conversation_id,
+                                    pending_tool_calls.len(),
+                                    tc_summary.join(", ")
+                                );
+                                let _ = app.emit(
+                                    "ai-agent-tool-calls",
+                                    serde_json::json!({
+                                        "conversation_id": conversation_id,
+                                        "tool_calls": &pending_tool_calls,
+                                    }),
+                                );
+                            }
                         }
 
                         log::info!(
@@ -425,47 +444,31 @@ async fn agent_stream_openai(
                         }
 
                         if let Some(tcs) = delta["tool_calls"].as_array() {
-                            emitted = true;
                             for tc in tcs {
-                                let idx = tc["index"].as_u64().unwrap_or(0) as usize;
-                                let tc_id = tc["id"].as_str().map(|s| s.to_string());
-                                let tc_name = tc["function"]["name"].as_str().map(|s| s.to_string());
-                                let tc_name_raw = tc.get("function").and_then(|f| f.get("name")).map(|v| v.to_string());
-                                if tc_id.is_some() || tc_name.is_some() {
+                                let Some(tool_call_delta) = apply_openai_tool_call_delta(
+                                    tc,
+                                    &mut pending_tool_calls,
+                                    &mut tc_args_buffer,
+                                ) else {
+                                    continue;
+                                };
+                                emitted = true;
+                                if tool_call_delta.has_identity() {
                                     log::info!(
                                         "[ai_agent_stream/openai] tool_call chunk idx={} id={:?} name={:?} name_raw={:?} conv={}",
-                                        idx, tc_id, tc_name, tc_name_raw, conversation_id
+                                        tool_call_delta.index,
+                                        tool_call_delta.id,
+                                        tool_call_delta.name,
+                                        tool_call_delta.raw_name,
+                                        conversation_id
                                     );
                                 }
-                                while pending_tool_calls.len() <= idx {
-                                    pending_tool_calls.push(ToolCall {
-                                        id: String::new(),
-                                        call_type: "function".to_string(),
-                                        function: FunctionCall {
-                                            name: String::new(),
-                                            arguments: String::new(),
-                                        },
+                                if let Some(args) = &tool_call_delta.arguments_chunk {
+                                    let payload = serde_json::json!({
+                                        "conversation_id": conversation_id,
+                                        "content": args
                                     });
-                                }
-                                if let Some(id) = tc_id {
-                                    pending_tool_calls[idx].id = id;
-                                }
-                                if let Some(func) = tc["function"].as_object() {
-                                    if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
-                                        if !name.is_empty() {
-                                            pending_tool_calls[idx].function.name = name.to_string();
-                                        }
-                                    }
-                                    if let Some(args) =
-                                        func.get("arguments").and_then(|a| a.as_str())
-                                    {
-                                        tc_args_buffer.entry(idx).or_default().push_str(args);
-                                        let payload = serde_json::json!({
-                                            "conversation_id": conversation_id,
-                                            "content": args
-                                        });
-                                        let _ = app.emit("ai-stream-tool-args", payload);
-                                    }
+                                    let _ = app.emit("ai-stream-tool-args", payload);
                                 }
                             }
                         }
@@ -509,23 +512,28 @@ async fn agent_stream_openai(
     }
 
     if !pending_tool_calls.is_empty() {
-        for (idx, args) in &tc_args_buffer {
-            if let Some(tc) = pending_tool_calls.get_mut(*idx) {
-                tc.function.arguments = args.clone();
-            }
+        let dropped = finalize_openai_tool_calls(&mut pending_tool_calls, &tc_args_buffer);
+        if dropped > 0 {
+            log::warn!(
+                "[ai_agent_stream/openai] dropped {} incomplete tool_calls before stream-end emit conv={}",
+                dropped,
+                conversation_id
+            );
         }
-        log::warn!(
-            "[ai_agent_stream/openai] stream ended without [DONE], but has tool_calls conv={} count={}",
-            conversation_id,
-            pending_tool_calls.len()
-        );
-        let _ = app.emit(
-            "ai-agent-tool-calls",
-            serde_json::json!({
-                "conversation_id": conversation_id,
-                "tool_calls": &pending_tool_calls,
-            }),
-        );
+        if !pending_tool_calls.is_empty() {
+            log::warn!(
+                "[ai_agent_stream/openai] stream ended without [DONE], but has tool_calls conv={} count={}",
+                conversation_id,
+                pending_tool_calls.len()
+            );
+            let _ = app.emit(
+                "ai-agent-tool-calls",
+                serde_json::json!({
+                    "conversation_id": conversation_id,
+                    "tool_calls": &pending_tool_calls,
+                }),
+            );
+        }
     }
 
     log::warn!(

@@ -3222,7 +3222,7 @@ function DialogWorkspaceDock({
                     <div className="text-[11px] text-[var(--color-text-secondary)] whitespace-pre-wrap break-words">
                       {selectedTask.task}
                     </div>
-                    <div className="grid gap-2 md:grid-cols-3">
+                    <div className="grid gap-2 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
                       <div className="rounded-lg bg-[var(--color-bg-secondary)]/70 px-3 py-2">
                         <div className="text-[10px] text-[var(--color-text-tertiary)]">派发者</div>
                         <div className="mt-1 text-[12px] text-[var(--color-text)]">

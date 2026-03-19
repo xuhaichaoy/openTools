@@ -227,6 +227,78 @@ function buildSpawnTaskRoleBoundaryInstruction(role: SpawnedTaskRoleBoundary): s
   }
 }
 
+function buildDelegatedTaskPrompt(params: {
+  spawnerName: string;
+  task: string;
+  label?: string;
+  roleBoundaryInstruction?: string;
+  context?: string;
+  attachments?: readonly string[];
+  executionHint?: string;
+}): string {
+  const task = params.task.trim() || "未命名任务";
+  const label = params.label?.trim();
+  const context = params.context?.trim();
+  const attachments = (params.attachments ?? [])
+    .map((item) => String(item ?? "").trim())
+    .filter(Boolean);
+  const executionHint = params.executionHint?.trim();
+
+  const lines: string[] = [
+    `[由 ${params.spawnerName} 委派的任务]`,
+    "",
+    "## 任务目标",
+    task,
+  ];
+
+  if (label && label !== task) {
+    lines.push("", "## 任务焦点", label);
+  }
+
+  lines.push(
+    "",
+    "## 协作方式",
+    "- 这是主 Agent 委派给你的子任务。你需要在给定目标和边界内自行决定执行步骤。",
+    "- 不要等待上游继续逐步指挥，也不要擅自改写任务目标。",
+    "- 如果发现缺少关键前提或必须扩大范围，先尽量在当前边界内推进，再明确回报缺口、原因和建议的上游动作。",
+  );
+
+  if (params.roleBoundaryInstruction) {
+    lines.push("", "## 本轮职责边界", params.roleBoundaryInstruction);
+  }
+
+  lines.push(
+    "",
+    "## 范围与边界",
+    attachments.length > 0
+      ? "- 优先围绕下方工作集和补充上下文涉及的文件、目录或模块开展工作。"
+      : "- 优先围绕任务描述和补充上下文涉及的范围开展工作，不要无边界发散。",
+    "- 如需越过当前范围，请确认确有必要，并在结果里说明原因。",
+  );
+
+  if (context) {
+    lines.push("", "## 已知上下文", context);
+  }
+
+  if (attachments.length > 0) {
+    lines.push("", "## 工作集 / 附件文件", ...attachments.map((file) => `- ${file}`));
+  }
+
+  lines.push(
+    "",
+    "## 交付要求",
+    "- 返回时给出结论、关键证据和下一步建议，不要只回复“已处理”或“看过了”。",
+    "- 若任务涉及代码、文件、页面或验证，请优先提供文件路径、关键修改点、命令或测试结果等可核查信息。",
+    "- 若未完成，请明确说明阻塞原因、已完成部分和建议的后续动作。",
+  );
+
+  if (executionHint) {
+    lines.push("", executionHint);
+  }
+
+  return lines.join("\n");
+}
+
 function summarizeError(error: unknown): string {
   if (error instanceof Error) return error.message || "error";
   if (typeof error === "string") return error;
@@ -1653,19 +1725,16 @@ export class ActorSystem {
     const rootRunId = parentRecord?.rootRunId ?? parentRecord?.runId ?? runId;
     const effectiveContext = opts?.context ?? plannedSpawn?.context;
     const roleBoundaryInstruction = buildSpawnTaskRoleBoundaryInstruction(resolvedRoleBoundary);
-
-    let fullTask = `[由 ${spawnerName} 委派的任务]\n\n${task}`;
-    if (roleBoundaryInstruction) {
-      fullTask += `\n\n[本轮职责边界]\n${roleBoundaryInstruction}`;
-    }
-    if (effectiveContext) fullTask += `\n\n补充上下文：${effectiveContext}`;
-    if (opts?.attachments?.length) {
-      fullTask += `\n\n附件文件路径：\n${opts.attachments.map((f) => `- ${f}`).join("\n")}`;
-    }
     const executionHint = buildSpawnTaskExecutionHint(task);
-    if (executionHint) {
-      fullTask += `\n\n${executionHint}`;
-    }
+    const fullTask = buildDelegatedTaskPrompt({
+      spawnerName,
+      task,
+      label,
+      roleBoundaryInstruction,
+      context: effectiveContext,
+      attachments: opts?.attachments,
+      executionHint,
+    });
 
     const record: SpawnedTaskRecord = {
       runId,

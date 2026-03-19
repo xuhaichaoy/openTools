@@ -12,6 +12,7 @@ import {
 } from "@/core/ai/assistant-config";
 import { autoExtractMemories } from "@/core/agent/actor/actor-memory";
 import { buildKnowledgeContextMessages } from "@/core/agent/actor/middlewares/knowledge-base-middleware";
+import { getEnabledMcpAgentTools } from "@/core/mcp/mcp-agent-tools";
 import {
   assembleAgentExecutionContext,
   buildAgentExecutionContextPlan,
@@ -19,6 +20,7 @@ import {
   uniqueContextPaths,
 } from "@/core/agent/context-runtime";
 import { registry } from "@/core/plugin-system/registry";
+import { ensureMcpServersLoaded } from "@/store/mcp-store";
 import {
   ReActAgent,
   pluginActionToTool,
@@ -57,7 +59,7 @@ function getBuiltinTools(askUser?: AskUserCallback): { tools: AgentTool[]; reset
 }
 
 export function buildAllTools(askUser?: AskUserCallback): AgentTool[] {
-  const tools = [...getPluginTools(), ...getBuiltinTools(askUser).tools];
+  const tools = [...getPluginTools(), ...getBuiltinTools(askUser).tools, ...getEnabledMcpAgentTools()];
   return filterAssistantToolsByConfig(tools, useAIStore.getState().config);
 }
 
@@ -121,10 +123,11 @@ export class LocalAgentBridge implements AgentBridge {
   ): Promise<AgentBridgeResult> {
     const ai = getMToolsAI();
     const aiConfig = useAIStore.getState().config;
+    await ensureMcpServersLoaded();
     const builtinResult = getBuiltinTools(this.askUser);
     builtinResult.resetPerRunState();
     const { notifyToolCalled } = builtinResult;
-    const allTools = [...getPluginTools(), ...builtinResult.tools];
+    const allTools = [...getPluginTools(), ...builtinResult.tools, ...getEnabledMcpAgentTools()];
     const role = options?.role;
     const configFilteredTools = filterAssistantToolsByConfig(allTools, aiConfig);
     const tools = role ? filterToolsForRole(configFilteredTools, role) : configFilteredTools;

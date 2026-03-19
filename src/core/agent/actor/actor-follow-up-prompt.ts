@@ -5,6 +5,7 @@ const TASK_COMPLETED_PATTERN = /^\[(?:Task completed|任务完成):\s*([^\]\n]+)
 
 export interface FollowUpMessageSummary {
   userMessageCount: number;
+  userImageCount: number;
   actorMessageCount: number;
   hasTaskFailure: boolean;
   hasTaskCompletion: boolean;
@@ -16,6 +17,7 @@ export interface FollowUpPromptDescriptor {
   mode: "general" | "spawn_failure" | "spawn_completion";
   prompt: string;
   summary: FollowUpMessageSummary;
+  images?: string[];
 }
 
 function uniqueNonEmpty(values: string[]): string[] {
@@ -36,16 +38,18 @@ function extractTaskLabel(content: string, pattern: RegExp): string | null {
 }
 
 export function summarizeFollowUpMessages(
-  drained: Array<Pick<InboxMessage, "from" | "content">>,
+  drained: Array<Pick<InboxMessage, "from" | "content" | "images">>,
 ): FollowUpMessageSummary {
   const failedTaskLabels: string[] = [];
   const completedTaskLabels: string[] = [];
   let userMessageCount = 0;
+  let userImageCount = 0;
   let actorMessageCount = 0;
 
   for (const message of drained) {
     if (message.from === "user") {
       userMessageCount++;
+      userImageCount += message.images?.length ?? 0;
       continue;
     }
 
@@ -64,6 +68,7 @@ export function summarizeFollowUpMessages(
 
   return {
     userMessageCount,
+    userImageCount,
     actorMessageCount,
     hasTaskFailure: failedTaskLabels.length > 0,
     hasTaskCompletion: completedTaskLabels.length > 0,

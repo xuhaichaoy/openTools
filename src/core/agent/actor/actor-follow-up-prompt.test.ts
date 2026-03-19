@@ -48,6 +48,19 @@ describe("actor-follow-up-prompt", () => {
     expect(descriptor.prompt).toContain("产物位置");
   });
 
+  it("counts image attachments in user follow-up messages", () => {
+    const summary = summarizeFollowUpMessages([
+      {
+        from: "user",
+        content: "如图所示",
+        images: ["/tmp/a.png", "/tmp/b.png"],
+      },
+    ]);
+
+    expect(summary.userMessageCount).toBe(1);
+    expect(summary.userImageCount).toBe(2);
+  });
+
   it("builds failure-aware final synthesis instructions", () => {
     const prompt = buildFinalSynthesisPrompt({
       hadFailedSpawnFollowUp: true,

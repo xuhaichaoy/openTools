@@ -45,6 +45,14 @@ export interface StreamCallbacks {
   onError?: (errorText: string, assistantContent: string) => void;
 }
 
+interface StreamToolCallPayload {
+  id: string;
+  function?: {
+    name?: string;
+    arguments?: string;
+  };
+}
+
 // ── ID 生成器 ──
 
 export function generateChatId(): string {
@@ -290,15 +298,18 @@ export async function startStreamingChat(opts: {
         }
       },
     ),
-    listen<{ conversation_id: string; tool_calls: ToolCallInfo[] }>(
+    listen<{ conversation_id: string; tool_calls: StreamToolCallPayload[] }>(
       "ai-stream-tool-calls",
       (event) => {
         if (event.payload.conversation_id === conversationId) {
-          const newCalls = event.payload.tool_calls.map((tc: any) => ({
-            id: tc.id,
-            name: tc.function.name,
-            arguments: tc.function.arguments,
-          }));
+          const newCalls = event.payload.tool_calls
+            .filter((tc) => typeof tc.function?.name === "string" && tc.function.name.trim().length > 0)
+            .map<ToolCallInfo>((tc) => ({
+              id: tc.id,
+              name: tc.function?.name?.trim() ?? "",
+              arguments: tc.function?.arguments ?? "",
+            }));
+          if (newCalls.length === 0) return;
           updateAssistant((m) => ({
             ...m,
             content: m.content || "正在调用工具...",

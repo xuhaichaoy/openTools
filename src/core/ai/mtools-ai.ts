@@ -1164,19 +1164,29 @@ export function createMToolsAI(): MToolsAI {
               "ai-agent-tool-calls",
               (event) => {
                 if (event.payload.conversation_id === conversationId) {
+                  const normalizedToolCalls = (event.payload.tool_calls ?? []).filter(
+                    (toolCall) => (toolCall.function?.name ?? "").trim().length > 0,
+                  );
+                  if (normalizedToolCalls.length === 0) {
+                    dump("ai-agent-tool-calls:ignored-empty", event.payload);
+                    return;
+                  }
                   markStage("first_tool_calls", {
-                    toolCallCount: event.payload.tool_calls.length,
-                    tools: event.payload.tool_calls.map((toolCall) => toolCall.function?.name ?? "unknown"),
+                    toolCallCount: normalizedToolCalls.length,
+                    tools: normalizedToolCalls.map((toolCall) => toolCall.function?.name ?? "unknown"),
                   });
-                  dump("ai-agent-tool-calls", event.payload);
-                  resolvedToolCalls = event.payload.tool_calls;
+                  dump("ai-agent-tool-calls", {
+                    ...event.payload,
+                    tool_calls: normalizedToolCalls,
+                  });
+                  resolvedToolCalls = normalizedToolCalls;
                   kickWatchdog("tool_calls");
-                  traceStreamEvent(conversationId, "tool_calls", event.payload.tool_calls);
+                  traceStreamEvent(conversationId, "tool_calls", normalizedToolCalls);
                   logThinkingWindow("tool_calls", {
-                    toolCalls: event.payload.tool_calls,
+                    toolCalls: normalizedToolCalls,
                   });
                   endThinkingWindow("tool_calls", {
-                    toolCalls: event.payload.tool_calls,
+                    toolCalls: normalizedToolCalls,
                   });
                 }
               },

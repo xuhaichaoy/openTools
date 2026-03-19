@@ -22,6 +22,7 @@ import { validateActorTaskResult } from "./spawned-task-result-validator";
 import { appendToolCallSync as appendToolCall, appendToolResultSync as appendToolResult } from "./actor-transcript";
 import type { ActorRunContext } from "./actor-middleware";
 import { runMiddlewareChain } from "./actor-middleware";
+import { resolveActorEffectiveMaxIterations } from "./iteration-budget";
 import { ClarificationInterrupt, createDefaultMiddlewares } from "./middlewares";
 import type {
   AgentCapabilities,
@@ -222,6 +223,7 @@ export class AgentActor {
   private askUser?: AskUserCallback;
   private confirmDangerousAction?: ConfirmDangerousAction;
   private maxIterations: number;
+  private readonly hasExplicitMaxIterations: boolean;
   private systemPromptOverride?: string;
   private actorSystem?: ActorSystem;
   private toolPolicy?: ToolPolicy;
@@ -252,6 +254,7 @@ export class AgentActor {
     this.persistent = config.persistent !== false;
     this.modelOverride = config.modelOverride;
     this._capabilities = config.capabilities;
+    this.hasExplicitMaxIterations = typeof config.maxIterations === "number";
     this.maxIterations = config.maxIterations ?? config.role.maxIterations ?? 15;
     this.systemPromptOverride = config.systemPromptOverride;
     this.toolPolicy = config.toolPolicy;
@@ -636,7 +639,7 @@ export class AgentActor {
           });
           const { result: followUpResult, finalQuery: followUpHistoryQuery } = await this.runWithClarifications(
             followUp.prompt,
-            undefined,
+            followUp.images,
             emitTaskStep,
             opts?.runOverrides,
           );
@@ -874,14 +877,20 @@ export class AgentActor {
 
   /** 从已 drain 的消息构建后续查询（用于等待循环） */
   private buildFollowUpFromMessages(drained: InboxMessage[]): FollowUpPromptDescriptor {
+    const inheritedImages = drained.flatMap((message) => message.images ?? []);
     const messages = drained.map((m) => {
       const sender = m.from === "user" ? "用户" : (this.actorSystem?.get(m.from)?.role.name ?? m.from);
-      return `[${sender}]: ${m.content.slice(0, 300)}`;
+      const imageNote = m.images?.length ? `（附带 ${m.images.length} 张图片）` : "";
+      return `[${sender}${imageNote}]: ${m.content.slice(0, 300)}`;
     });
-    return buildFollowUpPromptFromRenderedMessages({
+    const descriptor = buildFollowUpPromptFromRenderedMessages({
       renderedMessages: messages,
       summary: summarizeFollowUpMessages(drained),
     });
+    if (inheritedImages.length > 0) {
+      descriptor.images = [...new Set(inheritedImages)];
+    }
+    return descriptor;
   }
 
   /** 等待 inbox 有消息或超时 */
@@ -1093,14 +1102,12 @@ export class AgentActor {
       }
     };
     const effectiveModelOverride = runOverrides?.model ?? this.modelOverride;
-    const globalMaxIterations = Math.max(
-      5,
-      Math.min(50, useAIStore.getState().config.agent_max_iterations ?? 25),
-    );
-    const effectiveMaxIterations = Math.max(
-      1,
-      Math.min(runOverrides?.maxIterations ?? this.maxIterations, globalMaxIterations),
-    );
+    const effectiveMaxIterations = resolveActorEffectiveMaxIterations({
+      actorMaxIterations: this.maxIterations,
+      actorHasExplicitMaxIterations: this.hasExplicitMaxIterations,
+      globalConfiguredMaxIterations: useAIStore.getState().config.agent_max_iterations,
+      runOverrideMaxIterations: runOverrides?.maxIterations,
+    });
     const effectiveSystemPromptOverride = runOverrides?.systemPromptAppend
       ? [this.systemPromptOverride ?? this.role.systemPrompt, runOverrides.systemPromptAppend]
         .filter(Boolean)

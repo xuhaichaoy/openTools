@@ -11,7 +11,7 @@ import {
   type BuiltinToolsResult,
 } from "../core/default-tools";
 import { shouldAutoCollapseProcess } from "../core/ui-state";
-import { executeMcpTool, useMcpStore } from "@/store/mcp-store";
+import { ensureMcpServersLoaded, executeMcpTool, useMcpStore } from "@/store/mcp-store";
 import { useAIStore } from "@/store/ai-store";
 import { filterAssistantToolsByConfig } from "@/core/ai/assistant-config";
 
@@ -87,47 +87,57 @@ export function useAgentEffects({
 
   useEffect(() => {
     if (!ai) return;
-    const allActions = registry.getAllActions();
-    const tools: AgentTool[] = allActions.map(({ pluginId, pluginName, action }) =>
-      pluginActionToTool(pluginId, pluginName, action, ai),
-    );
-    const builtinResult: BuiltinToolsResult = createBuiltinAgentTools(confirmHostFallback, askUser);
-    tools.push(...builtinResult.tools);
+    let cancelled = false;
+    void (async () => {
+      await ensureMcpServersLoaded();
+      if (cancelled) return;
 
-    // Merge MCP server tools into agent tool list
-    const mcpState = useMcpStore.getState();
-    const mcpToolDefs = mcpState.getAllMcpTools();
-    for (const def of mcpToolDefs) {
-      const params: Record<string, { type: string; description?: string }> = {};
-      if (def.input_schema && typeof def.input_schema === "object") {
-        const schema = def.input_schema as Record<string, unknown>;
-        const props = (schema.properties ?? {}) as Record<string, { type?: string; description?: string }>;
-        for (const [k, v] of Object.entries(props)) {
-          params[k] = { type: v.type ?? "string", description: v.description };
+      const allActions = registry.getAllActions();
+      const tools: AgentTool[] = allActions.map(({ pluginId, pluginName, action }) =>
+        pluginActionToTool(pluginId, pluginName, action, ai),
+      );
+      const builtinResult: BuiltinToolsResult = createBuiltinAgentTools(confirmHostFallback, askUser);
+      tools.push(...builtinResult.tools);
+
+      const mcpState = useMcpStore.getState();
+      const mcpToolDefs = mcpState.getAllMcpTools();
+      for (const def of mcpToolDefs) {
+        const params: Record<string, { type: string; description?: string }> = {};
+        if (def.input_schema && typeof def.input_schema === "object") {
+          const schema = def.input_schema as Record<string, unknown>;
+          const props = (schema.properties ?? {}) as Record<string, { type?: string; description?: string }>;
+          for (const [k, v] of Object.entries(props)) {
+            params[k] = { type: v.type ?? "string", description: v.description };
+          }
         }
+
+        tools.push({
+          name: def.name,
+          description: def.description ?? `MCP tool: ${def.name}`,
+          parameters: Object.keys(params).length > 0 ? params : { input: { type: "string", description: "Tool input" } },
+          execute: async (args) => {
+            try {
+              const result = await executeMcpTool(def.name, JSON.stringify(args ?? {}));
+              if (!result.success) {
+                return { error: result.result || `MCP tool call failed: ${def.name}` };
+              }
+              return result.result;
+            } catch (e) {
+              return { error: `MCP tool call failed: ${e}` };
+            }
+          },
+        });
       }
 
-      tools.push({
-        name: def.name,
-        description: def.description ?? `MCP tool: ${def.name}`,
-        parameters: Object.keys(params).length > 0 ? params : { input: { type: "string", description: "Tool input" } },
-        execute: async (args) => {
-          try {
-            const result = await executeMcpTool(def.name, JSON.stringify(args ?? {}));
-            if (!result.success) {
-              return { error: result.result || `MCP tool call failed: ${def.name}` };
-            }
-            return result.result;
-          } catch (e) {
-            return { error: `MCP tool call failed: ${e}` };
-          }
-        },
-      });
-    }
+      if (cancelled) return;
+      setAvailableTools(filterAssistantToolsByConfig(dedupeToolsByName(tools), aiConfig));
+      setResetPerRunState(() => builtinResult.resetPerRunState);
+      setNotifyToolCalled(() => builtinResult.notifyToolCalled);
+    })();
 
-    setAvailableTools(filterAssistantToolsByConfig(dedupeToolsByName(tools), aiConfig));
-    setResetPerRunState(() => builtinResult.resetPerRunState);
-    setNotifyToolCalled(() => builtinResult.notifyToolCalled);
+    return () => {
+      cancelled = true;
+    };
   }, [
     ai,
     aiConfig,

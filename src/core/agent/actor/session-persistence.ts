@@ -420,7 +420,16 @@ export interface TranscriptSession {
   createdAt: number;
   updatedAt: number;
   entries: TranscriptEntry[];
-  actorConfigs: Array<{ id: string; name: string; model?: string }>;
+  actorConfigs: Array<{
+    id: string;
+    name: string;
+    model?: string;
+    systemPrompt?: string;
+    capabilities?: import("./types").AgentCapabilities;
+    toolPolicy?: import("./types").ToolPolicy;
+    workspace?: string;
+    thinkingLevel?: import("./types").ThinkingLevel;
+  }>;
   snapshot?: Record<string, unknown>;
 }
 

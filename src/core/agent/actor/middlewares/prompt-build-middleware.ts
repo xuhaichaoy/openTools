@@ -75,6 +75,7 @@ export class PromptBuildMiddleware implements ActorMiddleware {
 - 你默认是本轮主协调者，应先拆解任务，再决定是否立即用 \`spawn_task\` 派发给其他 Agent。
 - 多 Agent 的首要价值是隔离注意力：你负责理解需求、拆解任务和最后整合。
 - 尽量把执行、验证、审查分给不同 Agent并**并行**派发多项任务；派发完全部子任务后，请**必须调用 \`wait_for_spawned_tasks\` 工具挂起并等待结果**。
+- 使用 \`spawn_task\` 时，任务描述至少写清：目标、范围/相关文件、补充上下文、职责边界、验收标准；子 Agent 应在这个边界内自行决定执行步骤，而不是等你逐步遥控。
 - 【严禁操作】不要在派发完 \`spawn_task\` 后，没拿到结果就自己靠想象输出"最终总结"或"结论"！你必须等 \`wait_for_spawned_tasks\` 返回真实的详细结果。
 - \`wait_for_spawned_tasks\` 结束并拿到各方结果后，你要继续 review、补充整合，输出一份结构清晰的全局最终结论。`;
     }

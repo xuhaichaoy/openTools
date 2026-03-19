@@ -2,6 +2,7 @@ pub mod agent;
 pub mod model_capabilities;
 pub mod request;
 pub mod stream;
+pub mod tool_call_stream;
 pub mod tools;
 pub mod types;
 

@@ -588,7 +588,10 @@ fn is_task_active_for_dedupe(task: &AgentOrchestratorTask) -> bool {
             .as_ref()
             .map(|value| !value.trim().is_empty())
             .unwrap_or(false)
-        && !matches!(task.status, AgentTaskStatus::Paused | AgentTaskStatus::Cancelled)
+        && !matches!(
+            task.status,
+            AgentTaskStatus::Paused | AgentTaskStatus::Cancelled
+        )
         && !once_done
 }
 
@@ -638,7 +641,12 @@ fn normalize_task_subject_for_dedupe(query: &str) -> String {
         return String::new();
     }
 
-    let stripped = strip_known_prefix(trimmed, &["请", "提醒", "通知", "一下", "用户", "我", "去", "要", "记得"]);
+    let stripped = strip_known_prefix(
+        trimmed,
+        &[
+            "请", "提醒", "通知", "一下", "用户", "我", "去", "要", "记得",
+        ],
+    );
     let separators = ['：', ':', '\n', '，', ',', '-', '（', '('];
     let mut end = stripped.len();
     for separator in separators {
@@ -936,10 +944,9 @@ pub async fn agent_task_create(
         None => None,
     };
     let parsed_trigger_action = match trigger_action.as_deref() {
-        Some(raw) => Some(
-            AgentTaskTriggerAction::from_str(raw)
-                .ok_or_else(|| "不支持的 trigger_action，仅支持 run_agent/deliver_message".to_string())?,
-        ),
+        Some(raw) => Some(AgentTaskTriggerAction::from_str(raw).ok_or_else(|| {
+            "不支持的 trigger_action，仅支持 run_agent/deliver_message".to_string()
+        })?),
         None => Some(AgentTaskTriggerAction::RunAgent),
     };
     let parsed_origin_mode = match origin_mode.as_deref() {
@@ -1142,8 +1149,7 @@ pub async fn agent_task_set_status(
     };
 
     let now = now_ms();
-    let preserve_user_locked_status =
-        should_preserve_user_locked_status(&task.status, &status);
+    let preserve_user_locked_status = should_preserve_user_locked_status(&task.status, &status);
 
     if !preserve_user_locked_status {
         task.status = status;

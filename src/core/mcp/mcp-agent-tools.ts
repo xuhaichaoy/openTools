@@ -32,7 +32,7 @@ export function getEnabledMcpAgentTools(serverIds?: string[]): AgentTool[] {
       const toolName = buildMcpToolName(server.id, def.name);
       tools.push({
         name: toolName,
-        description: def.description ?? `[MCP:${server.name}] ${def.name}`,
+        description: `[MCP:${server.name}] ${def.name}${def.description ? ` - ${def.description}` : ""}`,
         parameters: buildToolParameters(def.input_schema),
         execute: async (args) => {
           const result = await executeMcpTool(toolName, JSON.stringify(args ?? {}));

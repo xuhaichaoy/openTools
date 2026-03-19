@@ -87,6 +87,7 @@ interface McpState {
   serverResources: Record<string, McpResourceDef[]>;
   serverPrompts: Record<string, McpPromptDef[]>;
   isLoading: boolean;
+  hasLoaded: boolean;
 
   loadServers: () => Promise<void>;
   saveServers: (servers?: McpServerConfig[]) => Promise<void>;
@@ -102,6 +103,24 @@ interface McpState {
 }
 
 let jsonRpcId = 1000;
+let ensureMcpServersLoadedPromise: Promise<void> | null = null;
+
+export async function ensureMcpServersLoaded(force = false): Promise<void> {
+  const state = useMcpStore.getState();
+  if (!force && state.hasLoaded) return;
+  if (!force && state.isLoading && ensureMcpServersLoadedPromise) {
+    await ensureMcpServersLoadedPromise;
+    return;
+  }
+
+  if (!ensureMcpServersLoadedPromise || force) {
+    ensureMcpServersLoadedPromise = state.loadServers().finally(() => {
+      ensureMcpServersLoadedPromise = null;
+    });
+  }
+
+  await ensureMcpServersLoadedPromise;
+}
 
 async function sendRpc(
   serverId: string,
@@ -147,11 +166,14 @@ export const useMcpStore = create<McpState>((set, get) => ({
   serverResources: {},
   serverPrompts: {},
   isLoading: false,
+  hasLoaded: false,
 
   loadServers: async () => {
+    let loaded = false;
     set({ isLoading: true });
     try {
       const configs = await invoke<McpServerConfig[]>("mcp_load_config");
+      loaded = true;
       const statusEntries = await Promise.all(
         configs.map(async (config) => {
           if (!config.enabled) return [config.id, "offline"] as const;
@@ -181,7 +203,7 @@ export const useMcpStore = create<McpState>((set, get) => ({
     } catch (e) {
       handleError(e, { context: "加载 MCP 配置" });
     }
-    set({ isLoading: false });
+    set({ isLoading: false, hasLoaded: loaded });
   },
 
   saveServers: async (servers) => {

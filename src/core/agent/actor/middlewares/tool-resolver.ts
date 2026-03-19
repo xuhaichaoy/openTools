@@ -11,6 +11,7 @@ import { createCodeSearchTools } from "@/core/code-index/code-search-tools";
 import { getEnabledMcpAgentTools } from "@/core/mcp/mcp-agent-tools";
 import { filterAssistantToolsByConfig } from "@/core/ai/assistant-config";
 import { useAIStore } from "@/store/ai-store";
+import { ensureMcpServersLoaded } from "@/store/mcp-store";
 import type { ActorMiddleware, ActorRunContext } from "../actor-middleware";
 
 function getPluginTools(): AgentTool[] {
@@ -58,6 +59,7 @@ export class ToolResolverMiddleware implements ActorMiddleware {
         codeSearchTools = createCodeSearchTools(projectId, ctx.workspace);
       } catch { /* code index not available */ }
     }
+    await ensureMcpServersLoaded();
     const mcpTools = getEnabledMcpAgentTools();
 
     const allTools = dedupeToolsByName([
