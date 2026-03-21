@@ -862,4 +862,194 @@ describe("ReActAgent FC compatibility cache", () => {
     );
     expect(inboxImageMessage?.images).toEqual(["/tmp/design-shot.png"]);
   });
+
+  it("should include structured diagnostics when FC stops due to repeated tool calls", async () => {
+    let fcCalls = 0;
+    const ai = createMockAI(async () => {
+      fcCalls += 1;
+      if (fcCalls === 1) {
+        return {
+          type: "tool_calls",
+          toolCalls: [
+            {
+              id: "repeat-search",
+              type: "function",
+              function: {
+                name: "memory_search",
+                arguments: "{\"query\":\"baidu devtools\"}",
+              },
+            },
+          ],
+        };
+      }
+      return {
+        type: "tool_calls",
+        toolCalls: [
+          {
+            id: `repeat-${fcCalls}`,
+            type: "function",
+            function: {
+              name: "noop",
+              arguments: "{\"tag\":\"same\"}",
+            },
+          },
+        ],
+      };
+    });
+
+    const tools: AgentTool[] = [
+      {
+        name: "noop",
+        description: "noop",
+        parameters: {
+          tag: { type: "string", description: "tag" },
+        },
+        execute: async () => ({ ok: true }),
+      },
+      {
+        name: "memory_search",
+        description: "memory search",
+        parameters: {
+          query: { type: "string", description: "query" },
+        },
+        execute: async () => ({ results: [] }),
+      },
+    ];
+
+    const agent = new ReActAgent(ai, tools, {
+      maxIterations: 6,
+      fcCompatibilityKey: "iteration-diagnostics-repeat-tools",
+    });
+
+    const answer = await agent.run("继续处理当前任务");
+
+    expect(answer).toContain("执行已提前停止：检测到重复 tool_calls（最大 6 步）。");
+    expect(answer).toContain("执行诊断：");
+    expect(answer).toContain("实际运行轮数：4 / 6");
+    expect(answer).toContain("轮数定义：1 轮 = 1 次模型决策（返回回答或 tool_calls），不等于 1 次工具执行");
+    expect(answer).toContain("停止原因：连续 2 轮 tool_calls 完全相同");
+    expect(answer).toContain("工具执行次数：2");
+    expect(answer).toContain("重复工具模式：noop");
+  });
+
+  it("should give the model one chance to self-correct repeated tool calls", async () => {
+    let fcCalls = 0;
+    const ai = createMockAI(async ({ messages }) => {
+      const hasCorrectionPrompt = messages.some((message) =>
+        message.role === "user"
+        && typeof message.content === "string"
+        && message.content.includes("不要再次重复调用这些工具"),
+      );
+      if (hasCorrectionPrompt) {
+        return {
+          type: "content",
+          content: "我不会再重复调用了。基于现有结果，页面已经创建成功，接下来应直接访问或总结。",
+        };
+      }
+
+      fcCalls += 1;
+      if (fcCalls === 1) {
+        return {
+          type: "tool_calls",
+          toolCalls: [
+            {
+              id: "recover-search",
+              type: "function",
+              function: {
+                name: "memory_search",
+                arguments: "{\"query\":\"baidu devtools\"}",
+              },
+            },
+          ],
+        };
+      }
+      return {
+        type: "tool_calls",
+        toolCalls: [
+          {
+            id: `recover-repeat-${fcCalls}`,
+            type: "function",
+            function: {
+              name: "noop",
+              arguments: "{\"tag\":\"same\"}",
+            },
+          },
+        ],
+      };
+    });
+
+    const tools: AgentTool[] = [
+      {
+        name: "noop",
+        description: "noop",
+        parameters: {
+          tag: { type: "string", description: "tag" },
+        },
+        execute: async () => ({ ok: true }),
+      },
+      {
+        name: "memory_search",
+        description: "memory search",
+        parameters: {
+          query: { type: "string", description: "query" },
+        },
+        execute: async () => ({ results: [] }),
+      },
+    ];
+
+    const agent = new ReActAgent(ai, tools, {
+      maxIterations: 6,
+      fcCompatibilityKey: "iteration-diagnostics-repeat-tools-recover",
+    });
+
+    const answer = await agent.run("继续处理当前任务");
+
+    expect(answer).toContain("不会再重复调用");
+    expect(answer).not.toContain("执行诊断：");
+  });
+
+  it("should include structured diagnostics when FC truly reaches the iteration limit", async () => {
+    let fcCalls = 0;
+    const ai = createMockAI(async () => {
+      fcCalls += 1;
+      return {
+        type: "tool_calls",
+        toolCalls: [
+          {
+            id: `limit-${fcCalls}`,
+            type: "function",
+            function: {
+              name: "noop",
+              arguments: `{\"tag\":\"${fcCalls}\"}`,
+            },
+          },
+        ],
+      };
+    });
+
+    const tools: AgentTool[] = [
+      {
+        name: "noop",
+        description: "noop",
+        parameters: {
+          tag: { type: "string", description: "tag" },
+        },
+        execute: async () => ({ ok: true }),
+      },
+    ];
+
+    const agent = new ReActAgent(ai, tools, {
+      maxIterations: 2,
+      fcCompatibilityKey: "iteration-diagnostics-true-limit",
+    });
+
+    const answer = await agent.run("继续处理当前任务");
+
+    expect(answer).toContain("已达到最大执行步数（2 步）。");
+    expect(answer).toContain("执行诊断：");
+    expect(answer).toContain("实际运行轮数：2 / 2");
+    expect(answer).toContain("轮数定义：1 轮 = 1 次模型决策（返回回答或 tool_calls），不等于 1 次工具执行");
+    expect(answer).toContain("停止原因：已达到迭代上限");
+    expect(answer).toContain("工具执行次数：2");
+  });
 });

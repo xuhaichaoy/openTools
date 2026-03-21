@@ -24,6 +24,8 @@ export interface InboxMessage {
   replyTo?: string;
   /** 附带的图片路径（本地文件路径） */
   images?: string[];
+  /** 附带的文件列表（本地文件路径） */
+  attachments?: { path: string; fileName?: string }[];
 }
 
 // ── Dialog Messages（UI 层使用） ──
@@ -81,10 +83,16 @@ export interface DialogExecutionPlanEdge {
 export interface DialogExecutionPlannedSpawn {
   id: string;
   targetActorId: string;
+  targetActorName?: string;
   task: string;
   label?: string;
   context?: string;
   roleBoundary?: SpawnedTaskRoleBoundary;
+  createIfMissing?: boolean;
+  childDescription?: string;
+  childCapabilities?: AgentCapability[];
+  childWorkspace?: string;
+  childMaxIterations?: number;
 }
 
 export interface DialogExecutionPlan {

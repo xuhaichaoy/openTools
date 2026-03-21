@@ -19,6 +19,7 @@ vi.mock("./agent-actor", () => {
     persistent: boolean;
     modelOverride?: string;
     capabilities?: ActorConfig["capabilities"];
+    private _workspace?: string;
     private toolPolicy?: ToolPolicy;
     private systemPromptOverride?: string;
     private _status = "idle";
@@ -37,6 +38,7 @@ vi.mock("./agent-actor", () => {
       this.persistent = config.persistent !== false;
       this.modelOverride = config.modelOverride;
       this.capabilities = config.capabilities;
+      this._workspace = config.workspace;
       this.toolPolicy = config.toolPolicy;
       this.systemPromptOverride = config.systemPromptOverride;
     }
@@ -76,7 +78,7 @@ vi.mock("./agent-actor", () => {
     }
 
     get workspace() {
-      return undefined;
+      return this._workspace;
     }
 
     get timeoutSeconds() {
@@ -730,6 +732,65 @@ describe("ActorSystem.send", () => {
 });
 
 describe("ActorSystem dialog recall metadata", () => {
+  it("attaches shareable image and exported file artifacts to agent results", () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator", {
+      workspace: "/repo/project",
+    }));
+
+    system.recordArtifact({
+      actorId: "coordinator",
+      path: "/tmp/final-shot.png",
+      source: "tool_write",
+      toolName: "write_file",
+      summary: "生成截图",
+      timestamp: 1000,
+    });
+    system.recordArtifact({
+      actorId: "coordinator",
+      path: "/Users/demo/Downloads/report.xlsx",
+      source: "tool_write",
+      toolName: "write_file",
+      summary: "导出报表",
+      timestamp: 1001,
+    });
+    system.recordArtifact({
+      actorId: "coordinator",
+      path: "/repo/project/src/app.tsx",
+      source: "tool_edit",
+      toolName: "str_replace_edit",
+      summary: "修改项目源码",
+      timestamp: 1002,
+    });
+
+    const msg = system.publishResult("coordinator", "已生成截图和导出文件。");
+
+    expect(msg?.images).toEqual(["/tmp/final-shot.png"]);
+    expect(msg?.attachments).toEqual([
+      { path: "/Users/demo/Downloads/report.xlsx", fileName: "report.xlsx" },
+    ]);
+  });
+
+  it("does not echo uploaded files back as result media", () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator", {
+      workspace: "/repo/project",
+    }));
+
+    system.recordArtifact({
+      actorId: "coordinator",
+      path: "/tmp/user-upload.png",
+      source: "upload",
+      summary: "用户上传了图片：user-upload.png",
+      timestamp: 1000,
+    });
+
+    const msg = system.publishResult("coordinator", "我已经看过你发来的图片。");
+
+    expect(msg?.images).toBeUndefined();
+    expect(msg?.attachments).toBeUndefined();
+  });
+
   it("attaches recall metadata to agent result messages", () => {
     const system = new ActorSystem();
     const coordinator = system.spawn(buildActorConfig("coordinator", "Coordinator")) as unknown as {

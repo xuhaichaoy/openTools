@@ -383,6 +383,16 @@ const ChannelConfigPanel: React.FC = () => {
 
   const handleSendTest = useCallback(async () => {
     if (!testChannelId || !testMsg.trim()) return;
+    const targetChannel = channels.find((entry) => entry.config.id === testChannelId)?.config;
+    if (targetChannel?.type === "dingtalk") {
+      const platformConfig = targetChannel.platformConfig as { webhookUrl?: string; appKey?: string; appSecret?: string };
+      const hasWebhook = !!String(platformConfig.webhookUrl ?? "").trim();
+      const hasStream = !!String(platformConfig.appKey ?? "").trim() && !!String(platformConfig.appSecret ?? "").trim();
+      if (hasStream && !hasWebhook) {
+        alert("当前钉钉通道是 Stream-only 模式，配置页里的“测试发送”没有默认目标会话，因此这里失败不代表接收异常。请先在钉钉里给机器人发消息触发回复；如果需要在这里直接测试主动发送，请补充 Webhook。");
+        return;
+      }
+    }
     setSending(true);
     try {
       const mgr = getChannelManager();
@@ -394,7 +404,7 @@ const ChannelConfigPanel: React.FC = () => {
     } finally {
       setSending(false);
     }
-  }, [testChannelId, testMsg]);
+  }, [channels, testChannelId, testMsg]);
 
   const handleConversationAction = useCallback((
     action: "new" | "reset" | "stop" | "status",
@@ -915,7 +925,7 @@ const ChannelConfigPanel: React.FC = () => {
                       </div>
                       {ch.config.type === "dingtalk" && !platformConfig.webhookUrl && (
                         <div className="mt-1 text-[10px] text-[var(--color-text-secondary)]">
-                          钉钉 Stream-only 通道的测试发送没有默认目标会话；请在钉钉里先给机器人发消息触发回复，或额外配置 Webhook / RobotCode 用于主动发送。
+                          钉钉 Stream-only 通道的配置页测试发送没有默认目标会话；这不影响接收消息。请先在钉钉里给机器人发消息触发回复；如果要在这里直接测试主动发送，请补充 Webhook。
                         </div>
                       )}
                     </>

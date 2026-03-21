@@ -19,6 +19,8 @@ export interface McpToolDef {
   name: string;
   description?: string;
   input_schema?: Record<string, unknown>;
+  /** MCP 协议标准字段（camelCase），部分服务器使用此格式 */
+  inputSchema?: Record<string, unknown>;
 }
 
 export interface McpResourceDef {
@@ -330,8 +332,14 @@ export const useMcpStore = create<McpState>((set, get) => ({
         server.headers,
       )) as { tools?: McpToolDef[] };
 
+      // MCP 协议使用 inputSchema（camelCase），统一规范化为 input_schema
+      const normalizedTools = (toolsResult?.tools ?? []).map((tool) => ({
+        ...tool,
+        input_schema: tool.input_schema ?? tool.inputSchema,
+      }));
+
       set((s) => ({
-        serverTools: { ...s.serverTools, [id]: toolsResult?.tools ?? [] },
+        serverTools: { ...s.serverTools, [id]: normalizedTools },
       }));
 
       // Try resources/list (optional)

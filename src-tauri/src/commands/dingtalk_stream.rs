@@ -5,12 +5,14 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::env;
 use std::error::Error as StdError;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, State as TauriState};
+use tokio::net::TcpStream;
 use tokio::sync::oneshot;
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message, MaybeTlsStream};
 
 const DINGTALK_STREAM_OPEN_URL: &str = "https://api.dingtalk.com/v1.0/gateway/connections/open";
 const DINGTALK_BOT_MESSAGE_TOPIC: &str = "/v1.0/im/bot/messages/get";
@@ -199,10 +201,21 @@ struct StreamAckHeaders {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DingTalkAccessTokenResponse {
+    #[serde(alias = "access_token")]
     access_token: Option<String>,
-    expires_in: Option<u64>,
+    #[serde(alias = "expires_in")]
+    _expires_in: Option<u64>,
     errcode: Option<i64>,
     errmsg: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DingTalkDownloadedFile {
+    pub download_code: String,
+    pub path: String,
+    pub file_name: String,
+    pub content_type: Option<String>,
 }
 
 #[tauri::command]
@@ -234,6 +247,68 @@ pub async fn get_dingtalk_stream_channel_status(
     channel_id: String,
 ) -> Result<Option<DingTalkStreamStatus>, String> {
     manager.get_status(&channel_id)
+}
+
+#[tauri::command]
+pub async fn dingtalk_send_app_single_message(
+    client_id: String,
+    client_secret: String,
+    robot_code: String,
+    user_id: String,
+    msg_key: String,
+    msg_param: String,
+) -> Result<(), String> {
+    let access_token = request_dingtalk_access_token(&client_id, &client_secret).await?;
+    let client_ctx = build_dingtalk_http_client()?;
+    let response = client_ctx
+        .client
+        .post("https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend")
+        .header("x-acs-dingtalk-access-token", access_token)
+        .json(&json!({
+            "robotCode": robot_code,
+            "userIds": [user_id],
+            "msgKey": msg_key,
+            "msgParam": msg_param,
+        }))
+        .send()
+        .await
+        .map_err(|e| {
+            format_reqwest_transport_error("钉钉 API 发送失败 (单聊)", &e, &client_ctx.network_mode)
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!(
+            "钉钉 API 发送失败 (单聊): HTTP {} {}",
+            status, body
+        ));
+    }
+
+    let payload = response
+        .json::<Value>()
+        .await
+        .map_err(|e| format!("钉钉 API 响应解析失败: {}", e))?;
+
+    let code = payload
+        .get("errcode")
+        .and_then(Value::as_i64)
+        .or_else(|| payload.get("code").and_then(Value::as_i64))
+        .unwrap_or(0);
+
+    if code != 0 {
+        let msg = payload
+            .get("errmsg")
+            .and_then(Value::as_str)
+            .or_else(|| payload.get("message").and_then(Value::as_str))
+            .unwrap_or("Unknown Error");
+        return Err(format!(
+            "钉钉 API 发送失败 (单聊) 业务错误: Code {}, {}",
+            code, msg
+        ));
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -290,6 +365,153 @@ pub async fn dingtalk_send_app_message(
     }
 
     Ok(())
+}
+
+#[tauri::command]
+pub async fn dingtalk_upload_media(
+    client_id: String,
+    client_secret: String,
+    media_type: String, // "image", "file", "voice", "video"
+    file_path: String,
+) -> Result<String, String> {
+    let access_token = request_dingtalk_access_token(&client_id, &client_secret).await?;
+    let client_ctx = build_dingtalk_http_client()?;
+
+    let file_content = tokio::fs::read(&file_path)
+        .await
+        .map_err(|e| format!("读取本地文件失败: {}", e))?;
+
+    let file_name = std::path::Path::new(&file_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
+
+    let form = reqwest::multipart::Form::new().part(
+        "media",
+        reqwest::multipart::Part::bytes(file_content).file_name(file_name),
+    );
+
+    log::info!(
+        "[DingTalk] Uploading media: path={}, type={}",
+        file_path,
+        media_type
+    );
+    let response = client_ctx
+        .client
+        .post("https://oapi.dingtalk.com/media/upload")
+        .query(&[("access_token", access_token), ("type", media_type)])
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| {
+            let err =
+                format_reqwest_transport_error("钉钉媒体上传失败", &e, &client_ctx.network_mode);
+            log::error!("[DingTalk] Media upload transport error: {}", err);
+            err
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("钉钉媒体上传失败: HTTP {} {}", status, body));
+    }
+
+    let payload = response
+        .json::<Value>()
+        .await
+        .map_err(|e| format!("钉钉媒体上传响应解析失败: {}", e))?;
+
+    let errcode = payload.get("errcode").and_then(Value::as_i64).unwrap_or(0);
+    if errcode != 0 {
+        let errmsg = payload
+            .get("errmsg")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown error");
+        return Err(format!("钉钉媒体上传失败: {} ({})", errmsg, errcode));
+    }
+
+    let media_id = payload
+        .get("media_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            log::error!(
+                "[DingTalk] Media upload response missing media_id: {:?}",
+                payload
+            );
+            "钉钉上传响应缺少 media_id".to_string()
+        })?
+        .to_string();
+
+    log::info!("[DingTalk] Media upload success: media_id={}", media_id);
+    Ok(media_id)
+}
+
+#[tauri::command]
+pub async fn dingtalk_get_download_urls(
+    client_id: String,
+    client_secret: String,
+    robot_code: String,
+    download_codes: Vec<String>,
+) -> Result<HashMap<String, String>, String> {
+    if download_codes.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let access_token = request_dingtalk_access_token(&client_id, &client_secret).await?;
+    let client_ctx = build_dingtalk_http_client()?;
+    query_dingtalk_download_urls(&client_ctx, &access_token, &robot_code, &download_codes).await
+}
+
+#[tauri::command]
+pub async fn dingtalk_download_files(
+    client_id: String,
+    client_secret: String,
+    robot_code: String,
+    download_codes: Vec<String>,
+) -> Result<Vec<DingTalkDownloadedFile>, String> {
+    if download_codes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let access_token = request_dingtalk_access_token(&client_id, &client_secret).await?;
+    let client_ctx = build_dingtalk_http_client()?;
+    let url_map =
+        query_dingtalk_download_urls(&client_ctx, &access_token, &robot_code, &download_codes)
+            .await?;
+
+    let media_dir = std::env::temp_dir().join("51toolbox-dingtalk-media");
+    tokio::fs::create_dir_all(&media_dir)
+        .await
+        .map_err(|e| format!("创建钉钉媒体缓存目录失败: {}", e))?;
+
+    let mut downloaded = Vec::new();
+    let mut errors = Vec::new();
+
+    for download_code in download_codes {
+        let Some(download_url) = url_map.get(&download_code).cloned() else {
+            errors.push(format!("downloadCode={} 未返回下载地址", download_code));
+            continue;
+        };
+
+        match download_dingtalk_file(&client_ctx, &media_dir, &download_code, &download_url).await {
+            Ok(file) => downloaded.push(file),
+            Err(error) => errors.push(error),
+        }
+    }
+
+    if downloaded.is_empty() && !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+
+    if !errors.is_empty() {
+        log::warn!(
+            "[DingTalk] some files failed to download: {}",
+            errors.join(" | ")
+        );
+    }
+
+    Ok(downloaded)
 }
 
 #[tauri::command]
@@ -383,11 +605,14 @@ async fn run_stream_loop(
         };
 
         let ws_url = build_ws_url(&open.endpoint, &open.ticket);
-        let ws_result = connect_async(ws_url.as_str()).await;
+        log::info!("[DingTalk] Connecting to Stream WebSocket: {}", ws_url);
+
+        let ws_result = connect_async_robust(&ws_url).await;
         let (mut ws_stream, _) = match ws_result {
             Ok(ok) => ok,
             Err(err) => {
                 let err_msg = format!("钉钉 Stream WebSocket 连接失败: {}", err);
+                log::error!("[DingTalk] {}", err_msg);
                 update_runtime_state(&state, &channel_id, token, "error", Some(err_msg.clone()));
                 if let Some(tx) = ready_tx.take() {
                     let _ = tx.send(Err(err_msg));
@@ -503,6 +728,62 @@ async fn request_dingtalk_access_token(
     client_id: &str,
     client_secret: &str,
 ) -> Result<String, String> {
+    match request_dingtalk_access_token_v1(client_id, client_secret).await {
+        Ok(token) => return Ok(token),
+        Err(error) => {
+            log::warn!(
+                "[DingTalk] v1 oauth2 access token request failed, falling back to legacy endpoint: {}",
+                error
+            );
+        }
+    }
+
+    request_dingtalk_access_token_legacy(client_id, client_secret).await
+}
+
+async fn request_dingtalk_access_token_v1(
+    client_id: &str,
+    client_secret: &str,
+) -> Result<String, String> {
+    let client_ctx = build_dingtalk_http_client()?;
+    let response = client_ctx
+        .client
+        .post("https://api.dingtalk.com/v1.0/oauth2/accessToken")
+        .json(&json!({
+            "appKey": client_id,
+            "appSecret": client_secret,
+        }))
+        .send()
+        .await
+        .map_err(|e| {
+            format_reqwest_transport_error(
+                "钉钉 v1 access token 请求失败",
+                &e,
+                &client_ctx.network_mode,
+            )
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!(
+            "钉钉 v1 access token 请求失败: HTTP {} {}",
+            status, body
+        ));
+    }
+
+    let payload = response
+        .json::<DingTalkAccessTokenResponse>()
+        .await
+        .map_err(|e| format!("钉钉 v1 access token 响应解析失败: {}", e))?;
+
+    extract_dingtalk_access_token(payload, "钉钉 v1 access token")
+}
+
+async fn request_dingtalk_access_token_legacy(
+    client_id: &str,
+    client_secret: &str,
+) -> Result<String, String> {
     let params = [("appkey", client_id), ("appsecret", client_secret)];
     let client_ctx = build_dingtalk_http_client()?;
     let response = client_ctx
@@ -533,21 +814,271 @@ async fn request_dingtalk_access_token(
         .await
         .map_err(|e| format!("钉钉 access_token 响应解析失败: {}", e))?;
 
+    extract_dingtalk_access_token(payload, "钉钉 access_token")
+}
+
+fn extract_dingtalk_access_token(
+    payload: DingTalkAccessTokenResponse,
+    label: &str,
+) -> Result<String, String> {
     let errcode = payload.errcode.unwrap_or(0);
     if errcode != 0 {
         return Err(format!(
-            "钉钉 access_token 获取失败: {} ({})",
+            "{} 获取失败: {} ({})",
+            label,
             payload.errmsg.as_deref().unwrap_or("unknown error"),
             errcode
         ));
     }
 
-    let _expires_in = payload.expires_in.unwrap_or(0);
-
     payload
         .access_token
         .filter(|token| !token.trim().is_empty())
-        .ok_or_else(|| "钉钉 access_token 响应缺少 token".to_string())
+        .ok_or_else(|| format!("{} 响应缺少 token", label))
+}
+
+async fn query_dingtalk_download_urls(
+    client_ctx: &DingTalkHttpClientContext,
+    access_token: &str,
+    robot_code: &str,
+    download_codes: &[String],
+) -> Result<HashMap<String, String>, String> {
+    let mut result = HashMap::new();
+    let mut errors = Vec::new();
+
+    for download_code in download_codes {
+        match query_single_dingtalk_download_url(
+            client_ctx,
+            access_token,
+            robot_code,
+            download_code,
+        )
+        .await
+        {
+            Ok(download_url) => {
+                result.insert(download_code.clone(), download_url);
+            }
+            Err(error) => {
+                errors.push(format!("downloadCode={}: {}", download_code, error));
+            }
+        }
+    }
+
+    if result.is_empty() && !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+
+    if !errors.is_empty() {
+        log::warn!(
+            "[DingTalk] partial download URL lookup failure: {}",
+            errors.join(" | ")
+        );
+    }
+
+    log::info!("[DingTalk] Resolved {} download URLs", result.len());
+    Ok(result)
+}
+
+async fn query_single_dingtalk_download_url(
+    client_ctx: &DingTalkHttpClientContext,
+    access_token: &str,
+    robot_code: &str,
+    download_code: &str,
+) -> Result<String, String> {
+    let body = json!({
+        "downloadCode": download_code,
+        "robotCode": robot_code,
+    });
+
+    let response = client_ctx
+        .client
+        .post("https://api.dingtalk.com/v1.0/robot/messageFiles/download")
+        .header("x-acs-dingtalk-access-token", access_token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| {
+            format_reqwest_transport_error("查询钉钉下载地址失败", &e, &client_ctx.network_mode)
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body_text = response.text().await.unwrap_or_default();
+        return Err(format!("HTTP {} {}", status, body_text));
+    }
+
+    let payload = response
+        .json::<Value>()
+        .await
+        .map_err(|e| format!("解析钉钉下载地址响应失败: {}", e))?;
+
+    extract_dingtalk_download_url(&payload)
+        .ok_or_else(|| format!("响应中未找到 downloadUrl: {}", payload))
+}
+
+fn extract_dingtalk_download_url(value: &Value) -> Option<String> {
+    match value {
+        Value::Array(items) => items.iter().find_map(extract_dingtalk_download_url),
+        Value::Object(map) => {
+            if let Some(download_url) = map
+                .get("downloadUrl")
+                .or_else(|| map.get("url"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                return Some(download_url.to_string());
+            }
+
+            for nested in map.values() {
+                if let Some(found) = extract_dingtalk_download_url(nested) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+async fn download_dingtalk_file(
+    client_ctx: &DingTalkHttpClientContext,
+    media_dir: &Path,
+    download_code: &str,
+    download_url: &str,
+) -> Result<DingTalkDownloadedFile, String> {
+    let response = client_ctx
+        .client
+        .get(download_url)
+        .send()
+        .await
+        .map_err(|e| {
+            format_reqwest_transport_error("下载钉钉媒体失败", &e, &client_ctx.network_mode)
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!(
+            "下载钉钉媒体失败(downloadCode={}): HTTP {} {}",
+            download_code, status, body
+        ));
+    }
+
+    let headers = response.headers().clone();
+    let content_type = headers
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.split(';').next().unwrap_or(value).trim().to_string())
+        .filter(|value| !value.is_empty());
+    let content_disposition = headers
+        .get(reqwest::header::CONTENT_DISPOSITION)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string());
+    let bytes = response.bytes().await.map_err(|e| {
+        format!(
+            "读取钉钉媒体响应体失败(downloadCode={}): {}",
+            download_code, e
+        )
+    })?;
+
+    let file_name = infer_dingtalk_download_file_name(
+        download_code,
+        download_url,
+        content_type.as_deref(),
+        content_disposition.as_deref(),
+    );
+    let target_path = media_dir.join(format!(
+        "{}-{}",
+        uuid::Uuid::new_v4(),
+        sanitize_dingtalk_file_name(&file_name)
+    ));
+
+    tokio::fs::write(&target_path, &bytes).await.map_err(|e| {
+        format!(
+            "写入钉钉媒体文件失败(downloadCode={}): {}",
+            download_code, e
+        )
+    })?;
+
+    Ok(DingTalkDownloadedFile {
+        download_code: download_code.to_string(),
+        path: target_path.to_string_lossy().into_owned(),
+        file_name,
+        content_type,
+    })
+}
+
+fn infer_dingtalk_download_file_name(
+    download_code: &str,
+    download_url: &str,
+    content_type: Option<&str>,
+    content_disposition: Option<&str>,
+) -> String {
+    if let Some(file_name) = content_disposition
+        .and_then(parse_content_disposition_file_name)
+        .filter(|value| !value.trim().is_empty())
+    {
+        return file_name;
+    }
+
+    if let Ok(url) = url::Url::parse(download_url) {
+        if let Some(segment) = url
+            .path_segments()
+            .and_then(|segments| segments.last())
+            .filter(|segment| segment.contains('.'))
+        {
+            return segment.to_string();
+        }
+    }
+
+    let ext = match content_type.unwrap_or("").to_ascii_lowercase().as_str() {
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "application/pdf" => "pdf",
+        "text/plain" => "txt",
+        "application/zip" => "zip",
+        _ => "bin",
+    };
+
+    format!(
+        "dingtalk-{}.{}",
+        sanitize_dingtalk_file_name(download_code),
+        ext
+    )
+}
+
+fn parse_content_disposition_file_name(value: &str) -> Option<String> {
+    value
+        .split(';')
+        .map(str::trim)
+        .find_map(|segment| {
+            segment
+                .strip_prefix("filename=")
+                .or_else(|| segment.strip_prefix("filename*="))
+                .map(|raw| raw.trim_matches('"').trim().to_string())
+        })
+        .filter(|value| !value.is_empty())
+}
+
+fn sanitize_dingtalk_file_name(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|ch| match ch {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            ch if ch.is_control() => '_',
+            ch => ch,
+        })
+        .collect::<String>();
+
+    let trimmed = sanitized.trim_matches('.').trim();
+    if trimmed.is_empty() {
+        "file.bin".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 async fn process_stream_message(
@@ -620,6 +1151,101 @@ async fn process_stream_message(
     }
 
     Ok(())
+}
+
+async fn connect_async_robust(
+    url_str: &str,
+) -> Result<
+    (
+        tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>,
+        tokio_tungstenite::tungstenite::handshake::client::Response,
+    ),
+    String,
+> {
+    let url = url::Url::parse(url_str).map_err(|e| format!("URL 解析失败: {}", e))?;
+    let host = url.host_str().ok_or("URL 缺少 host")?;
+    let port = url.port_or_known_default().ok_or("URL 端口未知")?;
+
+    log::info!("[DingTalk] Resolving host: {} (port={})", host, port);
+
+    // 优先尝试直接连接 (connect_async)
+    // 如果失败且是 Network is down (os error 50)，则尝试 IPv4 强制连接
+    match connect_async(url_str).await {
+        Ok(ok) => return Ok(ok),
+        Err(err) => {
+            let err_str = err.to_string();
+            if !err_str.contains("os error 50") && !err_str.contains("Network is down") {
+                return Err(err_str);
+            }
+            log::warn!(
+                "[DingTalk] Direct connection failed with {}, attempting IPv4 fallback",
+                err_str
+            );
+        }
+    }
+
+    // IPv4 强制解析逻辑
+    let addrs = tokio::net::lookup_host(format!("{}:{}", host, port))
+        .await
+        .map_err(|e| format!("DNS 解析失败: {}", e))?;
+
+    let mut ipv4_addrs = Vec::new();
+    for addr in addrs {
+        if addr.is_ipv4() {
+            ipv4_addrs.push(addr);
+        }
+    }
+
+    if ipv4_addrs.is_empty() {
+        return Err("未找到 IPv4 地址，无法进行 fallback 连接".to_string());
+    }
+
+    log::info!(
+        "[DingTalk] Found IPv4 addresses: {:?}, trying to connect...",
+        ipv4_addrs
+    );
+
+    let mut connect_err = String::new();
+    for addr in ipv4_addrs {
+        log::info!(
+            "[DingTalk] Trying to connect to {} via IP-based TCP stream",
+            addr
+        );
+
+        let tcp_stream = match tokio::net::TcpStream::connect(addr).await {
+            Ok(s) => s,
+            Err(e) => {
+                connect_err = format!("TCP 连接失败: {}", e);
+                log::warn!("[DingTalk] IPv4 fallback TCP failed for {}: {}", addr, e);
+                continue;
+            }
+        };
+
+        let request =
+            match tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(
+                url_str,
+            ) {
+                Ok(req) => req,
+                Err(e) => {
+                    connect_err = format!("构建请求失败: {}", e);
+                    continue;
+                }
+            };
+
+        match tokio_tungstenite::client_async_tls(request, tcp_stream).await {
+            Ok(ok) => {
+                log::info!("[DingTalk] Robust connection established via {}", addr);
+                return Ok(ok);
+            }
+            Err(e) => {
+                connect_err = format!("TLS/WS Handshake Failed: {}", e);
+                log::warn!("[DingTalk] IPv4 fallback failed for {}: {}", addr, e);
+                continue;
+            }
+        }
+    }
+
+    Err(format!("所有尝试均失败。最后错误: {}", connect_err))
 }
 
 fn build_ws_url(endpoint: &str, ticket: &str) -> String {

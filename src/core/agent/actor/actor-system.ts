@@ -1,4 +1,5 @@
 import { AgentActor, DIALOG_FULL_ROLE, type AskUserCallback } from "./agent-actor";
+import { isLikelyVisualAttachmentPath } from "@/core/ai/ai-center-handoff";
 import type {
   ApprovalRequest,
   AgentCapability,
@@ -49,6 +50,14 @@ const MAX_SPAWN_DEPTH = 3; // 最大 spawn 链深度
 const MAX_CHILDREN_PER_AGENT = 5; // 单个 Agent 同时运行的子任务上限
 const ANNOUNCE_RETRY_DELAYS_MS = [5_000, 10_000, 20_000] as const;
 const ANNOUNCE_HARD_EXPIRY_MS = 30 * 60 * 1000; // 30 分钟硬超时
+const RESULT_SHAREABLE_ARTIFACT_SOURCES = new Set(["message", "tool_write", "tool_edit"]);
+const USER_SHAREABLE_ARTIFACT_DIR_PATTERNS = [
+  /(?:^|\/)downloads(?:\/|$)/i,
+  /(?:^|\/)desktop(?:\/|$)/i,
+  /(?:^|\/)documents(?:\/|$)/i,
+  /^\/tmp(?:\/|$)/i,
+  /^\/var\/folders(?:\/|$)/i,
+] as const;
 
 const READ_ONLY_CHILD_POLICY: ToolPolicy = {
   deny: [
@@ -310,6 +319,14 @@ function basename(path: string): string {
   return normalized.split("/").pop() || normalized;
 }
 
+function normalizePath(path?: string | null): string {
+  return String(path ?? "").trim().replace(/\\/g, "/");
+}
+
+function trimTrailingSlash(path: string): string {
+  return path.length > 1 ? path.replace(/\/+$/, "") : path;
+}
+
 function dirname(path: string): string {
   const normalized = String(path ?? "").replace(/\\/g, "/");
   const parts = normalized.split("/");
@@ -352,6 +369,26 @@ function inferLanguageFromPath(path: string): string | undefined {
     default:
       return ext || undefined;
   }
+}
+
+function isPathWithinDirectory(path: string, directory?: string): boolean {
+  const normalizedPath = trimTrailingSlash(normalizePath(path));
+  const normalizedDirectory = trimTrailingSlash(normalizePath(directory));
+  if (!normalizedPath || !normalizedDirectory) return false;
+  return normalizedPath === normalizedDirectory || normalizedPath.startsWith(`${normalizedDirectory}/`);
+}
+
+function isLikelyUserShareableArtifactPath(path: string, workspace?: string): boolean {
+  const normalizedPath = normalizePath(path);
+  if (!normalizedPath) return false;
+  if (isLikelyVisualAttachmentPath(normalizedPath)) return true;
+
+  const normalizedWorkspace = normalizePath(workspace);
+  if (normalizedWorkspace) {
+    return !isPathWithinDirectory(normalizedPath, normalizedWorkspace);
+  }
+
+  return USER_SHAREABLE_ARTIFACT_DIR_PATTERNS.some((pattern) => pattern.test(normalizedPath));
 }
 
 function collectDialogMessagePreview(items: readonly string[] | undefined, limit = 3): string[] | undefined {
@@ -1087,14 +1124,28 @@ export class ActorSystem {
     const suggestions = plan.plannedSpawns
       .filter((spawn) => spawn.targetActorId !== coordinatorActorId)
       .map((spawn, index) => {
-        const targetName = this.actors.get(spawn.targetActorId)?.role.name ?? spawn.targetActorId;
+        const targetName = spawn.targetActorName
+          ?? this.actors.get(spawn.targetActorId)?.role.name
+          ?? spawn.targetActorId;
         const label = spawn.label ? `（${spawn.label}）` : "";
         const roleBoundaryLabel = spawn.roleBoundary ? formatRoleBoundaryLabel(spawn.roleBoundary) : null;
         const roleBoundary = spawn.roleBoundary
           ? `；建议 role_boundary=${spawn.roleBoundary}${roleBoundaryLabel ? `（${roleBoundaryLabel}）` : ""}`
           : "";
         const extraContext = spawn.context ? `；补充说明：${spawn.context}` : "";
-        return `${index + 1}. 使用 spawn_task 派给 ${targetName}${label}：${spawn.task}${roleBoundary}${extraContext}`;
+        const createIfMissing = spawn.createIfMissing
+          ? "；建议 create_if_missing=true"
+          : "";
+        const childCapabilities = spawn.childCapabilities?.length
+          ? `；建议 agent_capabilities=${spawn.childCapabilities.join(",")}`
+          : "";
+        const childDescription = spawn.childDescription
+          ? `；职责提示：${spawn.childDescription}`
+          : "";
+        const childIterations = typeof spawn.childMaxIterations === "number"
+          ? `；建议 override_max_iterations=${spawn.childMaxIterations}`
+          : "";
+        return `${index + 1}. 使用 spawn_task 派给 ${targetName}${label}：${spawn.task}${roleBoundary}${createIfMissing}${childCapabilities}${childIterations}${extraContext}${childDescription}`;
       });
     if (suggestions.length === 0) return;
 
@@ -1136,7 +1187,10 @@ export class ActorSystem {
     if (!plan?.plannedSpawns?.length) return undefined;
     const coordinatorActorId = plan.coordinatorActorId ?? plan.initialRecipientActorIds[0];
     if (!coordinatorActorId || spawnerActorId !== coordinatorActorId) return undefined;
-    return plan.plannedSpawns.find((spawn) => spawn.targetActorId === targetActorId);
+    return plan.plannedSpawns.find((spawn) =>
+      spawn.targetActorId === targetActorId
+      || spawn.targetActorName === targetActorId,
+    );
   }
 
   private isDialogPlanEdgeAllowed(
@@ -1639,23 +1693,34 @@ export class ActorSystem {
     if (!explicitRoleBoundary && resolvedRoleBoundary === "general" && plannedSpawn?.roleBoundary) {
       resolvedRoleBoundary = plannedSpawn.roleBoundary;
     }
-    if (!target && opts?.createIfMissing) {
+    const resolvedCreateChildSpec = {
+      description: opts?.createChildSpec?.description ?? plannedSpawn?.childDescription,
+      capabilities: opts?.createChildSpec?.capabilities ?? plannedSpawn?.childCapabilities,
+      workspace: opts?.createChildSpec?.workspace ?? plannedSpawn?.childWorkspace,
+    };
+    const resolvedOverrides = {
+      ...(typeof plannedSpawn?.childMaxIterations === "number"
+        ? { maxIterations: plannedSpawn.childMaxIterations }
+        : {}),
+      ...(opts?.overrides ?? {}),
+    };
+    if (!target && (opts?.createIfMissing || plannedSpawn?.createIfMissing)) {
       if (resolvedRoleBoundary === "general") {
         resolvedRoleBoundary = inferEphemeralChildBoundary({
           name: targetActorId,
-          description: opts.createChildSpec?.description,
-          capabilities: opts.createChildSpec?.capabilities,
+          description: resolvedCreateChildSpec.description,
+          capabilities: resolvedCreateChildSpec.capabilities,
         }).role;
       }
       const created = this.createEphemeralAgent(spawnerActorId, {
         name: targetActorId,
-        description: opts.createChildSpec?.description,
-        capabilities: opts.createChildSpec?.capabilities,
+        description: resolvedCreateChildSpec.description,
+        capabilities: resolvedCreateChildSpec.capabilities,
         roleBoundary: resolvedRoleBoundary,
-        workspace: opts.createChildSpec?.workspace,
-        toolPolicy: opts.overrides?.toolPolicy,
-        timeoutSeconds: opts.timeoutSeconds,
-        overrides: opts.overrides,
+        workspace: resolvedCreateChildSpec.workspace,
+        toolPolicy: resolvedOverrides.toolPolicy,
+        timeoutSeconds: opts?.timeoutSeconds,
+        overrides: resolvedOverrides,
       });
       if ("error" in created) {
         return { error: created.error };
@@ -1677,8 +1742,8 @@ export class ActorSystem {
       return { error: error instanceof Error ? error.message : String(error) };
     }
 
-    if (opts?.overrides) {
-      log(`spawnTask: prepared run overrides for ${target.role.name}`, JSON.stringify(opts.overrides).slice(0, 200));
+    if (Object.keys(resolvedOverrides).length > 0) {
+      log(`spawnTask: prepared run overrides for ${target.role.name}`, JSON.stringify(resolvedOverrides).slice(0, 200));
     }
 
     const mode = opts?.mode ?? "run";
@@ -1872,7 +1937,7 @@ export class ActorSystem {
     // 子任务结果仅通过 announce 回送给委派者，避免全局广播造成协作噪音。
     void target.assignTask(fullTask, opts?.images, {
       publishResult: false,
-      runOverrides: opts?.overrides,
+      runOverrides: Object.keys(resolvedOverrides).length > 0 ? resolvedOverrides : undefined,
     }).then((taskResult) => {
       cleanupRunningListener();
       if (record.status !== "running") return;
@@ -2197,6 +2262,55 @@ export class ActorSystem {
     }
   }
 
+  private collectShareableResultMedia(
+    actorId: string,
+    relatedRunId?: string,
+  ): Pick<DialogMessage, "images" | "attachments"> {
+    const actorWorkspace = this.actors.get(actorId)?.workspace;
+    const lastResultTimestamp = [...this.dialogHistory]
+      .slice()
+      .reverse()
+      .find((message) =>
+        message.kind === "agent_result"
+        && message.from === actorId
+        && message.relatedRunId === relatedRunId,
+      )?.timestamp;
+
+    const candidateArtifacts = this.getArtifactRecordsSnapshot()
+      .filter((artifact) => {
+        if (artifact.actorId !== actorId) return false;
+        if (!RESULT_SHAREABLE_ARTIFACT_SOURCES.has(artifact.source)) return false;
+        if (relatedRunId ? artifact.relatedRunId !== relatedRunId : Boolean(artifact.relatedRunId)) return false;
+        if (typeof lastResultTimestamp === "number" && artifact.timestamp <= lastResultTimestamp) return false;
+        return isLikelyUserShareableArtifactPath(artifact.path, actorWorkspace);
+      })
+      .sort((left, right) => left.timestamp - right.timestamp);
+
+    const seenPaths = new Set<string>();
+    const images: string[] = [];
+    const attachments: Array<{ path: string; fileName?: string }> = [];
+
+    for (const artifact of candidateArtifacts) {
+      const normalizedPath = normalizePath(artifact.path);
+      if (!normalizedPath || seenPaths.has(normalizedPath)) continue;
+      seenPaths.add(normalizedPath);
+
+      if (isLikelyVisualAttachmentPath(normalizedPath)) {
+        images.push(normalizedPath);
+      } else {
+        attachments.push({
+          path: normalizedPath,
+          fileName: artifact.fileName || basename(normalizedPath),
+        });
+      }
+    }
+
+    return {
+      ...(images.length ? { images } : {}),
+      ...(attachments.length ? { attachments } : {}),
+    };
+  }
+
   /**
    * 获取某个 Agent 的完整后代任务树（含孙任务、曾孙任务...）。
    * 返回扁平列表，每个 record 带 depth 字段表示层级。
@@ -2397,11 +2511,14 @@ export class ActorSystem {
     const coordinatorId = this.getCoordinatorId();
     const fromNonCoordinator = coordinatorId ? actorId !== coordinatorId : false;
     const suppressLowSignal = opts?.suppressLowSignal ?? true;
+    const relatedRunId = this.getOpenSpawnedSessionByTarget(actorId)?.runId;
 
     if (suppressLowSignal && fromNonCoordinator && isLowSignalCoordinationMessage(trimmed)) {
       log(`publishResult: suppress low-signal message from ${actorName}`);
       return null;
     }
+
+    const resultMedia = this.collectShareableResultMedia(actorId, relatedRunId);
 
     const msg: DialogMessage = {
       id: generateId(),
@@ -2411,8 +2528,10 @@ export class ActorSystem {
       timestamp: Date.now(),
       priority: "normal",
       kind: "agent_result",
-      relatedRunId: this.getOpenSpawnedSessionByTarget(actorId)?.runId,
+      relatedRunId,
       ...this.buildDialogMessageRecallPatch(actorId),
+      ...(resultMedia.images?.length ? { images: resultMedia.images } : {}),
+      ...(resultMedia.attachments?.length ? { attachments: resultMedia.attachments } : {}),
     };
     this.dialogHistory.push(msg);
     appendDialogMessage(this.sessionId, msg);
@@ -2430,6 +2549,8 @@ export class ActorSystem {
           priority: msg.priority,
           expectReply: msg.expectReply,
           replyTo: msg.replyTo,
+          attachments: msg.attachments,
+          images: msg.images,
         });
       }
     }

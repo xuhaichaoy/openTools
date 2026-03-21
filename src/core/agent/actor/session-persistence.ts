@@ -424,6 +424,7 @@ export interface TranscriptSession {
     id: string;
     name: string;
     model?: string;
+    maxIterations?: number;
     systemPrompt?: string;
     capabilities?: import("./types").AgentCapabilities;
     toolPolicy?: import("./types").ToolPolicy;

@@ -42,7 +42,7 @@ export interface TranscriptSession {
   createdAt: number;
   updatedAt: number;
   entries: TranscriptEntry[];
-  actorConfigs: Array<{ id: string; name: string; model?: string }>;
+  actorConfigs: Array<{ id: string; name: string; model?: string; maxIterations?: number }>;
 }
 
 export interface ArchivedSession {

@@ -244,7 +244,7 @@ function normalizeConfig(config: AIConfig): AIConfig {
       : 5000;
   const normalizedMaxIterations =
     typeof config.agent_max_iterations === "number"
-      ? Math.max(5, Math.min(50, Math.floor(config.agent_max_iterations)))
+      ? Math.max(5, Math.min(100, Math.floor(config.agent_max_iterations)))
       : 25;
   const normalized: AIConfig = {
     ...config,

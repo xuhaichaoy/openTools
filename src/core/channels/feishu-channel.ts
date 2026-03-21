@@ -19,6 +19,7 @@ import type {
   MessageHandler,
 } from "./types";
 import { createLogger } from "@/core/logger";
+import { resolveChannelOutgoingMedia } from "./channel-outbound-media";
 
 const log = createLogger("Feishu");
 // Typing reaction 会一直存在直到显式移除；这里保留较长 TTL 只做兜底清理，
@@ -139,14 +140,69 @@ export class FeishuChannel implements IMChannel {
 
   async send(msg: ChannelOutgoingMessage): Promise<void> {
     if (!this._config) throw new Error("Feishu channel not connected");
+    const outgoingMedia = resolveChannelOutgoingMedia(msg);
 
-    // 优先 App API 模式：有应用凭证且有明确会话 ID
-    if (this._config.appId && this._config.appSecret && msg.conversationId && msg.conversationId !== "default") {
-      await this._sendByApi(msg);
+    // 如果包含图片或附件，先处理它们
+    if (outgoingMedia.images && outgoingMedia.images.length > 0) {
+      log.info("Processing images for Feishu", { count: outgoingMedia.images.length });
+      for (const imagePath of outgoingMedia.images) {
+        try {
+          const imageKey = await this._uploadMedia(imagePath, "image");
+          log.info("Image uploaded to Feishu, sending as media message", { imageKey });
+          await this.send({
+            ...msg,
+            messageType: "image",
+            text: imageKey,
+            mediaUrl: undefined,
+            mediaUrls: [],
+            images: [],
+            attachments: [],
+          });
+        } catch (error) {
+          log.error("Failed to upload/send image to Feishu", { imagePath, error });
+        }
+      }
+    }
+    if (outgoingMedia.attachments && outgoingMedia.attachments.length > 0) {
+      log.info("Processing attachments for Feishu", { count: outgoingMedia.attachments.length });
+      for (const attachment of outgoingMedia.attachments) {
+        try {
+          const fileKey = await this._uploadMedia(attachment.path, "file");
+          log.info("Attachment uploaded to Feishu, sending as media message", { fileKey, fileName: attachment.fileName });
+          await this.send({
+            ...msg,
+            messageType: "file",
+            text: fileKey,
+            mediaUrl: undefined,
+            mediaUrls: [],
+            images: [],
+            attachments: [attachment],
+          });
+        } catch (error) {
+          log.error("Failed to upload/send attachment to Feishu", { path: attachment.path, error });
+        }
+      }
+    }
+
+    // 如果只有媒体且没有正文，则不再重复发送额外的空文本消息
+    const hasAnyContent = Boolean(msg.text?.trim() || msg.markdown || outgoingMedia.mediaUrls?.length);
+    if (!hasAnyContent) {
+      log.warn("Nothing to send in FeishuChannel", { msg });
       return;
     }
 
-    await this._sendByWebhook(msg);
+    // 如果主消息体为空，且刚才已经发送过图片/附件子消息了，则直接返回，避免发送多余的空文本
+    if (!msg.text?.trim() && !msg.markdown && outgoingMedia.mediaUrls?.length) {
+      return;
+    }
+
+    // 优先 App API 模式：有应用凭证且有明确会话 ID
+    if (this._config.appId && this._config.appSecret && msg.conversationId && msg.conversationId !== "default") {
+      await this._sendByApi({ ...msg, mediaUrl: undefined, mediaUrls: [], images: [], attachments: [] });
+      return;
+    }
+
+    await this._sendByWebhook({ ...msg, mediaUrl: undefined, mediaUrls: [], images: [], attachments: [] });
   }
 
   async startTypingForMessage(msg: ChannelIncomingMessage): Promise<void> {
@@ -223,6 +279,23 @@ export class FeishuChannel implements IMChannel {
     await this.stopTypingForConversation(normalizedConversationId);
   }
 
+  private async _uploadMedia(filePath: string, type: "image" | "file"): Promise<string> {
+    if (!this._config?.appId || !this._config?.appSecret) {
+      throw new Error("媒体上传需要配置 appId 和 appSecret");
+    }
+    const command = type === "image" ? "feishu_upload_image" : "feishu_upload_file";
+    const params: Record<string, unknown> = {
+      appId: this._config.appId.trim(),
+      appSecret: this._config.appSecret.trim(),
+      baseUrl: this._getOpenBaseUrl(),
+      filePath,
+    };
+    if (type === "file") {
+      params.fileType = filePath.split(".").pop()?.toLowerCase() || "stream";
+    }
+    return await invoke(command, params);
+  }
+
   private async _sendByApi(msg: ChannelOutgoingMessage): Promise<void> {
     const { msgType, content } = buildFeishuAppMessagePayload(msg);
 
@@ -275,7 +348,41 @@ export class FeishuChannel implements IMChannel {
     const msg = this._parseCallback(raw);
     if (!msg) return;
 
-    log.info("Incoming Feishu message", { sender: msg.senderName, text: msg.text.slice(0, 50) });
+    // 如果包含图片，尝试获取 Base64 内容以供 AI 识别
+    if (msg.images && msg.images.length > 0 && this._config?.appId && this._config?.appSecret) {
+      try {
+        const unresolvedKeys = msg.images.filter(img => !img.startsWith("http") && !img.startsWith("data:"));
+        if (unresolvedKeys.length > 0) {
+          log.info("Resolving Feishu image keys to Base64", { count: unresolvedKeys.length });
+          const base64List = await Promise.all(unresolvedKeys.map(async (key) => {
+            try {
+              return await invoke<string>("feishu_get_image_as_base64", {
+                appId: this._config!.appId.trim(),
+                appSecret: this._config!.appSecret.trim(),
+                baseUrl: this._getOpenBaseUrl(),
+                imageKey: key,
+              });
+            } catch (e) {
+              log.error("Failed to resolve individual Feishu image", { key, error: e });
+              return key;
+            }
+          }));
+          
+          let b64Idx = 0;
+          msg.images = msg.images.map(img => {
+            if (!img.startsWith("http") && !img.startsWith("data:")) {
+              return base64List[b64Idx++] || img;
+            }
+            return img;
+          });
+          log.info("Feishu image keys resolved");
+        }
+      } catch (error) {
+        log.error("Failed to resolve Feishu image keys", error);
+      }
+    }
+
+    log.info("Incoming Feishu message", { sender: msg.senderName, text: msg.text.slice(0, 50), imageCount: msg.images?.length });
 
     for (const handler of this._handlers) {
       try {
@@ -302,7 +409,13 @@ export class FeishuChannel implements IMChannel {
       body.sign = await computeFeishuSign(timestamp, this._config.secret);
     }
 
-    if (msg.messageType === "markdown" && msg.markdown) {
+    if (msg.messageType === "image") {
+      body.msg_type = "image";
+      body.content = { image_key: msg.text };
+    } else if (msg.messageType === "file") {
+      body.msg_type = "file";
+      body.content = { file_key: msg.text };
+    } else if (msg.messageType === "markdown" && msg.markdown) {
       body.msg_type = "interactive";
       body.card = buildFeishuMarkdownCard(msg.markdown.text, msg.markdown.title);
     } else if (looksLikeMarkdown(msg.text || "")) {
@@ -344,11 +457,18 @@ export class FeishuChannel implements IMChannel {
         } catch {
           text = String(message.content || "");
         }
+      } else if (msgType === "image") {
+        text = extractFeishuTextFromImage(message.content) || "[图片]";
+      } else if (msgType === "file") {
+        text = extractFeishuTextFromFile(message.content) || "[文件]";
       } else {
         text = String(message.content || "");
       }
 
-      if (!text.trim()) return null;
+      if (!text.trim() && msgType !== "image" && msgType !== "file") {
+        log.info("Ignoring empty Feishu callback", { msgId: message.message_id, msgType });
+        return null;
+      }
 
       const chatId = String(message.chat_id || "default");
       const chatType = String(message.chat_type || "p2p");
@@ -372,12 +492,53 @@ export class FeishuChannel implements IMChannel {
         conversationType: chatType === "p2p" ? "private" : "group",
         timestamp: Number(header?.create_time || Date.now()),
         atBot,
+        images: msgType === "image" ? [extractFeishuImageKey(message.content)] : undefined,
+        attachments: msgType === "file" ? [extractFeishuFileDetail(message.content)] : undefined,
         raw,
       };
     } catch (err) {
       log.error("Failed to parse Feishu callback", err);
       return null;
     }
+  }
+}
+
+function extractFeishuTextFromImage(content: unknown): string {
+  try {
+    const data = JSON.parse(String(content || "{}"));
+    return data.image_key ? `[图片:${data.image_key}]` : "";
+  } catch {
+    return "";
+  }
+}
+
+function extractFeishuTextFromFile(content: unknown): string {
+  try {
+    const data = JSON.parse(String(content || "{}"));
+    return data.file_name ? `[文件:${data.file_name}]` : "";
+  } catch {
+    return "";
+  }
+}
+
+function extractFeishuImageKey(content: unknown): string {
+  try {
+    const data = JSON.parse(String(content || "{}"));
+    return data.image_key || "";
+  } catch {
+    return "";
+  }
+}
+
+function extractFeishuFileDetail(content: unknown): { name: string; downloadCode: string } {
+  try {
+    const data = JSON.parse(String(content || "{}"));
+    return {
+      name: data.file_name || "file",
+      downloadCode: data.file_key || "",
+    };
+  } catch {
+    return { name: "file", downloadCode: "" };
   }
 }
 
@@ -447,9 +608,23 @@ function buildFeishuPostContent(text: string): string {
 }
 
 function buildFeishuAppMessagePayload(msg: ChannelOutgoingMessage): {
-  msgType: "interactive" | "post";
+  msgType: "interactive" | "post" | "image" | "file";
   content: string;
 } {
+  if (msg.messageType === "image") {
+    return {
+      msgType: "image",
+      content: JSON.stringify({ image_key: msg.text }),
+    };
+  }
+
+  if (msg.messageType === "file") {
+    return {
+      msgType: "file",
+      content: JSON.stringify({ file_key: msg.text }),
+    };
+  }
+
   if (msg.messageType === "markdown" && msg.markdown) {
     return {
       msgType: "interactive",

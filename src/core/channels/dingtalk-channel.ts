@@ -20,8 +20,17 @@ import type {
   MessageHandler,
 } from "./types";
 import { createLogger } from "@/core/logger";
+import { resolveChannelOutgoingMedia } from "./channel-outbound-media";
 
 const log = createLogger("DingTalk");
+const DINGTALK_SEND_LOGIC_VERSION = "2026-03-20-media-send-v4-private-photo-url";
+
+interface DingTalkDownloadedFile {
+  downloadCode: string;
+  path: string;
+  fileName: string;
+  contentType?: string;
+}
 
 export interface DingTalkConfig {
   /** 机器人 Webhook URL（用于发送消息） */
@@ -49,6 +58,11 @@ async function computeSign(timestamp: string, secret: string): Promise<string> {
   const data = encoder.encode(`${timestamp}\n${secret}`);
   const signature = await crypto.subtle.sign("HMAC", key, data);
   return btoa(String.fromCharCode(...new Uint8Array(signature)));
+}
+
+function isHttpMediaUrl(value?: string | null): boolean {
+  const normalized = String(value ?? "").trim();
+  return /^https?:\/\//i.test(normalized);
 }
 
 export class DingTalkChannel implements IMChannel {
@@ -133,23 +147,168 @@ export class DingTalkChannel implements IMChannel {
   async send(msg: ChannelOutgoingMessage): Promise<void> {
     if (!this._config) throw new Error("DingTalk channel not connected");
     this._rememberOutboundMessage(msg);
+    const outgoingMedia = resolveChannelOutgoingMedia(msg);
+    log.info("Preparing DingTalk send", {
+      logicVersion: DINGTALK_SEND_LOGIC_VERSION,
+      conversationId: msg.conversationId,
+      conversationType: msg.conversationType,
+      targetUserId: msg.targetUserId,
+      messageType: msg.messageType ?? "text",
+      hasReplyWebhook: Boolean(msg.replyWebhookUrl),
+      mediaCount: outgoingMedia.mediaUrls?.length ?? 0,
+      imageCount: outgoingMedia.images?.length ?? 0,
+      attachmentCount: outgoingMedia.attachments?.length ?? 0,
+      hasText: Boolean(msg.text?.trim() || msg.markdown),
+    });
 
+    // 1. 处理媒体文件（图片/附件）
+    const hasPendingImages = Boolean(outgoingMedia.images?.length);
+    const hasPendingAttachments = Boolean(outgoingMedia.attachments?.length);
+
+    if (hasPendingImages) {
+      log.info("Processing images for DingTalk", { count: outgoingMedia.images!.length });
+      for (const imagePath of outgoingMedia.images!) {
+        try {
+          const imageRef = await this._prepareImageForSend(imagePath, msg.conversationType);
+          log.info("Image prepared for DingTalk delivery", {
+            conversationType: msg.conversationType,
+            imageRefType: isHttpMediaUrl(imageRef) ? "url" : "mediaId",
+          });
+          // 递归发送媒体消息，且不带原文本与 webhook 路由，强制走 App API
+          await this.send({
+            ...msg,
+            messageType: "image",
+            text: imageRef,
+            markdown: undefined,
+            mediaUrl: undefined,
+            mediaUrls: [],
+            images: [],
+            attachments: [],
+            replyWebhookUrl: undefined,
+            replyWebhookExpiresAt: undefined,
+          });
+        } catch (error) {
+          log.error("Failed to upload/send image to DingTalk", { imagePath, error });
+        }
+      }
+    }
+
+    if (hasPendingAttachments) {
+      log.info("Processing attachments for DingTalk", { count: outgoingMedia.attachments!.length });
+      for (const attachment of outgoingMedia.attachments!) {
+        try {
+          const mediaId = await this._uploadMedia(attachment.path, "file");
+          log.info("Attachment uploaded, sending as media message", { mediaId, fileName: attachment.fileName });
+          await this.send({
+            ...msg,
+            messageType: "file",
+            text: mediaId,
+            markdown: undefined,
+            mediaUrl: undefined,
+            mediaUrls: [],
+            images: [],
+            attachments: [attachment],
+            replyWebhookUrl: undefined,
+            replyWebhookExpiresAt: undefined,
+          });
+        } catch (error) {
+          log.error("Failed to upload/send attachment to DingTalk", { path: attachment.path, error });
+        }
+      }
+    }
+
+    // 2. 检查主文本内容
+    const textPart = msg.text?.trim() || "";
+    const hasMainContent = Boolean(textPart || msg.markdown);
+
+    // 如果刚处理完媒体且没有剩余正文，则结束
+    if (!hasMainContent) {
+      if (hasPendingImages || hasPendingAttachments) return;
+      log.warn("Nothing to send in DingTalkChannel", { msg });
+      return;
+    }
+
+    // 3. 优先使用会话 Session Webhook 发送正文
     if (msg.replyWebhookUrl && !isWebhookExpired(msg.replyWebhookExpiresAt)) {
       try {
-        await this._sendByWebhookUrl(msg.replyWebhookUrl, msg);
+        await this._sendByWebhookUrl(msg.replyWebhookUrl, {
+          ...msg,
+          mediaUrl: undefined,
+          mediaUrls: [],
+          images: [],
+          attachments: [],
+        });
         return;
       } catch (err) {
         log.warn("DingTalk session webhook send failed, falling back to API/webhook", err);
       }
     }
 
-    // 优先 App API 模式：有应用凭证且有明确的群会话 ID（非 "default"）
+    // 4. 其次使用 App API 发送 (需配置 appKey/appSecret)
     if (this._config.appKey && this._config.appSecret && msg.conversationId && msg.conversationId !== "default") {
-      await this._sendByApi(msg);
+      await this._sendByApi({
+        ...msg,
+        mediaUrl: undefined,
+        mediaUrls: [],
+        images: [],
+        attachments: [],
+      });
       return;
     }
 
-    await this._sendByWebhook(msg);
+    // 5. 最后使用固定 Webhook 兜底
+    await this._sendByWebhook({
+      ...msg,
+      mediaUrl: undefined,
+      mediaUrls: [],
+      images: [],
+      attachments: [],
+    });
+  }
+
+  private async _uploadMedia(filePath: string, type: "image" | "file"): Promise<string> {
+    if (!this._config?.appKey || !this._config?.appSecret) {
+      throw new Error("媒体上传需要配置 appKey 和 appSecret");
+    }
+    log.info("Uploading media to DingTalk", { filePath, type });
+    const mediaId = await invoke<string>("dingtalk_upload_media", {
+      clientId: this._config.appKey.trim(),
+      clientSecret: this._config.appSecret.trim(),
+      mediaType: type,
+      filePath,
+    });
+    log.info("Media upload successful", { mediaId });
+    return mediaId;
+  }
+
+  private async _prepareImageForSend(
+    imagePath: string,
+    conversationType?: ChannelOutgoingMessage["conversationType"],
+  ): Promise<string> {
+    if (isHttpMediaUrl(imagePath)) {
+      return imagePath.trim();
+    }
+
+    if (conversationType === "private") {
+      try {
+        await invoke("start_im_callback_server");
+        const mediaUrl = await invoke<string>("register_im_callback_media", {
+          filePath: imagePath,
+        });
+        log.info("Prepared local media URL for DingTalk private image", {
+          imagePath,
+          mediaUrl,
+        });
+        return mediaUrl;
+      } catch (error) {
+        log.warn("Failed to prepare local media URL for DingTalk private image, falling back to upload", {
+          imagePath,
+          error,
+        });
+      }
+    }
+
+    return this._uploadMedia(imagePath, "image");
   }
 
   private async _sendByApi(msg: ChannelOutgoingMessage): Promise<void> {
@@ -157,6 +316,7 @@ export class DingTalkChannel implements IMChannel {
     if (!robotCode) {
       throw new Error("钉钉发送缺少 robotCode（请在通道配置中补充，或使用会话回调回复）");
     }
+    const singleChatUserId = msg.targetUserId?.trim() || msg.conversationId;
 
     const outgoing = buildDingTalkAppPayload(msg);
     const body: Record<string, unknown> = {
@@ -165,18 +325,52 @@ export class DingTalkChannel implements IMChannel {
       msgKey: outgoing.msgKey,
       msgParam: outgoing.msgParam,
     };
+    log.info("Sending DingTalk message via app API", {
+      logicVersion: DINGTALK_SEND_LOGIC_VERSION,
+      conversationId: msg.conversationId,
+      conversationType: msg.conversationType,
+      targetUserId: msg.conversationType === "private" ? singleChatUserId : undefined,
+      messageType: msg.messageType ?? "text",
+      msgKey: outgoing.msgKey,
+      hasReplyWebhook: Boolean(msg.replyWebhookUrl),
+    });
 
     try {
-      await invoke("dingtalk_send_app_message", {
-        clientId: this._config!.appKey,
-        clientSecret: this._config!.appSecret,
-        robotCode: body.robotCode,
-        openConversationId: body.openConversationId,
-        msgKey: body.msgKey,
-        msgParam: body.msgParam,
-      });
-      log.info("Message sent via DingTalk API", { conversationId: msg.conversationId });
+      if (msg.conversationType === "private") {
+        await invoke("dingtalk_send_app_single_message", {
+          clientId: this._config!.appKey,
+          clientSecret: this._config!.appSecret,
+          robotCode: body.robotCode,
+          userId: singleChatUserId,
+          msgKey: body.msgKey,
+          msgParam: body.msgParam,
+        });
+        log.info("Message sent via DingTalk API (single)", {
+          conversationId: msg.conversationId,
+          userId: singleChatUserId,
+        });
+      } else {
+        await invoke("dingtalk_send_app_message", {
+          clientId: this._config!.appKey,
+          clientSecret: this._config!.appSecret,
+          robotCode: body.robotCode,
+          openConversationId: body.openConversationId,
+          msgKey: body.msgKey,
+          msgParam: body.msgParam,
+        });
+        log.info("Message sent via DingTalk API (group)", { conversationId: msg.conversationId });
+      }
     } catch (err) {
+      if (msg.messageType === "image" || msg.messageType === "file") {
+        log.error("DingTalk media API send failed", {
+          conversationId: msg.conversationId,
+          conversationType: msg.conversationType,
+          targetUserId: msg.targetUserId,
+          messageType: msg.messageType,
+          error: err,
+        });
+        throw err;
+      }
       log.warn("DingTalk API send failed, falling back to webhook", err);
       await this._sendByWebhook(msg);
     }
@@ -262,7 +456,46 @@ export class DingTalkChannel implements IMChannel {
       return;
     }
 
-    log.info("Incoming DingTalk message", { sender: msg.senderName, text: msg.text.slice(0, 50) });
+    // 如果包含下载代码，优先下载为本地文件路径，再交给 Dialog/模型使用。
+    if (msg.images && msg.images.length > 0 && this._config?.appKey && this._config?.appSecret) {
+      const robotCode = msg.robotCode || this._config.robotCode || this._config.appKey;
+      if (robotCode) {
+        try {
+          const downloadCodes = msg.images.filter((imageRef) => imageRef.trim().length > 0);
+          if (downloadCodes.length > 0) {
+            log.info("Downloading DingTalk images to local temp files", { count: downloadCodes.length });
+            const downloadedFiles = await invoke<DingTalkDownloadedFile[]>("dingtalk_download_files", {
+              clientId: this._config.appKey.trim(),
+              clientSecret: this._config.appSecret.trim(),
+              robotCode: robotCode.trim(),
+              downloadCodes: downloadCodes,
+            });
+            const pathByCode = new Map(
+              downloadedFiles
+                .filter((file) => file.downloadCode && file.path)
+                .map((file) => [file.downloadCode, file.path]),
+            );
+            const resolvedImagePaths = downloadCodes
+              .map((downloadCode) => pathByCode.get(downloadCode))
+              .filter((value): value is string => Boolean(value));
+            msg.images = resolvedImagePaths.length > 0 ? resolvedImagePaths : undefined;
+            log.info("DingTalk images downloaded", {
+              resolvedCount: resolvedImagePaths.length,
+              requestedCount: downloadCodes.length,
+              samplePath: resolvedImagePaths[0],
+            });
+          }
+        } catch (error) {
+          log.error("Failed to download DingTalk images", error);
+          msg.images = undefined;
+        }
+      }
+    } else if (msg.images?.length) {
+      log.warn("DingTalk image callback received but app credentials are unavailable, skip image ingestion");
+      msg.images = undefined;
+    }
+
+    log.info("Incoming DingTalk message", { sender: msg.senderName, text: msg.text.slice(0, 50), imageCount: msg.images?.length });
 
     for (const handler of this._handlers) {
       try {
@@ -320,6 +553,24 @@ export class DingTalkChannel implements IMChannel {
     if (msg.atAll) at.isAtAll = true;
     if (msg.atUsers?.length) at.atMobiles = msg.atUsers;
 
+    if (msg.messageType === "image") {
+      return {
+        msgtype: "markdown",
+        markdown: {
+          title: "图片",
+          text: `![图片](${msg.text})`,
+        },
+        at,
+      };
+    }
+
+    if (msg.messageType === "file") {
+      return {
+        msgtype: "file",
+        file: { media_id: msg.text },
+      };
+    }
+
     const explicitMarkdown = resolveMarkdownContent(msg);
     if (explicitMarkdown) {
       return {
@@ -363,16 +614,24 @@ export class DingTalkChannel implements IMChannel {
   private _parseCallback(raw: Record<string, unknown>): ChannelIncomingMessage | null {
     try {
       // 钉钉机器人回调消息格式
-      const msgType = String(raw.msgtype || "text");
-      const text = msgType === "text"
-        ? String((raw.text as Record<string, unknown>)?.content || "")
-        : String(raw.content || raw.text || "");
+      const rawMsgType = pickFirstString(raw.msgtype, raw.msgType, raw.messageType) || "text";
+      const imageDownloadCodes = extractDingTalkImageDownloadCodes(raw) ?? [];
+      const msgType = normalizeDingTalkMessageType(rawMsgType, imageDownloadCodes.length > 0);
+      const text = extractDingTalkCallbackText(raw)
+        || (msgType === "image" ? "[图片]" : msgType === "file" ? "[文件]" : "");
 
-      if (!text.trim()) return null;
+      if (!text.trim()) {
+        log.info("Ignoring empty DingTalk callback", { msgId: raw.msgId, msgType });
+        return null;
+      }
 
       const senderId = pickFirstString(
         raw.senderStaffId,
         raw.senderId,
+        raw.staffId,
+        raw.senderUserId,
+        raw.userId,
+        raw.openId,
         raw.senderNick,
       );
       if (isDingTalkSelfMessage(raw, senderId)) {
@@ -384,12 +643,22 @@ export class DingTalkChannel implements IMChannel {
         return null;
       }
 
-      const senderName = String(raw.senderNick || raw.senderName || senderId || "unknown");
-      const conversationType = resolveDingTalkConversationType(raw.conversationType);
+      const senderName = pickFirstString(
+        raw.senderNick,
+        raw.senderName,
+        raw.nick,
+        raw.senderDisplayName,
+        senderId,
+      ) || "unknown";
+      const conversationType = resolveDingTalkConversationType(
+        raw.conversationType,
+        raw.chatType,
+        raw.chat_type,
+      );
       const conversationId = resolveDingTalkConversationId(raw, conversationType, senderId);
       if (!conversationId) {
         log.warn("Ignoring DingTalk callback without stable conversation id", {
-          messageId: pickFirstString(raw.msgId),
+          messageId: pickFirstString(raw.msgId, raw.messageId, raw.eventId),
           senderId,
           conversationType,
           availableKeys: Object.keys(raw),
@@ -401,18 +670,23 @@ export class DingTalkChannel implements IMChannel {
       const atBot = atUsers?.some((u) => u.dingtalkId === "$:LWCP_v1:$") ?? false;
 
       return {
-        messageId: String(raw.msgId || Date.now()),
+        messageId: pickFirstString(raw.msgId, raw.messageId, raw.eventId, raw.id) || String(Date.now()),
         senderId: senderId || "unknown",
         senderName,
         text: text.replace(/@\S+\s*/g, "").trim(),
-        messageType: msgType as ChannelIncomingMessage["messageType"],
+        messageType: msgType,
         conversationId,
         conversationType,
-        timestamp: Number(raw.createAt || Date.now()),
+        timestamp: toTimestamp(raw.createAt ?? raw.createTime ?? raw.timestamp) ?? Date.now(),
         atBot,
-        replyWebhookUrl: typeof raw.sessionWebhook === "string" ? raw.sessionWebhook : undefined,
-        replyWebhookExpiresAt: toTimestamp(raw.sessionWebhookExpiredTime),
-        robotCode: typeof raw.robotCode === "string" ? raw.robotCode : undefined,
+        replyWebhookUrl: pickFirstString(raw.sessionWebhook, raw.replyWebhookUrl) || undefined,
+        replyWebhookExpiresAt: toTimestamp(
+          raw.sessionWebhookExpiredTime
+          ?? raw.sessionWebhookExpireTime
+          ?? raw.sessionWebhookExpiredAt,
+        ),
+        robotCode: pickFirstString(raw.robotCode, raw.robot_code, raw.chatbotCode) || undefined,
+        images: imageDownloadCodes.length > 0 ? imageDownloadCodes : undefined,
         raw,
       };
     } catch (err) {
@@ -424,15 +698,124 @@ export class DingTalkChannel implements IMChannel {
 
 function pickFirstString(...values: unknown[]): string {
   for (const value of values) {
-    if (typeof value !== "string") continue;
-    const trimmed = value.trim();
+    if (typeof value !== "string" && typeof value !== "number") continue;
+    const trimmed = String(value).trim();
     if (trimmed) return trimmed;
   }
   return "";
 }
 
-function resolveDingTalkConversationType(value: unknown): "private" | "group" {
-  const normalized = String(value || "").trim().toLowerCase();
+function pickNestedString(value: unknown, ...path: string[]): string {
+  let current: unknown = value;
+  for (const segment of path) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) {
+      return "";
+    }
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return pickFirstString(current);
+}
+
+function extractDingTalkCallbackText(raw: Record<string, unknown>): string {
+  return pickFirstString(
+    pickNestedString(raw, "text", "content"),
+    pickNestedString(raw, "msgData", "text", "content"),
+    pickNestedString(raw, "msgData", "content"),
+    pickNestedString(raw, "message", "text", "content"),
+    pickNestedString(raw, "message", "content"),
+    pickNestedString(raw, "messageBody", "text", "content"),
+    pickNestedString(raw, "messageBody", "content"),
+    pickNestedString(raw, "content", "content"),
+    pickNestedString(raw, "markdown", "text"),
+    extractDingTalkRichTextText(pickNestedValue(raw, "content", "richText")),
+    extractDingTalkRichTextText(pickNestedValue(raw, "msgData", "content", "richText")),
+    extractDingTalkRichTextText(pickNestedValue(raw, "message", "content", "richText")),
+    raw.content && typeof raw.content === "string" ? raw.content : "",
+    raw.text && typeof raw.text === "string" ? raw.text : "",
+  );
+}
+
+function normalizeDingTalkMessageType(
+  rawType: string,
+  hasImages = false,
+): ChannelIncomingMessage["messageType"] {
+  const normalized = rawType.trim().toLowerCase();
+  if (normalized === "picture" || normalized === "photo" || normalized === "image") {
+    return "image";
+  }
+  if (normalized === "richtext" || normalized === "rich_text") {
+    return hasImages ? "image" : "text";
+  }
+  if (normalized === "file") {
+    return "file";
+  }
+  if (normalized === "markdown") {
+    return "markdown";
+  }
+  if (normalized === "interactive") {
+    return "interactive";
+  }
+  return "text";
+}
+
+function extractDingTalkImageDownloadCodes(raw: Record<string, unknown>): string[] | undefined {
+  const directCandidates = [
+    pickPreferredDingTalkDownloadCode(raw.content),
+    pickPreferredDingTalkDownloadCode((raw.msgData as Record<string, unknown> | undefined)?.content),
+    pickPreferredDingTalkDownloadCode((raw.message as Record<string, unknown> | undefined)?.content),
+  ].filter(Boolean);
+
+  if (directCandidates.length > 0) {
+    return [...new Set(directCandidates)];
+  }
+
+  const richTextItems = [
+    pickNestedValue(raw, "content", "richText"),
+    pickNestedValue(raw, "msgData", "content", "richText"),
+    pickNestedValue(raw, "message", "content", "richText"),
+  ];
+  const richTextCandidates = richTextItems.flatMap((value) => extractDingTalkRichTextDownloadCodes(value));
+  if (richTextCandidates.length === 0) return undefined;
+  return [...new Set(richTextCandidates)];
+}
+
+function pickNestedValue(value: unknown, ...path: string[]): unknown {
+  let current: unknown = value;
+  for (const segment of path) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) {
+      return undefined;
+    }
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return current;
+}
+
+function pickPreferredDingTalkDownloadCode(value: unknown): string {
+  return pickNestedString(value, "downloadCode") || pickNestedString(value, "pictureDownloadCode");
+}
+
+function extractDingTalkRichTextDownloadCodes(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const codes = value
+    .map((item) => pickPreferredDingTalkDownloadCode(item))
+    .filter(Boolean);
+  return [...new Set(codes)];
+}
+
+function extractDingTalkRichTextText(value: unknown): string {
+  if (!Array.isArray(value)) return "";
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return "";
+      return pickFirstString((item as Record<string, unknown>).text);
+    })
+    .filter(Boolean)
+    .join("")
+    .trim();
+}
+
+function resolveDingTalkConversationType(...values: unknown[]): "private" | "group" {
+  const normalized = pickFirstString(...values).toLowerCase();
   if (normalized === "1" || normalized === "private" || normalized === "single" || normalized === "p2p") {
     return "private";
   }
@@ -462,9 +845,14 @@ function resolveDingTalkConversationId(
     return pickFirstString(
       raw.conversationId,
       raw.openConversationId,
+      raw.chatId,
+      raw.chat_id,
+      raw.cid,
       raw.sessionWebhook,
       raw.senderId,
       raw.senderStaffId,
+      raw.userId,
+      raw.senderUserId,
       senderId,
     );
   }
@@ -472,6 +860,9 @@ function resolveDingTalkConversationId(
   return pickFirstString(
     raw.conversationId,
     raw.openConversationId,
+    raw.chatId,
+    raw.chat_id,
+    raw.cid,
     raw.openThreadId,
     raw.sessionWebhook,
   );
@@ -549,9 +940,40 @@ function resolveMarkdownContent(
 }
 
 function buildDingTalkAppPayload(msg: ChannelOutgoingMessage): {
-  msgKey: "sampleText" | "sampleMarkdown";
+  msgKey: "sampleText" | "sampleMarkdown" | "sampleImageMsg" | "sampleFile";
   msgParam: string;
 } {
+  if (msg.messageType === "image") {
+    const imageRef = String(msg.text ?? "").trim();
+    if (isHttpMediaUrl(imageRef)) {
+      return {
+        msgKey: "sampleImageMsg",
+        msgParam: JSON.stringify({
+          photoURL: imageRef,
+        }),
+      };
+    }
+    return {
+      msgKey: "sampleMarkdown",
+      msgParam: JSON.stringify({
+        title: "图片",
+        text: `![图片](${imageRef})`,
+      }),
+    };
+  }
+
+  if (msg.messageType === "file") {
+    const attachment = msg.attachments?.[0];
+    return {
+      msgKey: "sampleFile",
+      msgParam: JSON.stringify({
+        mediaId: msg.text,
+        fileName: attachment?.fileName || "file",
+        fileType: attachment?.fileName?.split(".").pop() || "bin",
+      }),
+    };
+  }
+
   const explicitMarkdown = resolveMarkdownContent(msg);
   if (explicitMarkdown) {
     return {

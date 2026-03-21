@@ -399,14 +399,14 @@ function formatDialogApprovalModeLabel(planBundle: DialogDispatchPlanBundle): st
   switch (runtimePlan.routingMode) {
     case "broadcast":
       return insight.codingProfile.profile.codingMode
-        ? "并行协作（广播）"
-        : "广播讨论";
+        ? "并行讨论（广播）"
+        : "并行讨论";
     case "direct":
       return "直接处理";
     case "smart":
-      return `${insight.autoModeLabel ?? "智能协作"} · 协调者动态分工`;
+      return `${insight.autoModeLabel ?? "定向协作"} · 按现有 Agent 路由`;
     default:
-      return `${insight.autoModeLabel ?? "协调协作"} · 协调者动态分工`;
+      return `${insight.autoModeLabel ?? "自动协作"} · 主代理按需委派`;
   }
 }
 
@@ -435,20 +435,20 @@ function buildDialogBoundaryApprovalPresentation(params: {
 
   const permissions = [
     coordinatorName
-      ? `${coordinatorName} 负责理解需求、拆解任务、调度协作并统一输出最终结论。`
+      ? `${coordinatorName} 负责理解需求、拆解任务、按需委派子代理并统一输出最终结论。`
       : "首个接手 Agent 负责理解需求、拆解任务并统一输出最终结论。",
     allParticipantLabels.length > 1
       ? `允许在当前房间的 ${allParticipantLabels.length} 个 Agent 之间自由分配执行、审查和验证工作。`
       : "本轮不会预先锁死额外分工，当前主执行者可根据现场情况继续拆解任务。",
-    "允许协调者或上游负责人改写、合并、跳过建议分工，并在必要时创建临时子 Agent。",
+    "允许主代理或上游负责人改写、合并、跳过建议分工，并在必要时创建临时子 Agent。",
     "本次批准的是协作边界和授权范围，不是每个 Agent 的硬编码任务单。",
   ];
 
   const notes = [
     suggestedLanes.length > 0
-      ? `系统只提供建议分工方向作为参考：${suggestedLanes.join("、")}。最终怎么派活，由执行时的协调者决定。`
+      ? `系统只提供建议分工方向作为参考：${suggestedLanes.join("、")}。最终怎么派活，由执行时的主代理决定。`
       : "系统可能提供建议分工方向，但不会锁死每个 Agent 的具体任务文本。",
-    "如果执行中发现更合理的拆法，协调者可以重新派活；子任务在确有必要时，也可以继续拆成更小的子任务。",
+    "如果执行中发现更合理的拆法，主代理可以重新派活；子任务在确有必要时，也可以继续拆成更小的子任务。",
   ];
 
   return {
@@ -458,8 +458,8 @@ function buildDialogBoundaryApprovalPresentation(params: {
     modeLabel: formatDialogApprovalModeLabel(planBundle),
     taskPreview: truncateWorkflowText(insight.taskSummary, 240),
     summary: insight.focusLabel
-      ? `当前重点是「${insight.focusLabel}」，具体执行、审查、验证顺序由协调者在运行中决定。`
-      : "本轮会先由主负责人理解任务，再按实际需要组织执行、审查与验证。",
+      ? `当前重点是「${insight.focusLabel}」，具体执行、审查、验证顺序由主代理在运行中决定。`
+      : "本轮会先由主代理理解任务，再按实际需要组织执行、审查与验证。",
     coordinatorLabel: coordinatorName,
     participantLabels,
     permissions,
@@ -2495,9 +2495,9 @@ function AddAgentForm({
 // ── Routing Mode Button ──
 
 const ROUTING_MODES = [
-  { value: "coordinator" as const, icon: "👤", label: "协调", desc: "消息发给当前协调者 Agent" },
-  { value: "smart" as const, icon: "⚡", label: "智能", desc: "自动选择最合适的 Agent" },
-  { value: "broadcast" as const, icon: "📢", label: "广播", desc: "消息发送给所有 Agent" },
+  { value: "coordinator" as const, icon: "👤", label: "自动协作", desc: "默认交给主代理，必要时再临时创建子代理" },
+  { value: "smart" as const, icon: "⚡", label: "定向路由", desc: "自动选择最合适的现有 Agent" },
+  { value: "broadcast" as const, icon: "📢", label: "并行讨论", desc: "把同一条消息发给所有 Agent" },
 ];
 
 function RoutingModeButton({
@@ -3811,6 +3811,9 @@ function buildDialogChannelGroups(params: {
     );
     if (alreadyCovered) continue;
     const preview = params.sessionPreviews[runtimeRecord.sessionId];
+    // Runtime state is persisted separately from IM previews. If we only have a
+    // stale runtime record, showing it as a live channel conversation is misleading.
+    if (!preview) continue;
     const channelType = inferIMChannelType({ preview, runtimeRecord });
     if (!channelType) continue;
     groups[channelType].conversations.push({
@@ -4448,8 +4451,14 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     }
     const preview = imSessionPreviews[selectedDialogSessionId];
     const runtimeRecord = runtimeSessions[buildRuntimeSessionKey("dialog", selectedDialogSessionId)];
-    return inferIMChannelType({ preview, runtimeRecord }) ?? "local";
-  }, [currentRoomSessionId, imSessionPreviews, runtimeSessions, selectedDialogSessionId]);
+    const channelType = inferIMChannelType({ preview, runtimeRecord });
+    if (!channelType) return "local";
+    const hasLiveConversation = dialogChannelGroups[channelType].conversations.some((conversation) =>
+      conversation.activeSessionId === selectedDialogSessionId
+      || conversation.conversation.topics.some((topic) => topic.sessionId === selectedDialogSessionId),
+    );
+    return preview || hasLiveConversation ? channelType : "local";
+  }, [currentRoomSessionId, dialogChannelGroups, imSessionPreviews, runtimeSessions, selectedDialogSessionId]);
   const activeDialogView = manualDialogView ?? derivedDialogView;
   const dialogTopSessionItems = useMemo<DialogTopSessionItem[]>(() => {
     const localRuntimeRecord = currentRoomSessionId
@@ -5852,7 +5861,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
           <div className="flex flex-wrap items-center gap-1.5">
             <div className="flex min-w-0 flex-wrap items-center gap-1.5">
               <Users className="h-4 w-4 text-[var(--color-accent)]" />
-              <span className="text-[13px] font-semibold text-[var(--color-text)]">协作房间</span>
+              <span className="text-[13px] font-semibold text-[var(--color-text)]">Dialog 工作台</span>
               <span className={`rounded-full px-2 py-0.5 text-[10px] ${
                 actors.length > 0
                   ? "bg-emerald-500/10 text-emerald-600"
@@ -5862,7 +5871,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
               </span>
               {coordinatorName && (
                 <span className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
-                  协调者 {coordinatorName}
+                  主代理 {coordinatorName}
                 </span>
               )}
               <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
@@ -6059,12 +6068,12 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                   <div className="flex flex-col items-center gap-1.5">
                     <Bot className="w-5 h-5 text-[var(--color-text-tertiary)] opacity-60" />
                     <div className="text-[13px] font-medium text-[var(--color-text)]">
-                      {actors.length > 0 ? "从下方发起一条协作任务" : "先搭一个协作房间，再开始对话"}
+                      {actors.length > 0 ? "从下方发起一条任务，主代理会先接住它" : "先启动一个主代理，再开始对话"}
                     </div>
                     <div className="text-[11px] text-[var(--color-text-secondary)]">
                       {actors.length > 0
-                        ? "适合 review、debug、brainstorm 这类持续协作；如果目标是直接改代码，优先切到 Agent。"
-                        : "建议先保留一个协调者，再按分析、编写或审查角色继续补充。"}
+                        ? "默认像单代理一样工作；只有在值得时，主代理才会临时创建审查、验证或探索子代理。"
+                        : "建议先保留一个主代理，再按需要补充现有 Agent 或让主代理临时创建子代理。"}
                     </div>
                     <div className="mt-0.5 flex flex-wrap justify-center gap-2">
                       {actors.length > 0

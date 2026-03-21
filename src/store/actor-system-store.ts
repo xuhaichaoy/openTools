@@ -45,6 +45,7 @@ import {
 } from "@/core/ai/ai-session-runtime";
 import { buildDialogContextSummary } from "@/core/agent/actor/dialog-session-summary";
 import { buildSpawnedTaskCheckpoint } from "@/core/agent/actor/spawned-task-checkpoint";
+import { resolvePersistedDialogActorMaxIterations } from "@/core/agent/actor/dialog-actor-persistence";
 import {
   buildDialogContextSnapshot,
   cloneDialogContextSnapshot,
@@ -96,6 +97,7 @@ interface PersistedSession {
     id: string;
     roleName: string;
     model?: string;
+    maxIterations?: number;
     systemPrompt?: string;
     capabilities?: AgentCapabilities;
     toolPolicy?: ToolPolicy;
@@ -259,6 +261,7 @@ function buildSessionSnapshot(
       id: a.id,
       roleName: a.role.name,
       model: a.modelOverride,
+      maxIterations: a.hasExplicitMaxIterationsConfig ? a.configuredMaxIterations : undefined,
       systemPrompt: a.getSystemPromptOverride(),
       capabilities: a.capabilities,
       toolPolicy: a.toolPolicyConfig,
@@ -923,6 +926,7 @@ async function saveSessionSnapshot(system: ActorSystem): Promise<void> {
       id: actor.id,
       name: actor.roleName,
       model: actor.model,
+      maxIterations: actor.maxIterations,
       systemPrompt: actor.systemPrompt,
       capabilities: actor.capabilities,
       toolPolicy: actor.toolPolicy,
@@ -942,6 +946,7 @@ function restoreSnapshot(system: ActorSystem, persisted: PersistedSession): void
   if (persisted.dialogHistory.length) {
     system.restoreDialogHistory(persisted.dialogHistory);
   }
+  const actorCount = persisted.actorConfigs.length;
   for (const config of persisted.actorConfigs) {
     system.spawn({
       id: config.id,
@@ -951,6 +956,7 @@ function restoreSnapshot(system: ActorSystem, persisted: PersistedSession): void
         systemPrompt: config.systemPrompt ?? DIALOG_FULL_ROLE.systemPrompt,
       },
       modelOverride: config.model,
+      maxIterations: resolvePersistedDialogActorMaxIterations(config, actorCount),
       systemPromptOverride: config.systemPrompt,
       capabilities: config.capabilities,
       toolPolicy: config.toolPolicy,

@@ -1,5 +1,10 @@
 import { create } from "zustand";
-import type { ActorStatus, DialogMessage } from "@/core/agent/actor/types";
+import type {
+  ActorStatus,
+  DialogMessage,
+  ApprovalRequestDetail,
+  ApprovalDecisionOption,
+} from "@/core/agent/actor/types";
 import type { ChannelType, ChannelIncomingMessage } from "@/core/channels/types";
 
 export type IMConversationRuntimeStatus = "idle" | "running" | "waiting" | "queued";
@@ -84,8 +89,8 @@ function areStringListsEqual(left?: readonly string[], right?: readonly string[]
 }
 
 function areApprovalRequestDetailsEqual(
-  left?: DialogMessage["approvalRequest"] extends { details?: infer Details } ? Details : never,
-  right?: DialogMessage["approvalRequest"] extends { details?: infer Details } ? Details : never,
+  left?: ApprovalRequestDetail[],
+  right?: ApprovalRequestDetail[],
 ): boolean {
   const leftLength = left?.length ?? 0;
   const rightLength = right?.length ?? 0;
@@ -107,8 +112,8 @@ function areApprovalRequestDetailsEqual(
 }
 
 function areApprovalDecisionOptionsEqual(
-  left?: DialogMessage["approvalRequest"] extends { decisionOptions?: infer Options } ? Options : never,
-  right?: DialogMessage["approvalRequest"] extends { decisionOptions?: infer Options } ? Options : never,
+  left?: ApprovalDecisionOption[],
+  right?: ApprovalDecisionOption[],
 ): boolean {
   const leftLength = left?.length ?? 0;
   const rightLength = right?.length ?? 0;
@@ -177,6 +182,10 @@ function areDialogMessagesEqual(left: DialogMessage, right: DialogMessage): bool
     && areStringListsEqual(left.options, right.options)
     && areStringListsEqual(left.appliedMemoryPreview, right.appliedMemoryPreview)
     && areStringListsEqual(left.appliedTranscriptPreview, right.appliedTranscriptPreview)
+    && areStringListsEqual(
+      left.attachments?.map((a) => a.path),
+      right.attachments?.map((a) => a.path),
+    )
     && areApprovalRequestsEqual(left.approvalRequest, right.approvalRequest);
 }
 

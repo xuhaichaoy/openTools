@@ -22,6 +22,7 @@ import { validateActorTaskResult } from "./spawned-task-result-validator";
 import { appendToolCallSync as appendToolCall, appendToolResultSync as appendToolResult } from "./actor-transcript";
 import type { ActorRunContext } from "./actor-middleware";
 import { runMiddlewareChain } from "./actor-middleware";
+import { isLegacySingleDefaultDialogLead } from "./dialog-actor-persistence";
 import { resolveActorEffectiveMaxIterations } from "./iteration-budget";
 import { ClarificationInterrupt, createDefaultMiddlewares } from "./middlewares";
 import type {
@@ -300,6 +301,22 @@ export class AgentActor {
         throw new Error(interaction.status === "timed_out" ? "用户未回复" : "交互已取消");
       }
       const reply = interaction.content;
+      const replyImages = interaction.message?.images ?? [];
+      if (replyImages.length > 0) {
+        this.receive({
+          id: generateId(),
+          from: "user",
+          content: [
+            "[ask_user 图片补充]",
+            `用户在回答你刚才的问题时附带了 ${replyImages.length} 张图片。`,
+            reply ? `文字回复：${reply}` : "",
+            "请在继续处理当前任务时结合这些图片理解上下文。",
+          ].filter(Boolean).join("\n"),
+          timestamp: Date.now(),
+          priority: "normal",
+          images: replyImages,
+        });
+      }
       actorDebugLog(this.role.name, `askUser: got reply="${reply.slice(0, 60)}"`);
 
       const parseReplies = (): string[] => {
@@ -345,6 +362,14 @@ export class AgentActor {
 
   get allTasks(): readonly ActorTask[] {
     return this.tasks;
+  }
+
+  get configuredMaxIterations(): number {
+    return this.maxIterations;
+  }
+
+  get hasExplicitMaxIterationsConfig(): boolean {
+    return this.hasExplicitMaxIterations;
   }
 
   get pendingInboxCount(): number {
@@ -1102,8 +1127,17 @@ export class AgentActor {
       }
     };
     const effectiveModelOverride = runOverrides?.model ?? this.modelOverride;
+    const actorCount = this.actorSystem?.getAll().length ?? 0;
+    const baselineMaxIterations = !this.hasExplicitMaxIterations
+      && this.actorSystem
+      && isLegacySingleDefaultDialogLead({
+        roleName: this.role.name,
+        capabilities: this._capabilities,
+      }, actorCount)
+      ? Math.max(this.maxIterations, 40)
+      : this.maxIterations;
     const effectiveMaxIterations = resolveActorEffectiveMaxIterations({
-      actorMaxIterations: this.maxIterations,
+      actorMaxIterations: baselineMaxIterations,
       actorHasExplicitMaxIterations: this.hasExplicitMaxIterations,
       globalConfiguredMaxIterations: useAIStore.getState().config.agent_max_iterations,
       runOverrideMaxIterations: runOverrides?.maxIterations,

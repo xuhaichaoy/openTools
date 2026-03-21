@@ -49,8 +49,83 @@ interface DialogSupportAssignment {
   roleLabel: string;
 }
 
+interface DialogDelegateLane {
+  roleId: DialogSupportRoleId;
+  roleLabel: string;
+  targetActorId: string;
+  targetActorName: string;
+  task: string;
+  roleBoundary?: SpawnedTaskRoleBoundary;
+  createIfMissing?: boolean;
+  childDescription?: string;
+  childCapabilities?: AgentCapability[];
+  childMaxIterations?: number;
+}
+
 type CapabilityWeights = Partial<Record<AgentCapability, number>>;
 type DialogSupportRoleId = "architect" | "implementer" | "reviewer" | "debugger" | "tester" | "support";
+type ConcreteDialogSupportRoleId = Exclude<DialogSupportRoleId, "support">;
+
+const EPHEMERAL_CHILD_LIBRARY: Record<
+  ConcreteDialogSupportRoleId,
+  {
+    targetActorName: string;
+    roleLabel: string;
+    roleBoundary: SpawnedTaskRoleBoundary;
+    childDescription: string;
+    childCapabilities: AgentCapability[];
+    childMaxIterations: number;
+  }
+> = {
+  architect: {
+    targetActorName: "Architect",
+    roleLabel: "架构把关",
+    roleBoundary: "reviewer",
+    childDescription: "负责从架构边界、模块依赖与长期演进角度独立评估方案。",
+    childCapabilities: ["architecture", "code_analysis", "synthesis", "code_review"],
+    childMaxIterations: 18,
+  },
+  implementer: {
+    targetActorName: "Implementer",
+    roleLabel: "核心实现",
+    roleBoundary: "executor",
+    childDescription: "负责按照协调者给出的范围落地实现、修复与必要验证，避免抢总协调权。",
+    childCapabilities: ["code_write", "code_analysis", "debugging", "testing", "file_write", "shell_execute"],
+    childMaxIterations: 32,
+  },
+  reviewer: {
+    targetActorName: "Reviewer",
+    roleLabel: "代码评审",
+    roleBoundary: "reviewer",
+    childDescription: "负责独立审查实现方案与改动结果，重点关注边界条件、回归风险与可维护性。",
+    childCapabilities: ["code_review", "code_analysis", "security", "testing"],
+    childMaxIterations: 20,
+  },
+  debugger: {
+    targetActorName: "Debugger",
+    roleLabel: "问题定位",
+    roleBoundary: "executor",
+    childDescription: "负责定位异常链路、复现条件和根因证据，帮助主代理快速收敛排查路径。",
+    childCapabilities: ["debugging", "code_analysis", "testing", "code_write"],
+    childMaxIterations: 24,
+  },
+  tester: {
+    targetActorName: "Validator",
+    roleLabel: "验证回归",
+    roleBoundary: "validator",
+    childDescription: "负责执行测试、构建、回归与验收，给出可复验结论，默认不直接修改代码。",
+    childCapabilities: ["testing", "debugging", "code_analysis", "shell_execute"],
+    childMaxIterations: 20,
+  },
+};
+
+const ROOM_ROLE_COVERAGE_CAPABILITIES: Record<ConcreteDialogSupportRoleId, AgentCapability[]> = {
+  architect: ["architecture", "coordinator", "synthesis"],
+  implementer: ["code_write", "file_write", "shell_execute"],
+  reviewer: ["code_review", "security"],
+  debugger: ["debugging"],
+  tester: ["testing", "shell_execute"],
+};
 
 const REVIEW_PATTERNS = [
   /code review/i,
@@ -302,6 +377,40 @@ function getSupportRoleSpecs(
   return queue.map((id) => ({ id, ...specs[id] }));
 }
 
+function canActorCoverSupportRole(
+  actor: DialogPlanningActor,
+  roleId: Exclude<DialogSupportRoleId, "support">,
+): boolean {
+  const capabilities = getActorCapabilities(actor);
+  switch (roleId) {
+    case "architect":
+      return capabilities.some((capability) => ["architecture", "code_analysis", "synthesis"].includes(capability));
+    case "implementer":
+      return capabilities.some((capability) => ["code_write", "file_write", "shell_execute"].includes(capability));
+    case "reviewer":
+      return capabilities.some((capability) => ["code_review", "security", "architecture"].includes(capability));
+    case "debugger":
+      return capabilities.includes("debugging");
+    case "tester":
+      return capabilities.some((capability) => ["testing", "debugging"].includes(capability));
+  }
+}
+
+function getCoveredSupportRoles(
+  actors: DialogPlanningActor[],
+): Set<Exclude<DialogSupportRoleId, "support">> {
+  const coveredRoles = new Set<Exclude<DialogSupportRoleId, "support">>();
+  const candidateRoles = ["architect", "implementer", "reviewer", "debugger", "tester"] as const;
+  for (const actor of actors) {
+    for (const roleId of candidateRoles) {
+      if (canActorCoverSupportRole(actor, roleId)) {
+        coveredRoles.add(roleId);
+      }
+    }
+  }
+  return coveredRoles;
+}
+
 function assignSupportRoles(
   actors: DialogPlanningActor[],
   primaryActorId: string,
@@ -335,6 +444,72 @@ function assignSupportRoles(
   }
 
   return assignments;
+}
+
+function shouldUseSoloLeadFlow(insight: DialogDispatchInsight, supportingActorCount: number): boolean {
+  if (supportingActorCount > 0) return false;
+  if (!insight.codingProfile.profile.codingMode || !insight.focus) return true;
+  if (insight.codingProfile.profile.largeProjectMode) return false;
+  return insight.focus === "implementation";
+}
+
+function getEphemeralRoleQueue(
+  focus: DialogCodingFocus,
+  largeProjectMode: boolean,
+): Array<Exclude<DialogSupportRoleId, "support">> {
+  switch (focus) {
+    case "review":
+      return largeProjectMode
+        ? ["reviewer", "implementer", "tester"]
+        : ["reviewer"];
+    case "debugging":
+      return largeProjectMode
+        ? ["debugger", "implementer", "tester"]
+        : ["debugger", "tester"];
+    case "testing":
+      return largeProjectMode
+        ? ["tester", "implementer"]
+        : ["tester"];
+    case "architecture":
+      return largeProjectMode
+        ? ["architect", "reviewer", "implementer"]
+        : ["architect", "reviewer"];
+    default:
+      return largeProjectMode
+        ? ["implementer", "reviewer", "tester"]
+        : ["reviewer"];
+  }
+}
+
+function buildEphemeralDelegates(
+  focus: DialogCodingFocus,
+  largeProjectMode: boolean,
+  coveredRoleIds: Set<Exclude<DialogSupportRoleId, "support">>,
+  supportingActorCount: number,
+): DialogDelegateLane[] {
+  const maxDelegates = supportingActorCount > 0 ? 1 : largeProjectMode ? 2 : 1;
+  if (maxDelegates <= 0) return [];
+  const usedNames = new Set<string>();
+  return getEphemeralRoleQueue(focus, largeProjectMode)
+    .filter((roleId) => !coveredRoleIds.has(roleId))
+    .slice(0, maxDelegates)
+    .flatMap((roleId) => {
+      const blueprint = EPHEMERAL_CHILD_LIBRARY[roleId];
+      if (!blueprint || usedNames.has(blueprint.targetActorName)) return [];
+      usedNames.add(blueprint.targetActorName);
+      return [{
+        roleId,
+        roleLabel: blueprint.roleLabel,
+        targetActorId: blueprint.targetActorName,
+        targetActorName: blueprint.targetActorName,
+        task: "",
+        roleBoundary: blueprint.roleBoundary,
+        createIfMissing: true,
+        childDescription: blueprint.childDescription,
+        childCapabilities: blueprint.childCapabilities,
+        childMaxIterations: blueprint.childMaxIterations,
+      }];
+    });
 }
 
 function formatRouteReason(reason?: string | null): string {
@@ -382,6 +557,7 @@ function buildCodingLeadTask(params: {
   primaryActorName: string;
   focus: DialogCodingFocus;
   largeProjectMode: boolean;
+  hasDelegates: boolean;
   routeReason?: string | null;
 }): string {
   const {
@@ -389,42 +565,46 @@ function buildCodingLeadTask(params: {
     taskSummary,
     focus,
     largeProjectMode,
+    hasDelegates,
     routeReason,
   } = params;
   const focusText = getFocusLabel(focus);
   const routeText = formatRouteReason(routeReason);
+  if (!hasDelegates) {
+    return `你是本轮主代理，请先独立推进编码任务${focusText ? `（${focusText}）` : ""}：${taskSummary.slice(0, 240)}。优先自己完成探索、实现与验证，只有在真正需要隔离审查或验证时再临时创建子代理。${routeText}`;
+  }
   if (routingMode === "smart") {
     if (largeProjectMode) {
-      return `优先接手大型编码任务，先按“探索 -> 设计 -> 实施 -> 独立审查 -> 验证”拆解范围，再按需派发实现/评审/验证子任务：${taskSummary.slice(0, 240)}${routeText}`;
+      return `优先接手大型编码任务，先自己收敛问题，再按“探索 -> 实施 -> 独立审查 -> 验证”决定是否临时创建子代理：${taskSummary.slice(0, 240)}${routeText}`;
     }
     if (focus === "debugging") {
-      return `优先接手问题定位与修复任务，先确认根因和受影响范围，再按需派发修复、独立审查或验证子任务：${taskSummary.slice(0, 240)}${routeText}`;
+      return `优先接手问题定位与修复任务，先确认根因和受影响范围，再按需临时创建定位、修复或验证子代理：${taskSummary.slice(0, 240)}${routeText}`;
     }
     if (focus === "review") {
-      return `优先接手代码评审任务，先标出风险与待确认点，再按需派发修复或验证子任务：${taskSummary.slice(0, 240)}${routeText}`;
+      return `优先接手代码评审任务，先标出风险与待确认点，再按需临时创建修复或验证子代理：${taskSummary.slice(0, 240)}${routeText}`;
     }
-    return `优先接手编码任务${focusText ? `（${focusText}）` : ""}，先确认修改范围与验证路径，并预留独立 review，再按需派发子任务：${taskSummary.slice(0, 240)}${routeText}`;
+    return `优先接手编码任务${focusText ? `（${focusText}）` : ""}，先确认修改范围与验证路径，并在必要时临时创建审查/验证子代理：${taskSummary.slice(0, 240)}${routeText}`;
   }
 
   if (largeProjectMode) {
-    return `作为技术协调者先拆解大型编码任务，明确受影响模块、修改边界、独立审查点与验证顺序，再通过 spawn_task 调度实现/评审/验证：${taskSummary.slice(0, 240)}`;
+    return `作为主代理先拆解大型编码任务，明确受影响模块、修改边界、独立审查点与验证顺序，再通过 spawn_task 按需调度实现/评审/验证子代理：${taskSummary.slice(0, 240)}`;
   }
   if (focus === "debugging") {
-    return `作为协调者先定位问题根因和最小修复路径，再按需派发实现、独立审查与验证子任务：${taskSummary.slice(0, 240)}`;
+    return `作为主代理先定位问题根因和最小修复路径，再按需调度实现、独立审查与验证子代理：${taskSummary.slice(0, 240)}`;
   }
   if (focus === "review") {
-    return `作为协调者先归纳需要审查的风险点，再按需派发修复建议与验证子任务：${taskSummary.slice(0, 240)}`;
+    return `作为主代理先归纳需要审查的风险点，再按需调度修复建议与验证子代理：${taskSummary.slice(0, 240)}`;
   }
-  return `作为协调者先拆解编码任务${focusText ? `（${focusText}）` : ""}，再按需 spawn_task 派发实现、独立评审和验证：${taskSummary.slice(0, 240)}`;
+  return `作为主代理先拆解编码任务${focusText ? `（${focusText}）` : ""}，再按需 spawn_task 调度实现、独立评审和验证：${taskSummary.slice(0, 240)}`;
 }
 
-function buildCodingSupportTask(
-  assignment: DialogSupportAssignment,
+function buildCodingSupportTaskByRole(
+  roleId: DialogSupportRoleId,
   primaryActorName: string,
   focus: DialogCodingFocus,
   largeProjectMode: boolean,
 ): string {
-  switch (assignment.roleId) {
+  switch (roleId) {
     case "architect":
       return `从模块边界、依赖关系和后续演进角度把关方案，帮助 ${primaryActorName} 控制${largeProjectMode ? "大型改动" : "改动范围"}。`;
     case "implementer":
@@ -449,25 +629,35 @@ function buildCodingSupportTask(
   }
 }
 
+function buildCodingSupportTask(
+  assignment: DialogSupportAssignment,
+  primaryActorName: string,
+  focus: DialogCodingFocus,
+  largeProjectMode: boolean,
+): string {
+  return buildCodingSupportTaskByRole(
+    assignment.roleId,
+    primaryActorName,
+    focus,
+    largeProjectMode,
+  );
+}
+
 function buildCodingRuntimeSummary(
-  routingMode: DialogRoutingMode,
   primaryActor: DialogPlanningActor,
-  assignments: DialogSupportAssignment[],
+  delegates: DialogDelegateLane[],
   focus: DialogCodingFocus,
   largeProjectMode: boolean,
 ): string {
   const focusText = getFocusLabel(focus);
-  if (assignments.length === 0) {
-    return `${primaryActor.roleName} 单独处理${largeProjectMode ? "大型" : ""}编码任务${focusText ? ` · ${focusText}` : ""}`;
+  if (delegates.length === 0) {
+    return `${primaryActor.roleName} 以单主代理方式处理${largeProjectMode ? "大型" : ""}编码任务${focusText ? ` · ${focusText}` : ""}`;
   }
-  const roleSummary = assignments
+  const roleSummary = delegates
     .slice(0, 3)
-    .map((assignment) => `${assignment.actor.roleName} 负责${assignment.roleLabel}`)
+    .map((delegate) => `${delegate.targetActorName} 负责${delegate.roleLabel}`)
     .join("；");
-  if (routingMode === "smart") {
-    return `${primaryActor.roleName} 主接手编码任务${focusText ? ` · ${focusText}` : ""}，并协调 ${roleSummary}`;
-  }
-  return `${primaryActor.roleName} 作为技术协调者推进编码任务${focusText ? ` · ${focusText}` : ""}，并调度 ${roleSummary}`;
+  return `${primaryActor.roleName} 主接手编码任务${focusText ? ` · ${focusText}` : ""}，并按需委派 ${roleSummary}`;
 }
 
 function mapSupportRoleToBoundary(roleId: DialogSupportRoleId): SpawnedTaskRoleBoundary {
@@ -486,19 +676,19 @@ function mapSupportRoleToBoundary(roleId: DialogSupportRoleId): SpawnedTaskRoleB
 }
 
 function buildPlannedSpawns(
-  assignments: Array<{
-    actor: DialogPlanningActor;
-    task: string;
-    label: string;
-    roleBoundary?: SpawnedTaskRoleBoundary;
-  }>,
+  delegates: DialogDelegateLane[],
 ): DialogExecutionPlannedSpawn[] {
-  return assignments.map((assignment, index) => ({
+  return delegates.map((delegate, index) => ({
     id: `spawn-${index + 1}`,
-    targetActorId: assignment.actor.id,
-    task: assignment.task,
-    label: assignment.label,
-    roleBoundary: assignment.roleBoundary,
+    targetActorId: delegate.targetActorId,
+    targetActorName: delegate.targetActorName,
+    task: delegate.task,
+    label: delegate.roleLabel,
+    roleBoundary: delegate.roleBoundary,
+    createIfMissing: delegate.createIfMissing,
+    childDescription: delegate.childDescription,
+    childCapabilities: delegate.childCapabilities,
+    childMaxIterations: delegate.childMaxIterations,
   }));
 }
 
@@ -699,6 +889,38 @@ export function buildDialogDispatchPlanBundle(params: {
   }));
 
   if (!insight.codingProfile.profile.codingMode || !insight.focus) {
+    if (supportingActors.length === 0) {
+      return {
+        clusterPlan: {
+          id: planId,
+          mode: "multi_role",
+          sharedContext: { routingMode, coordinator: primaryActor.roleName },
+          steps: [
+            {
+              id: "plan-1",
+              role: primaryActor.roleName,
+              task: `由 ${primaryActor.roleName} 作为单主代理直接处理当前任务：${taskSummary.slice(0, 240)}`,
+              dependencies: [],
+              critical: true,
+            },
+          ],
+        },
+        runtimePlan: {
+          id: planId,
+          routingMode: routingMode === "smart" ? "smart" : "coordinator",
+          summary: `${primaryActor.roleName} 以单主代理方式直接处理本轮任务`,
+          approvedAt: Date.now(),
+          initialRecipientActorIds: [primaryActor.id],
+          participantActorIds: [primaryActor.id],
+          coordinatorActorId: primaryActor.id,
+          allowedMessagePairs: [],
+          allowedSpawnPairs: [],
+          state: "armed",
+        },
+        insight,
+      };
+    }
+
     const supportTasks = supportingActors.map((actor) => ({
       actor,
       task: buildGeneralSupportTask(actor, primaryActor.roleName, taskSummary),
@@ -741,7 +963,66 @@ export function buildDialogDispatchPlanBundle(params: {
         coordinatorActorId: primaryActor.id,
         allowedMessagePairs,
         allowedSpawnPairs,
-        plannedSpawns: buildPlannedSpawns(supportTasks),
+        plannedSpawns: buildPlannedSpawns(
+          supportTasks.map((assignment) => ({
+            roleId: "support",
+            roleLabel: assignment.label,
+            targetActorId: assignment.actor.id,
+            targetActorName: assignment.actor.roleName,
+            task: assignment.task,
+            roleBoundary: assignment.roleBoundary,
+          })),
+        ),
+        state: "armed",
+      },
+      insight,
+    };
+  }
+
+  const focus = insight.focus;
+  const largeProjectMode = insight.codingProfile.profile.largeProjectMode;
+  const soloLeadFlow = shouldUseSoloLeadFlow(insight, supportingActors.length);
+  if (soloLeadFlow) {
+    return {
+      clusterPlan: {
+        id: planId,
+        mode: "multi_role",
+        sharedContext: {
+          routingMode,
+          coordinator: primaryActor.roleName,
+          taskType: "coding",
+          codingFocus: focus,
+          codingModeLabel: insight.autoModeLabel,
+          collaboration: "solo_lead",
+        },
+        steps: [
+          {
+            id: "plan-1",
+            role: primaryActor.roleName,
+            task: buildCodingLeadTask({
+              routingMode,
+              taskSummary,
+              primaryActorName: primaryActor.roleName,
+              focus,
+              largeProjectMode,
+              hasDelegates: false,
+              routeReason: selectedRoute?.reason,
+            }),
+            dependencies: [],
+            critical: true,
+          },
+        ],
+      },
+      runtimePlan: {
+        id: planId,
+        routingMode: routingMode === "smart" ? "smart" : "coordinator",
+        summary: `${primaryActor.roleName} 以单主代理方式推进编码任务${insight.focusLabel ? ` · ${insight.focusLabel}` : ""}`,
+        approvedAt: Date.now(),
+        initialRecipientActorIds: [primaryActor.id],
+        participantActorIds: [primaryActor.id],
+        coordinatorActorId: primaryActor.id,
+        allowedMessagePairs: [],
+        allowedSpawnPairs: [],
         state: "armed",
       },
       insight,
@@ -751,9 +1032,40 @@ export function buildDialogDispatchPlanBundle(params: {
   const assignments = assignSupportRoles(
     actors,
     primaryActor.id,
-    insight.focus,
-    insight.codingProfile.profile.largeProjectMode,
+    focus,
+    largeProjectMode,
   );
+  const existingDelegates: DialogDelegateLane[] = assignments.map((assignment) => ({
+    roleId: assignment.roleId,
+    roleLabel: assignment.roleLabel,
+    targetActorId: assignment.actor.id,
+    targetActorName: assignment.actor.roleName,
+    task: buildCodingSupportTask(
+      assignment,
+      primaryActor.roleName,
+      focus,
+      largeProjectMode,
+    ),
+    roleBoundary: mapSupportRoleToBoundary(assignment.roleId),
+  }));
+  const coveredRoleIds = supportingActors.length > 0
+    ? getCoveredSupportRoles(actors)
+    : new Set<Exclude<DialogSupportRoleId, "support">>();
+  const ephemeralDelegates = buildEphemeralDelegates(
+    focus,
+    largeProjectMode,
+    coveredRoleIds,
+    supportingActors.length,
+  ).map((delegate) => ({
+    ...delegate,
+    task: buildCodingSupportTaskByRole(
+      delegate.roleId,
+      primaryActor.roleName,
+      focus,
+      largeProjectMode,
+    ),
+  }));
+  const delegates = [...existingDelegates, ...ephemeralDelegates];
   const steps: ClusterStep[] = [
     {
       id: "plan-1",
@@ -762,39 +1074,23 @@ export function buildDialogDispatchPlanBundle(params: {
         routingMode,
         taskSummary,
         primaryActorName: primaryActor.roleName,
-        focus: insight.focus,
-        largeProjectMode: insight.codingProfile.profile.largeProjectMode,
+        focus,
+        largeProjectMode,
+        hasDelegates: delegates.length > 0,
         routeReason: selectedRoute?.reason,
       }),
       dependencies: [],
       critical: true,
     },
-    ...assignments.map((assignment, index) => ({
+    ...delegates.map((delegate, index) => ({
       id: `plan-${index + 2}`,
-      role: assignment.actor.roleName,
-      task: buildCodingSupportTask(
-        assignment,
-        primaryActor.roleName,
-        insight.focus!,
-        insight.codingProfile.profile.largeProjectMode,
-      ),
+      role: delegate.targetActorName,
+      task: delegate.task,
       dependencies: ["plan-1"],
       critical: false,
     })),
   ];
-  const plannedSpawns = buildPlannedSpawns(
-    assignments.map((assignment) => ({
-      actor: assignment.actor,
-      task: buildCodingSupportTask(
-        assignment,
-        primaryActor.roleName,
-        insight.focus!,
-        insight.codingProfile.profile.largeProjectMode,
-      ),
-      label: assignment.roleLabel,
-      roleBoundary: mapSupportRoleToBoundary(assignment.roleId),
-    })),
-  );
+  const plannedSpawns = buildPlannedSpawns(delegates);
 
   return {
     clusterPlan: {
@@ -804,7 +1100,7 @@ export function buildDialogDispatchPlanBundle(params: {
         routingMode,
         coordinator: primaryActor.roleName,
         taskType: "coding",
-        codingFocus: insight.focus,
+        codingFocus: focus,
         codingModeLabel: insight.autoModeLabel,
       },
       steps,
@@ -813,11 +1109,10 @@ export function buildDialogDispatchPlanBundle(params: {
       id: planId,
       routingMode: routingMode === "smart" ? "smart" : "coordinator",
       summary: buildCodingRuntimeSummary(
-        routingMode,
         primaryActor,
-        assignments,
-        insight.focus,
-        insight.codingProfile.profile.largeProjectMode,
+        delegates,
+        focus,
+        largeProjectMode,
       ),
       approvedAt: Date.now(),
       initialRecipientActorIds: [primaryActor.id],

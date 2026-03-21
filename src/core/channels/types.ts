@@ -37,6 +37,13 @@ export interface ChannelIncomingMessage {
   replyWebhookExpiresAt?: number;
   /** 平台机器人编码（如钉钉 robotCode） */
   robotCode?: string;
+  /** 附带的图片路径（IM 平台原始下载地址或代码） */
+  images?: string[];
+  /** 附带的文件列表 */
+  attachments?: Array<{
+    name: string;
+    downloadCode: string;
+  }>;
   /** 原始消息数据 */
   raw?: unknown;
 }
@@ -45,6 +52,14 @@ export interface ChannelIncomingMessage {
 export interface ChannelOutgoingMessage {
   /** 目标会话 ID */
   conversationId: string;
+  /** 会话类型 */
+  conversationType?: ChannelIncomingMessage["conversationType"];
+  /** 私聊目标用户 ID（如钉钉单聊 API 所需 userId） */
+  targetUserId?: string;
+  /** OpenClaw 风格的单个媒体引用（本地路径/file URL；兼容旧字段） */
+  mediaUrl?: string;
+  /** OpenClaw 风格的多个媒体引用（本地路径/file URL；兼容旧字段） */
+  mediaUrls?: string[];
   /** 回复的目标消息 ID（如平台支持） */
   replyToMessageId?: string;
   /** 会话级回复 webhook（如钉钉 sessionWebhook） */
@@ -58,7 +73,14 @@ export interface ChannelOutgoingMessage {
   /** Markdown 内容 */
   markdown?: { title: string; text: string };
   /** 消息类型（默认 text） */
-  messageType?: "text" | "markdown" | "actionCard" | "feedCard";
+  messageType?: "text" | "markdown" | "actionCard" | "feedCard" | "image" | "file";
+  /** 附带的图片路径（本地文件路径，兼容旧字段） */
+  images?: string[];
+  /** 附带的文件列表（兼容旧字段） */
+  attachments?: Array<{
+    path: string;
+    fileName?: string;
+  }>;
   /** 是否 @所有人 */
   atAll?: boolean;
   /** @指定人的手机号或 ID 列表 */

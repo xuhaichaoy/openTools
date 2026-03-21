@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose, Engine as _};
 use futures_util::{SinkExt, StreamExt};
 use lark_websocket_protobuf::pbbp2::{Frame, Header};
 use prost::Message as ProstMessage;
@@ -214,6 +215,32 @@ struct FeishuReactionResponse {
 #[derive(Debug, Deserialize)]
 struct FeishuReactionResponseData {
     reaction_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FeishuUploadImageResponse {
+    code: i32,
+    msg: String,
+    data: Option<FeishuUploadImageData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FeishuUploadImageData {
+    #[serde(rename = "image_key")]
+    image_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FeishuUploadFileResponse {
+    code: i32,
+    msg: String,
+    data: Option<FeishuUploadFileData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FeishuUploadFileData {
+    #[serde(rename = "file_key")]
+    file_key: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -433,6 +460,177 @@ pub async fn feishu_remove_typing_reaction(
     }
 
     Ok(())
+}
+
+#[tauri::command]
+pub async fn feishu_upload_image(
+    app_id: String,
+    app_secret: String,
+    base_url: Option<String>,
+    file_path: String,
+) -> Result<String, String> {
+    let normalized_base_url = normalize_base_url(base_url.as_deref());
+    let token =
+        request_feishu_tenant_access_token(&normalized_base_url, &app_id, &app_secret).await?;
+
+    let file_content = tokio::fs::read(&file_path)
+        .await
+        .map_err(|e| format!("读取本地文件失败: {}", e))?;
+
+    let form = reqwest::multipart::Form::new()
+        .text("image_type", "message")
+        .part(
+            "image",
+            reqwest::multipart::Part::bytes(file_content).file_name("image.png"),
+        );
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!(
+            "{}/open-apis/im/v1/images",
+            normalized_base_url.trim_end_matches('/')
+        ))
+        .bearer_auth(&token.tenant_access_token)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("飞书图片上传失败: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("飞书图片上传失败: HTTP {} {}", status, body));
+    }
+
+    let payload = response
+        .json::<FeishuUploadImageResponse>()
+        .await
+        .map_err(|e| format!("飞书图片上传响应解析失败: {}", e))?;
+
+    if payload.code != 0 {
+        return Err(format!(
+            "飞书图片上传失败: {} ({})",
+            payload.msg, payload.code
+        ));
+    }
+
+    let image_key = payload
+        .data
+        .and_then(|d| d.image_key)
+        .ok_or_else(|| "飞书图片上传响应缺少 image_key".to_string())?;
+
+    Ok(image_key)
+}
+
+#[tauri::command]
+pub async fn feishu_get_image_as_base64(
+    app_id: String,
+    app_secret: String,
+    base_url: Option<String>,
+    image_key: String,
+) -> Result<String, String> {
+    let normalized_base_url = normalize_base_url(base_url.as_deref());
+    let token =
+        request_feishu_tenant_access_token(&normalized_base_url, &app_id, &app_secret).await?;
+
+    log::info!("[Feishu] Fetching image content for key: {}", image_key);
+
+    let url = format!(
+        "{}/open-apis/im/v1/images/{}",
+        normalized_base_url, image_key
+    );
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&url)
+        .header(
+            "Authorization",
+            format!("Bearer {}", token.tenant_access_token),
+        )
+        .send()
+        .await
+        .map_err(|e| format!("获取飞书图片失败: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body_text = response.text().await.unwrap_or_default();
+        return Err(format!("获取飞书图片失败: HTTP {} {}", status, body_text));
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("读取图片数据失败: {}", e))?;
+
+    let b64 = general_purpose::STANDARD.encode(bytes);
+    Ok(format!("data:image/png;base64,{}", b64))
+}
+
+#[tauri::command]
+pub async fn feishu_upload_file(
+    app_id: String,
+    app_secret: String,
+    base_url: Option<String>,
+    file_type: String, // pdf, doc, xls, ppt, stream
+    file_path: String,
+) -> Result<String, String> {
+    let normalized_base_url = normalize_base_url(base_url.as_deref());
+    let token =
+        request_feishu_tenant_access_token(&normalized_base_url, &app_id, &app_secret).await?;
+
+    let file_content = tokio::fs::read(&file_path)
+        .await
+        .map_err(|e| format!("读取本地文件失败: {}", e))?;
+
+    let file_name = std::path::Path::new(&file_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
+
+    let form = reqwest::multipart::Form::new()
+        .text("file_type", file_type)
+        .text("file_name", file_name.clone())
+        .part(
+            "file",
+            reqwest::multipart::Part::bytes(file_content).file_name(file_name),
+        );
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!(
+            "{}/open-apis/im/v1/files",
+            normalized_base_url.trim_end_matches('/')
+        ))
+        .bearer_auth(&token.tenant_access_token)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("飞书文件上传失败: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("飞书文件上传失败: HTTP {} {}", status, body));
+    }
+
+    let payload = response
+        .json::<FeishuUploadFileResponse>()
+        .await
+        .map_err(|e| format!("飞书文件上传响应解析失败: {}", e))?;
+
+    if payload.code != 0 {
+        return Err(format!(
+            "飞书文件上传失败: {} ({})",
+            payload.msg, payload.code
+        ));
+    }
+
+    let file_key = payload
+        .data
+        .and_then(|d| d.file_key)
+        .ok_or_else(|| "飞书文件上传响应缺少 file_key".to_string())?;
+
+    Ok(file_key)
 }
 
 #[tauri::command]

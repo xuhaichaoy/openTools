@@ -1,6 +1,6 @@
 export const DEFAULT_AGENT_MAX_ITERATIONS = 25;
 export const MIN_AGENT_MAX_ITERATIONS = 5;
-export const MAX_AGENT_MAX_ITERATIONS = 50;
+export const MAX_AGENT_MAX_ITERATIONS = 100;
 
 export function clampGlobalAgentMaxIterations(value?: number): number {
   return Math.max(
@@ -21,5 +21,5 @@ export function resolveActorEffectiveMaxIterations(params: {
       ? params.actorMaxIterations
       : Math.max(params.actorMaxIterations, globalMaxIterations));
 
-  return Math.max(1, Math.min(requestedMaxIterations, globalMaxIterations));
+  return Math.max(1, Math.min(requestedMaxIterations, MAX_AGENT_MAX_ITERATIONS));
 }

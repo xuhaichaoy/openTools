@@ -30,6 +30,12 @@ const aiLog = createLogger("MToolsAI");
 const STREAM_STALL_TIMEOUT_MS = 120_000;
 const STREAM_FIRST_CHUNK_TIMEOUT_MS = 90_000;
 const STREAM_HARD_TIMEOUT_MS = 600_000;
+const MANAGED_AUTH_STREAM_ERROR_PATTERNS = [
+  /\b401\b/,
+  /unauthorized/i,
+  /invalid token/i,
+  /http\s*401/i,
+];
 
 const generateId = () =>
   Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
@@ -115,6 +121,15 @@ function traceStreamEvent(
     return;
   }
   // console.log(`[AI TRACE][${conversationId}][${phase}]`, payload);
+}
+
+export function shouldDeferManagedAuthStreamError(
+  config: Pick<AIConfig, "source">,
+  error: string,
+): boolean {
+  const source = config.source ?? "own_key";
+  if (source !== "team" && source !== "platform") return false;
+  return MANAGED_AUTH_STREAM_ERROR_PATTERNS.some((pattern) => pattern.test(error));
 }
 
 function logStreamWithToolsContext(
@@ -578,6 +593,17 @@ export function createMToolsAI(): MToolsAI {
                     safeReject(new Error("Aborted"));
                     return;
                   }
+                  if (shouldDeferManagedAuthStreamError(
+                    effectiveConfig,
+                    event.payload.error,
+                  )) {
+                    aiLog.warn("[chat] defer managed-auth stream error until routed retry settles", {
+                      conversationId,
+                      source: effectiveConfig.source ?? "own_key",
+                      error: event.payload.error,
+                    });
+                    return;
+                  }
                   traceStreamEvent(conversationId, "error", event.payload.error);
                   safeReject(new Error(event.payload.error));
                 }
@@ -770,6 +796,17 @@ export function createMToolsAI(): MToolsAI {
                   kickWatchdog("error");
                   if (abortBridge.isAborted()) {
                     safeReject(new Error("Aborted"));
+                    return;
+                  }
+                  if (shouldDeferManagedAuthStreamError(
+                    effectiveConfig,
+                    event.payload.error,
+                  )) {
+                    aiLog.warn("[stream] defer managed-auth stream error until routed retry settles", {
+                      conversationId,
+                      source: effectiveConfig.source ?? "own_key",
+                      error: event.payload.error,
+                    });
                     return;
                   }
                   traceStreamEvent(conversationId, "error", event.payload.error);
@@ -1329,6 +1366,17 @@ export function createMToolsAI(): MToolsAI {
                 });
                 if (abortBridge.isAborted()) {
                   safeReject(new Error("Aborted"));
+                  return;
+                }
+                if (shouldDeferManagedAuthStreamError(
+                  config,
+                  event.payload.error,
+                )) {
+                  aiLog.warn("[streamWithTools] defer managed-auth stream error until routed retry settles", {
+                    conversationId,
+                    source: config.source ?? "own_key",
+                    error: event.payload.error,
+                  });
                   return;
                 }
                 const remaining = reasoningStream.flush();

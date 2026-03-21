@@ -22,6 +22,11 @@ export interface IMConversationProgressEvent {
 }
 
 interface ChannelProgressEmitterOptions {
+  sendProgress: (params: {
+    channelId: string;
+    conversationId: string;
+    message: string;
+  }) => Promise<void>;
   startFeishuTyping: (params: {
     channelId: string;
     conversationId: string;
@@ -30,7 +35,10 @@ interface ChannelProgressEmitterOptions {
 }
 
 export class ChannelProgressEmitter {
-  constructor(private readonly options: ChannelProgressEmitterOptions) {}
+  private readonly options: ChannelProgressEmitterOptions;
+  constructor(options: ChannelProgressEmitterOptions) {
+    this.options = options;
+  }
 
   async emit(event: IMConversationProgressEvent): Promise<void> {
     if (event.channelType === "feishu") {

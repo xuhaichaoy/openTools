@@ -52,6 +52,12 @@ export interface AgentTool {
     string,
     { type: string; description?: string; required?: boolean }
   >;
+  /**
+   * 原始 JSON Schema（如 MCP input_schema）。
+   * 若提供，toolToFunctionDef 会直接透传给模型，
+   * 跳过 parameters → JSON Schema 的有损转换。
+   */
+  rawParametersSchema?: Record<string, unknown>;
   /** 标记为高风险工具，执行前会触发确认弹窗 */
   dangerous?: boolean;
   /** 标记为只读工具（不产生副作用），可安全并行执行 */
@@ -121,11 +127,112 @@ export interface AgentConfig {
   contextMessages?: Array<{ role: "user" | "assistant"; content: string }>;
 }
 
+type IterationStopReason =
+  | "iteration_limit_reached"
+  | "repeated_tool_calls"
+  | "empty_model_output";
+
+interface IterationStopDiagnostics {
+  iterationsUsed: number;
+  stopReason: IterationStopReason;
+  repeatedToolPattern?: string;
+}
+
+function formatIterationStopReason(reason: IterationStopReason): string {
+  switch (reason) {
+    case "repeated_tool_calls":
+      return "连续 2 轮 tool_calls 完全相同";
+    case "empty_model_output":
+      return "连续 3 轮模型未返回有效内容";
+    default:
+      return "已达到迭代上限";
+  }
+}
+
+function formatIterationStopHeadline(
+  reason: IterationStopReason,
+  maxIterations: number,
+): string {
+  switch (reason) {
+    case "repeated_tool_calls":
+      return `执行已提前停止：检测到重复 tool_calls（最大 ${maxIterations} 步）。`;
+    case "empty_model_output":
+      return `执行已提前停止：模型连续未返回有效内容（最大 ${maxIterations} 步）。`;
+    default:
+      return `已达到最大执行步数（${maxIterations} 步）。`;
+  }
+}
+
+function formatRepeatedToolPattern(toolCalls: AIToolCall[]): string | undefined {
+  const counts = new Map<string, number>();
+  for (const toolCall of toolCalls) {
+    const name = toolCall.function.name?.trim();
+    if (!name) continue;
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  if (counts.size === 0) return undefined;
+  return [...counts.entries()]
+    .map(([name, count]) => (count > 1 ? `${name} x${count}` : name))
+    .join(", ");
+}
+
+function buildRepeatedToolCallCorrectionMessage(toolPattern?: string): string {
+  return [
+    "[系统提示] 你刚刚连续两轮提出了相同的 tool_calls。",
+    toolPattern ? `重复工具模式：${toolPattern}` : "",
+    "不要再次重复调用这些工具。",
+    "请先基于当前已有结果说明卡点在哪里。",
+    "如果还要继续，必须至少改变其中一项：工具、参数、目标对象，或直接给出结论。",
+    "若这是有副作用的工具（如创建页面、写文件、发请求），默认视为上一次已经生效，不要盲目重试。",
+  ].filter(Boolean).join("\n");
+}
+
 const DEFAULT_CONFIG: AgentConfig = {
   maxIterations: 10,
   temperature: 0.7,
   verbose: true,
 };
+
+// ── MCP 参数自动推断 ──
+
+const URL_PATTERN = /https?:\/\/[^\s"'<>\u3000\u3001\u3002\uff01\uff0c\uff1b]+/;
+const FILE_PATH_PATTERN = /(?:\/[\w.\-]+){2,}|[A-Z]:\\[\w.\-\\]+/;
+
+/**
+ * 从用户输入中推断 MCP 工具缺失的必填参数值。
+ * 仅处理高置信度场景（URL、文件路径、搜索关键词），避免误填。
+ */
+function inferMcpParamFromUserInput(
+  paramKey: string,
+  paramDesc: string,
+  userInput: string,
+): string | null {
+  // URL 类参数
+  if (paramKey === "url" || paramDesc.includes("url") || paramDesc.includes("navigate")) {
+    const match = userInput.match(URL_PATTERN);
+    if (match) return match[0];
+  }
+  // 文件路径类参数
+  if (paramKey === "path" || paramKey === "filepath" || paramKey === "file_path"
+    || paramDesc.includes("file") || paramDesc.includes("path")) {
+    const match = userInput.match(FILE_PATH_PATTERN);
+    if (match) return match[0];
+  }
+  // 搜索 / 查询类参数：提取引号中的内容或 URL 去除后的关键文本
+  if (paramKey === "query" || paramKey === "search" || paramKey === "keyword"
+    || paramDesc.includes("search") || paramDesc.includes("query")) {
+    // 先尝试提取引号中的内容
+    const quotedMatch = userInput.match(/["'「」""]([^"'「」""]+)["'「」""]/);
+    if (quotedMatch) return quotedMatch[1].trim();
+    // 去掉命令前缀，取核心文本
+    const cleaned = userInput
+      .replace(/^.*?(?:搜索|查询|查找|search|query|find)\s*/i, "")
+      .replace(URL_PATTERN, "")
+      .trim();
+    if (cleaned.length > 0 && cleaned.length <= 200) return cleaned;
+  }
+  return null;
+}
 
 /** 仅缓存“不兼容 FC”的模型，避免重复探测。 */
 const FC_CACHE_TTL_MS = 30 * 60 * 1000;
@@ -700,6 +807,19 @@ class LoopDetector {
 
 /** 将 AgentTool 转为 OpenAI Function Calling 格式 */
 function toolToFunctionDef(tool: AgentTool): AIToolDefinition {
+  // 如果工具提供了原始 JSON Schema（如 MCP input_schema），直接透传，
+  // 避免 parameters → JSON Schema 的有损转换（会丢失 required/enum/default 等）。
+  if (tool.rawParametersSchema) {
+    return {
+      type: "function",
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.rawParametersSchema,
+      },
+    };
+  }
+
   const properties: Record<string, unknown> = {};
   const required: string[] = [];
 
@@ -1447,20 +1567,37 @@ export class ReActAgent {
     }
   }
 
-  private buildIterationExhaustedSummary(): string {
+  private buildIterationExhaustedSummary(diagnostics?: IterationStopDiagnostics): string {
     const toolsCalled = this.steps
       .filter((s) => s.type === "action" && s.toolName)
       .map((s) => s.toolName!);
     const answers = this.steps.filter((s) => s.type === "answer");
     const errors = this.steps.filter((s) => s.type === "error");
+    const iterationsUsed = Math.max(
+      1,
+      Math.min(
+        diagnostics?.iterationsUsed ?? this.config.maxIterations,
+        this.config.maxIterations,
+      ),
+    );
+    const stopReason = diagnostics?.stopReason ?? "iteration_limit_reached";
+    const repeatedToolPattern = diagnostics?.repeatedToolPattern?.trim();
 
-    let summary = `已达到最大执行步数（${this.config.maxIterations} 步）。`;
+    let summary = formatIterationStopHeadline(stopReason, this.config.maxIterations);
+    summary += "\n执行诊断：";
+    summary += `\n- 实际运行轮数：${iterationsUsed} / ${this.config.maxIterations}`;
+    summary += "\n- 轮数定义：1 轮 = 1 次模型决策（返回回答或 tool_calls），不等于 1 次工具执行";
+    summary += `\n- 停止原因：${formatIterationStopReason(stopReason)}`;
+    summary += `\n- 工具执行次数：${toolsCalled.length}`;
     if (toolsCalled.length > 0) {
       const unique = [...new Set(toolsCalled)];
-      summary += `\n已调用工具: ${unique.join(", ")}（共 ${toolsCalled.length} 次）`;
+      summary += `\n- 已调用工具：${unique.join(", ")}（共 ${toolsCalled.length} 次）`;
+    }
+    if (repeatedToolPattern) {
+      summary += `\n- 重复工具模式：${repeatedToolPattern}`;
     }
     if (errors.length > 0) {
-      summary += `\n遇到 ${errors.length} 个错误`;
+      summary += `\n- 错误次数：${errors.length}`;
     }
     if (answers.length > 0) {
       const lastAnswer = answers[answers.length - 1].content;
@@ -1473,6 +1610,12 @@ export class ReActAgent {
     this.addStep({
       type: "error",
       content: "iteration_exhausted",
+      toolOutput: {
+        iterationsUsed,
+        maxIterations: this.config.maxIterations,
+        stopReason,
+        repeatedToolPattern,
+      },
       timestamp: Date.now(),
     });
 
@@ -1536,6 +1679,25 @@ export class ReActAgent {
           missing.push(key);
         }
       }
+
+      // MCP 工具参数自动补全：当模型遗漏必填参数时，尝试从用户输入中提取
+      if (missing.length > 0 && toolName.startsWith("mcp_")) {
+        for (const key of [...missing]) {
+          const desc = (tool.parameters[key]?.description ?? "").toLowerCase();
+          const keyLower = key.toLowerCase();
+          const inferred = inferMcpParamFromUserInput(keyLower, desc, userInput);
+          if (inferred !== null) {
+            toolParams[key] = inferred;
+            missing.splice(missing.indexOf(key), 1);
+            this.addStep({
+              type: "observation",
+              content: `[MCP 参数补全] ${toolName}.${key} = ${JSON.stringify(inferred).slice(0, 100)}`,
+              timestamp: Date.now(),
+            });
+          }
+        }
+      }
+
       if (missing.length > 0) {
         const schema = Object.entries(tool.parameters)
           .map(([k, v]) => `  ${k}: ${v.type}${v.required === false ? " (可选)" : " (必需)"}${v.description ? ` - ${v.description}` : ""}`)
@@ -2301,6 +2463,7 @@ ${s.taskStrategy}
     let iterationWarningIdx = -1;
     let fcEmptyCount = 0;
     let fcStaleCount = 0;
+    let repeatedToolCorrectionIssued = false;
     let prevToolCallsKey = "";
     let lastDisabledKey = this.loopDetector.getDisabledTools().join(",");
     let lastMode = this.mode;
@@ -2402,7 +2565,10 @@ ${s.taskStrategy}
         }
         fcEmptyCount++;
         if (fcEmptyCount >= 3) {
-          const fallback = this.buildIterationExhaustedSummary();
+          const fallback = this.buildIterationExhaustedSummary({
+            iterationsUsed: i + 1,
+            stopReason: "empty_model_output",
+          });
           this.addStep({ type: "answer", content: fallback, timestamp: Date.now() });
           return fallback;
         }
@@ -2427,13 +2593,34 @@ ${s.taskStrategy}
         .join("|");
       if (curToolCallsKey === prevToolCallsKey) {
         fcStaleCount++;
+        if (!repeatedToolCorrectionIssued) {
+          repeatedToolCorrectionIssued = true;
+          const repeatedToolPattern = formatRepeatedToolPattern(validToolCalls);
+          this.addStep({
+            type: "observation",
+            content: repeatedToolPattern
+              ? `检测到重复 tool_calls，已要求模型调整计划：${repeatedToolPattern}`
+              : "检测到重复 tool_calls，已要求模型调整计划。",
+            timestamp: Date.now(),
+          });
+          messages.push({
+            role: "user",
+            content: buildRepeatedToolCallCorrectionMessage(repeatedToolPattern),
+          });
+          continue;
+        }
         if (fcStaleCount >= 2) {
-          const fallback = this.buildIterationExhaustedSummary();
+          const fallback = this.buildIterationExhaustedSummary({
+            iterationsUsed: i + 1,
+            stopReason: "repeated_tool_calls",
+            repeatedToolPattern: formatRepeatedToolPattern(validToolCalls),
+          });
           this.addStep({ type: "answer", content: fallback, timestamp: Date.now() });
           return fallback;
         }
       } else {
         fcStaleCount = 0;
+        repeatedToolCorrectionIssued = false;
       }
       prevToolCallsKey = curToolCallsKey;
 
@@ -2609,7 +2796,10 @@ ${s.taskStrategy}
       }
     }
 
-    const fallback = this.buildIterationExhaustedSummary();
+    const fallback = this.buildIterationExhaustedSummary({
+      iterationsUsed: this.config.maxIterations,
+      stopReason: "iteration_limit_reached",
+    });
     this.addStep({
       type: "answer",
       content: fallback,
@@ -2783,7 +2973,10 @@ ${s.taskStrategy}
       }
     }
 
-    const fallback = this.buildIterationExhaustedSummary();
+    const fallback = this.buildIterationExhaustedSummary({
+      iterationsUsed: this.config.maxIterations,
+      stopReason: "iteration_limit_reached",
+    });
     this.addStep({
       type: "answer",
       content: fallback,

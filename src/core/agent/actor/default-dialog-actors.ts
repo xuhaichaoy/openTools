@@ -27,12 +27,14 @@ function buildExternalIMSystemPromptAppend(channelType?: ChannelType): string {
     "- 如果信息不足，直接用自然语言向用户提一个简洁问题，等待用户下一条消息。",
     "- 提问时不要把问题拆成复杂表单，优先一次只问最关键的一个问题。",
     "- 如果操作本应审批，直接明确说明“这个操作需要回到本机确认”，不要在渠道里卡住流程。",
-    "- 渠道对话里不要提及 ask_user、审批弹窗、计划模式等内部机制。",
+    "- 系统具备【智能媒体回传】能力：如果你在回答中包含了本地图片或文件的绝对路径（如 /tmp/xxx.png），系统会自动将其作为媒体消息发送给用户。",
+    "- 不要声称“当前渠道不能发图片/文件”或“只能把本机路径给用户去打开”。",
+    "- 只要你生成了图片、截图或附件，并认为对用户有帮助，就直接在回答中输出其绝对路径即可，系统会代劳发送。",
   ].join("\n");
 }
 
 function buildDefaultActorConfig(
-  roleName: "Coordinator" | "Specialist",
+  roleName: "Lead",
   options?: DefaultDialogActorSpawnOptions,
 ): Pick<ActorConfig, "role" | "toolPolicy" | "middlewareOverrides"> {
   const isExternalIM = options?.mode === "external_im";
@@ -52,7 +54,7 @@ function buildDefaultActorConfig(
     : undefined;
   const middlewareOverrides: MiddlewareOverrides = isExternalIM
     ? { approvalLevel: "off", disable: ["Clarification"] }
-    : roleName === "Coordinator"
+    : roleName === "Lead"
       ? { approvalLevel: "permissive" }
       : {};
 
@@ -67,27 +69,29 @@ export function spawnDefaultDialogActors(
   system: ActorSystem,
   options?: DefaultDialogActorSpawnOptions,
 ): void {
-  const coordinatorConfig = buildDefaultActorConfig("Coordinator", options);
+  const coordinatorConfig = buildDefaultActorConfig("Lead", options);
   system.spawn({
     id: `agent-${makeId()}`,
     role: coordinatorConfig.role,
     capabilities: {
-      tags: ["coordinator", "synthesis", "code_analysis"],
-      description: "默认协调者，负责理解任务、分配讨论方向并收束结论。",
+      tags: [
+        "coordinator",
+        "synthesis",
+        "code_analysis",
+        "code_write",
+        "debugging",
+        "code_review",
+        "testing",
+        "file_write",
+        "shell_execute",
+        "information_retrieval",
+        "web_search",
+      ],
+      description: "默认主代理，先独立推进任务；只有在确实值得时才按需创建临时子代理做探索、审查或验证。",
     },
+    maxIterations: 40,
+    contextTokens: 16_000,
     ...(coordinatorConfig.toolPolicy ? { toolPolicy: coordinatorConfig.toolPolicy } : {}),
     middlewareOverrides: coordinatorConfig.middlewareOverrides,
-  });
-
-  const specialistConfig = buildDefaultActorConfig("Specialist", options);
-  system.spawn({
-    id: `agent-${makeId()}`,
-    role: specialistConfig.role,
-    capabilities: {
-      tags: ["code_analysis", "code_write", "debugging"],
-      description: "默认执行者，负责深入分析、修复建议和具体实现细节。",
-    },
-    ...(specialistConfig.toolPolicy ? { toolPolicy: specialistConfig.toolPolicy } : {}),
-    middlewareOverrides: specialistConfig.middlewareOverrides,
   });
 }

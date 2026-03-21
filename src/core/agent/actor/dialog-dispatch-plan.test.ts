@@ -76,13 +76,13 @@ describe("dialog-dispatch-plan", () => {
 
     expect(plan).not.toBeNull();
     expect(plan?.runtimePlan.initialRecipientActorIds).toEqual(["coordinator"]);
-    expect(plan?.runtimePlan.summary).toContain("Coordinator 作为技术协调者推进编码任务");
+    expect(plan?.runtimePlan.summary).toContain("Coordinator 主接手编码任务");
     expect(plan?.clusterPlan.sharedContext).toMatchObject({
       taskType: "coding",
       codingFocus: "debugging",
       codingModeLabel: "Coding · 大项目",
     });
-    expect(plan?.clusterPlan.steps[0].task).toContain("拆解大型编码任务");
+    expect(plan?.clusterPlan.steps[0].task).toContain("作为主代理先拆解大型编码任务");
     expect(plan?.clusterPlan.steps.find((step) => step.role === "Fixer")?.task).toContain("定位异常链路");
     expect(plan?.clusterPlan.steps.find((step) => step.role === "Reviewer")?.task).toContain("独立审查者");
     expect(plan?.clusterPlan.steps.find((step) => step.role === "Tester")?.task).toContain("设计并执行验证步骤");
@@ -121,5 +121,52 @@ describe("dialog-dispatch-plan", () => {
       "validator",
       "general",
     ]);
+  });
+
+  it("keeps simple implementation work in solo lead flow and suggests ephemeral children for larger debugging tasks", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-15T11:00:00.000Z"));
+
+    const soloActors: DialogPlanningActor[] = [
+      {
+        id: "lead",
+        roleName: "Lead",
+        capabilities: { tags: ["coordinator", "code_write", "code_analysis", "debugging", "testing"] },
+      },
+    ];
+
+    const soloPlan = buildDialogDispatchPlanBundle({
+      actors: soloActors,
+      routingMode: "coordinator",
+      content: "请修一下 src/button.tsx 里按钮 hover 颜色不对的问题",
+      attachmentPaths: ["/repo/src/button.tsx"],
+      coordinatorActorId: "lead",
+    });
+
+    expect(soloPlan).not.toBeNull();
+    expect(soloPlan?.runtimePlan.summary).toContain("单主代理方式推进编码任务");
+    expect(soloPlan?.runtimePlan.plannedSpawns).toBeUndefined();
+
+    const delegatedPlan = buildDialogDispatchPlanBundle({
+      actors: soloActors,
+      routingMode: "coordinator",
+      content: "请排查整个项目里的 TypeScript 报错并修复，最后补上验证步骤",
+      attachmentSummary: "已附带 src/app.ts 与 tests/app.test.ts",
+      attachmentPaths: [
+        "/repo/src/app.ts",
+        "/repo/src/lib/util.ts",
+        "/repo/tests/app.test.ts",
+        "/repo/package.json",
+      ],
+      coordinatorActorId: "lead",
+    });
+
+    expect(delegatedPlan).not.toBeNull();
+    expect(delegatedPlan?.runtimePlan.summary).toContain("并按需委派");
+    expect(delegatedPlan?.runtimePlan.plannedSpawns?.map((spawn) => spawn.targetActorName)).toEqual([
+      "Debugger",
+      "Implementer",
+    ]);
+    expect(delegatedPlan?.runtimePlan.plannedSpawns?.every((spawn) => spawn.createIfMissing)).toBe(true);
   });
 });

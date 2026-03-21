@@ -43,6 +43,8 @@ export interface ChannelEntry {
 interface ConversationRoute {
   channelId: string;
   conversationId: string;
+  conversationType?: ChannelIncomingMessage["conversationType"];
+  targetUserId?: string;
   lastActiveAt: number;
   messageId?: string;
   replyWebhookUrl?: string;
@@ -101,7 +103,8 @@ export class ChannelManager {
     this._progressEmitter?.dispose();
     this._conversationRuntimeManager?.dispose();
     this._progressEmitter = new ChannelProgressEmitter({
-      sendProgress: async ({ channelId, conversationId, message }) => {
+      sendProgress: async (params: { channelId: string; conversationId: string; message: string }) => {
+        const { channelId, conversationId, message } = params;
         const route = this._getConversationRoute(channelId, conversationId);
         if (!route) return;
         await this._sendProgressThroughRoute(conversationId, route, message);
@@ -113,10 +116,29 @@ export class ChannelManager {
       },
     });
     this._conversationRuntimeManager = new IMConversationRuntimeManager({
-      onReply: async ({ channelId, conversationId, text, messageId }) => {
+      onReply: async (params: {
+        channelId: string;
+        conversationId: string;
+        text: string;
+        messageId?: string;
+        mediaUrl?: string;
+        mediaUrls?: string[];
+        images?: string[];
+        attachments?: { path: string; fileName?: string }[];
+      }) => {
+        const { channelId, conversationId, text, messageId, mediaUrl, mediaUrls, images, attachments } = params;
         const route = this._getConversationRoute(channelId, conversationId);
         if (route) {
-          await this._sendReplyThroughRoute(conversationId, route, text, messageId);
+          await this._sendReplyWithMediaThroughRoute(
+            conversationId,
+            route,
+            text,
+            messageId,
+            mediaUrl,
+            mediaUrls,
+            images,
+            attachments,
+          );
         }
       },
       onProgress: async (event) => {
@@ -318,6 +340,8 @@ export class ChannelManager {
       try {
         await entry.channel.send({
           conversationId,
+          ...(route?.conversationType ? { conversationType: route.conversationType } : {}),
+          ...(route?.targetUserId ? { targetUserId: route.targetUserId } : {}),
           ...(route?.messageId ? { replyToMessageId: route.messageId } : {}),
           ...(route?.replyWebhookUrl ? { replyWebhookUrl: route.replyWebhookUrl } : {}),
           ...(route?.replyWebhookExpiresAt ? { replyWebhookExpiresAt: route.replyWebhookExpiresAt } : {}),
@@ -429,7 +453,7 @@ export class ChannelManager {
           log.info(`Ignoring duplicated IM callback for channel ${channelId}`);
           return;
         }
-        log.info(`Received IM callback for channel ${channelId}`);
+        log.info(`Received IM callback for channel ${channelId}`, payload);
         try {
           await this.handleExternalCallback(channelId, payload);
         } catch (err) {
@@ -495,6 +519,8 @@ export class ChannelManager {
     this._conversationRoutes.set(this._buildConversationRouteKey(channelId, msg.conversationId), {
       channelId,
       conversationId: msg.conversationId,
+      conversationType: msg.conversationType,
+      targetUserId: msg.senderId,
       lastActiveAt: Date.now(),
       messageId: msg.messageId,
       replyWebhookUrl: msg.replyWebhookUrl,
@@ -518,19 +544,48 @@ export class ChannelManager {
     text: string,
     expectedTypingMessageId?: string,
   ): Promise<void> {
+    await this._sendReplyWithMediaThroughRoute(conversationId, route, text, expectedTypingMessageId);
+  }
+
+  private async _sendReplyWithMediaThroughRoute(
+    conversationId: string,
+    route: ConversationRoute,
+    text: string,
+    expectedTypingMessageId?: string,
+    mediaUrl?: string,
+    mediaUrls?: string[],
+    images?: string[],
+    attachments?: { path: string; fileName?: string }[],
+  ): Promise<void> {
     const entry = this.channels.get(route.channelId);
     if (!entry?.channel || entry.channel.status !== "connected") {
       return;
     }
 
     try {
+      log.info("Forwarding IM reply through route", {
+        channelId: route.channelId,
+        conversationId,
+        conversationType: route.conversationType,
+        targetUserId: route.targetUserId,
+        hasReplyWebhook: Boolean(route.replyWebhookUrl),
+        hasText: Boolean(text),
+        imageCount: images?.length ?? 0,
+        attachmentCount: attachments?.length ?? 0,
+      });
       await entry.channel.send({
         conversationId,
+        conversationType: route.conversationType,
+        targetUserId: route.targetUserId,
         replyToMessageId: route.messageId,
         replyWebhookUrl: route.replyWebhookUrl,
         replyWebhookExpiresAt: route.replyWebhookExpiresAt,
         robotCode: route.robotCode,
         text,
+        mediaUrl,
+        mediaUrls,
+        images,
+        attachments,
       });
       const storedRoute = this._getConversationRoute(route.channelId, conversationId);
       if (storedRoute) {
@@ -551,7 +606,7 @@ export class ChannelManager {
   private async _sendProgressThroughRoute(
     conversationId: string,
     route: ConversationRoute,
-    message: ChannelOutgoingMessage,
+    message: string,
   ): Promise<void> {
     const entry = this.channels.get(route.channelId);
     if (!entry?.channel || entry.channel.status !== "connected") {
@@ -561,11 +616,13 @@ export class ChannelManager {
     try {
       await entry.channel.send({
         conversationId,
+        conversationType: route.conversationType,
+        targetUserId: route.targetUserId,
         replyToMessageId: route.messageId,
         replyWebhookUrl: route.replyWebhookUrl,
         replyWebhookExpiresAt: route.replyWebhookExpiresAt,
         robotCode: route.robotCode,
-        ...message,
+        text: message,
       });
     } catch (err) {
       log.error("Failed to forward progress to source IM channel", err);
@@ -639,9 +696,8 @@ export class ChannelManager {
 }
 
 declare global {
-  interface globalThis {
-    __MTOOLS_CHANNEL_MANAGER__?: ChannelManager;
-  }
+  // eslint-disable-next-line no-var
+  var __MTOOLS_CHANNEL_MANAGER__: ChannelManager | undefined;
 }
 
 export function getChannelManager(): ChannelManager {

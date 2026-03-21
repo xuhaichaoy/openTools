@@ -17,6 +17,12 @@ import {
 import type { DialogMessage } from "@/core/agent/actor/types";
 import type { IMConversationProgressEvent } from "./channel-progress-emitter";
 import type { ChannelIncomingMessage, ChannelType } from "./types";
+import {
+  deriveShareableIMMediaFromText,
+  sanitizeIMReplyTextForMedia,
+  shouldExplicitlyDeliverMediaToIM,
+} from "./im-media-delivery";
+import { resolveChannelOutgoingMedia } from "./channel-outbound-media";
 
 const log = createLogger("IMConversationRuntime");
 const MAX_PREVIEW_MESSAGES = 120;
@@ -30,6 +36,8 @@ interface PendingIMMessage {
   conversationType: ChannelIncomingMessage["conversationType"];
   displayLabel: string;
   displayDetail: string;
+  images?: string[];
+  attachments?: ChannelIncomingMessage["attachments"];
 }
 
 interface RuntimeActivitySnapshot {
@@ -81,6 +89,10 @@ interface IMConversationRuntimeManagerOptions {
     conversationId: string;
     text: string;
     messageId?: string;
+    mediaUrl?: string;
+    mediaUrls?: string[];
+    images?: string[];
+    attachments?: { path: string; fileName?: string }[];
   }) => Promise<void>;
   onProgress?: (event: IMConversationProgressEvent) => Promise<void>;
   onFinalized?: (params: {
@@ -111,6 +123,7 @@ function cloneDialogMessage(message: DialogMessage): DialogMessage {
   return {
     ...message,
     ...(message.images ? { images: [...message.images] } : {}),
+    ...(message.attachments ? { attachments: message.attachments.map((a) => ({ ...a })) } : {}),
     ...(message.options ? { options: [...message.options] } : {}),
     ...(message.appliedMemoryPreview ? { appliedMemoryPreview: [...message.appliedMemoryPreview] } : {}),
     ...(message.appliedTranscriptPreview ? { appliedTranscriptPreview: [...message.appliedTranscriptPreview] } : {}),
@@ -134,11 +147,36 @@ function cloneDialogMessage(message: DialogMessage): DialogMessage {
   };
 }
 
+function mergeUniqueStrings(...groups: Array<readonly string[] | undefined>): string[] | undefined {
+  const result = [...new Set(groups.flatMap((group) => group ?? []).map((value) => String(value ?? "").trim()).filter(Boolean))];
+  return result.length ? result : undefined;
+}
+
+function mergeUniqueAttachments(
+  ...groups: Array<ReadonlyArray<{ path: string; fileName?: string }> | undefined>
+): Array<{ path: string; fileName?: string }> | undefined {
+  const merged = new Map<string, { path: string; fileName?: string }>();
+  for (const group of groups) {
+    for (const item of group ?? []) {
+      const path = String(item.path ?? "").trim();
+      if (!path) continue;
+      merged.set(path, {
+        path,
+        ...(item.fileName ? { fileName: item.fileName } : {}),
+      });
+    }
+  }
+  return merged.size > 0 ? [...merged.values()] : undefined;
+}
+
 export class IMConversationRuntimeManager {
+  private readonly options: IMConversationRuntimeManagerOptions;
   private runtimes = new Map<string, IMConversationRuntime>();
   private conversations = new Map<string, IMConversationState>();
 
-  constructor(private readonly options: IMConversationRuntimeManagerOptions) {}
+  constructor(options: IMConversationRuntimeManagerOptions) {
+    this.options = options;
+  }
 
   async handleIncoming(params: {
     channelId: string;
@@ -420,8 +458,33 @@ export class IMConversationRuntimeManager {
         }
 
         if (this.shouldForwardFinalAgentResult(runtime, latestDialogEvent)) {
-          const text = String(latestDialogEvent.content || "").slice(0, 2000).trim();
-          if (text) {
+          const originalText = String(latestDialogEvent.content || "").slice(0, 2000).trim();
+          const shouldDeliverMedia = shouldExplicitlyDeliverMediaToIM(runtime.lastInput?.text);
+          const derivedMedia = shouldDeliverMedia
+            ? deriveShareableIMMediaFromText(originalText)
+            : {};
+          const outgoingMedia = shouldDeliverMedia
+            ? resolveChannelOutgoingMedia({
+                mediaUrls: derivedMedia.mediaUrls,
+                images: latestDialogEvent.images,
+                attachments: latestDialogEvent.attachments,
+              })
+            : {};
+          const text = shouldDeliverMedia && outgoingMedia.mediaUrls?.length
+            ? sanitizeIMReplyTextForMedia(originalText)
+            : originalText;
+          const hasMedia = Boolean(outgoingMedia.mediaUrls?.length);
+          
+          if (text || hasMedia) {
+            log.info("Forwarding agent reply to IM", { 
+              conversationId: runtime.conversationId,
+              hasText: !!text,
+              mediaCount: outgoingMedia.mediaUrls?.length || 0,
+              imageCount: outgoingMedia.images?.length || 0,
+              attachmentCount: outgoingMedia.attachments?.length || 0,
+              shouldDeliverMedia,
+            });
+
             runtime.forwardedResultMessageIds.add(latestDialogEvent.id);
             this.options.onFinalized?.({
               channelId: runtime.channelId,
@@ -433,6 +496,10 @@ export class IMConversationRuntimeManager {
               conversationId: runtime.conversationId,
               text,
               messageId: runtime.lastInput?.messageId,
+              mediaUrl: outgoingMedia.mediaUrl,
+              mediaUrls: outgoingMedia.mediaUrls,
+              images: outgoingMedia.images,
+              attachments: outgoingMedia.attachments,
             }).catch((error) => {
               log.error("Failed to send IM runtime reply", error);
             });
@@ -489,6 +556,8 @@ export class IMConversationRuntimeManager {
       conversationType: msg.conversationType,
       displayLabel: getChannelDisplayLabel(channelType),
       displayDetail: getConversationDisplayDetail(channelType, msg.conversationType),
+      images: msg.images,
+      attachments: msg.attachments,
     };
   }
 
@@ -514,6 +583,8 @@ export class IMConversationRuntimeManager {
       externalSessionId: runtime.system.sessionId,
       runtimeDisplayLabel: pending.displayLabel,
       runtimeDisplayDetail: pending.displayDetail,
+      images: pending.images,
+      attachments: pending.attachments,
     });
     this.emitProgress({
       channelId: runtime.channelId,
