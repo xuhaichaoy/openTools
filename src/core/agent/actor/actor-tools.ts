@@ -185,12 +185,18 @@ export function createActorCommunicationTools(
       "将一个子任务派发给另一个 Agent 执行。系统会自动追踪任务进度，" +
       "目标 Agent 完成后结果会自动发送到你的收件箱。此操作是非阻塞的。" +
       "适用于将大任务分解为子任务分配给不同 Agent 并行执行。" +
+      "默认仅顶层协调者可以继续创建子线程；非协调子 Agent 应把新增分工建议回传给协调者。" +
       "当目标 Agent 不存在时，也可以按需创建临时子 Agent。",
     parameters: {
       target_agent: {
         type: "string",
         description: "目标 Agent 的名称；若不存在且 create_if_missing=true，则会创建同名临时子 Agent",
-        required: true,
+        required: false,
+      },
+      planned_delegation_id: {
+        type: "string",
+        description: "已批准建议委派的 ID。提供后会优先复用 contract 中的目标 Agent、职责边界和 child 配置。",
+        required: false,
       },
       task: {
         type: "string",
@@ -287,8 +293,9 @@ export function createActorCommunicationTools(
     readonly: false,
     execute: async (params) => {
       const currentInheritedImages = opts?.getInheritedImages?.() ?? opts?.inheritedImages;
-      const targetInput = String(params.target_agent);
-      const target = resolveTarget(targetInput);
+      const targetInput = params.target_agent ? String(params.target_agent).trim() : "";
+      const target = targetInput ? resolveTarget(targetInput) : "";
+      const plannedDelegationId = params.planned_delegation_id ? String(params.planned_delegation_id).trim() : undefined;
       const task = String(params.task);
       const label = params.label ? String(params.label) : undefined;
       const context = params.context ? String(params.context) : undefined;
@@ -342,6 +349,7 @@ export function createActorCommunicationTools(
             }
           : undefined,
         overrides: hasOverrides ? overrides : undefined,
+        plannedDelegationId,
       });
 
       if ("error" in result) {
@@ -354,7 +362,7 @@ export function createActorCommunicationTools(
         to: getActorName(result.targetActorId),
         label: result.label,
         roleBoundary: result.roleBoundary,
-        hint: `任务已派发（mode=${result.mode}）。如果是多任务协作，记住在派发完所有需要等待的子任务后调用 wait_for_spawned_tasks，而不是立刻得出最终结论。`,
+        hint: `任务已派发（mode=${result.mode}）。当你的下一步明确依赖这些子任务结果时，再调用 wait_for_spawned_tasks 挂起等待。`,
       };
     },
   });
@@ -363,7 +371,7 @@ export function createActorCommunicationTools(
   tools.push({
     name: "wait_for_spawned_tasks",
     description:
-      "挂起当前执行，等待所有你派发的子任务（跑在后台的）全部完成。必须在派发完所有需要联动的子任务后调用此工具。" +
+      "挂起当前执行，等待所有你派发的子任务（跑在后台的）全部完成。当你的下一步明确依赖这些子任务结果时，再调用此工具。" +
       "工具会一直阻塞直到所有目标子任务完成，返回它们成功或失败的完整结果。" +
       "这样你可以拿到各方的完整详细报告，再往下执行综合梳理和总结，而不用依赖公屏的简短播报。",
     parameters: {},

@@ -390,13 +390,25 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       inputRef,
       scrollRef,
       openDangerConfirm: (toolName, params) => {
-        if (!useToolTrustStore.getState().shouldConfirm(toolName)) {
+        const toolTrust = useToolTrustStore.getState();
+        const cachedDecision = toolTrust.getCachedDecision(toolName, params);
+        if (cachedDecision !== null) {
+          return Promise.resolve(cachedDecision);
+        }
+        const assessment = toolTrust.assess(toolName, params);
+        if (assessment.decision !== "ask") {
+          toolTrust.rememberDecision(toolName, params, true);
           return Promise.resolve(true);
         }
         return openConfirmDialog({
           source: "agent",
           toolName,
           params,
+          risk: assessment.risk,
+          reason: assessment.reason,
+        }).then((confirmed) => {
+          toolTrust.rememberDecision(toolName, params, confirmed);
+          return confirmed;
         });
       },
       resetPerRunState,

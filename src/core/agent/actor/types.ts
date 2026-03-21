@@ -201,12 +201,27 @@ export interface DialogQueuedFollowUp {
   attachmentPaths?: string[];
   uploadRecords?: SessionUploadRecord[];
   routingMode: "direct" | "coordinator" | "smart" | "broadcast";
+  contractState?: "none" | "sealed" | "needs_reapproval";
+  contractStatus?: "ready" | "needs_reapproval" | "missing";
   createdAt: number;
 }
 
 export interface DialogContextSummary {
   summary: string;
   summarizedMessageCount: number;
+  updatedAt: number;
+}
+
+export interface DialogRoomCompactionState {
+  summary: string;
+  compactedMessageCount: number;
+  compactedSpawnedTaskCount: number;
+  compactedArtifactCount: number;
+  preservedIdentifiers: string[];
+  triggerReasons?: string[];
+  memoryFlushNoteId?: string;
+  memoryConfirmedCount?: number;
+  memoryQueuedCount?: number;
   updatedAt: number;
 }
 
@@ -253,8 +268,18 @@ export interface ToolPolicy {
   deny?: string[];
 }
 
+/** 访问权限级别：控制是否允许读写执行环境。 */
+export type AccessMode = "read_only" | "auto" | "full_access";
+
 /** HumanApproval 策略级别 */
-export type ApprovalLevel = "strict" | "normal" | "permissive" | "off";
+export type ApprovalMode = "strict" | "normal" | "permissive" | "off";
+export type ApprovalLevel = ApprovalMode;
+
+/** 统一执行策略：对齐 access mode + approval mode 控制面。 */
+export interface ExecutionPolicy {
+  accessMode?: AccessMode;
+  approvalMode?: ApprovalMode;
+}
 
 /** 中间件覆盖配置 */
 export interface MiddlewareOverrides {
@@ -276,6 +301,8 @@ export interface ActorConfig {
   systemPromptOverride?: string;
   /** 工具策略：控制此 Agent 可用的工具 */
   toolPolicy?: ToolPolicy;
+  /** 一等执行策略：访问权限 + 审批模式 */
+  executionPolicy?: ExecutionPolicy;
   /** 全局超时（秒），超时后 assignTask 自动 abort */
   timeoutSeconds?: number;
   /** Agent 工作目录（独立 workspace，shell 执行时使用） */
@@ -304,6 +331,8 @@ export interface SpawnTaskOverrides {
   maxIterations?: number;
   /** 覆盖工具策略（白名单/黑名单） */
   toolPolicy?: ToolPolicy;
+  /** 覆盖执行策略 */
+  executionPolicy?: ExecutionPolicy;
   /** 覆盖 context token 预算 */
   contextTokens?: number;
   /** 覆盖思维深度 */
@@ -435,6 +464,12 @@ export interface SpawnedTaskRecord {
   runId: string;
   spawnerActorId: string;
   targetActorId: string;
+  /** 关联的父 execution contract；无 contract 的手动派工可为空 */
+  contractId?: string;
+  /** 关联的已批准委派建议；纯手动派工可为空 */
+  plannedDelegationId?: string;
+  /** 这次派工来自显式建议委派还是纯手动决定 */
+  dispatchSource: "manual" | "contract_suggestion";
   /** 父任务 runId；直接子任务为空，嵌套子任务会显式指向上游任务 */
   parentRunId?: string;
   /** 当前任务所在协作子树的根任务 runId */

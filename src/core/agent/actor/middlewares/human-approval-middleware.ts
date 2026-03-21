@@ -10,9 +10,9 @@
  *   - deny: 始终禁止
  */
 
-import type { AgentTool } from "@/plugins/builtin/SmartAgent/core/react-agent";
 import type { ActorMiddleware, ActorRunContext } from "../actor-middleware";
 import type { ApprovalDecisionOption, ApprovalRequest, ApprovalRequestDetail } from "../types";
+import { assessToolApproval, normalizeExecutionPolicy } from "../tool-approval-policy";
 
 export type ApprovalPolicy = "always-allow" | "ask-every-time" | "deny";
 
@@ -469,18 +469,16 @@ export class HumanApprovalMiddleware implements ActorMiddleware {
   async apply(ctx: ActorRunContext): Promise<void> {
     if (!ctx.actorSystem) return;
 
-    // Respect per-actor approval level override
-    const approvalLevel = ctx.middlewareOverrides?.approvalLevel ?? "normal";
-    if (approvalLevel === "off") return;
-
-    // "permissive" mode: only block explicitly denied tools, skip interactive approval
-    const skipInteractive = approvalLevel === "permissive";
+    const executionPolicy = normalizeExecutionPolicy(ctx.executionPolicy, {
+      approvalLevel: ctx.middlewareOverrides?.approvalLevel,
+    });
+    if (executionPolicy.approvalMode === "off") return;
 
     const actorSystem = ctx.actorSystem;
     const actorId = ctx.actorId;
 
     // "strict" mode: treat ALL tools as needing approval (unless already session-approved)
-    const isStrict = approvalLevel === "strict";
+    const isStrict = executionPolicy.approvalMode === "strict";
 
     ctx.tools = ctx.tools.map((tool) => {
       const rule = findMatchingRule(tool.name, this.rules);
@@ -504,9 +502,7 @@ export class HumanApprovalMiddleware implements ActorMiddleware {
         riskDescription: "严格模式下所有工具调用都需要确认",
       };
 
-      // ask-every-time: wrap with approval gate (unless permissive mode)
-      if (skipInteractive) return tool;
-
+      // Wrap tool execution with the shared approval ladder.
       const originalExecute = tool.execute;
       return {
         ...tool,
@@ -518,6 +514,18 @@ export class HumanApprovalMiddleware implements ActorMiddleware {
           }
           if (cachedPolicy === "deny") {
             return { error: `工具 ${tool.name} 已被用户拒绝` };
+          }
+
+          const approvalAssessment = assessToolApproval(tool.name, params, {
+            executionPolicy,
+            approvalMode: executionPolicy.approvalMode,
+            workspace: ctx.workspace,
+          });
+          if (approvalAssessment.decision === "deny") {
+            return { error: approvalAssessment.reason || `工具 ${tool.name} 已被安全策略禁止使用。` };
+          }
+          if (approvalAssessment.decision === "allow") {
+            return originalExecute(params);
           }
 
           // Use confirmDangerousAction callback if available (for dialog/popup mode)

@@ -19,8 +19,8 @@ function matchesGlob(name: string, patterns: string[]): boolean {
 function applyToolPolicy(tools: AgentTool[], policy: { allow?: string[]; deny?: string[] }): AgentTool[] {
   const { allow, deny } = policy;
   return tools.filter((t) => {
-    if (COMM_TOOL_NAMES.has(t.name)) return true;
     if (deny?.length && matchesGlob(t.name, deny)) return false;
+    if (COMM_TOOL_NAMES.has(t.name)) return true;
     if (allow?.length && !matchesGlob(t.name, allow)) return false;
     return true;
   });

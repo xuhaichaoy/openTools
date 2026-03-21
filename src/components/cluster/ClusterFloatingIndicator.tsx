@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, type ReactNode } from "react";
-import { Network, Loader2, X, Bot, MessageCircle, Users } from "lucide-react";
+import { Network, Loader2, X, Bot, MessageCircle, Users, MessagesSquare } from "lucide-react";
 import { useClusterStore } from "@/store/cluster-store";
 import { useAppStore } from "@/store/app-store";
 import { useAgentStore } from "@/store/agent-store";
@@ -18,13 +18,14 @@ import {
   shouldPulseRuntimeIndicator,
 } from "@/core/agent/context-runtime/runtime-indicator";
 
-const MODE_ORDER: RuntimeSessionMode[] = ["cluster", "agent", "dialog", "ask"];
+const MODE_ORDER: RuntimeSessionMode[] = ["cluster", "agent", "dialog", "im_conversation", "ask"];
 
 const MODE_ICONS: Record<RuntimeSessionMode, ReactNode> = {
   ask: <MessageCircle className="w-3.5 h-3.5" />,
   agent: <Bot className="w-3.5 h-3.5" />,
   cluster: <Network className="w-3.5 h-3.5" />,
   dialog: <Users className="w-3.5 h-3.5" />,
+  im_conversation: <MessagesSquare className="w-3.5 h-3.5" />,
 };
 
 function formatElapsed(ms: number) {
@@ -104,11 +105,12 @@ export function ClusterFloatingIndicator() {
         });
         return;
       case "dialog":
+      case "im_conversation":
         routeToAICenter({
           mode: "dialog",
           source: "floating_indicator",
           taskId: sessionId,
-          note: "resume dialog runtime",
+          note: mode === "im_conversation" ? "resume im conversation runtime" : "resume dialog runtime",
           pushView,
         });
     }

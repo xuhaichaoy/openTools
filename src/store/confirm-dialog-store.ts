@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type { ToolApprovalRisk } from "@/core/agent/actor/tool-approval-policy";
 
 export type ConfirmDialogSource = "ask" | "agent" | "cluster" | "actor_dialog";
 
@@ -7,6 +8,8 @@ interface ConfirmDialogRequest {
   toolName: string;
   params: Record<string, unknown>;
   source: ConfirmDialogSource;
+  risk?: ToolApprovalRisk;
+  reason?: string;
   resolve: (confirmed: boolean) => void;
 }
 
@@ -17,6 +20,8 @@ interface ConfirmDialogState {
     toolName: string;
     params: Record<string, unknown>;
     source: ConfirmDialogSource;
+    risk?: ToolApprovalRisk;
+    reason?: string;
   }) => Promise<boolean>;
   submit: (confirmed: boolean) => void;
   dismiss: () => void;
@@ -36,13 +41,15 @@ function popNext(requests: ConfirmDialogRequest[]): [ConfirmDialogRequest | null
 export const useConfirmDialogStore = create<ConfirmDialogState>((set, get) => ({
   active: null,
   queue: [],
-  open: ({ toolName, params, source }) =>
+  open: ({ toolName, params, source, risk, reason }) =>
     new Promise<boolean>((resolve) => {
       const request: ConfirmDialogRequest = {
         id: nextId(),
         toolName,
         params,
         source,
+        risk,
+        reason,
         resolve,
       };
 

@@ -1,5 +1,6 @@
 import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
 import { loadBootstrapReinjectionPreview } from "@/core/ai/bootstrap-context";
+import { isContextPressureError } from "@/core/ai/context-pressure";
 import type {
   AgentSession,
   AgentSessionCompaction,
@@ -568,14 +569,5 @@ export function buildAgentSessionMemoryFlushText(
 }
 
 export function isAgentContextPressureError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return [
-    /maximum context length/i,
-    /context length/i,
-    /prompt is too long/i,
-    /too many input tokens/i,
-    /context window/i,
-    /request too large/i,
-    /max(?:imum)? tokens/i,
-  ].some((pattern) => pattern.test(message));
+  return isContextPressureError(error);
 }

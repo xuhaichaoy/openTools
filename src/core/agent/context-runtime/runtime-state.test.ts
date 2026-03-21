@@ -57,4 +57,22 @@ describe("runtime-state", () => {
     expect(abortSpy).toHaveBeenCalledTimes(1);
     expect(getRuntimeSession("cluster", "cluster-1")).toBeNull();
   });
+
+  it("supports im conversation runtime sessions in persistent state", () => {
+    useRuntimeStateStore.getState().upsertSession({
+      mode: "im_conversation",
+      sessionId: "im-1",
+      query: "钉钉群里的后续追问",
+      displayLabel: "钉钉会话",
+      displayDetail: "钉钉 · 群聊",
+      startedAt: 300,
+      status: "awaiting_reply",
+    });
+
+    const record = getRuntimeSession("im_conversation", "im-1");
+
+    expect(buildRuntimeSessionKey("im_conversation", "im-1")).toBe("im_conversation:im-1");
+    expect(record?.displayLabel).toBe("钉钉会话");
+    expect(getForegroundRuntimeSession("im_conversation")?.sessionId).toBe("im-1");
+  });
 });

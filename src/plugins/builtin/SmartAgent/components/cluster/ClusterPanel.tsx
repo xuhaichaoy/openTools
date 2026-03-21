@@ -675,13 +675,25 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
 
   const confirmDangerousAction = useCallback(
     (toolName: string, params: Record<string, unknown>): Promise<boolean> => {
-      if (!useToolTrustStore.getState().shouldConfirm(toolName)) {
+      const toolTrust = useToolTrustStore.getState();
+      const cachedDecision = toolTrust.getCachedDecision(toolName, params);
+      if (cachedDecision !== null) {
+        return Promise.resolve(cachedDecision);
+      }
+      const assessment = toolTrust.assess(toolName, params);
+      if (assessment.decision !== "ask") {
+        toolTrust.rememberDecision(toolName, params, true);
         return Promise.resolve(true);
       }
       return openConfirmDialog({
         source: "cluster",
         toolName,
         params,
+        risk: assessment.risk,
+        reason: assessment.reason,
+      }).then((confirmed) => {
+        toolTrust.rememberDecision(toolName, params, confirmed);
+        return confirmed;
       });
     },
     [openConfirmDialog],

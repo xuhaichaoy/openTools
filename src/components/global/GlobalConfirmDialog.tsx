@@ -11,6 +11,8 @@ export function GlobalConfirmDialog() {
     <ConfirmDialog
       toolName={active.toolName}
       params={active.params}
+      risk={active.risk}
+      reason={active.reason}
       onResult={(result) => submit(result.confirmed)}
     />
   );

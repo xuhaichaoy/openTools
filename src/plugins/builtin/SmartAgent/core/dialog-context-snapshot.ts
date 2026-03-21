@@ -2,6 +2,7 @@ import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
 import type {
   DialogArtifactRecord,
   DialogContextSummary,
+  DialogRoomCompactionState,
   PendingInteraction,
   SessionUploadRecord,
   SpawnedTaskRecord,
@@ -36,6 +37,15 @@ export interface DialogContextSnapshot {
   focusedSessionRunId?: string;
   focusedSessionLabel?: string;
   summaryPreview?: string;
+  roomCompactionUpdatedAt?: number;
+  roomCompactionMessageCount: number;
+  roomCompactionTaskCount: number;
+  roomCompactionArtifactCount: number;
+  roomCompactionSummaryPreview?: string;
+  roomCompactionPreservedIdentifiers: string[];
+  roomCompactionTriggerReasons: string[];
+  roomCompactionMemoryConfirmedCount: number;
+  roomCompactionMemoryQueuedCount: number;
   memoryRecallAttempted: boolean;
   memoryHitCount: number;
   memoryPreview: string[];
@@ -55,6 +65,8 @@ export function cloneDialogContextSnapshot(
   if (!snapshot) return null;
   return {
     ...snapshot,
+    roomCompactionPreservedIdentifiers: [...(snapshot.roomCompactionPreservedIdentifiers ?? [])],
+    roomCompactionTriggerReasons: [...(snapshot.roomCompactionTriggerReasons ?? [])],
     memoryPreview: [...(snapshot.memoryPreview ?? [])],
     transcriptPreview: [...(snapshot.transcriptPreview ?? [])],
     contextLines: [...snapshot.contextLines],
@@ -103,6 +115,7 @@ export function hasDialogContextSnapshotContent(
     || snapshot.pendingInteractionCount > 0
     || snapshot.queuedFollowUpCount > 0
     || snapshot.runningActorCount > 0
+    || snapshot.roomCompactionMessageCount > 0
     || snapshot.memoryRecallAttempted
     || snapshot.transcriptRecallAttempted,
   );
@@ -128,6 +141,11 @@ export function buildDialogContextNarrative(
     parts.push(`更早的 ${snapshot.summarizedMessageCount} 条房间消息已整理为摘要，避免重复注入整段旧历史`);
   } else if (snapshot.dialogHistoryCount > 0) {
     parts.push("当前会继续沿用房间最近的协作消息");
+  }
+  if (snapshot.roomCompactionMessageCount > 0) {
+    parts.push(
+      `房间较早的 ${snapshot.roomCompactionMessageCount} 条消息已压缩为结构化摘要，并保留了 ${snapshot.roomCompactionTaskCount} 条子任务线索与 ${snapshot.roomCompactionArtifactCount} 条产物线索`,
+    );
   }
   if (snapshot.focusedSessionLabel) {
     parts.push(`新输入会优先继续聚焦中的子会话 ${snapshot.focusedSessionLabel}`);
@@ -200,6 +218,25 @@ export function buildDialogContextReport(
   if (snapshot.summaryPreview) {
     lines.push(`摘要提示：${snapshot.summaryPreview}`);
   }
+  if (snapshot.roomCompactionMessageCount > 0) {
+    lines.push(
+      `房间压缩：已整理 ${snapshot.roomCompactionMessageCount} 条消息、${snapshot.roomCompactionTaskCount} 条子任务线索、${snapshot.roomCompactionArtifactCount} 条产物线索`,
+    );
+  }
+  if (snapshot.roomCompactionTriggerReasons.length > 0) {
+    lines.push(`压缩原因：${snapshot.roomCompactionTriggerReasons.join("；")}`);
+  }
+  if (snapshot.roomCompactionSummaryPreview) {
+    lines.push(`压缩摘要：${snapshot.roomCompactionSummaryPreview}`);
+  }
+  if (snapshot.roomCompactionPreservedIdentifiers.length > 0) {
+    lines.push(`保留线索：${snapshot.roomCompactionPreservedIdentifiers.join("；")}`);
+  }
+  if (snapshot.roomCompactionMemoryConfirmedCount > 0 || snapshot.roomCompactionMemoryQueuedCount > 0) {
+    lines.push(
+      `压缩记忆沉淀：确认 ${snapshot.roomCompactionMemoryConfirmedCount} 条，候选 ${snapshot.roomCompactionMemoryQueuedCount} 条`,
+    );
+  }
   if (snapshot.memoryHitCount > 0) {
     lines.push(`长期记忆：命中 ${snapshot.memoryHitCount} 条`);
   } else if (snapshot.memoryRecallAttempted) {
@@ -225,6 +262,7 @@ export function buildDialogContextSnapshot(params: {
   workspaceRoot?: string;
   sourceHandoff?: AICenterHandoff | null;
   dialogContextSummary?: DialogContextSummary | null;
+  dialogRoomCompaction?: DialogRoomCompactionState | null;
   dialogHistoryCount: number;
   sessionUploads?: readonly SessionUploadRecord[];
   artifacts?: readonly DialogArtifactRecord[];
@@ -276,6 +314,23 @@ export function buildDialogContextSnapshot(params: {
     summaryPreview: params.dialogContextSummary?.summary
       ? compactText(params.dialogContextSummary.summary, 140)
       : undefined,
+    roomCompactionUpdatedAt: params.dialogRoomCompaction?.updatedAt,
+    roomCompactionMessageCount: Math.max(0, params.dialogRoomCompaction?.compactedMessageCount ?? 0),
+    roomCompactionTaskCount: Math.max(0, params.dialogRoomCompaction?.compactedSpawnedTaskCount ?? 0),
+    roomCompactionArtifactCount: Math.max(0, params.dialogRoomCompaction?.compactedArtifactCount ?? 0),
+    roomCompactionSummaryPreview: params.dialogRoomCompaction?.summary
+      ? compactText(params.dialogRoomCompaction.summary, 180)
+      : undefined,
+    roomCompactionPreservedIdentifiers: (params.dialogRoomCompaction?.preservedIdentifiers ?? [])
+      .map((item) => compactText(item, 48))
+      .filter((item): item is string => Boolean(item))
+      .slice(0, 8),
+    roomCompactionTriggerReasons: (params.dialogRoomCompaction?.triggerReasons ?? [])
+      .map((item) => compactText(item, 60))
+      .filter((item): item is string => Boolean(item))
+      .slice(0, 4),
+    roomCompactionMemoryConfirmedCount: Math.max(0, params.dialogRoomCompaction?.memoryConfirmedCount ?? 0),
+    roomCompactionMemoryQueuedCount: Math.max(0, params.dialogRoomCompaction?.memoryQueuedCount ?? 0),
     memoryRecallAttempted: params.memoryRecallAttempted === true,
     memoryHitCount: Math.max(0, params.memoryHitCount ?? 0),
     memoryPreview: (params.memoryPreview ?? [])

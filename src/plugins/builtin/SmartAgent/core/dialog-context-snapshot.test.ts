@@ -19,6 +19,17 @@ describe("buildDialogContextSnapshot", () => {
         summarizedMessageCount: 18,
         updatedAt: 123,
       },
+      dialogRoomCompaction: {
+        summary: "房间较早内容已压缩，保留首页布局结论、Hero 修改点和关键文件路径。",
+        compactedMessageCount: 12,
+        compactedSpawnedTaskCount: 2,
+        compactedArtifactCount: 1,
+        preservedIdentifiers: ["index.tsx", "design.png"],
+        triggerReasons: ["共享工作集偏大", "房间历史已明显拉长"],
+        memoryConfirmedCount: 2,
+        memoryQueuedCount: 1,
+        updatedAt: 456,
+      },
       dialogHistoryCount: 26,
       sessionUploads: [{ id: "u1", type: "image", name: "design.png", size: 1, addedAt: 1 }],
       artifacts: [{
@@ -72,6 +83,13 @@ describe("buildDialogContextSnapshot", () => {
     expect(snapshot.workspaceRoot).toBe("/tmp/project");
     expect(snapshot.sourceModeLabel).toBe("Agent 模式");
     expect(snapshot.summarizedMessageCount).toBe(18);
+    expect(snapshot.roomCompactionMessageCount).toBe(12);
+    expect(snapshot.roomCompactionTaskCount).toBe(2);
+    expect(snapshot.roomCompactionArtifactCount).toBe(1);
+    expect(snapshot.roomCompactionPreservedIdentifiers).toEqual(["index.tsx", "design.png"]);
+    expect(snapshot.roomCompactionTriggerReasons).toEqual(["共享工作集偏大", "房间历史已明显拉长"]);
+    expect(snapshot.roomCompactionMemoryConfirmedCount).toBe(2);
+    expect(snapshot.roomCompactionMemoryQueuedCount).toBe(1);
     expect(snapshot.pendingInteractionCount).toBe(1);
     expect(snapshot.pendingApprovalCount).toBe(1);
     expect(snapshot.openSessionCount).toBe(1);
@@ -81,6 +99,10 @@ describe("buildDialogContextSnapshot", () => {
     expect(snapshot.contextLines.some((line) => line.includes("当前工作区"))).toBe(true);
     expect(snapshot.contextLines.some((line) => line.includes("跨模式来源"))).toBe(true);
     expect(snapshot.contextLines.some((line) => line.includes("待处理交互"))).toBe(true);
+    expect(snapshot.contextLines.some((line) => line.includes("房间压缩"))).toBe(true);
+    expect(snapshot.contextLines.some((line) => line.includes("压缩原因"))).toBe(true);
+    expect(snapshot.contextLines.some((line) => line.includes("保留线索"))).toBe(true);
+    expect(snapshot.contextLines.some((line) => line.includes("压缩记忆沉淀"))).toBe(true);
     expect(snapshot.contextLines.some((line) => line.includes("长期记忆"))).toBe(true);
     expect(snapshot.contextLines.some((line) => line.includes("会话轨迹回补"))).toBe(true);
   });

@@ -4,6 +4,16 @@ import {
   inferCodingExecutionProfile,
   type ResolvedCodingExecutionProfile,
 } from "@/core/agent/coding-profile";
+import {
+  buildExecutionContractDraftFromDialogBundle,
+  sealExecutionContract as sealDialogExecutionContract,
+} from "@/core/collaboration/execution-contract";
+import type {
+  CollaborationActorRosterEntry,
+  ExecutionContract,
+  ExecutionContractDraft,
+} from "@/core/collaboration/types";
+import type { ApprovalDialogPresentation } from "@/store/cluster-plan-approval-store";
 import type { ClusterPlan, ClusterStep } from "@/core/agent/cluster/types";
 import type { DialogRoutingMode } from "./dialog-presets";
 import type {
@@ -41,6 +51,19 @@ export interface DialogDispatchPlanBundle {
   clusterPlan: ClusterPlan;
   runtimePlan: DialogExecutionPlan;
   insight: DialogDispatchInsight;
+}
+
+export interface BuildExecutionContractDraftFromDialogParams {
+  actors: DialogPlanningActor[];
+  routingMode: DialogRoutingMode;
+  content: string;
+  attachmentSummary?: string;
+  attachmentPaths?: readonly string[];
+  handoff?: Partial<AICenterHandoff> | null;
+  mentionedTargetId?: string | null;
+  selectedRoute?: { agentId: string; reason: string } | null;
+  coordinatorActorId?: string | null;
+  actorRoster?: readonly CollaborationActorRosterEntry[];
 }
 
 interface DialogSupportAssignment {
@@ -1125,4 +1148,70 @@ export function buildDialogDispatchPlanBundle(params: {
     },
     insight,
   };
+}
+
+export function buildExecutionContractDraftFromDialog(
+  params: BuildExecutionContractDraftFromDialogParams,
+): (ExecutionContractDraft & { insight: DialogDispatchInsight }) | null {
+  const planBundle = buildDialogDispatchPlanBundle(params);
+  if (!planBundle) return null;
+  const draft = buildExecutionContractDraftFromDialogBundle({
+    surface: "local_dialog",
+    bundle: planBundle,
+    input: {
+      content: params.content,
+      briefContent: params.attachmentSummary,
+      attachmentPaths: params.attachmentPaths ? [...params.attachmentPaths] : undefined,
+    },
+    actorRoster: params.actorRoster ?? params.actors.map((actor) => ({
+      actorId: actor.id,
+      roleName: actor.roleName,
+      capabilities: actor.capabilities?.tags,
+    })),
+  });
+  return { ...draft, insight: planBundle.insight };
+}
+
+export function buildClusterPresentationFromDraft(params: {
+  draft: ExecutionContractDraft & { insight?: DialogDispatchInsight };
+  actors: readonly { id: string; roleName: string }[];
+}): ApprovalDialogPresentation {
+  const actorById = new Map(params.actors.map((actor) => [actor.id, actor.roleName] as const));
+  const coordinatorLabel = params.draft.coordinatorActorId
+    ? actorById.get(params.draft.coordinatorActorId) ?? params.draft.coordinatorActorId
+    : undefined;
+  const participantLabels = [...new Set(
+    params.draft.participantActorIds.map((actorId) => actorById.get(actorId) ?? actorId),
+  )];
+  return {
+    kind: "boundary",
+    title: "审批协作边界",
+    description: "请确认本轮协作的主负责人、可参与范围和授权边界是否合理。",
+    modeLabel: params.draft.insight?.autoModeLabel
+      ? `${params.draft.insight.autoModeLabel} · ${params.draft.executionStrategy}`
+      : params.draft.executionStrategy,
+    taskPreview: params.draft.input.briefContent ?? params.draft.input.content,
+    summary: params.draft.summary,
+    coordinatorLabel,
+    participantLabels,
+    permissions: [
+      coordinatorLabel
+        ? `${coordinatorLabel} 负责主协调、分工和最终输出。`
+        : "主接手 Agent 负责主协调、分工和最终输出。",
+      "本次审批的是协作边界与 delegation 上限，而不是固定的逐条执行脚本。",
+      "建议 delegations 可以被主协调者在运行时调整，但越界行为会被 runtime 拒绝。",
+    ],
+    notes: params.draft.plannedDelegations.length > 0
+      ? [`建议 delegation：${params.draft.plannedDelegations.map((item) => item.label || item.targetActorName || item.targetActorId).join("、")}`]
+      : ["本轮没有预设 delegation，主协调者会按现场情况决定是否拆分。"],
+  };
+}
+
+export function sealExecutionContractFromDialog(params: {
+  draft: ExecutionContractDraft;
+  approvedAt?: number;
+}): ExecutionContract {
+  return sealDialogExecutionContract(params.draft, {
+    approvedAt: params.approvedAt,
+  });
 }

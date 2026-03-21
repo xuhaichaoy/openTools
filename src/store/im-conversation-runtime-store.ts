@@ -5,6 +5,11 @@ import type {
   ApprovalRequestDetail,
   ApprovalDecisionOption,
 } from "@/core/agent/actor/types";
+import type {
+  CollaborationChildSessionPreview,
+  ExecutionContractState,
+  ExecutionStrategy,
+} from "@/core/collaboration/types";
 import type { ChannelType, ChannelIncomingMessage } from "@/core/channels/types";
 
 export type IMConversationRuntimeStatus = "idle" | "running" | "waiting" | "queued";
@@ -27,6 +32,11 @@ export interface IMConversationSessionPreview {
   displayDetail: string;
   status: IMConversationRuntimeStatus;
   queueLength: number;
+  executionStrategy?: ExecutionStrategy | null;
+  pendingInteractionCount: number;
+  childSessionsPreview: CollaborationChildSessionPreview[];
+  queuedFollowUpCount: number;
+  contractState?: ExecutionContractState | null;
   startedAt: number;
   updatedAt: number;
   lastInputText?: string;
@@ -40,6 +50,9 @@ export interface IMConversationTopicSnapshot {
   sessionId: string;
   status: IMConversationRuntimeStatus;
   queueLength: number;
+  pendingInteractionCount: number;
+  queuedFollowUpCount: number;
+  contractState?: ExecutionContractState | null;
   updatedAt: number;
   startedAt: number;
   lastInputText?: string;
@@ -59,6 +72,11 @@ export interface IMConversationSnapshot {
   activeSessionId?: string;
   activeStatus: IMConversationRuntimeStatus;
   activeQueueLength: number;
+  executionStrategy?: ExecutionStrategy | null;
+  pendingInteractionCount: number;
+  childSessionsPreview: CollaborationChildSessionPreview[];
+  queuedFollowUpCount: number;
+  contractState?: ExecutionContractState | null;
   backgroundTopicCount: number;
   topics: IMConversationTopicSnapshot[];
 }
@@ -217,12 +235,39 @@ function areActorPreviewListsEqual(
   return true;
 }
 
+function areChildSessionPreviewEqual(
+  left: CollaborationChildSessionPreview,
+  right: CollaborationChildSessionPreview,
+): boolean {
+  return left.id === right.id
+    && left.label === right.label
+    && left.targetActorId === right.targetActorId
+    && left.status === right.status
+    && left.mode === right.mode
+    && left.focusable === right.focusable
+    && left.resumable === right.resumable;
+}
+
+function areChildSessionPreviewListsEqual(
+  left: readonly CollaborationChildSessionPreview[],
+  right: readonly CollaborationChildSessionPreview[],
+): boolean {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    if (!areChildSessionPreviewEqual(left[index], right[index])) return false;
+  }
+  return true;
+}
+
 function areTopicSnapshotsEqual(left: IMConversationTopicSnapshot, right: IMConversationTopicSnapshot): boolean {
   return left.runtimeKey === right.runtimeKey
     && left.topicId === right.topicId
     && left.sessionId === right.sessionId
     && left.status === right.status
     && left.queueLength === right.queueLength
+    && left.pendingInteractionCount === right.pendingInteractionCount
+    && left.queuedFollowUpCount === right.queuedFollowUpCount
+    && left.contractState === right.contractState
     && left.startedAt === right.startedAt
     && left.lastInputText === right.lastInputText;
 }
@@ -253,8 +298,13 @@ function areSessionPreviewsEqual(
     && left.displayDetail === right.displayDetail
     && left.status === right.status
     && left.queueLength === right.queueLength
+    && left.executionStrategy === right.executionStrategy
+    && left.pendingInteractionCount === right.pendingInteractionCount
+    && left.queuedFollowUpCount === right.queuedFollowUpCount
+    && left.contractState === right.contractState
     && left.startedAt === right.startedAt
     && left.lastInputText === right.lastInputText
+    && areChildSessionPreviewListsEqual(left.childSessionsPreview, right.childSessionsPreview)
     && areActorPreviewListsEqual(left.actors, right.actors)
     && areDialogMessageListsEqual(left.dialogHistory, right.dialogHistory);
 }
@@ -289,7 +339,12 @@ function areConversationSnapshotsEqual(
     && left.activeSessionId === right.activeSessionId
     && left.activeStatus === right.activeStatus
     && left.activeQueueLength === right.activeQueueLength
+    && left.executionStrategy === right.executionStrategy
+    && left.pendingInteractionCount === right.pendingInteractionCount
+    && left.queuedFollowUpCount === right.queuedFollowUpCount
+    && left.contractState === right.contractState
     && left.backgroundTopicCount === right.backgroundTopicCount
+    && areChildSessionPreviewListsEqual(left.childSessionsPreview, right.childSessionsPreview)
     && areTopicSnapshotListsEqual(left.topics, right.topics);
 }
 

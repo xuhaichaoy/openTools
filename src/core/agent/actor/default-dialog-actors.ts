@@ -1,7 +1,7 @@
 import { DIALOG_FULL_ROLE } from "./agent-actor";
 import type { ActorSystem } from "./actor-system";
 import type { ChannelType } from "@/core/channels/types";
-import type { ActorConfig, MiddlewareOverrides, ToolPolicy } from "./types";
+import type { ActorConfig, ExecutionPolicy, MiddlewareOverrides, ToolPolicy } from "./types";
 
 function makeId(): string {
   return Math.random().toString(36).substring(2, 8);
@@ -36,7 +36,7 @@ function buildExternalIMSystemPromptAppend(channelType?: ChannelType): string {
 export function buildDefaultDialogActorConfig(
   roleName: string,
   options?: DefaultDialogActorSpawnOptions,
-): Pick<ActorConfig, "role" | "toolPolicy" | "middlewareOverrides"> {
+): Pick<ActorConfig, "role" | "toolPolicy" | "executionPolicy" | "middlewareOverrides"> {
   const isExternalIM = options?.mode === "external_im";
   const role = isExternalIM
     ? {
@@ -52,15 +52,21 @@ export function buildDefaultDialogActorConfig(
   const toolPolicy: ToolPolicy | undefined = isExternalIM
     ? { deny: ["ask_user"] }
     : undefined;
-  const middlewareOverrides: MiddlewareOverrides = isExternalIM
-    ? { approvalLevel: "off", disable: ["Clarification"] }
+  const executionPolicy: ExecutionPolicy = isExternalIM
+    ? { accessMode: "read_only", approvalMode: "off" }
     : roleName === "Lead"
-      ? { approvalLevel: "permissive" }
+      ? { accessMode: "auto", approvalMode: "permissive" }
+      : { accessMode: "auto", approvalMode: "normal" };
+  const middlewareOverrides: MiddlewareOverrides = isExternalIM
+    ? { approvalLevel: executionPolicy.approvalMode, disable: ["Clarification"] }
+    : roleName === "Lead"
+      ? { approvalLevel: executionPolicy.approvalMode }
       : {};
 
   return {
     role,
     toolPolicy,
+    executionPolicy,
     middlewareOverrides,
   };
 }
@@ -92,6 +98,7 @@ export function spawnDefaultDialogActors(
     maxIterations: 40,
     contextTokens: 16_000,
     ...(coordinatorConfig.toolPolicy ? { toolPolicy: coordinatorConfig.toolPolicy } : {}),
+    executionPolicy: coordinatorConfig.executionPolicy,
     middlewareOverrides: coordinatorConfig.middlewareOverrides,
   });
 }

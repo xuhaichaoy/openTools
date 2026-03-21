@@ -9,6 +9,7 @@ import {
   unregisterRuntimeAbortHandler,
   useRuntimeStateStore,
 } from "@/core/agent/context-runtime/runtime-state";
+import { CollaborationSessionController } from "@/core/collaboration/session-controller";
 import { createLogger } from "@/core/logger";
 import {
   useIMConversationRuntimeStore,
@@ -18,6 +19,7 @@ import {
   type IMConversationTopicSnapshot,
 } from "@/store/im-conversation-runtime-store";
 import type { DialogMessage } from "@/core/agent/actor/types";
+import type { CollaborationSessionSnapshot } from "@/core/collaboration/types";
 import type { IMConversationProgressEvent } from "./channel-progress-emitter";
 import type { ChannelIncomingMessage, ChannelType } from "./types";
 import {
@@ -67,6 +69,7 @@ interface IMConversationRuntime {
   conversationType: ChannelIncomingMessage["conversationType"];
   topicId: string;
   system: ActorSystem;
+  controller: CollaborationSessionController;
   queue: PendingIMMessage[];
   status: IMConversationRuntimeStatus;
   lastInput?: PendingIMMessage;
@@ -464,8 +467,26 @@ export class IMConversationRuntimeManager {
       });
     }
 
-    if (restored?.dialogHistory?.length) {
-      system.restoreDialogHistory(restored.dialogHistory.map((message) => cloneDialogMessage(message)));
+    const restoredDialogHistory = restored?.collaborationSnapshot?.dialogMessages?.length
+      ? restored.collaborationSnapshot.dialogMessages
+      : restored?.dialogHistory;
+    if (restoredDialogHistory?.length) {
+      system.restoreDialogHistory(restoredDialogHistory.map((message) => cloneDialogMessage(message)));
+    }
+    const controller = new CollaborationSessionController(system, {
+      surface: "im_conversation",
+      actorRosterProvider: () => system.getAll().map((actor) => ({
+        actorId: actor.id,
+        roleName: actor.role.name,
+        capabilities: actor.capabilities?.tags,
+        executionPolicy: actor.executionPolicy,
+        workspace: actor.workspace,
+      })),
+    });
+    if (restored?.collaborationSnapshot) {
+      controller.restore(restored.collaborationSnapshot);
+    } else {
+      controller.snapshot();
     }
 
     const runtime: IMConversationRuntime = {
@@ -476,7 +497,11 @@ export class IMConversationRuntimeManager {
       conversationType: params.conversationType,
       topicId: params.topicId,
       system,
-      queue: [],
+      controller,
+      queue: restored?.queuedMessages
+        ?.map((message) => clonePendingIMMessage(message as PendingIMMessage))
+        .filter((message): message is PendingIMMessage => Boolean(message))
+        ?? [],
       status: restored ? "idle" : "idle",
       ...(restored?.lastInput ? { lastInput: clonePendingIMMessage(restored.lastInput as PendingIMMessage) } : {}),
       updatedAt: restored?.updatedAt ?? Date.now(),
@@ -513,6 +538,7 @@ export class IMConversationRuntimeManager {
         ...(config.model ? { modelOverride: config.model } : {}),
         maxIterations: typeof config.maxIterations === "number" ? config.maxIterations : 40,
         ...(config.toolPolicy ? { toolPolicy: config.toolPolicy } : baseConfig.toolPolicy ? { toolPolicy: baseConfig.toolPolicy } : {}),
+        executionPolicy: config.executionPolicy ?? baseConfig.executionPolicy,
         middlewareOverrides: config.middlewareOverrides ?? baseConfig.middlewareOverrides,
         ...(config.workspace ? { workspace: config.workspace } : {}),
         ...(typeof config.timeoutSeconds === "number" ? { timeoutSeconds: config.timeoutSeconds } : {}),
@@ -646,6 +672,10 @@ export class IMConversationRuntimeManager {
     };
   }
 
+  private getCollaborationSnapshot(runtime: IMConversationRuntime): CollaborationSessionSnapshot {
+    return runtime.controller.snapshot();
+  }
+
   private shouldDispatchImmediately(runtime: IMConversationRuntime): boolean {
     const activity = this.inspectRuntime(runtime);
     if (activity.pendingApprovals > 0 || activity.pendingReplies > 0) {
@@ -655,12 +685,32 @@ export class IMConversationRuntimeManager {
   }
 
   private dispatch(runtime: IMConversationRuntime, pending: PendingIMMessage): void {
-    runtime.inFlight = true;
     runtime.lastInput = pending;
-    runtime.status = "running";
     runtime.updatedAt = Date.now();
-    runtime.system.broadcastAndResolve("user", pending.text, {
-      _briefContent: pending.briefContent,
+    const snapshot = this.getCollaborationSnapshot(runtime);
+    if (snapshot.pendingInteractions.length > 1) {
+      runtime.queue = [pending, ...runtime.queue];
+      runtime.inFlight = false;
+      runtime.status = "waiting";
+      void this.options.onReply({
+        channelId: runtime.channelId,
+        conversationId: runtime.conversationId,
+        text: "当前有多条待处理交互，请先在桌面端确认或明确回复对象。",
+        messageId: pending.messageId,
+      }).catch((error) => {
+        log.warn("Failed to notify IM multi-interaction ambiguity", error);
+      });
+      this.syncRuntimeState(runtime, this.inspectRuntime(runtime, snapshot), snapshot);
+      return;
+    }
+
+    runtime.inFlight = true;
+    runtime.status = "running";
+    runtime.controller.dispatchUserInput({
+      content: pending.text,
+      briefContent: pending.briefContent,
+      displayText: pending.briefContent,
+      images: pending.images,
       externalChannelType: pending.channelType,
       externalChannelId: runtime.channelId,
       externalConversationId: runtime.conversationId,
@@ -668,8 +718,9 @@ export class IMConversationRuntimeManager {
       externalSessionId: runtime.system.sessionId,
       runtimeDisplayLabel: pending.displayLabel,
       runtimeDisplayDetail: pending.displayDetail,
-      images: pending.images,
-      attachments: pending.attachments,
+    }, {
+      allowQueue: false,
+      forceAsNewMessage: snapshot.pendingInteractions.length === 0,
     });
     this.emitProgress({
       channelId: runtime.channelId,
@@ -679,16 +730,16 @@ export class IMConversationRuntimeManager {
       messageId: pending.messageId,
       kind: "accepted",
     });
-    this.syncRuntimeState(runtime);
+    this.syncRuntimeState(runtime, undefined, this.getCollaborationSnapshot(runtime));
   }
 
-  private inspectRuntime(runtime: IMConversationRuntime): RuntimeActivitySnapshot {
-    const pendingInteractions = runtime.system.getPendingUserInteractions();
-    const pendingApprovals = pendingInteractions.filter((item) => item.type === "approval").length;
-    const pendingReplies = pendingInteractions.length - pendingApprovals;
-    const runningTasks = runtime.system
-      .getSpawnedTasksSnapshot()
-      .filter((task) => task.status === "running").length;
+  private inspectRuntime(
+    runtime: IMConversationRuntime,
+    snapshot = this.getCollaborationSnapshot(runtime),
+  ): RuntimeActivitySnapshot {
+    const pendingApprovals = snapshot.presentationState.pendingApprovalCount;
+    const pendingReplies = snapshot.presentationState.pendingInteractionCount - pendingApprovals;
+    const runningTasks = snapshot.childSessions.filter((task) => task.status === "running").length;
     const activeActors = runtime.system
       .getAll()
       .filter((actor) => actor.status === "running" || actor.status === "waiting").length;
@@ -702,7 +753,8 @@ export class IMConversationRuntimeManager {
   }
 
   private refreshRuntime(runtime: IMConversationRuntime): void {
-    const activity = this.inspectRuntime(runtime);
+    const snapshot = this.getCollaborationSnapshot(runtime);
+    const activity = this.inspectRuntime(runtime, snapshot);
     if (activity.pendingApprovals > 0 || activity.pendingReplies > 0) {
       runtime.status = "waiting";
       this.emitProgress({
@@ -715,7 +767,12 @@ export class IMConversationRuntimeManager {
       });
     } else if (runtime.queue.length > 0) {
       runtime.status = "queued";
-    } else if (runtime.inFlight || activity.runningTasks > 0 || activity.activeActors > 0) {
+    } else if (
+      runtime.inFlight
+      || activity.runningTasks > 0
+      || activity.activeActors > 0
+      || snapshot.presentationState.status === "processing"
+    ) {
       runtime.status = "running";
       this.emitProgress({
         channelId: runtime.channelId,
@@ -732,7 +789,7 @@ export class IMConversationRuntimeManager {
     }
 
     runtime.updatedAt = Date.now();
-    this.syncRuntimeState(runtime, activity);
+    this.syncRuntimeState(runtime, activity, snapshot);
 
     if (
       !runtime.pumping
@@ -748,7 +805,7 @@ export class IMConversationRuntimeManager {
         this.dispatch(runtime, next);
       }
       runtime.pumping = false;
-      this.syncRuntimeState(runtime);
+      this.syncRuntimeState(runtime, undefined, this.getCollaborationSnapshot(runtime));
       this.scheduleSettledRefresh(runtime);
     }
   }
@@ -771,11 +828,12 @@ export class IMConversationRuntimeManager {
   private syncRuntimeState(
     runtime: IMConversationRuntime,
     activity = this.inspectRuntime(runtime),
+    snapshot = this.getCollaborationSnapshot(runtime),
   ): void {
     const pendingApprovals = activity.pendingApprovals;
     const pendingReplies = activity.pendingReplies;
     const runningTasks = activity.runningTasks;
-    const queueLength = runtime.queue.length;
+    const queueLength = runtime.queue.length + snapshot.queuedFollowUps.length;
     const hasActivity =
       runtime.inFlight
       || pendingApprovals > 0
@@ -790,8 +848,8 @@ export class IMConversationRuntimeManager {
         conversationId: runtime.conversationId,
         topicId: runtime.topicId,
       });
-      unregisterRuntimeAbortHandler("dialog", runtime.system.sessionId);
-      useRuntimeStateStore.getState().removeSession("dialog", runtime.system.sessionId);
+      unregisterRuntimeAbortHandler("im_conversation", runtime.system.sessionId);
+      useRuntimeStateStore.getState().removeSession("im_conversation", runtime.system.sessionId);
       this.syncConversationSnapshots();
       return;
     }
@@ -803,7 +861,7 @@ export class IMConversationRuntimeManager {
           ? "user_reply"
           : queueLength > 0 && runningTasks === 0 && activity.activeActors === 0
             ? "follow_up_queue"
-            : "dialog_running";
+            : "running";
     const status =
       pendingApprovals > 0
         ? "awaiting_approval"
@@ -817,18 +875,19 @@ export class IMConversationRuntimeManager {
       96,
     ) || runtime.lastInput?.displayLabel || "IM 会话";
 
-    registerRuntimeAbortHandler("dialog", runtime.system.sessionId, () => {
+    registerRuntimeAbortHandler("im_conversation", runtime.system.sessionId, () => {
       runtime.queue = [];
       runtime.inFlight = false;
       runtime.system.abortAll();
       for (const actor of runtime.system.getAll()) {
         runtime.system.cancelPendingInteractionsForActor(actor.id);
       }
+      runtime.controller.clearQueuedFollowUps();
       this.refreshRuntime(runtime);
     });
 
     useRuntimeStateStore.getState().upsertSession({
-      mode: "dialog",
+      mode: "im_conversation",
       sessionId: runtime.system.sessionId,
       query,
       displayLabel: runtime.lastInput?.displayLabel ?? getChannelDisplayLabel(runtime.channelType),
@@ -849,10 +908,11 @@ export class IMConversationRuntimeManager {
       conversationId: runtime.conversationId,
       topicId: runtime.topicId,
     });
-    unregisterRuntimeAbortHandler("dialog", runtime.system.sessionId);
-    useRuntimeStateStore.getState().removeSession("dialog", runtime.system.sessionId);
+    unregisterRuntimeAbortHandler("im_conversation", runtime.system.sessionId);
+    useRuntimeStateStore.getState().removeSession("im_conversation", runtime.system.sessionId);
     runtime.queue = [];
     runtime.unsubscribe();
+    runtime.controller.dispose();
     runtime.system.killAll();
     this.runtimes.delete(runtime.key);
     this.syncConversationSnapshots();
@@ -1011,6 +1071,7 @@ export class IMConversationRuntimeManager {
     runtime.queue = [];
     runtime.inFlight = false;
     runtime.updatedAt = Date.now();
+    runtime.controller.clearQueuedFollowUps();
     runtime.system.abortAll();
     for (const actor of runtime.system.getAll()) {
       runtime.system.cancelPendingInteractionsForActor(actor.id);
@@ -1087,7 +1148,7 @@ export class IMConversationRuntimeManager {
     }
 
     return {
-      version: 1,
+      version: 2,
       savedAt: Date.now(),
       conversations: [...this.conversations.entries()].map(([key, state]) => ({
         key,
@@ -1102,6 +1163,7 @@ export class IMConversationRuntimeManager {
   }
 
   private buildPersistedRuntimeRecord(runtime: IMConversationRuntime): PersistedIMRuntimeRecord {
+    const collaborationSnapshot = runtime.controller.snapshot();
     return {
       key: runtime.key,
       channelId: runtime.channelId,
@@ -1112,8 +1174,12 @@ export class IMConversationRuntimeManager {
       sessionId: runtime.system.sessionId,
       updatedAt: runtime.updatedAt,
       ...(runtime.lastInput ? { lastInput: clonePendingIMMessage(runtime.lastInput) } : {}),
-      dialogHistory: runtime.system
-        .getDialogHistory()
+      ...(runtime.queue.length > 0
+        ? {
+            queuedMessages: runtime.queue.map((message) => clonePendingIMMessage(message)),
+          }
+        : {}),
+      dialogHistory: collaborationSnapshot.dialogMessages
         .slice(-MAX_PERSISTED_DIALOG_MESSAGES)
         .map((message) => cloneDialogMessage(message)),
       actorConfigs: runtime.system.getAll().map((actor) => ({
@@ -1124,6 +1190,7 @@ export class IMConversationRuntimeManager {
         ...(actor.getSystemPromptOverride() ? { systemPrompt: actor.getSystemPromptOverride() } : {}),
         ...(actor.capabilities ? { capabilities: actor.capabilities } : {}),
         ...(actor.toolPolicyConfig ? { toolPolicy: actor.toolPolicyConfig } : {}),
+        ...(actor.executionPolicy ? { executionPolicy: actor.executionPolicy } : {}),
         ...(actor.workspace ? { workspace: actor.workspace } : {}),
         ...(typeof actor.timeoutSeconds === "number" ? { timeoutSeconds: actor.timeoutSeconds } : {}),
         ...(typeof actor.contextTokens === "number" ? { contextTokens: actor.contextTokens } : {}),
@@ -1131,12 +1198,13 @@ export class IMConversationRuntimeManager {
         ...(actor.middlewareOverrides ? { middlewareOverrides: actor.middlewareOverrides } : {}),
         sessionHistory: actor.getSessionHistory(),
       })),
+      collaborationSnapshot,
     };
   }
 
   private buildSessionPreview(runtime: IMConversationRuntime): IMConversationSessionPreview {
-    const dialogHistory = runtime.system
-      .getDialogHistory()
+    const collaborationSnapshot = runtime.controller.snapshot();
+    const dialogHistory = collaborationSnapshot.dialogMessages
       .slice(-MAX_PREVIEW_MESSAGES)
       .map((message) => cloneDialogMessage(message));
     const actors = runtime.system.getAll().map((actor) => ({
@@ -1160,6 +1228,11 @@ export class IMConversationRuntimeManager {
       displayDetail,
       status: runtime.status,
       queueLength: runtime.queue.length,
+      executionStrategy: collaborationSnapshot.presentationState.executionStrategy,
+      pendingInteractionCount: collaborationSnapshot.presentationState.pendingInteractionCount,
+      childSessionsPreview: collaborationSnapshot.presentationState.childSessionsPreview.map((item) => ({ ...item })),
+      queuedFollowUpCount: collaborationSnapshot.presentationState.queuedFollowUpCount,
+      contractState: collaborationSnapshot.presentationState.contractState,
       startedAt: runtime.lastInput?.timestamp ?? runtime.updatedAt,
       updatedAt: runtime.updatedAt,
       lastInputText: runtime.lastInput?.text,
@@ -1193,6 +1266,7 @@ export class IMConversationRuntimeManager {
     }
 
     const conversationType = latestRuntime?.conversationType ?? state?.conversationType ?? "private";
+    const activeCollaborationSnapshot = activeRuntime ? activeRuntime.controller.snapshot() : null;
     const displayLabel = activeRuntime?.lastInput?.displayLabel
       ?? latestRuntime?.lastInput?.displayLabel
       ?? getChannelDisplayLabel(channelType);
@@ -1206,6 +1280,9 @@ export class IMConversationRuntimeManager {
         sessionId: runtime.system.sessionId,
         status: runtime.status,
         queueLength: runtime.queue.length,
+        pendingInteractionCount: runtime.controller.snapshot().presentationState.pendingInteractionCount,
+        queuedFollowUpCount: runtime.controller.snapshot().presentationState.queuedFollowUpCount,
+        contractState: runtime.controller.snapshot().presentationState.contractState,
         updatedAt: runtime.updatedAt,
         startedAt: runtime.lastInput?.timestamp ?? runtime.updatedAt,
         lastInputText: runtime.lastInput?.text,
@@ -1234,6 +1311,11 @@ export class IMConversationRuntimeManager {
       activeSessionId: activeRuntime?.system.sessionId,
       activeStatus: activeRuntime?.status ?? "idle",
       activeQueueLength: activeRuntime?.queue.length ?? 0,
+      executionStrategy: activeCollaborationSnapshot?.presentationState.executionStrategy ?? null,
+      pendingInteractionCount: activeCollaborationSnapshot?.presentationState.pendingInteractionCount ?? 0,
+      childSessionsPreview: activeCollaborationSnapshot?.presentationState.childSessionsPreview.map((item) => ({ ...item })) ?? [],
+      queuedFollowUpCount: activeCollaborationSnapshot?.presentationState.queuedFollowUpCount ?? 0,
+      contractState: activeCollaborationSnapshot?.presentationState.contractState ?? null,
       backgroundTopicCount: topics.filter((topic) => topic.topicId !== activeTopicId).length,
       topics,
     };
@@ -1321,16 +1403,16 @@ export class IMConversationRuntimeManager {
     runtime: IMConversationRuntime,
     activity: RuntimeActivitySnapshot,
   ): string {
-    if (activity.pendingApprovals > 0) return "等待审批";
+    if (activity.pendingApprovals > 0) return "等待确认";
     if (activity.pendingReplies > 0) return "等待回复";
-    if (runtime.queue.length > 0) return "排队中";
+    if (runtime.queue.length > 0) return "后台排队";
     switch (runtime.status) {
       case "running":
-        return "运行中";
+        return "处理中";
       case "waiting":
-        return "等待中";
+        return "等待回复";
       case "queued":
-        return "排队中";
+        return "后台排队";
       default:
         return "空闲";
     }

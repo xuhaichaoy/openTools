@@ -9,9 +9,11 @@ import type {
   ActorConfig,
   ActorStatus,
   DialogArtifactRecord,
+  DialogRoomCompactionState,
   DialogQueuedFollowUp,
   DialogExecutionPlan,
   DialogMessage,
+  ExecutionPolicy,
   MiddlewareOverrides,
   PendingInteraction,
   SessionUploadRecord,
@@ -51,12 +53,33 @@ import {
   cloneDialogContextSnapshot,
   type DialogContextSnapshot,
 } from "@/plugins/builtin/SmartAgent/core/dialog-context-snapshot";
+import { cloneDialogRoomCompaction } from "@/core/agent/actor/dialog-room-compaction";
+import { ensureDialogRoomCompaction } from "@/core/agent/actor/dialog-context-pressure";
 import { useAISessionRuntimeStore } from "@/store/ai-session-runtime-store";
 import {
   registerRuntimeAbortHandler,
   unregisterRuntimeAbortHandler,
   useRuntimeStateStore,
 } from "@/core/agent/context-runtime/runtime-state";
+import { CollaborationSessionController } from "@/core/collaboration/session-controller";
+import {
+  cloneCollaborationSnapshot,
+  createEmptyCollaborationSnapshot,
+} from "@/core/collaboration/persistence";
+import {
+  buildExecutionContractDraftFromLegacyPlan,
+  cloneExecutionContract,
+  sealExecutionContract,
+} from "@/core/collaboration/execution-contract";
+import type {
+  CollaborationDispatchInput,
+  CollaborationDispatchResult,
+  CollaborationRosterActor,
+  CollaborationPresentationState,
+  CollaborationSessionSnapshot,
+  ExecutionContract,
+  ExecutionContractDraft,
+} from "@/core/collaboration/types";
 
 const log = createLogger("ActorStore");
 
@@ -64,12 +87,15 @@ const log = createLogger("ActorStore");
 
 const LEGACY_STORAGE_KEY = "dialog_session";
 const ACTIVE_SESSION_POINTER_KEY = "dialog_session_pointer";
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 8;
 
 interface PersistedSpawnedTask {
   runId: string;
   spawnerActorId: string;
   targetActorId: string;
+  contractId?: string;
+  plannedDelegationId?: string;
+  dispatchSource?: SpawnedTaskRecord["dispatchSource"];
   parentRunId?: string;
   rootRunId?: string;
   roleBoundary?: SpawnedTaskRecord["roleBoundary"];
@@ -101,6 +127,7 @@ interface PersistedSession {
     systemPrompt?: string;
     capabilities?: AgentCapabilities;
     toolPolicy?: ToolPolicy;
+    executionPolicy?: ExecutionPolicy;
     workspace?: string;
     timeoutSeconds?: number;
     contextTokens?: number;
@@ -115,10 +142,13 @@ interface PersistedSession {
   queuedFollowUps?: DialogQueuedFollowUp[];
   focusedSpawnedSessionRunId?: string | null;
   coordinatorActorId?: string | null;
+  executionContract?: ExecutionContract | null;
   dialogExecutionPlan?: DialogExecutionPlan | null;
   approvalCache?: Record<string, "always-allow" | "ask-every-time" | "deny">;
   sourceHandoff?: AICenterHandoff | null;
   contextSnapshot?: DialogContextSnapshot | null;
+  dialogRoomCompaction?: DialogRoomCompactionState | null;
+  collaborationSnapshot?: CollaborationSessionSnapshot | null;
   sessionId?: string;
   savedAt: number;
 }
@@ -219,12 +249,16 @@ function buildSessionSnapshot(
   queuedFollowUps?: readonly DialogQueuedFollowUp[],
   focusedSpawnedSessionRunId?: string | null,
   coordinatorActorId?: string | null,
+  executionContract?: ExecutionContract | null,
   dialogExecutionPlan?: DialogExecutionPlan | null,
   approvalCache?: Record<string, "always-allow" | "ask-every-time" | "deny">,
   sourceHandoff?: AICenterHandoff | null,
   contextSnapshot?: DialogContextSnapshot | null,
+  dialogRoomCompaction?: DialogRoomCompactionState | null,
+  collaborationSnapshot?: CollaborationSessionSnapshot | null,
   sessionId?: string,
 ): PersistedSession {
+  const shouldPersistLegacyDialogPlan = !executionContract && !collaborationSnapshot?.activeContract;
   const persistedTasks: PersistedSpawnedTask[] = [];
   if (spawnedTasks) {
     for (const r of spawnedTasks.values()) {
@@ -232,6 +266,9 @@ function buildSessionSnapshot(
         runId: r.runId,
         spawnerActorId: r.spawnerActorId,
         targetActorId: r.targetActorId,
+        contractId: r.contractId,
+        plannedDelegationId: r.plannedDelegationId,
+        dispatchSource: r.dispatchSource,
         parentRunId: r.parentRunId,
         rootRunId: r.rootRunId,
         roleBoundary: r.roleBoundary,
@@ -265,6 +302,7 @@ function buildSessionSnapshot(
       systemPrompt: a.getSystemPromptOverride(),
       capabilities: a.capabilities,
       toolPolicy: a.toolPolicyConfig,
+      executionPolicy: a.executionPolicy,
       workspace: a.workspace,
       timeoutSeconds: a.timeoutSeconds,
       contextTokens: a.contextTokens,
@@ -295,12 +333,99 @@ function buildSessionSnapshot(
       : undefined,
     focusedSpawnedSessionRunId,
     coordinatorActorId,
-    dialogExecutionPlan,
+    executionContract: executionContract ? cloneExecutionContract(executionContract) : null,
+    dialogExecutionPlan: shouldPersistLegacyDialogPlan ? dialogExecutionPlan : null,
     approvalCache,
     sourceHandoff: cloneAICenterHandoff(sourceHandoff),
     contextSnapshot: cloneDialogContextSnapshot(contextSnapshot),
+    dialogRoomCompaction: cloneDialogRoomCompaction(dialogRoomCompaction),
+    collaborationSnapshot: collaborationSnapshot ? cloneCollaborationSnapshot(collaborationSnapshot) : null,
     sessionId,
     savedAt: Date.now(),
+  };
+}
+
+function buildCollaborationActorRoster(actors: readonly ActorSnapshot[]): CollaborationRosterActor[] {
+  return actors.map((actor) => ({
+    id: actor.id,
+    roleName: actor.roleName,
+    capabilities: actor.capabilities,
+    executionPolicy: actor.executionPolicy,
+    workspace: actor.workspace,
+    toolPolicy: actor.toolPolicy,
+    executionPolicy: actor.executionPolicy,
+    thinkingLevel: actor.thinkingLevel,
+    middlewareOverrides: actor.middlewareOverrides,
+  }));
+}
+
+function mapCollaborationQueuedFollowUps(
+  snapshot: CollaborationSessionSnapshot | null,
+): DialogQueuedFollowUp[] {
+  if (!snapshot) return [];
+  return snapshot.queuedFollowUps.map((item) => ({
+    id: item.id,
+    displayText: item.displayText,
+    content: item.content,
+    briefContent: item.briefContent,
+    images: item.images ? [...item.images] : undefined,
+    attachmentPaths: item.attachmentPaths ? [...item.attachmentPaths] : undefined,
+    uploadRecords: item.uploadRecords ? item.uploadRecords.map((record) => ({ ...record })) : undefined,
+    routingMode: item.contract?.executionStrategy ?? "coordinator",
+    createdAt: item.createdAt,
+    contractState:
+      item.contractStatus === "needs_reapproval"
+        ? "needs_reapproval"
+        : item.contractStatus === "ready"
+          ? "sealed"
+          : "none",
+    contractStatus:
+      item.contractStatus === "needs_reapproval"
+        ? "needs_reapproval"
+        : item.contractStatus === "ready"
+          ? "ready"
+          : "missing",
+  }));
+}
+
+function buildLegacyCollaborationSnapshot(
+  system: ActorSystem,
+  persisted: PersistedSession,
+): CollaborationSessionSnapshot {
+  const base = createEmptyCollaborationSnapshot("local_dialog");
+  const draft = !persisted.executionContract && persisted.dialogExecutionPlan
+    ? buildExecutionContractDraftFromLegacyPlan(persisted.dialogExecutionPlan, "local_dialog")
+    : null;
+
+  return {
+    ...base,
+    activeContract: persisted.executionContract
+      ? cloneExecutionContract(persisted.executionContract)
+      : draft
+        ? sealExecutionContract(
+            draft,
+            buildCollaborationActorRoster(system.getAll().map(snapshotActor)),
+            { content: persisted.dialogExecutionPlan?.summary ?? "" },
+            persisted.dialogExecutionPlan?.approvedAt ?? persisted.savedAt,
+          )
+        : null,
+    queuedFollowUps: (persisted.queuedFollowUps ?? []).map((item) => ({
+      id: item.id,
+      displayText: item.displayText,
+      content: item.content,
+      briefContent: item.briefContent,
+      images: item.images ? [...item.images] : undefined,
+      attachmentPaths: item.attachmentPaths ? [...item.attachmentPaths] : undefined,
+      uploadRecords: item.uploadRecords ? item.uploadRecords.map((record) => ({ ...record })) : undefined,
+      createdAt: item.createdAt,
+      executionStrategy: item.routingMode,
+      policy: "queue",
+      contract: null,
+      contractStatus: "missing",
+    })),
+    focusedChildSessionId: persisted.focusedSpawnedSessionRunId ?? null,
+    dialogMessages: persisted.dialogHistory.map((message) => ({ ...message })),
+    updatedAt: persisted.savedAt ?? 0,
   };
 }
 
@@ -326,6 +451,7 @@ function buildPersistableDialogContextSnapshot(params: {
   focusedSpawnedSessionRunId?: string | null;
   coordinatorActorId?: string | null;
   sourceHandoff?: AICenterHandoff | null;
+  dialogRoomCompaction?: DialogRoomCompactionState | null;
 }): DialogContextSnapshot | null {
   const actorById = new Map(params.actors.map((actor) => [actor.id, actor] as const));
   const workspaceRoot = (
@@ -363,6 +489,7 @@ function buildPersistableDialogContextSnapshot(params: {
     workspaceRoot,
     sourceHandoff: params.sourceHandoff,
     dialogContextSummary,
+    dialogRoomCompaction: params.dialogRoomCompaction,
     dialogHistoryCount: params.dialogHistory.length,
     sessionUploads: params.sessionUploads,
     artifacts: params.artifacts,
@@ -383,6 +510,127 @@ function buildPersistableDialogContextSnapshot(params: {
     transcriptPreview,
   });
   return snapshot.contextLines.length > 0 ? snapshot : null;
+}
+
+const DIALOG_ROOM_COMPACTION_DEBOUNCE_MS = 1200;
+let _dialogRoomCompactionTimer: ReturnType<typeof setTimeout> | null = null;
+let _dialogRoomCompactionScheduledKey: string | null = null;
+
+function buildDialogRoomCompactionScheduleKey(params: {
+  sessionId: string;
+  dialogHistoryCount: number;
+  artifactsCount: number;
+  spawnedTaskCount: number;
+  sourceHandoff?: AICenterHandoff | null;
+}): string {
+  return [
+    params.sessionId,
+    params.dialogHistoryCount,
+    params.artifactsCount,
+    params.spawnedTaskCount,
+    params.sourceHandoff?.goal ?? "",
+    params.sourceHandoff?.summary ?? "",
+  ].join("::");
+}
+
+function scheduleDialogRoomCompaction(params: {
+  system: ActorSystem;
+  dialogHistory: readonly DialogMessage[];
+  artifacts: readonly DialogArtifactRecord[];
+  spawnedTasks: readonly SpawnedTaskRecord[];
+  sourceHandoff?: AICenterHandoff | null;
+}): void {
+  const scheduleKey = buildDialogRoomCompactionScheduleKey({
+    sessionId: params.system.sessionId,
+    dialogHistoryCount: params.dialogHistory.length,
+    artifactsCount: params.artifacts.length,
+    spawnedTaskCount: params.spawnedTasks.length,
+    sourceHandoff: params.sourceHandoff,
+  });
+  if (_dialogRoomCompactionScheduledKey === scheduleKey) {
+    return;
+  }
+  _dialogRoomCompactionScheduledKey = scheduleKey;
+  if (_dialogRoomCompactionTimer) clearTimeout(_dialogRoomCompactionTimer);
+  _dialogRoomCompactionTimer = setTimeout(() => {
+    _dialogRoomCompactionTimer = null;
+    void runDialogRoomCompaction(params).catch((error) => {
+      log.warn("runDialogRoomCompaction failed", error);
+    });
+  }, DIALOG_ROOM_COMPACTION_DEBOUNCE_MS);
+}
+
+async function runDialogRoomCompaction(params: {
+  system: ActorSystem;
+}): Promise<void> {
+  const currentStore = useActorSystemStore.getState();
+  if (currentStore._system !== params.system || currentStore._system?.sessionId !== params.system.sessionId) {
+    return;
+  }
+
+  const ensured = await ensureDialogRoomCompaction(params.system);
+  if (!ensured?.changed) {
+    return;
+  }
+  const persisted = ensured.state;
+
+  const latestStore = useActorSystemStore.getState();
+  if (latestStore._system !== params.system || latestStore._system?.sessionId !== params.system.sessionId) {
+    return;
+  }
+
+  const dialogHistory = [...params.system.getDialogHistory()];
+  const spawnedTasks = params.system.getSpawnedTasksSnapshot().map((task) => ({ ...task }));
+  const artifacts = params.system.getArtifactRecordsSnapshot().map((artifact) => ({ ...artifact }));
+  const sessionUploads = params.system.getSessionUploadsSnapshot().map((upload) => ({ ...upload }));
+  const collaborationSnapshot = latestStore.controller?.syncFromSystem() ?? latestStore.collaborationSnapshot;
+  const pendingUserInteractions = buildRecoveredPendingUserInteractions(
+    dialogHistory,
+    params.system.getPendingUserInteractions(),
+  );
+  const queuedFollowUps = collaborationSnapshot
+    ? mapCollaborationQueuedFollowUps(collaborationSnapshot)
+    : latestStore.queuedFollowUps;
+  const focusedSpawnedSessionRunId = collaborationSnapshot?.focusedChildSessionId
+    ?? params.system.getFocusedSpawnedSessionRunId();
+  const contextSnapshot = buildPersistableDialogContextSnapshot({
+    sessionId: params.system.sessionId,
+    actors: params.system.getAll().map(snapshotActor),
+    dialogHistory,
+    artifacts,
+    sessionUploads,
+    spawnedTasks,
+    pendingUserInteractions,
+    queuedFollowUps,
+    focusedSpawnedSessionRunId,
+    coordinatorActorId: params.system.getCoordinatorId(),
+    sourceHandoff: latestStore.sourceHandoff,
+    dialogRoomCompaction: persisted,
+  });
+
+  useActorSystemStore.setState({
+    dialogRoomCompaction: cloneDialogRoomCompaction(persisted),
+    contextSnapshot,
+  });
+
+  syncDialogRuntimeSession(params.system.sessionId, {
+    dialogHistory,
+    spawnedTasks,
+    pendingUserInteractions,
+    sourceHandoff: latestStore.sourceHandoff,
+  });
+  syncDialogRuntimeState({
+    sessionId: params.system.sessionId,
+    system: params.system,
+    actors: params.system.getAll().map(snapshotActor),
+    coordinatorActorId: params.system.getCoordinatorId(),
+    dialogHistory,
+    spawnedTasks,
+    pendingUserInteractions,
+    queuedFollowUps,
+    sourceHandoff: latestStore.sourceHandoff,
+  });
+  debouncedSave(params.system);
 }
 
 /** Max session age: discard sessions older than 7 days */
@@ -603,6 +851,13 @@ function resolveDialogRuntimeWorkspaceRoot(
   )?.workspace;
   const workspaceRoot = coordinatorWorkspace || fallbackWorkspace;
   return workspaceRoot?.trim() ? workspaceRoot : undefined;
+}
+
+function resolveLiveDialogRoomCompaction(
+  system?: ActorSystem | null,
+  fallback?: DialogRoomCompactionState | null,
+): DialogRoomCompactionState | null {
+  return system?.getDialogRoomCompaction() ?? fallback ?? null;
 }
 
 function syncDialogRuntimeState(params: {
@@ -839,7 +1094,7 @@ function loadLegacySession(): PersistedSession | null {
     const data = JSON.parse(raw) as PersistedSession;
 
     // Schema version check: discard incompatible data
-    if (data.version !== undefined && data.version !== SCHEMA_VERSION) {
+    if (data.version !== undefined && data.version !== SCHEMA_VERSION && data.version !== SCHEMA_VERSION - 1) {
       log.info(`Discarding session with outdated schema v${data.version} (current: v${SCHEMA_VERSION})`);
       localStorage.removeItem(LEGACY_STORAGE_KEY);
       return null;
@@ -900,19 +1155,33 @@ function loadActiveSessionPointer(): string | null {
 }
 
 async function saveSessionSnapshot(system: ActorSystem): Promise<void> {
+  const controller = useActorSystemStore.getState().controller;
+  const collaborationSnapshot = controller?.syncFromSystem() ?? useActorSystemStore.getState().collaborationSnapshot;
+  const activeContractForPersistence = collaborationSnapshot?.activeContract ?? system.getActiveExecutionContract();
+  const legacyDialogPlanForPersistence = activeContractForPersistence
+    ? null
+    : system.getDialogExecutionPlan();
+  const queuedFollowUps = collaborationSnapshot
+    ? mapCollaborationQueuedFollowUps(collaborationSnapshot)
+    : useActorSystemStore.getState().queuedFollowUps;
+  const focusedSpawnedSessionRunId = collaborationSnapshot?.focusedChildSessionId
+    ?? system.getFocusedSpawnedSessionRunId();
   const snapshot = buildSessionSnapshot(
     [...system.getDialogHistory()],
     system.getAll(),
     system.getSpawnedTasksMap(),
     system.getArtifactRecordsSnapshot(),
     system.getSessionUploadsSnapshot(),
-    useActorSystemStore.getState().queuedFollowUps,
-    system.getFocusedSpawnedSessionRunId(),
+    queuedFollowUps,
+    focusedSpawnedSessionRunId,
     system.getCoordinatorId(),
-    system.getDialogExecutionPlan(),
+    activeContractForPersistence,
+    legacyDialogPlanForPersistence,
     getSessionApprovalsSnapshot(),
     useActorSystemStore.getState().sourceHandoff,
     useActorSystemStore.getState().contextSnapshot,
+    resolveLiveDialogRoomCompaction(system, useActorSystemStore.getState().dialogRoomCompaction),
+    collaborationSnapshot,
     system.sessionId,
   );
 
@@ -930,6 +1199,7 @@ async function saveSessionSnapshot(system: ActorSystem): Promise<void> {
       systemPrompt: actor.systemPrompt,
       capabilities: actor.capabilities,
       toolPolicy: actor.toolPolicy,
+      executionPolicy: actor.executionPolicy,
       workspace: actor.workspace,
       thinkingLevel: actor.thinkingLevel,
       middlewareOverrides: actor.middlewareOverrides,
@@ -960,6 +1230,7 @@ function restoreSnapshot(system: ActorSystem, persisted: PersistedSession): void
       systemPromptOverride: config.systemPrompt,
       capabilities: config.capabilities,
       toolPolicy: config.toolPolicy,
+      executionPolicy: config.executionPolicy,
       workspace: config.workspace,
       timeoutSeconds: config.timeoutSeconds,
       contextTokens: config.contextTokens,
@@ -978,7 +1249,9 @@ function restoreSnapshot(system: ActorSystem, persisted: PersistedSession): void
   if (persisted.coordinatorActorId && system.get(persisted.coordinatorActorId)) {
     system.setCoordinator(persisted.coordinatorActorId);
   }
-  if (persisted.dialogExecutionPlan) {
+  if (!persisted.collaborationSnapshot && persisted.executionContract) {
+    system.restoreExecutionContract(persisted.executionContract);
+  } else if (!persisted.collaborationSnapshot && persisted.dialogExecutionPlan) {
     system.restoreDialogExecutionPlan(persisted.dialogExecutionPlan);
   }
   restoreSessionApprovals(persisted.approvalCache);
@@ -988,6 +1261,9 @@ function restoreSnapshot(system: ActorSystem, persisted: PersistedSession): void
   if (persisted.sessionUploads?.length) {
     system.restoreSessionUploads(persisted.sessionUploads);
   }
+  if (persisted.dialogRoomCompaction) {
+    system.setDialogRoomCompaction(persisted.dialogRoomCompaction);
+  }
   // 恢复子任务记录（UI 展示用，不会恢复运行态）
   if (persisted.spawnedTasks?.length) {
     system.restoreSpawnedTasks(
@@ -995,6 +1271,9 @@ function restoreSnapshot(system: ActorSystem, persisted: PersistedSession): void
         runId: t.runId,
         spawnerActorId: t.spawnerActorId,
         targetActorId: t.targetActorId,
+        contractId: t.contractId,
+        plannedDelegationId: t.plannedDelegationId,
+        dispatchSource: t.dispatchSource ?? "manual",
         parentRunId: t.parentRunId,
         rootRunId: t.rootRunId,
         roleBoundary: t.roleBoundary,
@@ -1016,7 +1295,7 @@ function restoreSnapshot(system: ActorSystem, persisted: PersistedSession): void
       })),
     );
   }
-  if (persisted.focusedSpawnedSessionRunId) {
+  if (!persisted.collaborationSnapshot && persisted.focusedSpawnedSessionRunId) {
     try {
       system.focusSpawnedSession(persisted.focusedSpawnedSessionRunId);
     } catch {
@@ -1048,6 +1327,7 @@ export interface ActorSnapshot {
   modelOverride?: string;
   systemPromptOverride?: string;
   toolPolicy?: ToolPolicy;
+  executionPolicy?: ExecutionPolicy;
   workspace?: string;
   timeoutSeconds?: number;
   contextTokens?: number;
@@ -1099,6 +1379,14 @@ interface ActorSystemState {
   sourceHandoff: AICenterHandoff | null;
   /** 当前结构化上下文快照 */
   contextSnapshot: DialogContextSnapshot | null;
+  /** 当前房间级上下文压缩状态 */
+  dialogRoomCompaction: DialogRoomCompactionState | null;
+  /** 协作控制器 */
+  controller: CollaborationSessionController | null;
+  /** 协作快照 */
+  collaborationSnapshot: CollaborationSessionSnapshot | null;
+  /** 协作展示态 */
+  presentationState: CollaborationPresentationState | null;
   /** 当前 ActorSystem 实例引用（不序列化） */
   _system: ActorSystem | null;
 
@@ -1134,10 +1422,26 @@ interface ActorSystemState {
   steer: (actorId: string, directive: string) => void;
   focusSpawnedSession: (runId: string | null) => void;
   closeSpawnedSession: (runId: string) => void;
+  abortSpawnedSession: (runId: string) => void;
   resetSession: (summary?: string) => void;
   enqueueFollowUp: (payload: Omit<DialogQueuedFollowUp, "id" | "createdAt">) => string;
   removeFollowUp: (id: string) => void;
   clearFollowUps: () => void;
+  dispatchDialogInput: (
+    input: CollaborationDispatchInput,
+    options?: Parameters<CollaborationSessionController["dispatchUserInput"]>[1],
+  ) => CollaborationDispatchResult | null;
+  replyToPendingInteraction: (
+    interactionId: string,
+    input: CollaborationDispatchInput,
+  ) => CollaborationDispatchResult | null;
+  applyDraftExecutionContract: (
+    draft: ExecutionContractDraft | null,
+    input?: Pick<CollaborationDispatchInput, "content" | "briefContent" | "images" | "attachmentPaths">,
+  ) => ExecutionContract | null;
+  setFocusedChildSession: (childSessionId: string | null) => void;
+  runQueuedFollowUp: (id: string) => CollaborationDispatchResult | null;
+  clearQueuedFollowUps: () => void;
   setSourceHandoff: (handoff: AICenterHandoff | null) => void;
   /** 等待用户回复的交互列表 */
   pendingUserInteractions: PendingInteraction[];
@@ -1154,6 +1458,7 @@ interface ActorSystemState {
     workspace?: string;
     thinkingLevel?: ThinkingLevel;
     toolPolicy?: ToolPolicy;
+    executionPolicy?: ExecutionPolicy;
     middlewareOverrides?: MiddlewareOverrides;
     capabilities?: AgentCapabilities;
   }) => void;
@@ -1169,6 +1474,7 @@ function snapshotActor(actor: AgentActor): ActorSnapshot {
     modelOverride: actor.modelOverride,
     systemPromptOverride: actor.getSystemPromptOverride(),
     toolPolicy: actor.toolPolicyConfig,
+    executionPolicy: actor.executionPolicy,
     workspace: actor.workspace,
     timeoutSeconds: actor.timeoutSeconds,
     contextTokens: actor.contextTokens,
@@ -1220,6 +1526,10 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
   queuedFollowUps: [],
   sourceHandoff: null,
   contextSnapshot: null,
+  dialogRoomCompaction: null,
+  controller: null,
+  collaborationSnapshot: null,
+  presentationState: null,
   pendingUserInteractions: [],
   _system: null,
 
@@ -1283,7 +1593,12 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
     // 连接任务队列执行器，使通用任务可委派给 Agent
     getTaskQueue().setExecutor(createActorSystemExecutor(system));
 
-    set({ _system: system, active: true });
+    const controller = new CollaborationSessionController(system, {
+      surface: "local_dialog",
+      actorRosterProvider: () => buildCollaborationActorRoster(system.getAll().map(snapshotActor)),
+    });
+
+    set({ _system: system, controller, active: true });
     void (async () => {
       const persisted = await loadPersistedSessionSnapshot();
       if (persisted?.sessionId) {
@@ -1291,17 +1606,19 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
       }
       if (persisted) {
         restoreSnapshot(system, persisted);
+        if (persisted.collaborationSnapshot) {
+          controller.restore(persisted.collaborationSnapshot);
+        } else {
+          controller.restore(buildLegacyCollaborationSnapshot(system, persisted));
+        }
+        const collaborationSnapshot = controller.syncFromSystem();
         set({
-          queuedFollowUps: persisted.queuedFollowUps?.map((item) => ({
-            ...item,
-            ...(item.images ? { images: [...item.images] } : {}),
-            ...(item.attachmentPaths ? { attachmentPaths: [...item.attachmentPaths] } : {}),
-            ...(item.uploadRecords
-              ? { uploadRecords: item.uploadRecords.map((record) => ({ ...record })) }
-              : {}),
-          })) ?? [],
+          queuedFollowUps: mapCollaborationQueuedFollowUps(collaborationSnapshot),
           sourceHandoff: cloneAICenterHandoff(persisted.sourceHandoff),
           contextSnapshot: cloneDialogContextSnapshot(persisted.contextSnapshot),
+          dialogRoomCompaction: cloneDialogRoomCompaction(persisted.dialogRoomCompaction),
+          collaborationSnapshot,
+          presentationState: { ...collaborationSnapshot.presentationState },
         });
       } else if (system.getAll().length === 0) {
         spawnDefaultDialogActors(system);
@@ -1317,7 +1634,15 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
       if (system.getAll().length === 0) {
         spawnDefaultDialogActors(system);
       }
-      set({ queuedFollowUps: [], sourceHandoff: null, contextSnapshot: null });
+      const collaborationSnapshot = controller.syncFromSystem();
+      set({
+        queuedFollowUps: [],
+        sourceHandoff: null,
+        contextSnapshot: null,
+        dialogRoomCompaction: null,
+        collaborationSnapshot,
+        presentationState: { ...collaborationSnapshot.presentationState },
+      });
       await bootstrapSavedIMChannels();
       saveActiveSessionPointer(system.sessionId);
       syncDialogRuntimeSession(system.sessionId);
@@ -1377,6 +1702,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
     clearSessionApprovals();
     clearPersistedSession();
     clearActiveSessionPointer();
+    get().controller?.dispose();
     set({
       _system: null,
       active: false,
@@ -1392,6 +1718,10 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
       queuedFollowUps: [],
       sourceHandoff: null,
       contextSnapshot: null,
+      dialogRoomCompaction: null,
+      controller: null,
+      collaborationSnapshot: null,
+      presentationState: null,
       pendingUserInteractions: [],
     });
   },
@@ -1454,9 +1784,21 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
   },
 
   focusSpawnedSession: (runId) => {
-    const system = get()._system;
-    if (!system) return;
-    system.focusSpawnedSession(runId);
+    const controller = get().controller;
+    if (controller) {
+      controller.setFocusedChildSession(runId);
+    } else {
+      const system = get()._system;
+      if (!system) return;
+      system.focusSpawnedSession(runId);
+    }
+    get().sync();
+  },
+
+  setFocusedChildSession: (childSessionId) => {
+    const controller = get().controller;
+    if (!controller) return;
+    controller.setFocusedChildSession(childSessionId);
     get().sync();
   },
 
@@ -1467,10 +1809,20 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
     get().sync();
   },
 
+  abortSpawnedSession: (runId) => {
+    const system = get()._system;
+    if (!system) return;
+    system.abortSpawnedTask(runId, {
+      error: "子会话已由用户终止",
+    });
+    get().sync();
+  },
+
   resetSession: (summary) => {
     const system = get()._system;
     if (!system) return;
     system.resetSession(summary);
+    get().controller?.restore(null);
     saveActiveSessionPointer(system.sessionId);
     syncDialogRuntimeSession(system.sessionId);
     unregisterRuntimeAbortHandler("dialog", system.sessionId);
@@ -1486,45 +1838,98 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
       queuedFollowUps: [],
       sourceHandoff: null,
       contextSnapshot: null,
+      dialogRoomCompaction: null,
+      collaborationSnapshot: null,
+      presentationState: null,
     });
     get().sync();
   },
 
   enqueueFollowUp: (payload) => {
-    const id = `dialog-follow-up-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    set((state) => ({
-      queuedFollowUps: [
-        ...state.queuedFollowUps,
-        {
-          ...payload,
-          id,
-          createdAt: Date.now(),
-        },
-      ],
-    }));
-    const system = get()._system;
-    if (system) {
+    const controller = get().controller;
+    const id = controller?.enqueueFollowUp({
+      content: payload.content,
+      displayText: payload.displayText,
+      briefContent: payload.briefContent,
+      images: payload.images,
+      attachmentPaths: payload.attachmentPaths,
+      uploadRecords: payload.uploadRecords,
+      executionStrategy: payload.routingMode,
+    }, "queue");
+    if (controller || get()._system) {
       get().sync();
     }
-    return id;
+    return id ?? `dialog-follow-up-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   },
 
   removeFollowUp: (id) => {
-    set((state) => ({
-      queuedFollowUps: state.queuedFollowUps.filter((item) => item.id !== id),
-    }));
-    const system = get()._system;
-    if (system) {
+    const controller = get().controller;
+    if (controller) {
+      controller.removeQueuedFollowUp(id);
+    }
+    if (controller || get()._system) {
       get().sync();
     }
   },
 
   clearFollowUps: () => {
-    set({ queuedFollowUps: [] });
-    const system = get()._system;
-    if (system) {
+    get().controller?.clearQueuedFollowUps();
+    if (get().controller || get()._system) {
       get().sync();
     }
+  },
+
+  dispatchDialogInput: (input, options) => {
+    const controller = get().controller;
+    if (!controller) return null;
+    const result = controller.dispatchUserInput(input, options);
+    get().sync();
+    return result;
+  },
+
+  replyToPendingInteraction: (interactionId, input) => {
+    const controller = get().controller;
+    if (!controller) return null;
+    const result = controller.replyToInteraction(interactionId, input);
+    get().sync();
+    return result;
+  },
+
+  applyDraftExecutionContract: (draft, input) => {
+    const controller = get().controller;
+    if (!controller) return null;
+    if (!draft) {
+      controller.applyExecutionContract(null);
+      get().sync();
+      return null;
+    }
+    const liveActors = get()._system?.getAll().map(snapshotActor) ?? get().actors;
+    const contract = sealExecutionContract(
+      draft,
+      buildCollaborationActorRoster(liveActors),
+      {
+        content: input?.content ?? draft.summary ?? "",
+        briefContent: input?.briefContent,
+        images: input?.images,
+        attachmentPaths: input?.attachmentPaths,
+      },
+    );
+    controller.applyExecutionContract(contract);
+    get().sync();
+    return contract;
+  },
+
+  runQueuedFollowUp: (id) => {
+    const controller = get().controller;
+    if (!controller) return null;
+    const result = controller.runQueuedFollowUp(id);
+    get().sync();
+    return result;
+  },
+
+  clearQueuedFollowUps: () => {
+    get().controller?.clearQueuedFollowUps();
+    get().sync();
   },
 
   setSourceHandoff: (handoff) => {
@@ -1534,10 +1939,17 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
     if (system) {
       const dialogHistory = system.getDialogHistory();
       const spawnedTasks = system.getSpawnedTasksSnapshot();
+      const collaborationSnapshot = get().controller?.syncFromSystem() ?? get().collaborationSnapshot;
       const pendingUserInteractions = buildRecoveredPendingUserInteractions(
         dialogHistory,
         system.getPendingUserInteractions(),
       );
+      const queuedFollowUps = collaborationSnapshot
+        ? mapCollaborationQueuedFollowUps(collaborationSnapshot)
+        : get().queuedFollowUps;
+      const focusedSpawnedSessionRunId = collaborationSnapshot?.focusedChildSessionId
+        ?? system.getFocusedSpawnedSessionRunId();
+      const dialogRoomCompaction = resolveLiveDialogRoomCompaction(system, get().dialogRoomCompaction);
       const contextSnapshot = buildPersistableDialogContextSnapshot({
         sessionId: system.sessionId,
         actors: system.getAll().map(snapshotActor),
@@ -1546,12 +1958,13 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
         sessionUploads: system.getSessionUploadsSnapshot(),
         spawnedTasks,
         pendingUserInteractions,
-        queuedFollowUps: get().queuedFollowUps,
-        focusedSpawnedSessionRunId: system.getFocusedSpawnedSessionRunId(),
+        queuedFollowUps,
+        focusedSpawnedSessionRunId,
         coordinatorActorId: system.getCoordinatorId(),
         sourceHandoff: nextHandoff,
+        dialogRoomCompaction,
       });
-      set({ contextSnapshot });
+      set({ contextSnapshot, dialogRoomCompaction: cloneDialogRoomCompaction(dialogRoomCompaction) });
       syncDialogRuntimeSession(system.sessionId, {
         dialogHistory,
         spawnedTasks,
@@ -1566,7 +1979,14 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
         dialogHistory,
         spawnedTasks,
         pendingUserInteractions,
-        queuedFollowUps: get().queuedFollowUps,
+        queuedFollowUps,
+        sourceHandoff: nextHandoff,
+      });
+      scheduleDialogRoomCompaction({
+        system,
+        dialogHistory,
+        artifacts: system.getArtifactRecordsSnapshot(),
+        spawnedTasks,
         sourceHandoff: nextHandoff,
       });
       debouncedSave(system);
@@ -1594,6 +2014,9 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
         queuedFollowUps: [],
         sourceHandoff: null,
         contextSnapshot: null,
+        dialogRoomCompaction: null,
+        collaborationSnapshot: null,
+        presentationState: null,
         pendingUserInteractions: [],
       });
       return;
@@ -1604,7 +2027,6 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
     const spawnedTasks = system.getSpawnedTasksSnapshot().map((task) => ({ ...task }));
     const artifacts = system.getArtifactRecordsSnapshot().map((artifact) => ({ ...artifact }));
     const sessionUploads = system.getSessionUploadsSnapshot().map((upload) => ({ ...upload }));
-    const focusedSpawnedSessionRunId = system.getFocusedSpawnedSessionRunId();
     const coordinatorActorId = system.getCoordinatorId();
     const actorTodos = Object.fromEntries(
       liveActors.map((actor) => [
@@ -1612,12 +2034,18 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
         getActorTodoList(actor.id).map((todo) => ({ ...todo })),
       ] satisfies [string, TodoItem[]]),
     );
-    const livePendingUserInteractions = system.getPendingUserInteractions();
+    const collaborationSnapshot = get().controller?.syncFromSystem() ?? null;
     const pendingUserInteractions = buildRecoveredPendingUserInteractions(
       dialogHistory,
-      livePendingUserInteractions,
+      system.getPendingUserInteractions(),
     );
+    const queuedFollowUps = collaborationSnapshot
+      ? mapCollaborationQueuedFollowUps(collaborationSnapshot)
+      : get().queuedFollowUps;
+    const focusedSpawnedSessionRunId = collaborationSnapshot?.focusedChildSessionId
+      ?? system.getFocusedSpawnedSessionRunId();
     const sourceHandoff = get().sourceHandoff;
+    const dialogRoomCompaction = resolveLiveDialogRoomCompaction(system, get().dialogRoomCompaction);
     const contextSnapshot = buildPersistableDialogContextSnapshot({
       sessionId: system.sessionId,
       actors,
@@ -1626,10 +2054,11 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
       sessionUploads,
       spawnedTasks,
       pendingUserInteractions,
-      queuedFollowUps: get().queuedFollowUps,
+      queuedFollowUps,
       focusedSpawnedSessionRunId,
       coordinatorActorId,
       sourceHandoff,
+      dialogRoomCompaction,
     });
     set({
       actors,
@@ -1640,7 +2069,11 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
       focusedSpawnedSessionRunId,
       coordinatorActorId,
       actorTodos,
+      queuedFollowUps,
       contextSnapshot,
+      dialogRoomCompaction: cloneDialogRoomCompaction(dialogRoomCompaction),
+      collaborationSnapshot: collaborationSnapshot ? cloneCollaborationSnapshot(collaborationSnapshot) : null,
+      presentationState: collaborationSnapshot ? { ...collaborationSnapshot.presentationState } : null,
       pendingUserInteractions,
     });
     syncDialogRuntimeSession(system.sessionId, {
@@ -1657,7 +2090,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
       dialogHistory,
       spawnedTasks,
       pendingUserInteractions,
-      queuedFollowUps: get().queuedFollowUps,
+      queuedFollowUps,
       sourceHandoff,
     });
     syncDialogSpawnedRuntimeSessions(system.sessionId, spawnedTasks, actors, {
@@ -1667,6 +2100,14 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
       actorTodosById: actorTodos,
       dialogHistory,
       artifacts,
+    });
+
+    scheduleDialogRoomCompaction({
+      system,
+      dialogHistory,
+      artifacts,
+      spawnedTasks,
+      sourceHandoff,
     });
 
     debouncedSave(system);

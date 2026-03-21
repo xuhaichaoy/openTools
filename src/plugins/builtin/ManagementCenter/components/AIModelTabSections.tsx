@@ -147,7 +147,7 @@ export function TrustLevelSelector() {
         <span className="text-xs text-[var(--color-text)]">操作确认策略</span>
       </div>
       <p className="text-[10px] text-[var(--color-text-secondary)]">
-        控制 AI 执行危险操作时是否弹出确认对话框，对内置聊天和 SmartAgent 同时生效。
+        控制 AI 工具调用的审批梯子：先走自动审核，只有高风险或不确定操作才升级到人工确认。
       </p>
       <div className="space-y-1.5">
         {TRUST_LEVEL_OPTIONS.map(({ value, label, description }) => {
@@ -177,7 +177,7 @@ export function TrustLevelSelector() {
       </div>
       {trustLevel === "auto_approve" && (
         <div className="text-[10px] text-red-500/80 bg-red-500/5 rounded-lg px-3 py-2 border border-red-500/10">
-          全部放行模式下，AI 的所有操作将直接执行，请确保你了解潜在风险。
+          全部放行模式下，自动审核和人工确认都会被跳过，请确保你了解潜在风险。
         </div>
       )}
     </div>

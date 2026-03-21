@@ -116,14 +116,64 @@ export function getDialogChannelConnectionLabel(
 function getIMRuntimeStatusLabel(status: IMConversationRuntimeStatus): string {
   switch (status) {
     case "running":
-      return "执行中";
+      return "处理中";
     case "waiting":
-      return "等待中";
+      return "等待回复";
     case "queued":
-      return "排队中";
+      return "后台排队";
     default:
       return "空闲";
   }
+}
+
+function getExecutionStrategyLabel(strategy?: IMConversationSessionPreview["executionStrategy"] | IMConversationSnapshot["executionStrategy"]): string | null {
+  switch (strategy) {
+    case "direct":
+      return "直达";
+    case "smart":
+      return "智能";
+    case "broadcast":
+      return "广播";
+    case "coordinator":
+      return "协调";
+    default:
+      return null;
+  }
+}
+
+function getContractStateLabel(state?: IMConversationSessionPreview["contractState"] | IMConversationSnapshot["contractState"]): string | null {
+  switch (state) {
+    case "sealed":
+      return "已封存";
+    case "active":
+      return "执行中";
+    case "completed":
+      return "已完成";
+    case "failed":
+      return "已失败";
+    case "superseded":
+      return "已替代";
+    default:
+      return null;
+  }
+}
+
+function buildCollaborationMetaPills(params: {
+  executionStrategy?: IMConversationSessionPreview["executionStrategy"] | IMConversationSnapshot["executionStrategy"];
+  pendingInteractionCount: number;
+  queuedFollowUpCount: number;
+  childSessionCount: number;
+  contractState?: IMConversationSessionPreview["contractState"] | IMConversationSnapshot["contractState"];
+}): string[] {
+  const pills: string[] = [];
+  const strategyLabel = getExecutionStrategyLabel(params.executionStrategy);
+  const contractStateLabel = getContractStateLabel(params.contractState);
+  if (strategyLabel) pills.push(`策略 ${strategyLabel}`);
+  if (params.pendingInteractionCount > 0) pills.push(`待交互 ${params.pendingInteractionCount}`);
+  if (params.queuedFollowUpCount > 0) pills.push(`排队 ${params.queuedFollowUpCount}`);
+  if (params.childSessionCount > 0) pills.push(`子会话 ${params.childSessionCount}`);
+  if (contractStateLabel) pills.push(contractStateLabel);
+  return pills;
 }
 
 export function inferIMChannelType(params: {
@@ -171,7 +221,7 @@ export function buildDialogChannelGroups(params: {
     const activeSessionId = conversation.activeSessionId?.trim() || "";
     const preview = activeSessionId ? params.sessionPreviews[activeSessionId] : undefined;
     const runtimeRecord = activeSessionId
-      ? params.runtimeSessions[buildRuntimeSessionKey("dialog", activeSessionId)]
+      ? params.runtimeSessions[buildRuntimeSessionKey("im_conversation", activeSessionId)]
       : undefined;
     if (activeSessionId && activeSessionId === currentRoomSessionId) continue;
     const statusLabel = runtimeRecord
@@ -201,7 +251,7 @@ export function buildDialogChannelGroups(params: {
   }
 
   for (const runtimeRecord of Object.values(params.runtimeSessions)) {
-    if (runtimeRecord.mode !== "dialog") continue;
+    if (runtimeRecord.mode !== "im_conversation" && runtimeRecord.mode !== "dialog") continue;
     if (runtimeRecord.sessionId === currentRoomSessionId) continue;
     const alreadyCovered = Object.values(groups).some((group) =>
       group.conversations.some((conversation) => conversation.activeSessionId === runtimeRecord.sessionId),
@@ -331,6 +381,20 @@ function RuntimeSessionPreview({
                 <span className="rounded-full border border-[var(--color-border)] px-2 py-0.5">
                   最近更新 {formatSessionStripTime(preview.updatedAt)}
                 </span>
+                {buildCollaborationMetaPills({
+                  executionStrategy: preview.executionStrategy,
+                  pendingInteractionCount: preview.pendingInteractionCount,
+                  queuedFollowUpCount: preview.queuedFollowUpCount,
+                  childSessionCount: preview.childSessionsPreview.length,
+                  contractState: preview.contractState,
+                }).map((pill) => (
+                  <span
+                    key={pill}
+                    className="rounded-full border border-[var(--color-border)] px-2 py-0.5"
+                  >
+                    {pill}
+                  </span>
+                ))}
               </div>
             </div>
             {currentRoomSessionId && onReturnToCurrentRoom && (
@@ -652,6 +716,30 @@ export function ChannelSessionBoard({
                         <span>·</span>
                         <span>{formatSessionStripTime(conversation.updatedAt)}</span>
                       </div>
+                      {buildCollaborationMetaPills({
+                        executionStrategy: conversation.conversation.executionStrategy,
+                        pendingInteractionCount: conversation.conversation.pendingInteractionCount,
+                        queuedFollowUpCount: conversation.conversation.queuedFollowUpCount,
+                        childSessionCount: conversation.conversation.childSessionsPreview.length,
+                        contractState: conversation.conversation.contractState,
+                      }).length > 0 && (
+                        <div className="mt-1.5 flex flex-wrap items-center gap-1">
+                          {buildCollaborationMetaPills({
+                            executionStrategy: conversation.conversation.executionStrategy,
+                            pendingInteractionCount: conversation.conversation.pendingInteractionCount,
+                            queuedFollowUpCount: conversation.conversation.queuedFollowUpCount,
+                            childSessionCount: conversation.conversation.childSessionsPreview.length,
+                            contractState: conversation.conversation.contractState,
+                          }).map((pill) => (
+                            <span
+                              key={`${conversation.key}-${pill}`}
+                              className="rounded-full border border-[var(--color-border)]/80 px-1.5 py-0.5 text-[9px] text-[var(--color-text-tertiary)]"
+                            >
+                              {pill}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
                 </button>

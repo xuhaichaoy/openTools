@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-export type RuntimeSessionMode = "agent" | "cluster" | "ask" | "dialog";
+export type RuntimeSessionMode = "agent" | "cluster" | "ask" | "dialog" | "im_conversation";
 
 export interface RuntimeSessionRecord {
   key: string;
@@ -64,6 +64,14 @@ function buildEmptySnapshot(): RuntimeStateSnapshot {
   };
 }
 
+function isRuntimeSessionMode(value: unknown): value is RuntimeSessionMode {
+  return value === "agent"
+    || value === "cluster"
+    || value === "ask"
+    || value === "dialog"
+    || value === "im_conversation";
+}
+
 function sanitizeSnapshot(input: unknown): RuntimeStateSnapshot {
   if (!input || typeof input !== "object") {
     return buildEmptySnapshot();
@@ -73,7 +81,7 @@ function sanitizeSnapshot(input: unknown): RuntimeStateSnapshot {
     Object.entries(raw.sessions ?? {}).filter(([key, value]) => {
       if (!key || !value || typeof value !== "object") return false;
       const record = value as Partial<RuntimeSessionRecord>;
-      return typeof record.mode === "string"
+      return isRuntimeSessionMode(record.mode)
         && typeof record.sessionId === "string"
         && typeof record.query === "string"
         && typeof record.startedAt === "number";
@@ -82,8 +90,16 @@ function sanitizeSnapshot(input: unknown): RuntimeStateSnapshot {
 
   return {
     sessions,
-    foregroundSessionIds: { ...(raw.foregroundSessionIds ?? {}) },
-    panelVisibility: { ...(raw.panelVisibility ?? {}) },
+    foregroundSessionIds: Object.fromEntries(
+      Object.entries(raw.foregroundSessionIds ?? {}).filter(
+        ([mode, sessionId]) => isRuntimeSessionMode(mode) && typeof sessionId === "string",
+      ),
+    ) as Partial<Record<RuntimeSessionMode, string>>,
+    panelVisibility: Object.fromEntries(
+      Object.entries(raw.panelVisibility ?? {}).filter(
+        ([mode, visible]) => isRuntimeSessionMode(mode) && typeof visible === "boolean",
+      ),
+    ) as Partial<Record<RuntimeSessionMode, boolean>>,
   };
 }
 

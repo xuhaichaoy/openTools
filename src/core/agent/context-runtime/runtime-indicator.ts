@@ -23,6 +23,10 @@ const MODE_META: Record<RuntimeSessionMode, RuntimeIndicatorMeta> = {
     label: "Dialog 房间",
     color: "#3b82f6",
   },
+  im_conversation: {
+    label: "IM 会话",
+    color: "#0ea5e9",
+  },
 };
 
 function normalizeStatusLabel(status?: string): string {
@@ -73,7 +77,9 @@ export function getRuntimeIndicatorStatus(record: RuntimeSessionRecord): string 
     case "user_reply":
       return "等待回复";
     case "follow_up_queue":
-      return "等待继续";
+      return record.mode === "im_conversation"
+        ? "后台排队"
+        : "等待继续";
     case "model_first_token":
       return "等待首个响应";
     case "model_generating":
@@ -84,7 +90,11 @@ export function getRuntimeIndicatorStatus(record: RuntimeSessionRecord): string 
       return "分发中";
     case "running":
     case "dialog_running":
-      return record.mode === "dialog" ? "协作中" : "执行中";
+      return record.mode === "dialog"
+        ? "协作中"
+        : record.mode === "im_conversation"
+          ? "处理中"
+          : "执行中";
     case "aggregating":
       return "汇总中";
     default:

@@ -350,7 +350,16 @@ export async function startStreamingChat(opts: {
       "ai-tool-confirm-request",
       async (event) => {
         const { useToolTrustStore } = await import("@/store/command-allowlist-store");
-        if (!useToolTrustStore.getState().shouldConfirm(event.payload.name)) {
+        let params: Record<string, unknown> = {};
+        try {
+          const parsed = JSON.parse(event.payload.arguments || "{}");
+          if (parsed && typeof parsed === "object") {
+            params = parsed as Record<string, unknown>;
+          }
+        } catch {
+          params = { rawArguments: event.payload.arguments };
+        }
+        if (!useToolTrustStore.getState().shouldConfirm(event.payload.name, params)) {
           await invoke("ai_confirm_tool", { approved: true });
           return;
         }

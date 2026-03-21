@@ -20,6 +20,7 @@ export type { KnowledgeBaseRef } from "./knowledge-base-middleware";
 export { TodoListMiddleware, clearActorTodos, clearAllTodos, getActorTodoList, replaceActorTodoList } from "./todo-list-middleware";
 export type { TodoItem } from "./todo-list-middleware";
 export { PatchToolCallsMiddleware } from "./patch-tool-calls-middleware";
+export { DialogRoomCompactionMiddleware } from "./dialog-room-compaction-middleware";
 export { SummarizationMiddleware } from "./summarization-middleware";
 export type { SummarizationConfig } from "./summarization-middleware";
 export { SuggestionsMiddleware } from "./suggestions-middleware";
@@ -43,6 +44,7 @@ import { ModelRetryMiddleware } from "./model-retry-middleware";
 import { KnowledgeBaseMiddleware } from "./knowledge-base-middleware";
 import { TodoListMiddleware } from "./todo-list-middleware";
 import { PatchToolCallsMiddleware } from "./patch-tool-calls-middleware";
+import { DialogRoomCompactionMiddleware } from "./dialog-room-compaction-middleware";
 import { SummarizationMiddleware } from "./summarization-middleware";
 import { SuggestionsMiddleware } from "./suggestions-middleware";
 import { TelemetryMiddleware } from "./telemetry-middleware";
@@ -66,7 +68,7 @@ import { SessionUploadsMiddleware } from "./session-uploads-middleware";
  * Default middleware chain order:
  *
  *   Title → ToolResolver → FCCompatibility → PatchToolCalls → Memory → KnowledgeBase
- *   → SessionUploads → Skill → TodoList → Clarification → Suggestions → ToolPolicy → HumanApproval
+ *   → SessionUploads → DialogRoomCompaction → Skill → TodoList → Clarification → Suggestions → ToolPolicy → HumanApproval
  *   → Telemetry → ModelRetry → SpawnLimit → Summarization → PromptBuild
  *
  * New additions:
@@ -82,6 +84,7 @@ export function createDefaultMiddlewares(): ActorMiddleware[] {
     new MemoryMiddleware(),
     new KnowledgeBaseMiddleware(),
     new SessionUploadsMiddleware(),
+    new DialogRoomCompactionMiddleware(),
     new SkillMiddleware(),
     new TodoListMiddleware(),
     new ClarificationMiddleware(),

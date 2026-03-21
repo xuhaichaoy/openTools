@@ -1,14 +1,21 @@
 import type {
   DialogMessage,
   AgentCapabilities,
+  ExecutionPolicy,
   MiddlewareOverrides,
   ThinkingLevel,
   ToolPolicy,
 } from "@/core/agent/actor/types";
+import {
+  cloneCollaborationSnapshot,
+  sanitizeCollaborationSnapshot,
+} from "@/core/collaboration/persistence";
+import type { CollaborationSessionSnapshot } from "@/core/collaboration/types";
 import type { ChannelIncomingMessage, ChannelType } from "./types";
 
-const IM_CONVERSATION_PERSIST_KEY = "mtools-im-conversation-runtime-v1";
-const IM_CONVERSATION_PERSIST_VERSION = 1;
+const IM_CONVERSATION_PERSIST_KEY = "mtools-im-conversation-runtime-v2";
+const IM_CONVERSATION_LEGACY_PERSIST_KEY = "mtools-im-conversation-runtime-v1";
+const IM_CONVERSATION_PERSIST_VERSION = 2;
 
 export interface PersistedIMPendingMessage {
   messageId: string;
@@ -34,6 +41,7 @@ export interface PersistedIMActorConfig {
   systemPrompt?: string;
   capabilities?: AgentCapabilities;
   toolPolicy?: ToolPolicy;
+  executionPolicy?: ExecutionPolicy;
   workspace?: string;
   timeoutSeconds?: number;
   contextTokens?: number;
@@ -52,8 +60,10 @@ export interface PersistedIMRuntimeRecord {
   sessionId: string;
   updatedAt: number;
   lastInput?: PersistedIMPendingMessage;
+  queuedMessages?: PersistedIMPendingMessage[];
   dialogHistory: DialogMessage[];
   actorConfigs: PersistedIMActorConfig[];
+  collaborationSnapshot?: CollaborationSessionSnapshot;
 }
 
 export interface PersistedIMConversationStateRecord {
@@ -140,6 +150,7 @@ function sanitizeActorConfig(input: unknown): PersistedIMActorConfig | null {
     ...(typeof record.systemPrompt === "string" ? { systemPrompt: record.systemPrompt } : {}),
     ...(record.capabilities && typeof record.capabilities === "object" ? { capabilities: record.capabilities } : {}),
     ...(record.toolPolicy && typeof record.toolPolicy === "object" ? { toolPolicy: record.toolPolicy } : {}),
+    ...(record.executionPolicy && typeof record.executionPolicy === "object" ? { executionPolicy: record.executionPolicy } : {}),
     ...(typeof record.workspace === "string" ? { workspace: record.workspace } : {}),
     ...(typeof record.timeoutSeconds === "number" ? { timeoutSeconds: record.timeoutSeconds } : {}),
     ...(typeof record.contextTokens === "number" ? { contextTokens: record.contextTokens } : {}),
@@ -175,7 +186,6 @@ function sanitizeRuntimeRecord(input: unknown): PersistedIMRuntimeRecord | null 
     || typeof record.topicId !== "string"
     || typeof record.sessionId !== "string"
     || typeof record.updatedAt !== "number"
-    || !Array.isArray(record.dialogHistory)
     || !Array.isArray(record.actorConfigs)
   ) {
     return null;
@@ -191,10 +201,20 @@ function sanitizeRuntimeRecord(input: unknown): PersistedIMRuntimeRecord | null 
     sessionId: record.sessionId,
     updatedAt: record.updatedAt,
     ...(sanitizePendingMessage(record.lastInput) ? { lastInput: sanitizePendingMessage(record.lastInput) } : {}),
-    dialogHistory: record.dialogHistory as DialogMessage[],
+    ...(Array.isArray(record.queuedMessages)
+      ? {
+          queuedMessages: record.queuedMessages
+            .map((item) => sanitizePendingMessage(item))
+            .filter((item): item is PersistedIMPendingMessage => Boolean(item)),
+        }
+      : {}),
+    dialogHistory: Array.isArray(record.dialogHistory) ? record.dialogHistory as DialogMessage[] : [],
     actorConfigs: record.actorConfigs
       .map((item) => sanitizeActorConfig(item))
       .filter((item): item is PersistedIMActorConfig => Boolean(item)),
+    ...(record.collaborationSnapshot
+      ? { collaborationSnapshot: sanitizeCollaborationSnapshot(record.collaborationSnapshot, "im_conversation") }
+      : {}),
   };
 }
 
@@ -223,7 +243,8 @@ function sanitizeConversationStateRecord(input: unknown): PersistedIMConversatio
 export function loadPersistedIMConversationRuntimeSnapshot(): PersistedIMConversationRuntimeSnapshot | null {
   if (!canUseLocalStorage()) return null;
   try {
-    const raw = localStorage.getItem(IM_CONVERSATION_PERSIST_KEY);
+    const raw = localStorage.getItem(IM_CONVERSATION_PERSIST_KEY)
+      ?? localStorage.getItem(IM_CONVERSATION_LEGACY_PERSIST_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<PersistedIMConversationRuntimeSnapshot>;
     if (
@@ -255,7 +276,17 @@ export function savePersistedIMConversationRuntimeSnapshot(
 ): void {
   if (!canUseLocalStorage()) return;
   try {
-    localStorage.setItem(IM_CONVERSATION_PERSIST_KEY, JSON.stringify(snapshot));
+    localStorage.setItem(IM_CONVERSATION_PERSIST_KEY, JSON.stringify({
+      ...snapshot,
+      version: IM_CONVERSATION_PERSIST_VERSION,
+      runtimes: snapshot.runtimes.map((runtime) => ({
+        ...runtime,
+        ...(runtime.collaborationSnapshot
+          ? { collaborationSnapshot: cloneCollaborationSnapshot(runtime.collaborationSnapshot) }
+          : {}),
+      })),
+    }));
+    localStorage.removeItem(IM_CONVERSATION_LEGACY_PERSIST_KEY);
   } catch {
     // Ignore persistence failures for best-effort IM recovery.
   }
@@ -265,6 +296,7 @@ export function clearPersistedIMConversationRuntimeSnapshot(): void {
   if (!canUseLocalStorage()) return;
   try {
     localStorage.removeItem(IM_CONVERSATION_PERSIST_KEY);
+    localStorage.removeItem(IM_CONVERSATION_LEGACY_PERSIST_KEY);
   } catch {
     // Ignore best-effort clear failures.
   }

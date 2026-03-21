@@ -19,7 +19,6 @@ import {
   FolderOpen,
   RotateCcw,
   ListChecks,
-  Network,
   Brain,
   ShieldCheck,
   ArrowRightCircle,
@@ -30,9 +29,10 @@ import remarkGfm from "remark-gfm";
 import { AICenterHandoffCard } from "@/components/ai/AICenterHandoffCard";
 import {
   buildDialogDispatchPlanBundle,
+  buildClusterPresentationFromDraft,
+  buildExecutionContractDraftFromDialog,
   inferDialogDispatchInsight,
   type DialogDispatchInsight,
-  type DialogDispatchPlanBundle,
 } from "@/core/agent/actor/dialog-dispatch-plan";
 import { buildDialogSpawnedTaskHandoff } from "@/core/agent/actor/spawned-task-checkpoint";
 import {
@@ -45,7 +45,6 @@ import { useAppStore, type AICenterHandoff } from "@/store/app-store";
 import { useAISessionRuntimeStore } from "@/store/ai-session-runtime-store";
 import {
   useClusterPlanApprovalStore,
-  type ApprovalDialogPresentation,
 } from "@/store/cluster-plan-approval-store";
 import { useConfirmDialogStore } from "@/store/confirm-dialog-store";
 import { useToolTrustStore } from "@/store/command-allowlist-store";
@@ -82,11 +81,12 @@ import { getSpawnedTaskRoleBoundaryMeta } from "@/core/agent/actor/spawned-task-
 import type {
   DialogArtifactRecord,
   DialogContextSummary,
-  DialogExecutionPlan,
   DialogMessage,
   DialogQueuedFollowUp,
+  DialogRoomCompactionState,
   PendingInteraction,
   SessionUploadRecord,
+  SpawnedTaskEventDetail,
   SpawnedTaskRecord,
 } from "@/core/agent/actor/types";
 import {
@@ -113,6 +113,7 @@ import { AttachDropdown } from "@/components/ui/AttachDropdown";
 import { DialogFollowUpDock } from "./DialogFollowUpDock";
 import { DialogContextStrip } from "./DialogContextStrip";
 import { ChannelSessionBoard, buildDialogChannelGroups, formatSessionStripTime, getDialogChannelConnectionLabel, getDialogViewLabel, inferIMChannelType, type DialogChannelConnectionMeta, type DialogSessionViewKey, type DialogTopSessionItem } from "./actor-chat-panel/DialogChannelBoard";
+import { DialogChildSessionStrip } from "./actor-chat-panel/DialogChildSessionStrip";
 import {
   ActorStatusBar,
   AddAgentForm,
@@ -367,79 +368,6 @@ function truncateWorkflowText(value: string | undefined, max = 80): string | und
   return `${normalized.slice(0, Math.max(0, max - 1)).trimEnd()}…`;
 }
 
-function formatDialogApprovalModeLabel(planBundle: DialogDispatchPlanBundle): string {
-  const { runtimePlan, insight } = planBundle;
-  switch (runtimePlan.routingMode) {
-    case "broadcast":
-      return insight.codingProfile.profile.codingMode
-        ? "并行讨论（广播）"
-        : "并行讨论";
-    case "direct":
-      return "直接处理";
-    case "smart":
-      return `${insight.autoModeLabel ?? "定向协作"} · 按现有 Agent 路由`;
-    default:
-      return `${insight.autoModeLabel ?? "自动协作"} · 主代理按需委派`;
-  }
-}
-
-function buildDialogBoundaryApprovalPresentation(params: {
-  planBundle: DialogDispatchPlanBundle;
-  actors: ActorSnapshot[];
-}): ApprovalDialogPresentation {
-  const { planBundle, actors } = params;
-  const actorById = new Map(actors.map((actor) => [actor.id, actor] as const));
-  const { runtimePlan, insight } = planBundle;
-  const coordinatorId = runtimePlan.coordinatorActorId ?? runtimePlan.initialRecipientActorIds[0];
-  const coordinatorName = coordinatorId
-    ? actorById.get(coordinatorId)?.roleName ?? coordinatorId
-    : undefined;
-  const allParticipantLabels = [...new Set(
-    runtimePlan.participantActorIds.map((actorId) => actorById.get(actorId)?.roleName ?? actorId),
-  )];
-  const participantLabels = coordinatorName
-    ? allParticipantLabels.filter((label) => label !== coordinatorName)
-    : allParticipantLabels;
-  const suggestedLanes = [...new Set(
-    (runtimePlan.plannedSpawns ?? [])
-      .map((spawn) => spawn.label?.trim())
-      .filter((label): label is string => Boolean(label)),
-  )];
-
-  const permissions = [
-    coordinatorName
-      ? `${coordinatorName} 负责理解需求、拆解任务、按需委派子代理并统一输出最终结论。`
-      : "首个接手 Agent 负责理解需求、拆解任务并统一输出最终结论。",
-    allParticipantLabels.length > 1
-      ? `允许在当前房间的 ${allParticipantLabels.length} 个 Agent 之间自由分配执行、审查和验证工作。`
-      : "本轮不会预先锁死额外分工，当前主执行者可根据现场情况继续拆解任务。",
-    "允许主代理或上游负责人改写、合并、跳过建议分工，并在必要时创建临时子 Agent。",
-    "本次批准的是协作边界和授权范围，不是每个 Agent 的硬编码任务单。",
-  ];
-
-  const notes = [
-    suggestedLanes.length > 0
-      ? `系统只提供建议分工方向作为参考：${suggestedLanes.join("、")}。最终怎么派活，由执行时的主代理决定。`
-      : "系统可能提供建议分工方向，但不会锁死每个 Agent 的具体任务文本。",
-    "如果执行中发现更合理的拆法，主代理可以重新派活；子任务在确有必要时，也可以继续拆成更小的子任务。",
-  ];
-
-  return {
-    kind: "boundary",
-    title: "审批协作边界",
-    description: "请确认本轮协作的主负责人、可参与范围和授权边界是否合理。",
-    modeLabel: formatDialogApprovalModeLabel(planBundle),
-    taskPreview: truncateWorkflowText(insight.taskSummary, 240),
-    summary: insight.focusLabel
-      ? `当前重点是「${insight.focusLabel}」，具体执行、审查、验证顺序由主代理在运行中决定。`
-      : "本轮会先由主代理理解任务，再按实际需要组织执行、审查与验证。",
-    coordinatorLabel: coordinatorName,
-    participantLabels,
-    permissions,
-    notes,
-  };
-}
-
 function collectArtifacts(
   dialogHistory: DialogMessage[],
   actorById: Map<string, ActorSnapshot>,
@@ -528,6 +456,7 @@ function buildDialogAgentHandoff(params: {
   sessionUploads: SessionUploadRecord[];
   spawnedTasks: SpawnedTaskRecord[];
   dialogContextSummary?: DialogContextSummary | null;
+  dialogRoomCompaction?: DialogRoomCompactionState | null;
   sourceSessionId?: string;
   maxMessages?: number;
   maxCharsPerMessage?: number;
@@ -542,6 +471,7 @@ function buildDialogAgentHandoff(params: {
     sessionUploads,
     spawnedTasks,
     dialogContextSummary,
+    dialogRoomCompaction,
     sourceSessionId,
     maxMessages = 10,
     maxCharsPerMessage = 500,
@@ -573,9 +503,7 @@ function buildDialogAgentHandoff(params: {
     artifacts,
     sessionUploads,
     spawnedTasks,
-    actorNameById: new Map(
-      [...actorById.entries()].map(([id, actor]) => [id, actor.roleName]),
-    ),
+    actorNameById,
     extraAttachmentPaths: recentMessages.flatMap((message) => message.images || []),
     maxArtifacts,
     maxSpawnedTasks,
@@ -589,9 +517,11 @@ function buildDialogAgentHandoff(params: {
     : attachmentPaths.length > 0
       ? "以下是之前 Dialog 协作房间的最近上下文，并已附带相关图片/文件，请继续落地执行："
       : "以下是之前 Dialog 协作房间的最近上下文，请继续落地执行：";
-  const earlySummary = dialogContextSummary
-    ? `已整理更早的 ${dialogContextSummary.summarizedMessageCount} 条房间消息：\n${dialogContextSummary.summary}`
-    : "";
+  const earlyRoomSummary = dialogRoomCompaction
+    ? `已压缩更早的 ${dialogRoomCompaction.compactedMessageCount} 条房间消息：\n${dialogRoomCompaction.summary}`
+    : dialogContextSummary
+      ? `已整理更早的 ${dialogContextSummary.summarizedMessageCount} 条房间消息：\n${dialogContextSummary.summary}`
+      : "";
   const visualSummary = workingSet.visualSummaryLine ?? "";
   const uploadSummary = workingSet.uploadSummaryLine ?? "";
   const artifactSummary = workingSet.artifactSummaryLines.length > 0
@@ -603,7 +533,7 @@ function buildDialogAgentHandoff(params: {
   const query = [
     intro,
     "",
-    earlySummary ? `---\n\n${earlySummary}` : "",
+    earlyRoomSummary ? `---\n\n${earlyRoomSummary}` : "",
     transcript,
     spawnedTaskSummary ? `---\n\n${spawnedTaskSummary}` : "",
     artifactSummary ? `---\n\n${artifactSummary}` : "",
@@ -632,7 +562,11 @@ function buildDialogAgentHandoff(params: {
     ) || "延续 Dialog 房间中的当前协作任务",
     intent: inferredCoding.profile.codingMode ? "coding" : "delivery",
     keyPoints: [
-      dialogContextSummary ? `已整理更早的 ${dialogContextSummary.summarizedMessageCount} 条房间消息` : "",
+      dialogRoomCompaction
+        ? `已压缩更早的 ${dialogRoomCompaction.compactedMessageCount} 条房间消息`
+        : dialogContextSummary
+          ? `已整理更早的 ${dialogContextSummary.summarizedMessageCount} 条房间消息`
+          : "",
       `带入最近 ${recentMessages.length} 条 Dialog 消息`,
       visualAttachmentPaths.length > 0 ? `${visualAttachmentPaths.length} 张视觉参考图` : "",
       workingSet.artifactSummaryLines.length > 0 ? `${workingSet.artifactSummaryLines.length} 条产物线索` : "",
@@ -644,8 +578,10 @@ function buildDialogAgentHandoff(params: {
       workingSet.openSessionCount > 0 ? `注意当前仍有 ${workingSet.openSessionCount} 个开放子会话线索` : "",
     ].filter(Boolean),
     contextSections: [
-      dialogContextSummary
-        ? { title: "早期协作摘要", items: [dialogContextSummary.summary] }
+      dialogRoomCompaction
+        ? { title: "房间压缩保留", items: [dialogRoomCompaction.summary] }
+        : dialogContextSummary
+          ? { title: "早期协作摘要", items: [dialogContextSummary.summary] }
         : null,
       visualAttachmentPaths.length > 0 && visualSummary
         ? { title: "视觉参考", items: [visualSummary] }
@@ -692,6 +628,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   const [routingMode, setRoutingMode] = useState<DialogRoutingMode>("coordinator");
   const [showAllMessages, setShowAllMessages] = useState(false);
   const [selectedPendingMessageId, setSelectedPendingMessageId] = useState<string | null>(null);
+  const [pendingSteerSessionRunId, setPendingSteerSessionRunId] = useState<string | null>(null);
   const [openApprovalMessageId, setOpenApprovalMessageId] = useState<string | null>(null);
   const [inputNotice, setInputNotice] = useState<string | null>(null);
   const [selectedSpawnRunId, setSelectedSpawnRunId] = useState<string | null>(null);
@@ -724,11 +661,12 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
 
   const {
     active: systemActive, actors, dialogHistory, pendingUserInteractions, spawnedTasks, artifacts: structuredArtifacts,
-    sessionUploads, queuedFollowUps, focusedSpawnedSessionRunId,
-    coordinatorActorId, actorTodos, sourceHandoff: incomingHandoff, contextSnapshot,
-    init, spawnActor, killActor, destroyAll, sendMessage, broadcastMessage, broadcastAndResolve,
-    abortAll, steer, focusSpawnedSession, closeSpawnedSession, resetSession, enqueueFollowUp, removeFollowUp, clearFollowUps,
-    sync, routeTask, replyToMessage, getSystem, setSourceHandoff,
+    sessionUploads, queuedFollowUps, dialogRoomCompaction,
+    coordinatorActorId, actorTodos, sourceHandoff: incomingHandoff, contextSnapshot, collaborationSnapshot,
+    init, spawnActor, killActor, destroyAll,
+    abortAll, closeSpawnedSession, abortSpawnedSession, resetSession, removeFollowUp, clearQueuedFollowUps,
+    dispatchDialogInput, replyToPendingInteraction, applyDraftExecutionContract, runQueuedFollowUp,
+    sync, routeTask, getSystem, setSourceHandoff,
     setCoordinator, reorderActors, updateActorConfig,
   } = useActorSystemStore(
     useShallow((state) => ({
@@ -740,29 +678,28 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       artifacts: active ? state.artifacts : EMPTY_DIALOG_ARTIFACTS,
       sessionUploads: active ? state.sessionUploads : EMPTY_SESSION_UPLOADS,
       queuedFollowUps: active ? state.queuedFollowUps : EMPTY_QUEUED_FOLLOW_UPS,
-      focusedSpawnedSessionRunId: active ? state.focusedSpawnedSessionRunId : null,
+      dialogRoomCompaction: active ? state.dialogRoomCompaction : null,
       coordinatorActorId: active ? state.coordinatorActorId : null,
       actorTodos: active ? state.actorTodos : EMPTY_ACTOR_TODOS,
       sourceHandoff: active ? state.sourceHandoff : null,
       contextSnapshot: active ? state.contextSnapshot : null,
+      collaborationSnapshot: active ? state.collaborationSnapshot : null,
       init: state.init,
       spawnActor: state.spawnActor,
       killActor: state.killActor,
       destroyAll: state.destroyAll,
-      sendMessage: state.sendMessage,
-      broadcastMessage: state.broadcastMessage,
-      broadcastAndResolve: state.broadcastAndResolve,
       abortAll: state.abortAll,
-      steer: state.steer,
-      focusSpawnedSession: state.focusSpawnedSession,
       closeSpawnedSession: state.closeSpawnedSession,
+      abortSpawnedSession: state.abortSpawnedSession,
       resetSession: state.resetSession,
-      enqueueFollowUp: state.enqueueFollowUp,
       removeFollowUp: state.removeFollowUp,
-      clearFollowUps: state.clearFollowUps,
+      clearQueuedFollowUps: state.clearQueuedFollowUps,
+      dispatchDialogInput: state.dispatchDialogInput,
+      replyToPendingInteraction: state.replyToPendingInteraction,
+      applyDraftExecutionContract: state.applyDraftExecutionContract,
+      runQueuedFollowUp: state.runQueuedFollowUp,
       sync: state.sync,
       routeTask: state.routeTask,
-      replyToMessage: state.replyToMessage,
       getSystem: state.getSystem,
       setSourceHandoff: state.setSourceHandoff,
       setCoordinator: state.setCoordinator,
@@ -809,10 +746,11 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   const [dialogChannelConnectPending, setDialogChannelConnectPending] = useState<
     Partial<Record<"dingtalk" | "feishu", boolean>>
   >({});
-  const { runtimeSessions, foregroundDialogSessionId } = useRuntimeStateStore(
+  const { runtimeSessions, foregroundDialogSessionId, foregroundIMConversationSessionId } = useRuntimeStateStore(
     useShallow((state) => ({
       runtimeSessions: active ? state.sessions : EMPTY_RUNTIME_SESSIONS,
       foregroundDialogSessionId: active ? state.foregroundSessionIds.dialog : undefined,
+      foregroundIMConversationSessionId: active ? state.foregroundSessionIds.im_conversation : undefined,
     })),
   );
   const { imConversations, imSessionPreviews } = useIMConversationRuntimeStore(
@@ -838,19 +776,45 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     return () => window.clearInterval(timer);
   }, [active, refreshDialogChannelMeta]);
 
+  const actorById = useMemo(() => {
+    const map = new Map<string, ActorSnapshot>();
+    actors.forEach((a) => map.set(a.id, a));
+    return map;
+  }, [actors]);
+  const dialogMemoryWorkspaceId = useMemo(
+    () => (
+      (coordinatorActorId ? actorById.get(coordinatorActorId)?.workspace : undefined)
+      ?? actors.find((actor) => typeof actor.workspace === "string" && actor.workspace.trim().length > 0)?.workspace
+    ),
+    [actorById, actors, coordinatorActorId],
+  );
   const runningActors = useMemo(() => actors.filter((a) => a.status === "running"), [actors]);
   const confirmDangerousAction = useCallback(
     (toolName: string, params: Record<string, unknown>): Promise<boolean> => {
-      if (!useToolTrustStore.getState().shouldConfirm(toolName)) {
+      const toolTrust = useToolTrustStore.getState();
+      const cachedDecision = toolTrust.getCachedDecision(toolName, params);
+      if (cachedDecision !== null) {
+        return Promise.resolve(cachedDecision);
+      }
+      const assessment = toolTrust.assess(toolName, params, {
+        workspace: dialogMemoryWorkspaceId,
+      });
+      if (assessment.decision !== "ask") {
+        toolTrust.rememberDecision(toolName, params, true);
         return Promise.resolve(true);
       }
       return openConfirmDialog({
         source: "actor_dialog",
         toolName,
         params,
+        risk: assessment.risk,
+        reason: assessment.reason,
+      }).then((confirmed) => {
+        toolTrust.rememberDecision(toolName, params, confirmed);
+        return confirmed;
       });
     },
-    [openConfirmDialog],
+    [dialogMemoryWorkspaceId, openConfirmDialog],
   );
   const hasRunningActors = runningActors.length > 0;
   const currentRoomSessionId = getSystem()?.sessionId ?? null;
@@ -898,16 +862,19 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     };
   }, [dialogChannelConnectPending, dialogChannelGroups, dialogChannelStatuses, dialogSavedChannels]);
   const selectedDialogSessionId = useMemo(() => {
+    const normalizedIM = foregroundIMConversationSessionId?.trim() || "";
+    if (normalizedIM) return normalizedIM;
     const normalized = foregroundDialogSessionId?.trim() || "";
     if (normalized) return normalized;
     return currentRoomSessionId;
-  }, [currentRoomSessionId, foregroundDialogSessionId]);
+  }, [currentRoomSessionId, foregroundDialogSessionId, foregroundIMConversationSessionId]);
   const derivedDialogView = useMemo<DialogSessionViewKey>(() => {
     if (!selectedDialogSessionId || selectedDialogSessionId === currentRoomSessionId) {
       return "local";
     }
     const preview = imSessionPreviews[selectedDialogSessionId];
-    const runtimeRecord = runtimeSessions[buildRuntimeSessionKey("dialog", selectedDialogSessionId)];
+    const runtimeRecord = runtimeSessions[buildRuntimeSessionKey("im_conversation", selectedDialogSessionId)]
+      ?? runtimeSessions[buildRuntimeSessionKey("dialog", selectedDialogSessionId)];
     const channelType = inferIMChannelType({ preview, runtimeRecord });
     if (!channelType) return "local";
     const hasLiveConversation = dialogChannelGroups[channelType].conversations.some((conversation) =>
@@ -954,6 +921,26 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   const activeDialogView = dialogTopSessionItems.some((item) => item.key === requestedDialogView)
     ? requestedDialogView
     : "local";
+  const activeDialogTopSessionItem = useMemo(
+    () => dialogTopSessionItems.find((item) => item.key === activeDialogView) ?? dialogTopSessionItems[0] ?? null,
+    [activeDialogView, dialogTopSessionItems],
+  );
+  const activeDialogViewSummary = useMemo(() => {
+    if (!activeDialogTopSessionItem) return null;
+    const parts: string[] = [];
+    if (activeDialogTopSessionItem.key === "local") {
+      parts.push("当前主房间");
+    } else if (activeDialogTopSessionItem.connectionLabel) {
+      parts.push(activeDialogTopSessionItem.connectionLabel);
+    }
+    if (activeDialogTopSessionItem.statusLabel && activeDialogTopSessionItem.key !== "local") {
+      parts.push(activeDialogTopSessionItem.statusLabel);
+    }
+    if (activeDialogTopSessionItem.updatedAt > 0) {
+      parts.push(formatSessionStripTime(activeDialogTopSessionItem.updatedAt));
+    }
+    return parts.join(" · ");
+  }, [activeDialogTopSessionItem]);
   const activeChannelGroup = activeDialogView === "local"
     ? null
     : dialogChannelGroups[activeDialogView];
@@ -968,12 +955,16 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   const activeChannelConversation = activeChannelGroup?.conversations.find((item) => item.key === activeChannelConversationKey)
     ?? activeChannelGroup?.conversations[0]
     ?? null;
+  const returnToLocalDialogRoom = useCallback(() => {
+    useRuntimeStateStore.getState().setForegroundSession("im_conversation", null);
+    if (currentRoomSessionId) {
+      useRuntimeStateStore.getState().setForegroundSession("dialog", currentRoomSessionId);
+    }
+  }, [currentRoomSessionId]);
   const handleSelectDialogView = useCallback((viewKey: DialogSessionViewKey) => {
     setManualDialogView(viewKey);
     if (viewKey === "local") {
-      if (currentRoomSessionId) {
-        useRuntimeStateStore.getState().setForegroundSession("dialog", currentRoomSessionId);
-      }
+      returnToLocalDialogRoom();
       return;
     }
     const targetGroup = dialogChannelGroups[viewKey];
@@ -987,9 +978,9 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       targetConversation?.activeSessionId
       || targetConversation?.conversation.topics[0]?.sessionId;
     if (targetSessionId) {
-      useRuntimeStateStore.getState().setForegroundSession("dialog", targetSessionId);
+      useRuntimeStateStore.getState().setForegroundSession("im_conversation", targetSessionId);
     }
-  }, [currentRoomSessionId, dialogChannelGroups, selectedDialogSessionId]);
+  }, [dialogChannelGroups, returnToLocalDialogRoom, selectedDialogSessionId]);
   const ensureDialogChannelConnected = useCallback(async (channelType: "dingtalk" | "feishu"): Promise<boolean> => {
     const meta = dialogChannelConnectionMeta[channelType];
     if (!meta.configured || meta.entries.length === 0) {
@@ -1182,12 +1173,17 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   useEffect(() => {
     useRuntimeStateStore.getState().setPanelVisible("dialog", active);
     if (!active) return;
-    const foregroundSessionId = getForegroundRuntimeSession("dialog")?.sessionId ?? foregroundDialogSessionId ?? null;
+    const foregroundSessionId =
+      getForegroundRuntimeSession("im_conversation")?.sessionId
+      ?? foregroundIMConversationSessionId
+      ?? getForegroundRuntimeSession("dialog")?.sessionId
+      ?? foregroundDialogSessionId
+      ?? null;
     if (foregroundSessionId) return;
     if (currentRoomSessionId) {
       useRuntimeStateStore.getState().setForegroundSession("dialog", currentRoomSessionId);
     }
-  }, [active, currentRoomSessionId, foregroundDialogSessionId, systemActive]);
+  }, [active, currentRoomSessionId, foregroundDialogSessionId, foregroundIMConversationSessionId, systemActive]);
 
   useEffect(() => () => {
     useRuntimeStateStore.getState().setPanelVisible("dialog", false);
@@ -1344,18 +1340,11 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     return map;
   }, [actors]);
 
-  const actorById = useMemo(() => {
-    const map = new Map<string, ActorSnapshot>();
-    actors.forEach((a) => map.set(a.id, a));
+  const actorNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    actors.forEach((a) => map.set(a.id, a.roleName));
     return map;
   }, [actors]);
-  const dialogMemoryWorkspaceId = useMemo(
-    () => (
-      (coordinatorActorId ? actorById.get(coordinatorActorId)?.workspace : undefined)
-      ?? actors.find((actor) => typeof actor.workspace === "string" && actor.workspace.trim().length > 0)?.workspace
-    ),
-    [actorById, actors, coordinatorActorId],
-  );
 
   const artifacts = useMemo(
     () => collectArtifacts(dialogHistory, actorById, structuredArtifacts),
@@ -1367,9 +1356,9 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       artifacts: structuredArtifacts,
       sessionUploads,
       spawnedTasks,
-      actorNameById: new Map(actors.map((actor) => [actor.id, actor.roleName])),
+      actorNameById,
     }),
-    [actors, dialogHistory, sessionUploads, spawnedTasks, structuredArtifacts],
+    [actorNameById, dialogHistory, sessionUploads, spawnedTasks, structuredArtifacts],
   );
 
   const pendingUserReplySet = useMemo(
@@ -1411,31 +1400,33 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     setSelectedSpawnRunId(nextTask?.runId ?? null);
   }, [spawnedTasks, selectedSpawnRunId]);
 
-  const focusedSessionTask = useMemo(
-    () => focusedSpawnedSessionRunId
-      ? spawnedTasks.find((task) => task.runId === focusedSpawnedSessionRunId && task.mode === "session" && task.sessionOpen)
-      : undefined,
-    [spawnedTasks, focusedSpawnedSessionRunId],
-  );
-  const focusedSessionLabel = useMemo(
-    () => focusedSessionTask
-      ? focusedSessionTask.label || (actorById.get(focusedSessionTask.targetActorId)?.roleName ?? focusedSessionTask.targetActorId)
-      : null,
-    [actorById, focusedSessionTask],
-  );
-
-  useEffect(() => {
-    if (focusedSpawnedSessionRunId && !focusedSessionTask) {
-      focusSpawnedSession(null);
-    }
-  }, [focusSpawnedSession, focusedSessionTask, focusedSpawnedSessionRunId]);
-
   const openApprovalMessage = openApprovalMessageId
     ? messageById.get(openApprovalMessageId) ?? null
     : null;
   const openApprovalInteraction = openApprovalMessageId
     ? pendingInteractionByMessageId.get(openApprovalMessageId)
     : undefined;
+  const collaborationQueuedFollowUpById = useMemo(
+    () => new Map((collaborationSnapshot?.queuedFollowUps ?? []).map((item) => [item.id, item] as const)),
+    [collaborationSnapshot],
+  );
+  const collaborationChildSessionByRunId = useMemo(
+    () => new Map((collaborationSnapshot?.childSessions ?? []).map((item) => [item.runId, item] as const)),
+    [collaborationSnapshot],
+  );
+  const pendingSteerSession = useMemo(() => {
+    if (!pendingSteerSessionRunId) return null;
+    return collaborationChildSessionByRunId.get(pendingSteerSessionRunId)
+      ?? spawnedTasks.find((task) => task.runId === pendingSteerSessionRunId && task.mode === "session" && task.sessionOpen)
+      ?? null;
+  }, [collaborationChildSessionByRunId, pendingSteerSessionRunId, spawnedTasks]);
+  const pendingSteerTargetActorId = pendingSteerSession?.targetActorId ?? null;
+  const pendingSteerTargetLabel = useMemo(() => {
+    if (!pendingSteerSession) return null;
+    return pendingSteerSession.label
+      || actorById.get(pendingSteerSession.targetActorId)?.roleName
+      || pendingSteerSession.targetActorId;
+  }, [actorById, pendingSteerSession]);
 
   const handleOpenApprovalDrawer = useCallback((messageId: string) => {
     setOpenApprovalMessageId(messageId);
@@ -1445,11 +1436,27 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     setOpenApprovalMessageId(null);
   }, []);
 
+  const handleInteractionReply = useCallback((messageId: string, content: string) => {
+    try {
+      replyToPendingInteraction(messageId, {
+        content,
+        displayText: content,
+      });
+      setInputNotice(null);
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setInputNotice(message || "回复失败，请稍后再试。");
+      return false;
+    }
+  }, [replyToPendingInteraction]);
+
   const handleApprovalReply = useCallback((messageId: string, content: string) => {
-    replyToMessage(messageId, content);
-    setOpenApprovalMessageId(null);
-    setInputNotice(null);
-  }, [replyToMessage]);
+    const replied = handleInteractionReply(messageId, content);
+    if (replied) {
+      setOpenApprovalMessageId(null);
+    }
+  }, [handleInteractionReply]);
 
   useEffect(() => {
     if (pendingUserInteractions.length === 0) {
@@ -1465,6 +1472,18 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       pendingUserInteractions.length === 1 ? pendingUserInteractions[0].messageId : null,
     );
   }, [pendingUserInteractions, selectedPendingMessageId]);
+  useEffect(() => {
+    if (selectedPendingMessageId && selectedPendingMessageId !== NEW_MESSAGE_TARGET && pendingSteerSessionRunId) {
+      setPendingSteerSessionRunId(null);
+    }
+  }, [pendingSteerSessionRunId, selectedPendingMessageId]);
+  useEffect(() => {
+    if (!pendingSteerSessionRunId) return;
+    if (pendingSteerSession && pendingSteerSession.mode === "session" && pendingSteerSession.focusable) return;
+    setPendingSteerSessionRunId(null);
+    setInput((current) => current.trimStart().startsWith("!steer ") ? "" : current);
+    setInputNotice((current) => current ?? "目标子会话已不可继续，已退出 steer 模式。");
+  }, [pendingSteerSession, pendingSteerSessionRunId]);
   useEffect(() => {
     const approvalIds = approvalInteractions.map((interaction) => interaction.messageId);
     const previousApprovalIds = previousApprovalIdsRef.current;
@@ -1537,6 +1556,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
         capabilities: normalizedCaps ? { tags: normalizedCaps } : undefined,
         workspace: p.workspace,
         toolPolicy: p.toolPolicy,
+        executionPolicy: p.executionPolicy,
         middlewareOverrides: p.middlewareOverrides,
         timeoutSeconds: p.timeoutSeconds,
         contextTokens: p.contextTokens,
@@ -1570,6 +1590,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
         systemPromptOverride: a.systemPromptOverride || a.currentTask?.query,
         workspace: a.workspace,
         toolPolicy: a.toolPolicy,
+        executionPolicy: a.executionPolicy,
         middlewareOverrides: a.middlewareOverrides,
         timeoutSeconds: a.timeoutSeconds,
         contextTokens: a.contextTokens,
@@ -1591,6 +1612,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       sessionUploads,
       spawnedTasks,
       dialogContextSummary,
+      dialogRoomCompaction,
       sourceSessionId: getSystem()?.sessionId,
     });
     if (!handoff) return;
@@ -1600,7 +1622,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       handoff,
       navigate: false,
     });
-  }, [actorById, artifacts, dialogContextSummary, dialogHistory, getSystem, sessionUploads, spawnedTasks]);
+  }, [actorById, artifacts, dialogContextSummary, dialogHistory, dialogRoomCompaction, getSystem, sessionUploads, spawnedTasks]);
   const handleContinueSpawnedTaskWithAgent = useCallback((runId: string) => {
     const task = spawnedTasks.find((item) => item.runId === runId);
     if (!task) return;
@@ -1610,7 +1632,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       actorTodos: actorTodos[task.targetActorId] ?? [],
       dialogHistory,
       artifacts,
-      actorNameById: new Map(actors.map((actor) => [actor.id, actor.roleName])),
+      actorNameById,
       sourceSessionId: getSystem()?.sessionId,
     });
     if (!handoff) return;
@@ -1620,14 +1642,63 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       handoff,
       navigate: false,
     });
-  }, [spawnedTasks, actorById, actorTodos, dialogHistory, artifacts, actors, getSystem]);
+  }, [spawnedTasks, actorById, actorNameById, actorTodos, dialogHistory, artifacts, getSystem]);
+  const handlePrepareChildSessionSteer = useCallback((runId: string) => {
+    const childSession = collaborationChildSessionByRunId.get(runId);
+    if (!childSession || childSession.mode !== "session" || !childSession.focusable) return;
+    const actorLabel = actorById.get(childSession.targetActorId)?.roleName ?? childSession.targetActorId;
+    setSelectedSpawnRunId(runId);
+    setPendingSteerSessionRunId(runId);
+    setSelectedPendingMessageId(NEW_MESSAGE_TARGET);
+    setShowMention(false);
+    setWorkspacePanel(null);
+    setInput((current) => current.trimStart().startsWith("!steer ") ? current : "!steer ");
+    setInputNotice(`已选中 ${actorLabel} 的后台线程补充指令，发送后会由主 Agent 协调转交。`);
+    window.requestAnimationFrame(() => {
+      inputRef.current?.focus();
+    });
+  }, [actorById, collaborationChildSessionByRunId]);
+  const handleCancelPendingSteer = useCallback(() => {
+    setPendingSteerSessionRunId(null);
+    setInput((current) => current.trimStart().startsWith("!steer ") ? "" : current);
+    setInputNotice(null);
+    inputRef.current?.focus();
+  }, []);
+  const handleAbortChildSession = useCallback(async (runId: string) => {
+    const task = spawnedTasks.find((item) => item.runId === runId && item.mode === "session" && item.sessionOpen);
+    if (!task) return;
+    const actorLabel = actorById.get(task.targetActorId)?.roleName ?? task.targetActorId;
+    const sessionLabel = task.label?.trim() || actorLabel;
+    const confirmed = await openConfirmDialog({
+      source: "actor_dialog",
+      toolName: "abort_child_session",
+      params: {
+        runId,
+        actor: actorLabel,
+        childSession: sessionLabel,
+        action: "终止当前子会话并中断它派生的后续协作",
+      },
+    });
+    if (!confirmed) return;
+    abortSpawnedSession(runId);
+    if (pendingSteerSessionRunId === runId) {
+      setPendingSteerSessionRunId(null);
+      setInput((current) => current.trimStart().startsWith("!steer ") ? "" : current);
+    }
+    setInputNotice(`已中止 ${sessionLabel}。`);
+    window.requestAnimationFrame(() => {
+      inputRef.current?.focus();
+    });
+  }, [abortSpawnedSession, actorById, openConfirmDialog, pendingSteerSessionRunId, spawnedTasks]);
   const handleNewTopic = useCallback(() => {
     resetSession();
+    setPendingSteerSessionRunId(null);
     setSourceHandoff(null);
   }, [resetSession, setSourceHandoff]);
   const handleFullReset = useCallback(() => {
     destroyAll();
     initRef.current = false;
+    setPendingSteerSessionRunId(null);
     setSourceHandoff(null);
   }, [destroyAll, setSourceHandoff]);
 
@@ -1659,131 +1730,170 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     });
   }, [config, dialogMemoryWorkspaceId, getSystem]);
 
-  const dispatchQueuedTopLevelMessage = useCallback(async (item: DialogQueuedFollowUp) => {
-    ensureSystem();
-    const system = useActorSystemStore.getState().getSystem() ?? getSystem();
-    if (!system) {
-      setInputNotice("Dialog 房间尚未准备好，请稍后再试。");
-      inputRef.current?.focus();
-      return false;
-    }
-    if (system.size === 0) {
-      setInputNotice("当前房间还没有可执行的 Agent，请先检查 Agent 阵容。");
-      inputRef.current?.focus();
-      return false;
-    }
+  const handleEditQueuedFollowUpItem = useCallback(async (itemId: string) => {
+    const nextItem = queuedFollowUps.find((item) => item.id === itemId);
+    if (!nextItem) return;
 
-    const dispatchInsight = inferDialogDispatchInsight({
-      content: item.content,
-      attachmentSummary: item.briefContent,
-      attachmentPaths: item.attachmentPaths ?? [],
-    });
-    const smartRoute = item.routingMode === "smart"
-      ? routeTask(item.content, dispatchInsight.preferredCapabilities)[0] ?? null
-      : null;
-
-    let runtimePlan: DialogExecutionPlan | null = null;
-    {
-      const planningRoutingMode: DialogRoutingMode =
-        item.routingMode === "direct" ? "coordinator" : item.routingMode;
-      const planBundle = buildDialogDispatchPlanBundle({
-        actors,
-        routingMode: planningRoutingMode,
-        content: item.content,
-        attachmentSummary: item.briefContent,
-        attachmentPaths: item.attachmentPaths ?? [],
-        selectedRoute: smartRoute,
-        coordinatorActorId,
-      });
-        if (planBundle) {
-          if (requirePlanApproval) {
-            const approvalResult = await openPlanApprovalDialog({
-              plan: planBundle.clusterPlan,
-              sessionId: system.sessionId,
-              presentation: buildDialogBoundaryApprovalPresentation({
-                planBundle,
-                actors,
-              }),
-            });
-            if (approvalResult.status !== "approved") {
-              setLastPlanReview({ status: "rejected", timestamp: Date.now(), plan: planBundle.clusterPlan });
-              setInputNotice("排队消息的执行计划已取消，消息会继续保留在队列里。");
-              inputRef.current?.focus();
-              return false;
-            }
-            setLastPlanReview({ status: "approved", timestamp: Date.now(), plan: planBundle.clusterPlan });
-          }
-          runtimePlan = planBundle.runtimePlan;
-        }
+    const restorablePaths = [...new Set([
+      ...(nextItem.attachmentPaths ?? []),
+      ...(nextItem.images ?? []),
+    ])];
+    clearAttachments();
+    setSelectedPendingMessageId(NEW_MESSAGE_TARGET);
+    setPendingSteerSessionRunId(null);
+    setInput(nextItem.displayText || nextItem.briefContent || nextItem.content);
+    setShowMention(false);
+    setSourceHandoff(null);
+    for (const path of restorablePaths) {
+      try {
+        await addAttachmentFromPath(path);
+      } catch {
+        // best-effort only; missing files should not block editing
       }
-
-    if (runtimePlan) {
-      system.armDialogExecutionPlan(runtimePlan);
-    } else {
-      system.clearDialogExecutionPlan();
     }
+    removeFollowUp(nextItem.id);
+    setInputNotice("已载入排队消息，可修改后重新审批或发送。");
+    inputRef.current?.focus();
+  }, [addAttachmentFromPath, clearAttachments, queuedFollowUps, removeFollowUp, setSourceHandoff]);
 
-    try {
-      setLastCommittedDispatchInsight(dispatchInsight);
-      queueDialogUserMemoryCapture(item.displayText || item.content);
-      if (item.routingMode === "smart" && smartRoute) {
-        sendMessage("user", smartRoute.agentId, item.content, {
-          _briefContent: item.briefContent,
-          images: item.images,
-        });
-      } else if (item.routingMode === "broadcast") {
-        broadcastMessage("user", item.content, {
-          _briefContent: item.briefContent,
-          images: item.images,
-        });
-      } else {
-        broadcastAndResolve("user", item.content, {
-          _briefContent: item.briefContent,
-          images: item.images,
-        });
-      }
-      if (item.uploadRecords?.length) {
-        system.registerSessionUploads(item.uploadRecords, { actorId: "user" });
-      }
-      return true;
-    } catch (error) {
-      system.clearDialogExecutionPlan();
-      const message = error instanceof Error ? error.message : String(error);
-      setInputNotice(message || "队列消息发送失败，请稍后重试。");
-      inputRef.current?.focus();
-      return false;
-    }
-  }, [
-    actors,
-    broadcastAndResolve,
-    broadcastMessage,
-    coordinatorActorId,
-    ensureSystem,
-    getSystem,
-    openPlanApprovalDialog,
-    queueDialogUserMemoryCapture,
-    requirePlanApproval,
-    routeTask,
-    sendMessage,
-  ]);
-
-  const handleRunNextQueuedFollowUp = useCallback(async () => {
-    const nextItem = queuedFollowUps[0];
+  const handleRunQueuedFollowUpItem = useCallback(async (itemId?: string) => {
+    const nextItem = itemId
+      ? queuedFollowUps.find((item) => item.id === itemId)
+      : queuedFollowUps[0];
     if (!nextItem || queuedFollowUpDispatchRef.current) return;
 
     queuedFollowUpDispatchRef.current = true;
     try {
-      const sent = await dispatchQueuedTopLevelMessage(nextItem);
-      if (sent) {
-        removeFollowUp(nextItem.id);
+      if (nextItem.contractStatus === "ready") {
+        queueDialogUserMemoryCapture(nextItem.displayText || nextItem.content);
+        runQueuedFollowUp(nextItem.id);
         setInputNotice(null);
+      } else {
+        const persistedItem = collaborationQueuedFollowUpById.get(nextItem.id);
+        const directTargetActorId = persistedItem?.contract?.executionStrategy === "direct"
+          && persistedItem.contract.initialRecipientActorIds.length === 1
+          ? persistedItem.contract.initialRecipientActorIds[0]
+          : undefined;
+        const planningRoutingMode: DialogRoutingMode = nextItem.routingMode === "smart" || nextItem.routingMode === "broadcast"
+          ? nextItem.routingMode
+          : "coordinator";
+        const dispatchInsight = inferDialogDispatchInsight({
+          content: nextItem.content,
+          attachmentSummary: nextItem.briefContent,
+          attachmentPaths: nextItem.attachmentPaths,
+        });
+        const selectedRoute = nextItem.routingMode === "smart"
+          ? routeTask(nextItem.content, dispatchInsight.preferredCapabilities)[0] ?? null
+          : null;
+        const planBundle = buildDialogDispatchPlanBundle({
+          actors,
+          routingMode: planningRoutingMode,
+          content: nextItem.content,
+          attachmentSummary: nextItem.briefContent,
+          attachmentPaths: nextItem.attachmentPaths ?? [],
+          mentionedTargetId: directTargetActorId ?? null,
+          selectedRoute,
+          coordinatorActorId,
+        });
+        const executionDraft = buildExecutionContractDraftFromDialog({
+          actors,
+          routingMode: planningRoutingMode,
+          content: nextItem.content,
+          attachmentSummary: nextItem.briefContent,
+          attachmentPaths: nextItem.attachmentPaths ?? [],
+          mentionedTargetId: directTargetActorId ?? null,
+          selectedRoute,
+          coordinatorActorId,
+        });
+        if (!executionDraft) {
+          setInputNotice("当前排队消息无法自动重建协作契约，请先编辑后重新发送。");
+          inputRef.current?.focus();
+          return;
+        }
+        if (requirePlanApproval || nextItem.contractStatus === "needs_reapproval") {
+          if (!planBundle) {
+            setInputNotice("当前排队消息无法自动重建审批草案，请先编辑后重新发送。");
+            inputRef.current?.focus();
+            return;
+          }
+          const approvalResult = await openPlanApprovalDialog({
+            plan: planBundle.clusterPlan,
+            sessionId: getSystem()?.sessionId,
+            presentation: buildClusterPresentationFromDraft({
+              draft: {
+                ...executionDraft,
+                insight: executionDraft.insight,
+              },
+              actors,
+            }),
+          });
+          if (approvalResult.status !== "approved") {
+            setLastPlanReview({ status: "rejected", timestamp: Date.now(), plan: planBundle.clusterPlan });
+            setInputNotice("排队消息已保留，等待重新审批或编辑。");
+            inputRef.current?.focus();
+            return;
+          }
+          setLastPlanReview({ status: "approved", timestamp: Date.now(), plan: planBundle.clusterPlan });
+        }
+
+        const sealedContract = applyDraftExecutionContract(executionDraft, {
+          content: nextItem.content,
+          briefContent: nextItem.briefContent,
+          images: nextItem.images,
+          attachmentPaths: nextItem.attachmentPaths,
+        });
+        try {
+          queueDialogUserMemoryCapture(nextItem.displayText || nextItem.content);
+          dispatchDialogInput({
+            content: nextItem.content,
+            displayText: nextItem.displayText,
+            briefContent: nextItem.briefContent,
+            images: nextItem.images,
+            attachmentPaths: nextItem.attachmentPaths,
+            uploadRecords: nextItem.uploadRecords,
+          }, {
+            contract: sealedContract,
+            policy: persistedItem?.policy,
+            allowQueue: false,
+            focusedChildSessionId: persistedItem?.focusedChildSessionId ?? null,
+            directTargetActorId,
+            forceAsNewMessage: true,
+          });
+          removeFollowUp(nextItem.id);
+          setInputNotice(null);
+        } catch (error) {
+          applyDraftExecutionContract(null);
+          throw error;
+        }
       }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setInputNotice(message || "队列消息发送失败，请稍后重试。");
+      inputRef.current?.focus();
     } finally {
       window.setTimeout(() => {
         queuedFollowUpDispatchRef.current = false;
       }, 180);
     }
-  }, [dispatchQueuedTopLevelMessage, queuedFollowUps, removeFollowUp]);
+  }, [
+    actors,
+    applyDraftExecutionContract,
+    collaborationQueuedFollowUpById,
+    coordinatorActorId,
+    dispatchDialogInput,
+    getSystem,
+    openPlanApprovalDialog,
+    queueDialogUserMemoryCapture,
+    queuedFollowUps,
+    removeFollowUp,
+    requirePlanApproval,
+    routeTask,
+    runQueuedFollowUp,
+  ]);
+
+  const handleRunNextQueuedFollowUp = useCallback(async () => {
+    await handleRunQueuedFollowUpItem();
+  }, [handleRunQueuedFollowUpItem]);
 
   useEffect(() => {
     if (queuedFollowUps.length === 0) {
@@ -1795,14 +1905,15 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     if (hasRunningActors) return;
     if (pendingUserInteractions.length > 0) return;
     if (queuedFollowUps.length === 0) return;
+    if (queuedFollowUps[0]?.contractStatus !== "ready") return;
     if (queuedFollowUpDispatchRef.current) return;
 
-    void handleRunNextQueuedFollowUp();
+    void handleRunQueuedFollowUpItem();
   }, [
-    handleRunNextQueuedFollowUp,
+    handleRunQueuedFollowUpItem,
     hasRunningActors,
     pendingUserInteractions.length,
-    queuedFollowUps.length,
+    queuedFollowUps,
   ]);
 
   const handleSend = useCallback(async () => {
@@ -1837,16 +1948,6 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
 
     if (!content && !hasImages) return;
 
-    const briefContent = hasContext
-      ? composeInputWithAttachmentSummary(userText, attachmentSummary)
-      : undefined;
-    const committedDispatchInsight = inferDialogDispatchInsight({
-      content,
-      attachmentSummary: briefContent,
-      attachmentPaths: inputAttachmentPaths,
-      handoff: incomingHandoff,
-    });
-
     const imagesToSend = hasImages ? [...imagePaths] : undefined;
     const uploadRecords = attachments.length > 0 ? buildSessionUploadRecords(attachments) : [];
 
@@ -1855,42 +1956,12 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       ? pendingInteractionByMessageId.get(selectedPendingMessageId)
       : undefined;
     const sendAsNewMessage = selectedPendingMessageId === NEW_MESSAGE_TARGET;
-
-    // 单个待回复时自动绑定（兼容 useEffect 异步时序），多个时要求显式选择
-    const effectiveReplyTarget = explicitlySelected
-      ?? (hasPendingInteractions && !sendAsNewMessage && pendingUserInteractions.length === 1
-        ? pendingUserInteractions[0]
-        : undefined);
-    const replyRelatedRunId = effectiveReplyTarget
-      ? messageById.get(effectiveReplyTarget.messageId)?.relatedRunId
-      : undefined;
+    const willReplyToInteraction = !sendAsNewMessage
+      && (Boolean(explicitlySelected) || pendingUserInteractions.length === 1);
 
     // 有多个待回复交互时，必须显式选择回复目标
-    if (hasPendingInteractions && !effectiveReplyTarget && !sendAsNewMessage && pendingUserInteractions.length > 1) {
+    if (hasPendingInteractions && !sendAsNewMessage && !explicitlySelected && pendingUserInteractions.length > 1) {
       setInputNotice("当前有多个待回复问题，请先选择要回复的那一条，或选择“作为新消息发送”。");
-      inputRef.current?.focus();
-      return;
-    }
-
-    if (effectiveReplyTarget) {
-      const liveSystem = useActorSystemStore.getState().getSystem() ?? getSystem();
-      setLastCommittedDispatchInsight(committedDispatchInsight);
-      queueDialogUserMemoryCapture(trimmed);
-      replyToMessage(effectiveReplyTarget.messageId, content, {
-        _briefContent: briefContent,
-        images: imagesToSend,
-      });
-      if (uploadRecords.length > 0) {
-        liveSystem?.registerSessionUploads(uploadRecords, {
-          actorId: "user",
-          relatedRunId: replyRelatedRunId,
-        });
-      }
-      setInput("");
-      setInputNotice(null);
-      setShowMention(false);
-      clearAttachments();
-      setSourceHandoff(null);
       inputRef.current?.focus();
       return;
     }
@@ -1903,13 +1974,8 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       ? composeInputWithAttachmentSummary(cleanContent || userText, attachmentSummary)
       : undefined;
     const planAttachmentSummary = finalBrief ?? attachmentSummary ?? undefined;
-    const isSteerCommand = Boolean(targetId && finalContent.startsWith("!steer "));
-    const shouldRouteToFocusedSession = Boolean(
-      focusedSessionTask &&
-      focusedSessionTask.sessionOpen &&
-      !targetId &&
-      !isSteerCommand,
-    );
+    const steerTargetActorId = targetId ?? pendingSteerTargetActorId;
+    const isSteerCommand = Boolean(steerTargetActorId && finalContent.startsWith("!steer "));
     const dispatchInsight = inferDialogDispatchInsight({
       content: finalContent,
       attachmentSummary: planAttachmentSummary,
@@ -1946,129 +2012,98 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       }
     }
 
-    const system = currentSystem;
-    let runtimePlan: DialogExecutionPlan | null = null;
+    let sealedContract = null;
+    if (!willReplyToInteraction && !isSteerCommand) {
+      const planningRoutingMode: DialogRoutingMode =
+        routingMode === "direct" ? "coordinator" : routingMode;
+      const planBundle = buildDialogDispatchPlanBundle({
+        actors,
+        routingMode: planningRoutingMode,
+        content: finalContent,
+        attachmentSummary: planAttachmentSummary,
+        attachmentPaths: inputAttachmentPaths,
+        handoff: incomingHandoff,
+        mentionedTargetId: targetId,
+        selectedRoute: selectedSmartRoute,
+        coordinatorActorId,
+      });
+      const executionDraft = buildExecutionContractDraftFromDialog({
+        actors,
+        routingMode: planningRoutingMode,
+        content: finalContent,
+        attachmentSummary: planAttachmentSummary,
+        attachmentPaths: inputAttachmentPaths,
+        handoff: incomingHandoff,
+        mentionedTargetId: targetId,
+        selectedRoute: selectedSmartRoute,
+        coordinatorActorId,
+      });
 
-    if (
-      hasRunningActors
-      && !effectiveReplyTarget
-      && !targetId
-      && !isSteerCommand
-      && !shouldRouteToFocusedSession
-    ) {
-      enqueueFollowUp({
-        displayText: cleanContent || trimmed || userText,
+      if (planBundle && executionDraft && requirePlanApproval) {
+        const approvalResult = await openPlanApprovalDialog({
+          plan: planBundle.clusterPlan,
+          sessionId: currentSystem.sessionId,
+          presentation: buildClusterPresentationFromDraft({
+            draft: {
+              ...executionDraft,
+              insight: executionDraft.insight,
+            },
+            actors,
+          }),
+        });
+        if (approvalResult.status !== "approved") {
+          setLastPlanReview({ status: "rejected", timestamp: Date.now(), plan: planBundle.clusterPlan });
+          setShowConfig(false);
+          setOverlay(null);
+          setWorkspacePanel("plan");
+          setInputNotice("执行计划已取消，调整后可重新发送。");
+          inputRef.current?.focus();
+          return;
+        }
+        setLastPlanReview({ status: "approved", timestamp: Date.now(), plan: planBundle.clusterPlan });
+      }
+
+      sealedContract = applyDraftExecutionContract(executionDraft, {
         content: finalContent,
         briefContent: finalBrief,
         images: imagesToSend,
         attachmentPaths: inputAttachmentPaths,
-        uploadRecords,
-        routingMode,
       });
-      setLastCommittedDispatchInsight(dispatchInsight);
-      setInput("");
-      setInputNotice("当前房间仍在处理上一轮协作，这条消息已加入队列，待房间空闲后继续。");
-      setShowMention(false);
-      clearAttachments();
-      setSourceHandoff(null);
-      inputRef.current?.focus();
-      return;
     }
 
-    if (!effectiveReplyTarget && !isSteerCommand) {
-      if (shouldRouteToFocusedSession) {
-        runtimePlan = null;
-      } else {
-        const planBundle = buildDialogDispatchPlanBundle({
-          actors,
-          routingMode,
-          content: finalContent,
-          attachmentSummary: planAttachmentSummary,
-          attachmentPaths: inputAttachmentPaths,
-          handoff: incomingHandoff,
-          mentionedTargetId: targetId,
-          selectedRoute: selectedSmartRoute,
-          coordinatorActorId,
-        });
-        if (planBundle) {
-          if (requirePlanApproval) {
-            const approvalResult = await openPlanApprovalDialog({
-              plan: planBundle.clusterPlan,
-              sessionId: system?.sessionId,
-              presentation: buildDialogBoundaryApprovalPresentation({
-                planBundle,
-                actors,
-              }),
-            });
-            if (approvalResult.status !== "approved") {
-              setLastPlanReview({ status: "rejected", timestamp: Date.now(), plan: planBundle.clusterPlan });
-              setShowConfig(false);
-              setOverlay(null);
-              setWorkspacePanel("plan");
-              setInputNotice("执行计划已取消，调整后可重新发送。");
-              inputRef.current?.focus();
-              return;
-            }
-            setLastPlanReview({ status: "approved", timestamp: Date.now(), plan: planBundle.clusterPlan });
-          }
-          runtimePlan = planBundle.runtimePlan;
-        }
-      }
-    }
-
-    if (!effectiveReplyTarget) {
-      if (runtimePlan) {
-        system?.armDialogExecutionPlan(runtimePlan);
-      } else {
-        system?.clearDialogExecutionPlan();
-      }
-    }
-
+    let nextInputNotice: string | null = null;
     try {
       setLastCommittedDispatchInsight(dispatchInsight);
       queueDialogUserMemoryCapture(cleanContent || trimmed);
-      if (shouldRouteToFocusedSession && focusedSessionTask) {
-        system?.sendUserMessageToSpawnedSession(focusedSessionTask.runId, finalContent, {
-          _briefContent: finalBrief,
-          images: imagesToSend,
-        });
-      } else if (isSteerCommand && targetId) {
-        const directive = finalContent.slice(7).trim();
-        if (directive) steer(targetId, directive);
-      } else if (targetId) {
-        sendMessage("user", targetId, finalContent, { _briefContent: finalBrief, images: imagesToSend });
-      } else {
-        if (routingMode === "smart" && finalContent) {
-          if (smartRoutes.length > 0) {
-            const selectedAgent = smartRoutes[0].agentId;
-            const reason = smartRoutes[0].reason;
-            console.log(`[Smart Routing] "${finalContent.slice(0, 30)}..." → ${selectedAgent} (${reason})`);
-            sendMessage("user", selectedAgent, finalContent, { _briefContent: finalBrief, images: imagesToSend });
-            if (uploadRecords.length > 0) {
-              system?.registerSessionUploads(uploadRecords, { actorId: "user" });
-            }
-            setInput("");
-            setShowMention(false);
-            clearAttachments();
-            setSourceHandoff(null);
-            inputRef.current?.focus();
-            return;
-          }
-        }
-        if (routingMode === "broadcast") {
-          broadcastMessage("user", finalContent, { _briefContent: finalBrief, images: imagesToSend });
-        } else {
-          broadcastAndResolve("user", finalContent, { _briefContent: finalBrief, images: imagesToSend });
-        }
+      const steerDirective = isSteerCommand ? finalContent.slice(7).trim() : "";
+      if (isSteerCommand && !steerDirective) {
+        setInputNotice("请输入要发送给当前 Agent 的 steer 指令内容。");
+        inputRef.current?.focus();
+        return;
       }
-      if (uploadRecords.length > 0) {
-        system?.registerSessionUploads(uploadRecords, {
-          actorId: "user",
-          relatedRunId: shouldRouteToFocusedSession ? focusedSessionTask?.runId : undefined,
-        });
+      const result = dispatchDialogInput({
+        content: isSteerCommand ? steerDirective : finalContent,
+        displayText: isSteerCommand ? steerDirective : (cleanContent || trimmed || userText),
+        briefContent: finalBrief,
+        images: imagesToSend,
+        attachmentPaths: inputAttachmentPaths,
+        uploadRecords,
+      }, {
+        contract: sealedContract,
+        selectedPendingMessageId: explicitlySelected?.messageId,
+        forceAsNewMessage: sendAsNewMessage,
+        directTargetActorId: !isSteerCommand ? targetId ?? undefined : undefined,
+        steerTargetActorId: isSteerCommand ? steerTargetActorId ?? undefined : undefined,
+        focusedChildSessionId: isSteerCommand ? undefined : null,
+        allowQueue: !isSteerCommand,
+      });
+      if (result?.disposition === "queued") {
+        nextInputNotice = "当前房间仍在处理上一轮协作，这条消息已加入队列，待房间空闲后继续。";
       }
     } catch (error) {
-      system?.clearDialogExecutionPlan();
+      if (sealedContract) {
+        applyDraftExecutionContract(null);
+      }
       const message = error instanceof Error ? error.message : String(error);
       setInputNotice(message || "发送失败，请稍后重试。");
       inputRef.current?.focus();
@@ -2076,17 +2111,21 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     }
 
     setInput("");
-    setInputNotice(null);
+    setInputNotice(nextInputNotice);
+    setPendingSteerSessionRunId(null);
     setShowMention(false);
     clearAttachments();
     setSourceHandoff(null);
     inputRef.current?.focus();
-  }, [input, hasAttachments, imagePaths, attachments, fileContextBlock, attachmentSummary, ensureSystem, pendingUserInteractions, pendingInteractionByMessageId, selectedPendingMessageId, parseMention, actors, sendMessage, broadcastMessage, broadcastAndResolve, steer, replyToMessage, routingMode, routeTask, clearAttachments, requirePlanApproval, openPlanApprovalDialog, getSystem, coordinatorActorId, focusedSessionTask, messageById, queueDialogUserMemoryCapture, inputAttachmentPaths, incomingHandoff, actorSupportsImageInput, toast, enqueueFollowUp, hasRunningActors, setSourceHandoff, activeDialogView]);
+  }, [input, hasAttachments, imagePaths, attachments, fileContextBlock, attachmentSummary, ensureSystem, pendingUserInteractions, pendingInteractionByMessageId, selectedPendingMessageId, parseMention, actors, routingMode, routeTask, clearAttachments, requirePlanApproval, openPlanApprovalDialog, coordinatorActorId, queueDialogUserMemoryCapture, inputAttachmentPaths, incomingHandoff, actorSupportsImageInput, toast, dispatchDialogInput, applyDraftExecutionContract, getSystem, setSourceHandoff, activeDialogView, pendingSteerTargetActorId]);
 
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value;
     setInput(val);
     if (inputNotice) setInputNotice(null);
+    if (pendingSteerSessionRunId && val.trim().length > 0 && !val.trimStart().startsWith("!steer")) {
+      setPendingSteerSessionRunId(null);
+    }
 
     const lastAt = val.lastIndexOf("@");
     if (lastAt >= 0 && lastAt === val.length - 1) {
@@ -2098,12 +2137,13 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     } else {
       setShowMention(false);
     }
-  }, [inputNotice]);
+  }, [inputNotice, pendingSteerSessionRunId]);
 
   const handleMentionSelect = useCallback((name: string) => {
     const lastAt = input.lastIndexOf("@");
     const before = lastAt >= 0 ? input.slice(0, lastAt) : input;
     setInput(`${before}@${name} `);
+    setPendingSteerSessionRunId(null);
     setShowMention(false);
     inputRef.current?.focus();
   }, [input]);
@@ -2262,13 +2302,13 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       });
     }
     for (const sessionId of runtimeOnlySessions) {
-      await abortRuntimeSession("dialog", sessionId);
+      await abortRuntimeSession("im_conversation", sessionId);
       removedTotal += 1;
     }
 
     if (removedTotal > 0) {
       if (activeChannelConversation?.activeSessionId) {
-        useRuntimeStateStore.getState().setForegroundSession("dialog", activeChannelConversation.activeSessionId);
+        useRuntimeStateStore.getState().setForegroundSession("im_conversation", activeChannelConversation.activeSessionId);
       }
       toast("success", `已清理 ${removedTotal} 个多余${activeDialogView === "dingtalk" ? "钉钉" : "飞书"}会话`);
     } else {
@@ -2393,7 +2433,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     if (openSessionCount > 0) {
       badges.push({
         key: "open-sessions",
-        label: `${openSessionCount} 个子会话可继续`,
+        label: `${openSessionCount} 个后台线程保留中`,
         className: "bg-blue-500/10 text-blue-700",
       });
     }
@@ -2440,7 +2480,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
         id: a.id, name: a.roleName, status: a.status, capabilities: a.capabilities?.tags,
       }));
       const spawnEvents = useActorSystemStore.getState().spawnedTaskEvents || [];
-      const tasks = spawnEvents.map((e: any) => ({
+      const tasks = spawnEvents.map((e: SpawnedTaskEventDetail) => ({
         spawner: e.spawnerActorId, target: e.targetActorId, label: e.label || "", status: e.status,
       }));
       const dialog = dialogHistory.map((m) => ({ from: m.from, to: m.to }));
@@ -2551,108 +2591,73 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
 
           <div className="flex flex-col gap-2.5">
             {dialogTopSessionItems.length > 0 && (
-              <div className="grid gap-1.5 md:grid-cols-3">
-                {dialogTopSessionItems.map((item) => {
-                  const isSelected = item.key === activeDialogView;
-                  const isConnectable = item.key !== "local" && item.canAutoConnect;
-                  const isConnecting = item.connectionState === "connecting";
-                  const indicatorClass = item.connectionState === "connected"
-                    ? "bg-emerald-500"
-                    : item.connectionState === "error"
-                      ? "bg-amber-500"
-                      : item.connectionState === "unconfigured"
-                        ? "bg-slate-400"
-                        : "bg-slate-300";
-                  const CardIcon = item.key === "local"
-                    ? MessageSquareText
-                    : item.key === "dingtalk"
-                      ? Smartphone
-                      : Bot;
-                  const cardHint = item.key === "local"
-                    ? "本地协作"
-                    : item.connectionState === "connected"
-                      ? "最近会话"
-                      : item.connectionState === "connecting"
-                        ? "建立连接中"
-                        : item.connectionState === "error"
-                          ? "点击重连"
-                          : item.connectionState === "unconfigured"
-                            ? "历史预览"
-                            : "点击连接";
-                  const statusBadgeLabel = item.connectionState === "connected"
-                    ? "在线"
-                    : item.connectionState === "connecting"
-                      ? "连接中"
+              <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/32 px-2.5 py-2">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {dialogTopSessionItems.map((item) => {
+                    const isSelected = item.key === activeDialogView;
+                    const isConnectable = item.key !== "local" && item.canAutoConnect;
+                    const isConnecting = item.connectionState === "connecting";
+                    const indicatorClass = item.connectionState === "connected"
+                      ? "bg-emerald-500"
                       : item.connectionState === "error"
-                        ? "异常"
+                        ? "bg-amber-500"
                         : item.connectionState === "unconfigured"
-                          ? "历史"
-                          : "未连接";
-                  const footerLabel = item.key === "local"
-                    ? "房间主视图"
-                    : isSelected
-                      ? "当前渠道"
-                      : isConnectable
-                        ? "点击进入"
-                        : "可切换";
-                  const metaLabel = item.updatedAt > 0
-                    ? `${footerLabel} · ${formatSessionStripTime(item.updatedAt)}`
-                    : footerLabel;
-                  return (
-                    <button
-                      key={item.key}
-                      onClick={() => { void handleDialogTopViewClick(item); }}
-                      className={`group h-[62px] rounded-[16px] border px-2.5 py-1.5 text-left transition-all ${
-                        isSelected
-                          ? "border-[var(--color-accent)]/25 bg-[linear-gradient(145deg,rgba(99,102,241,0.12),rgba(255,255,255,0.96)_72%)] text-[var(--color-accent)] shadow-[0_12px_24px_-22px_rgba(99,102,241,0.45)]"
-                          : item.key !== "local" && item.connectionState !== "connected"
-                            ? "border-[var(--color-border)] bg-[linear-gradient(145deg,rgba(248,250,252,0.72),rgba(255,255,255,0.96))] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/18"
-                            : "border-[var(--color-border)] bg-[linear-gradient(145deg,rgba(255,255,255,0.96),rgba(248,250,252,0.88))] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/16 hover:text-[var(--color-text)]"
-                      }`}
-                      title={`${item.label} · ${item.connectionLabel}${isConnectable ? " · 点击自动连接" : ""}${item.statusLabel ? ` · ${item.statusLabel}` : ""}`}
-                    >
-                      <div className="flex h-full items-center gap-2">
-                        <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-xl border ${
-                            isSelected
-                              ? "border-[var(--color-accent)]/20 bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
-                              : "border-[var(--color-border)] bg-[var(--color-bg)] text-[var(--color-text-secondary)] group-hover:text-[var(--color-text)]"
-                          }`}>
-                          <CardIcon className="h-3.5 w-3.5" />
-                        </div>
-                        <div className="flex min-w-0 flex-1 items-center justify-between gap-2">
-                          <div className="min-w-0 flex-1">
-                            <div className={`truncate text-[12px] font-semibold leading-none ${isSelected ? "text-[var(--color-accent)]" : "text-[var(--color-text)]"}`}>
-                              {item.label}
-                            </div>
-                            <div className="mt-1 truncate text-[9px] leading-none text-[var(--color-text-secondary)]">
-                              {cardHint}
-                              <span className="mx-1 text-[var(--color-text-tertiary)]">/</span>
-                              {metaLabel}
-                            </div>
-                          </div>
-                          <div className="flex shrink-0 items-center gap-1.5">
-                            <span className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[9px] ${
-                              item.connectionState === "connected"
-                                ? "bg-emerald-500/10 text-emerald-600"
-                                : item.connectionState === "connecting"
-                                  ? "bg-blue-500/10 text-blue-600"
-                                  : item.connectionState === "error"
-                                    ? "bg-amber-500/10 text-amber-700"
-                                    : "bg-[var(--color-bg)] text-[var(--color-text-tertiary)]"
-                            }`}>
-                              {isConnecting ? (
-                                <Loader2 className="h-2.5 w-2.5 animate-spin" />
-                              ) : (
-                                <span className={`h-1.5 w-1.5 rounded-full ${indicatorClass}`} />
-                              )}
-                              <span>{statusBadgeLabel}</span>
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    </button>
-                  );
-                })}
+                          ? "bg-slate-400"
+                          : "bg-slate-300";
+                    const statusBadgeLabel = item.connectionState === "connected"
+                      ? "在线"
+                      : item.connectionState === "connecting"
+                        ? "连接中"
+                        : item.connectionState === "error"
+                          ? "异常"
+                          : item.connectionState === "unconfigured"
+                            ? "历史"
+                            : "未连接";
+                    const CardIcon = item.key === "local"
+                      ? MessageSquareText
+                      : item.key === "dingtalk"
+                        ? Smartphone
+                        : Bot;
+
+                    return (
+                      <button
+                        key={item.key}
+                        onClick={() => { void handleDialogTopViewClick(item); }}
+                        className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[11px] transition-colors ${
+                          isSelected
+                            ? "border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
+                            : "border-[var(--color-border)] bg-[var(--color-bg)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/20 hover:text-[var(--color-text)]"
+                        }`}
+                        title={`${item.label} · ${item.connectionLabel}${isConnectable ? " · 点击自动连接" : ""}${item.statusLabel ? ` · ${item.statusLabel}` : ""}`}
+                      >
+                        <CardIcon className="h-3.5 w-3.5" />
+                        <span>{item.label}</span>
+                        <span className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[9px] ${
+                          item.connectionState === "connected"
+                            ? "bg-emerald-500/10 text-emerald-600"
+                            : item.connectionState === "connecting"
+                              ? "bg-blue-500/10 text-blue-600"
+                              : item.connectionState === "error"
+                                ? "bg-amber-500/10 text-amber-700"
+                                : "bg-[var(--color-bg-secondary)] text-[var(--color-text-tertiary)]"
+                        }`}>
+                          {isConnecting ? (
+                            <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                          ) : (
+                            <span className={`h-1.5 w-1.5 rounded-full ${indicatorClass}`} />
+                          )}
+                          <span>{statusBadgeLabel}</span>
+                        </span>
+                      </button>
+                    );
+                  })}
+
+                  {activeDialogViewSummary && (
+                    <span className="ml-auto text-[10px] text-[var(--color-text-secondary)]">
+                      {activeDialogViewSummary}
+                    </span>
+                  )}
+                </div>
               </div>
             )}
 
@@ -2687,16 +2692,19 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                     artifacts={artifacts}
                     sessionUploads={sessionUploads}
                     spawnedTasks={spawnedTasks}
+                    childSessions={collaborationSnapshot?.childSessions ?? []}
+                    contractDelegations={collaborationSnapshot?.contractDelegations ?? []}
                     selectedRunId={selectedSpawnRunId}
                     onSelectRunId={setSelectedSpawnRunId}
-                    focusedSessionRunId={focusedSpawnedSessionRunId}
-                    onFocusSession={focusSpawnedSession}
+                    onSteerSession={handlePrepareChildSessionSteer}
                     onCloseSession={closeSpawnedSession}
+                    onKillSession={handleAbortChildSession}
                     onContinueTaskWithAgent={handleContinueSpawnedTaskWithAgent}
                     draftPlan={draftDispatchPlan}
                     draftInsight={draftDispatchInsight}
                     contextBreakdown={contextBreakdown}
                     contextSnapshot={contextSnapshot}
+                    dialogRoomCompaction={dialogRoomCompaction}
                     dialogContextSummary={dialogContextSummary}
                     requirePlanApproval={requirePlanApproval}
                     onTogglePlanApproval={setRequirePlanApproval}
@@ -2726,12 +2734,12 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                     const targetSessionId = targetConversation?.activeSessionId
                       || targetConversation?.conversation.topics[0]?.sessionId;
                     if (targetSessionId) {
-                      useRuntimeStateStore.getState().setForegroundSession("dialog", targetSessionId);
+                      useRuntimeStateStore.getState().setForegroundSession("im_conversation", targetSessionId);
                     }
                   }}
                   onClearExtraConversations={handleClearExtraChannelConversations}
                   onReturnToCurrentRoom={currentRoomSessionId
-                    ? () => useRuntimeStateStore.getState().setForegroundSession("dialog", currentRoomSessionId)
+                    ? returnToLocalDialogRoom
                     : null}
                   renderMessageBubble={({ message, actorIndex, actorName, targetName, isUser }) => (
                     <MessageBubble
@@ -2866,7 +2874,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                       isUser={isUser}
                       isWaitingReply={isWaiting}
                       pendingInteraction={pendingInteraction}
-                      onReplyToInteraction={replyToMessage}
+                      onReplyToInteraction={handleInteractionReply}
                       onOpenApprovalDrawer={handleOpenApprovalDrawer}
                     />
                   </div>
@@ -3150,7 +3158,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
           />
 
           <div className="overflow-visible rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-[0_12px_32px_-24px_rgba(15,23,42,0.35)]">
-            {(incomingHandoff || dialogMemoryWorkspaceId || dialogContextSummary || dialogHistory.length > 0 || focusedSessionTask || queuedFollowUps.length > 0 || pendingUserInteractions.length > 0 || attachments.length > 0 || inputNotice || activeDialogView !== "local") && (
+            {(incomingHandoff || dialogMemoryWorkspaceId || dialogContextSummary || dialogHistory.length > 0 || openSessionCount > 0 || queuedFollowUps.length > 0 || pendingUserInteractions.length > 0 || attachments.length > 0 || inputNotice || activeDialogView !== "local") && (
               <div className="space-y-2 border-b border-[var(--color-border)] bg-[linear-gradient(135deg,rgba(15,23,42,0.02),transparent_45%)] px-3 py-2.5">
                 {activeDialogView !== "local" ? (
                   <div className="flex flex-wrap items-center gap-2 rounded-full border border-sky-500/15 bg-sky-500/10 px-3 py-1.5 text-[10px] text-sky-700">
@@ -3160,7 +3168,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                     </span>
                     {currentRoomSessionId && (
                       <button
-                        onClick={() => useRuntimeStateStore.getState().setForegroundSession("dialog", currentRoomSessionId)}
+                        onClick={returnToLocalDialogRoom}
                         className="rounded-full border border-sky-500/20 px-2.5 py-1 text-[10px] hover:border-sky-500/40 transition-colors"
                       >
                         返回本机
@@ -3179,21 +3187,12 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                       />
                     )}
 
-                    {focusedSessionTask && (
-                      <div className="flex flex-wrap items-center gap-2 rounded-xl border border-blue-500/15 bg-blue-500/10 px-3 py-1.5 text-[10px] text-blue-700">
-                        <Network className="w-3 h-3" />
-                        <span>
-                          当前正在聚焦子会话：
-                          {focusedSessionLabel}
-                        </span>
-                        <button
-                          onClick={() => focusSpawnedSession(null)}
-                          className="ml-auto rounded-full border border-blue-500/20 px-2.5 py-1 text-[10px] hover:border-blue-500/40 transition-colors"
-                        >
-                          退出聚焦
-                        </button>
-                      </div>
-                    )}
+                    <DialogChildSessionStrip
+                      sessions={collaborationSnapshot?.childSessions ?? []}
+                      actorNameById={actorNameById}
+                      pendingSteerSessionRunId={pendingSteerSessionRunId}
+                      onOpenWorkspace={() => handleWorkspacePanelChange("subtasks")}
+                    />
 
                     {queuedFollowUps.length > 0 && (
                       <DialogFollowUpDock
@@ -3202,8 +3201,14 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                         onRunNext={() => {
                           void handleRunNextQueuedFollowUp();
                         }}
+                        onRunItem={(id) => {
+                          void handleRunQueuedFollowUpItem(id);
+                        }}
+                        onEditItem={(id) => {
+                          void handleEditQueuedFollowUpItem(id);
+                        }}
                         onRemove={removeFollowUp}
-                        onClear={clearFollowUps}
+                        onClear={clearQueuedFollowUps}
                       />
                     )}
 
@@ -3260,7 +3265,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                     )}
 
                     {attachments.length > 0 && (
-                      <div className="flex max-h-[96px] flex-wrap gap-1.5 overflow-y-auto pr-1">
+                      <div className="flex flex-wrap gap-1.5">
                         {attachments.map((att) => (
                           <div
                             key={att.id}
@@ -3308,7 +3313,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                 </div>
                 {currentRoomSessionId && (
                   <button
-                    onClick={() => useRuntimeStateStore.getState().setForegroundSession("dialog", currentRoomSessionId)}
+                    onClick={returnToLocalDialogRoom}
                     className="inline-flex items-center gap-1.5 rounded-full border border-sky-500/20 bg-sky-500/8 px-3 py-1.5 text-[11px] text-sky-700 hover:border-sky-500/35 hover:bg-sky-500/12 transition-colors"
                   >
                     <Users className="h-3.5 w-3.5" />
@@ -3335,11 +3340,11 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                       ? "作为新消息发送，不会绑定到待回复问题..."
                       : selectedPendingInteractionLabel
                         ? `回复${selectedPendingInteractionLabel}...`
-                        : focusedSessionLabel
-                          ? `继续和 ${focusedSessionLabel} 的子会话...`
+                        : pendingSteerTargetLabel
+                          ? `向 ${pendingSteerTargetLabel} 发送 steer 指令...`
                           : pendingUserInteractions.length > 0
                             ? `有 ${pendingUserInteractions.length} 条待回复交互，先选择要回复的问题...`
-                            : "输入消息，Shift+Enter 换行，输入 @ 可指定发送给某个 Agent"}
+                            : "输入消息给主 Agent，必要时它会自动复用后台线程或分派子 Agent"}
                     value={input}
                     onChange={handleInputChange}
                     onKeyDown={handleKeyDown}
@@ -3377,13 +3382,21 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                       <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-2.5 py-1 text-[10px] text-amber-700">
                         当前回复 {selectedPendingInteractionLabel}
                       </span>
-                    ) : focusedSessionTask ? (
-                      <span className="rounded-full border border-blue-500/20 bg-blue-500/10 px-2.5 py-1 text-[10px] text-blue-700">
-                        已聚焦子会话
-                      </span>
+                    ) : pendingSteerTargetLabel ? (
+                      <button
+                        type="button"
+                        onClick={handleCancelPendingSteer}
+                        className="inline-flex items-center gap-1 rounded-full border border-sky-500/20 bg-sky-500/10 px-2.5 py-1 text-[10px] text-sky-700 hover:border-sky-500/35 hover:bg-sky-500/15 transition-colors"
+                      >
+                        Steer 到 {pendingSteerTargetLabel}
+                        <X className="h-3 w-3" />
+                      </button>
                     ) : coordinatorName ? (
-                      <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2.5 py-1 text-[10px] text-[var(--color-text-secondary)]">
-                        默认发给 {coordinatorName}
+                      <span
+                        className="rounded-full border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2.5 py-1 text-[10px] text-[var(--color-text-secondary)]"
+                        title="是否需要后台线程由主代理自动判断"
+                      >
+                        默认发给 {coordinatorName} · 自动判断是否开线程
                       </span>
                     ) : null}
                   </div>

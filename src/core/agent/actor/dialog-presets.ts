@@ -1,4 +1,5 @@
 import type {
+  ExecutionPolicy,
   MiddlewareOverrides,
   ThinkingLevel,
   ToolPolicy,
@@ -23,6 +24,7 @@ export interface DialogPresetParticipant {
   systemPromptOverride?: string;
   workspace?: string;
   toolPolicy?: ToolPolicy;
+  executionPolicy?: ExecutionPolicy;
   middlewareOverrides?: MiddlewareOverrides;
   timeoutSeconds?: number;
   contextTokens?: number;
@@ -47,6 +49,16 @@ const CODER_POLICY: ToolPolicy = {
   deny: ["delete_file", "native_*", "ssh_*"],
 };
 
+const READ_ONLY_EXECUTION_POLICY: ExecutionPolicy = {
+  accessMode: "read_only",
+  approvalMode: "permissive",
+};
+
+const CODER_EXECUTION_POLICY: ExecutionPolicy = {
+  accessMode: "auto",
+  approvalMode: "normal",
+};
+
 const SAFE_APPROVALS: MiddlewareOverrides = {
   approvalLevel: "permissive",
 };
@@ -62,6 +74,7 @@ const CODE_REVIEW_PARTICIPANTS: DialogPresetParticipant[] = [
     customName: "Code Reviewer",
     suggestedCapabilities: ["coordinator", "code_review", "code_analysis"],
     toolPolicy: READ_ONLY_POLICY,
+    executionPolicy: READ_ONLY_EXECUTION_POLICY,
     middlewareOverrides: SAFE_APPROVALS,
     contextTokens: 12000,
     thinkingLevel: "medium",
@@ -78,6 +91,7 @@ const CODE_REVIEW_PARTICIPANTS: DialogPresetParticipant[] = [
     customName: "Senior Developer",
     suggestedCapabilities: ["code_write", "code_analysis"],
     toolPolicy: CODER_POLICY,
+    executionPolicy: CODER_EXECUTION_POLICY,
     middlewareOverrides: NORMAL_APPROVALS,
     contextTokens: 12000,
     thinkingLevel: "medium",
@@ -97,6 +111,7 @@ const ARCHITECTURE_REVIEW_PARTICIPANTS: DialogPresetParticipant[] = [
     customName: "Architect",
     suggestedCapabilities: ["coordinator", "architecture"],
     toolPolicy: READ_ONLY_POLICY,
+    executionPolicy: READ_ONLY_EXECUTION_POLICY,
     middlewareOverrides: SAFE_APPROVALS,
     contextTokens: 14000,
     thinkingLevel: "high",
@@ -113,6 +128,7 @@ const ARCHITECTURE_REVIEW_PARTICIPANTS: DialogPresetParticipant[] = [
     customName: "Security Expert",
     suggestedCapabilities: ["security"],
     toolPolicy: READ_ONLY_POLICY,
+    executionPolicy: READ_ONLY_EXECUTION_POLICY,
     middlewareOverrides: SAFE_APPROVALS,
     contextTokens: 10000,
     systemPromptOverride: `你是一位安全专家。
@@ -126,6 +142,7 @@ const ARCHITECTURE_REVIEW_PARTICIPANTS: DialogPresetParticipant[] = [
     customName: "Performance Engineer",
     suggestedCapabilities: ["performance"],
     toolPolicy: READ_ONLY_POLICY,
+    executionPolicy: READ_ONLY_EXECUTION_POLICY,
     middlewareOverrides: SAFE_APPROVALS,
     contextTokens: 10000,
     systemPromptOverride: `你是一位性能工程师。
@@ -144,6 +161,7 @@ const BRAINSTORMING_PARTICIPANTS: DialogPresetParticipant[] = [
     customName: "Creative Thinker",
     suggestedCapabilities: ["coordinator", "creative"],
     toolPolicy: READ_ONLY_POLICY,
+    executionPolicy: READ_ONLY_EXECUTION_POLICY,
     middlewareOverrides: SAFE_APPROVALS,
     thinkingLevel: "high",
     systemPromptOverride: `你是一位富有创造力的思考者，担任此次头脑风暴的协调者。
@@ -159,6 +177,7 @@ const BRAINSTORMING_PARTICIPANTS: DialogPresetParticipant[] = [
     customName: "Devil's Advocate",
     suggestedCapabilities: ["creative", "code_analysis"],
     toolPolicy: READ_ONLY_POLICY,
+    executionPolicy: READ_ONLY_EXECUTION_POLICY,
     middlewareOverrides: SAFE_APPROVALS,
     thinkingLevel: "medium",
     systemPromptOverride: `你是一位"魔鬼代言人"。
@@ -172,6 +191,7 @@ const BRAINSTORMING_PARTICIPANTS: DialogPresetParticipant[] = [
     customName: "Synthesizer",
     suggestedCapabilities: ["synthesis"],
     toolPolicy: READ_ONLY_POLICY,
+    executionPolicy: READ_ONLY_EXECUTION_POLICY,
     middlewareOverrides: SAFE_APPROVALS,
     contextTokens: 12000,
     systemPromptOverride: `你是一位综合分析者。
@@ -189,6 +209,7 @@ const DEBUG_SESSION_PARTICIPANTS: DialogPresetParticipant[] = [
     customName: "Debugger",
     suggestedCapabilities: ["coordinator", "debugging", "code_analysis"],
     toolPolicy: READ_ONLY_POLICY,
+    executionPolicy: READ_ONLY_EXECUTION_POLICY,
     middlewareOverrides: SAFE_APPROVALS,
     contextTokens: 12000,
     thinkingLevel: "high",
@@ -205,6 +226,7 @@ const DEBUG_SESSION_PARTICIPANTS: DialogPresetParticipant[] = [
     customName: "Fixer",
     suggestedCapabilities: ["code_write", "testing"],
     toolPolicy: CODER_POLICY,
+    executionPolicy: CODER_EXECUTION_POLICY,
     middlewareOverrides: NORMAL_APPROVALS,
     timeoutSeconds: 600,
     contextTokens: 12000,

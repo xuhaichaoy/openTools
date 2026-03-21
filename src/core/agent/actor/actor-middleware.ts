@@ -1,7 +1,7 @@
 import type { AgentTool, AgentStep } from "@/plugins/builtin/SmartAgent/core/react-agent";
 import type { AgentRole } from "@/core/agent/cluster/types";
 import type { ActorSystem } from "./actor-system";
-import type { InboxMessage, ToolPolicy, MiddlewareOverrides } from "./types";
+import type { ExecutionPolicy, InboxMessage, ToolPolicy, MiddlewareOverrides } from "./types";
 import type { AskUserCallback } from "./agent-actor";
 
 /**
@@ -24,6 +24,7 @@ export interface ActorRunContext {
   readonly workspace?: string;
   readonly contextTokens?: number;
   readonly toolPolicy?: ToolPolicy;
+  readonly executionPolicy?: ExecutionPolicy;
   readonly actorSystem?: ActorSystem;
   readonly askUser?: AskUserCallback;
   readonly confirmDangerousAction?: (toolName: string, params: Record<string, unknown>) => Promise<boolean>;

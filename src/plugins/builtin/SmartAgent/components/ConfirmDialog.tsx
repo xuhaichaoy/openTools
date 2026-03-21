@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { createPortal } from "react-dom";
 import { AlertCircle, ChevronDown, ChevronRight } from "lucide-react";
+import type { ToolApprovalRisk } from "@/core/agent/actor/tool-approval-policy";
 
 export interface ConfirmResult {
   confirmed: boolean;
@@ -9,7 +10,24 @@ export interface ConfirmResult {
 interface ConfirmDialogProps {
   toolName: string;
   params: Record<string, unknown>;
+  risk?: ToolApprovalRisk;
+  reason?: string;
   onResult: (result: ConfirmResult) => void;
+}
+
+function formatRiskLabel(risk?: ToolApprovalRisk): string | null {
+  switch (risk) {
+    case "high":
+      return "高风险";
+    case "medium":
+      return "中风险";
+    case "unknown":
+      return "风险不明确";
+    case "low":
+      return "低风险";
+    default:
+      return null;
+  }
 }
 
 function describeAction(
@@ -54,16 +72,31 @@ function describeAction(
     return path ? `即将删除：${path}` : "即将执行删除操作";
   }
 
+  if (name.includes("abort_child_session")) {
+    const childSession = String(params.childSession || params.runId || "");
+    const actor = String(params.actor || "");
+    if (childSession && actor) {
+      return `即将中止子会话：${childSession}（${actor}）`;
+    }
+    if (childSession) {
+      return `即将中止子会话：${childSession}`;
+    }
+    return "即将中止一个子会话，并打断它后续的协作执行";
+  }
+
   return `即将调用工具 ${toolName}`;
 }
 
 export function ConfirmDialog({
   toolName,
   params,
+  risk,
+  reason,
   onResult,
 }: ConfirmDialogProps) {
   const [showDetail, setShowDetail] = useState(false);
   const description = describeAction(toolName, params);
+  const riskLabel = formatRiskLabel(risk);
 
   const dialog = (
     <div className="fixed inset-0 z-9999 flex items-center justify-center bg-black/40 backdrop-blur-sm">
@@ -80,6 +113,26 @@ export function ConfirmDialog({
         <p className="text-sm text-[var(--color-text)] mb-3 leading-relaxed">
           {description}
         </p>
+
+        {(riskLabel || reason) && (
+          <div className="mb-3 rounded-lg border border-amber-500/15 bg-amber-500/6 px-3 py-2">
+            <div className="flex flex-wrap items-center gap-2 text-[11px]">
+              {riskLabel && (
+                <span className="rounded-full bg-amber-500/12 px-2 py-0.5 font-medium text-amber-600">
+                  {riskLabel}
+                </span>
+              )}
+              <span className="text-[var(--color-text-secondary)]">
+                自动审核未直接放行，已升级到人工确认。
+              </span>
+            </div>
+            {reason && (
+              <div className="mt-1 text-[11px] leading-5 text-[var(--color-text-secondary)]">
+                {reason}
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="mb-4">
           <button

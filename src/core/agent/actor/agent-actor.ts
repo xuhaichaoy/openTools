@@ -18,6 +18,10 @@ import {
   type FollowUpPromptDescriptor,
 } from "./actor-follow-up-prompt";
 import { autoExtractMemories } from "./actor-memory";
+import {
+  isDialogContextPressureError,
+  recoverDialogRoomCompactionFromContextPressure,
+} from "./dialog-context-pressure";
 import { validateActorTaskResult } from "./spawned-task-result-validator";
 import { appendToolCallSync as appendToolCall, appendToolResultSync as appendToolResult } from "./actor-transcript";
 import type { ActorRunContext } from "./actor-middleware";
@@ -33,6 +37,7 @@ import type {
   ActorRunOverrides,
   ActorStatus,
   ActorTask,
+  ExecutionPolicy,
   InboxMessage,
   MiddlewareOverrides,
   ThinkingLevel,
@@ -232,6 +237,7 @@ export class AgentActor {
   private _workspace?: string;
   private _contextTokens?: number;
   private _thinkingLevel?: ThinkingLevel;
+  private _executionPolicy?: ExecutionPolicy;
   private _middlewareOverrides?: import("./types").MiddlewareOverrides;
 
   /** 会话记忆：跨任务保留对话上下文（对标 OpenClaw 持久会话） */
@@ -263,6 +269,7 @@ export class AgentActor {
     this._workspace = config.workspace;
     this._contextTokens = config.contextTokens;
     this._thinkingLevel = config.thinkingLevel;
+    this._executionPolicy = config.executionPolicy;
     this._middlewareOverrides = config.middlewareOverrides;
     this.confirmDangerousAction = opts?.confirmDangerousAction;
     this.actorSystem = opts?.actorSystem;
@@ -400,6 +407,14 @@ export class AgentActor {
     };
   }
 
+  get executionPolicy(): ExecutionPolicy | undefined {
+    if (!this._executionPolicy) return undefined;
+    return {
+      ...(this._executionPolicy.accessMode ? { accessMode: this._executionPolicy.accessMode } : {}),
+      ...(this._executionPolicy.approvalMode ? { approvalMode: this._executionPolicy.approvalMode } : {}),
+    };
+  }
+
   get middlewareOverrides(): MiddlewareOverrides | undefined {
     if (!this._middlewareOverrides) return undefined;
     return {
@@ -422,6 +437,7 @@ export class AgentActor {
     workspace?: string;
     thinkingLevel?: ThinkingLevel;
     toolPolicy?: ToolPolicy;
+    executionPolicy?: ExecutionPolicy;
     middlewareOverrides?: MiddlewareOverrides;
     capabilities?: AgentCapabilities;
   }): void {
@@ -431,6 +447,7 @@ export class AgentActor {
     if (patch.workspace !== undefined) this._workspace = patch.workspace || undefined;
     if (patch.thinkingLevel !== undefined) this._thinkingLevel = patch.thinkingLevel;
     if (patch.toolPolicy !== undefined) this.toolPolicy = patch.toolPolicy;
+    if (patch.executionPolicy !== undefined) this._executionPolicy = patch.executionPolicy;
     if (patch.middlewareOverrides !== undefined) this._middlewareOverrides = patch.middlewareOverrides;
     if (patch.capabilities !== undefined) this._capabilities = patch.capabilities;
   }
@@ -1117,6 +1134,7 @@ export class AgentActor {
     images?: string[],
     onStep?: (step: AgentStep) => void,
     runOverrides?: ActorRunOverrides,
+    allowContextRecovery = true,
   ): Promise<string> {
     const activeImageRefs = new Set<string>((images ?? []).filter(Boolean));
     const mergeActiveImages = (nextImages?: string[]) => {
@@ -1149,6 +1167,7 @@ export class AgentActor {
       : this.systemPromptOverride;
     const effectiveContextTokens = runOverrides?.contextTokens ?? this._contextTokens;
     const effectiveToolPolicy = runOverrides?.toolPolicy ?? this.toolPolicy;
+    const effectiveExecutionPolicy = runOverrides?.executionPolicy ?? this._executionPolicy;
     const effectiveMiddlewareOverrides = runOverrides?.middlewareOverrides ?? this._middlewareOverrides;
     const effectiveThinkingLevel = runOverrides?.thinkingLevel ?? this._thinkingLevel;
     const effectiveTemperature = runOverrides?.temperature
@@ -1174,6 +1193,7 @@ export class AgentActor {
       workspace: this._workspace,
       contextTokens: effectiveContextTokens,
       toolPolicy: effectiveToolPolicy,
+      executionPolicy: effectiveExecutionPolicy,
       actorSystem: this.actorSystem,
       askUser: this.askUser,
       confirmDangerousAction: this.confirmDangerousAction,
@@ -1257,8 +1277,47 @@ export class AgentActor {
       }
       const answer = await agent.run(query, signal, images);
       return answer;
+    } catch (error) {
+      const recovered = allowContextRecovery
+        ? await this.tryRecoverDialogContextPressure(query, onStep, error)
+        : false;
+      if (recovered) {
+        return this.runWithInbox(query, activeImageRefs.size > 0 ? [...activeImageRefs] : images, onStep, runOverrides, false);
+      }
+      throw error;
     } finally {
       this.abortController = null;
     }
+  }
+
+  private async tryRecoverDialogContextPressure(
+    query: string,
+    onStep: ((step: AgentStep) => void) | undefined,
+    error: unknown,
+  ): Promise<boolean> {
+    if (!this.actorSystem) return false;
+    if (!isDialogContextPressureError(error)) return false;
+
+    const recoveredCompaction = await recoverDialogRoomCompactionFromContextPressure(this.actorSystem)
+      .catch(() => null);
+    if (!recoveredCompaction) return false;
+
+    const reasonText = (recoveredCompaction.triggerReasons ?? [])
+      .slice(0, 2)
+      .join("；");
+    onStep?.({
+      type: "observation",
+      content:
+        `检测到当前 Dialog 房间上下文压力过大，已自动压缩较早历史并保留续跑线索${reasonText ? `（${reasonText}）` : ""}，准备基于新摘要重试一次。`,
+      toolName: "dialog_room_compaction",
+      timestamp: Date.now(),
+    });
+    actorWarnLog(this.role.name, "runWithInbox: recovered from dialog context pressure", {
+      queryPreview: query.slice(0, 120),
+      compactedMessageCount: recoveredCompaction.compactedMessageCount,
+      compactedSpawnedTaskCount: recoveredCompaction.compactedSpawnedTaskCount,
+      compactedArtifactCount: recoveredCompaction.compactedArtifactCount,
+    });
+    return true;
   }
 }

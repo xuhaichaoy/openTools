@@ -1,4 +1,11 @@
 import { create } from "zustand";
+import {
+  assessToolApproval,
+  buildToolApprovalCacheKey,
+  type ToolApprovalAssessment,
+  type ToolApprovalTrustMode,
+} from "@/core/agent/actor/tool-approval-policy";
+import type { ApprovalLevel } from "@/core/agent/actor/types";
 
 const PERSIST_KEY = "mtools-tool-trust-level";
 
@@ -11,32 +18,20 @@ export const TRUST_LEVEL_OPTIONS: {
 }[] = [
   {
     value: "always_ask",
-    label: "全部确认",
-    description: "所有危险操作（Shell 命令、文件写入等）均需手动确认",
+    label: "严格确认",
+    description: "自动放行只读操作；工程修改与执行命令默认更谨慎，需要更频繁人工确认",
   },
   {
     value: "auto_approve_file",
-    label: "仅 Shell 需确认",
-    description: "文件读写操作自动放行，仅执行 Shell 命令时弹出确认",
+    label: "自动审核",
+    description: "先做风险审查，常规代码修改和只读命令自动通过，高风险或不确定操作才确认",
   },
   {
     value: "auto_approve",
     label: "全部放行",
-    description: "所有操作自动执行，不再弹出确认对话框（请确保你信任 AI 的行为）",
+    description: "跳过自动审核和人工确认，所有操作直接执行",
   },
 ];
-
-const SHELL_TOOL_PATTERNS = [
-  "shell",
-  "run_shell",
-  "persistent_shell",
-  "command",
-];
-
-function isShellTool(toolName: string): boolean {
-  const name = toolName.toLowerCase();
-  return SHELL_TOOL_PATTERNS.some((p) => name.includes(p));
-}
 
 function loadTrustLevel(): TrustLevel {
   try {
@@ -45,14 +40,40 @@ function loadTrustLevel(): TrustLevel {
       return raw as TrustLevel;
     }
   } catch { /* ignore */ }
-  return "always_ask";
+  return "auto_approve_file";
 }
+
+function mapTrustLevelToMode(level: TrustLevel): ToolApprovalTrustMode {
+  switch (level) {
+    case "auto_approve":
+      return "full_auto";
+    case "always_ask":
+      return "strict_manual";
+    default:
+      return "auto_review";
+  }
+}
+
+const DECISION_CACHE_TTL_MS = 10_000;
+const sessionDecisionCache = new Map<string, { confirmed: boolean; expiresAt: number }>();
 
 interface ToolTrustState {
   trustLevel: TrustLevel;
   setTrustLevel: (level: TrustLevel) => void;
+  assess: (
+    toolName: string,
+    params?: Record<string, unknown>,
+    options?: { approvalLevel?: ApprovalLevel; workspace?: string },
+  ) => ToolApprovalAssessment;
   /** 给定工具名，是否需要弹出确认对话框 */
-  shouldConfirm: (toolName: string) => boolean;
+  shouldConfirm: (
+    toolName: string,
+    params?: Record<string, unknown>,
+    options?: { approvalLevel?: ApprovalLevel; workspace?: string },
+  ) => boolean;
+  getCachedDecision: (toolName: string, params?: Record<string, unknown>) => boolean | null;
+  rememberDecision: (toolName: string, params: Record<string, unknown> | undefined, confirmed: boolean) => void;
+  clearDecisionCache: () => void;
 }
 
 export const useToolTrustStore = create<ToolTrustState>((set, get) => ({
@@ -60,14 +81,41 @@ export const useToolTrustStore = create<ToolTrustState>((set, get) => ({
 
   setTrustLevel: (level) => {
     localStorage.setItem(PERSIST_KEY, level);
+    sessionDecisionCache.clear();
     set({ trustLevel: level });
   },
 
-  shouldConfirm: (toolName) => {
+  assess: (toolName, params = {}, options) => {
     const { trustLevel } = get();
-    if (trustLevel === "auto_approve") return false;
-    if (trustLevel === "auto_approve_file") return isShellTool(toolName);
-    return true;
+    return assessToolApproval(toolName, params, {
+      trustMode: mapTrustLevelToMode(trustLevel),
+      approvalLevel: options?.approvalLevel,
+      workspace: options?.workspace,
+    });
+  },
+
+  shouldConfirm: (toolName, params = {}, options) => get().assess(toolName, params, options).decision === "ask",
+
+  getCachedDecision: (toolName, params = {}) => {
+    const key = buildToolApprovalCacheKey(toolName, params);
+    const cached = sessionDecisionCache.get(key);
+    if (!cached) return null;
+    if (cached.expiresAt <= Date.now()) {
+      sessionDecisionCache.delete(key);
+      return null;
+    }
+    return cached.confirmed;
+  },
+
+  rememberDecision: (toolName, params = {}, confirmed) => {
+    sessionDecisionCache.set(buildToolApprovalCacheKey(toolName, params), {
+      confirmed,
+      expiresAt: Date.now() + DECISION_CACHE_TTL_MS,
+    });
+  },
+
+  clearDecisionCache: () => {
+    sessionDecisionCache.clear();
   },
 }));
 

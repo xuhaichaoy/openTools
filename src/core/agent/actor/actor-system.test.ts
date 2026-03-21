@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
-import type { ActorConfig, ToolPolicy } from "./types";
+import type { ActorConfig, ExecutionPolicy, ToolPolicy } from "./types";
 
 vi.mock("./actor-transcript", () => ({
   appendDialogMessageSync: vi.fn(),
@@ -21,6 +21,7 @@ vi.mock("./agent-actor", () => {
     capabilities?: ActorConfig["capabilities"];
     private _workspace?: string;
     private toolPolicy?: ToolPolicy;
+    private executionPolicyValue?: ExecutionPolicy;
     private systemPromptOverride?: string;
     private _status = "idle";
     private inbox: unknown[] = [];
@@ -40,6 +41,7 @@ vi.mock("./agent-actor", () => {
       this.capabilities = config.capabilities;
       this._workspace = config.workspace;
       this.toolPolicy = config.toolPolicy;
+      this.executionPolicyValue = config.executionPolicy;
       this.systemPromptOverride = config.systemPromptOverride;
     }
 
@@ -79,6 +81,11 @@ vi.mock("./agent-actor", () => {
 
     get workspace() {
       return this._workspace;
+    }
+
+    get executionPolicy() {
+      if (!this.executionPolicyValue) return undefined;
+      return { ...this.executionPolicyValue };
     }
 
     get timeoutSeconds() {
@@ -216,7 +223,7 @@ describe("ActorSystem.broadcastAndResolve", () => {
     system.killAll();
   });
 
-  it("delivers a coordinator bootstrap instead of auto-spawning planned tasks", async () => {
+  it("activates the approved contract without injecting a coordinator bootstrap", async () => {
     const system = new ActorSystem();
     const coordinator = system.spawn(buildActorConfig("coordinator", "Coordinator"));
     const specialist = system.spawn(buildActorConfig("specialist", "Specialist")) as unknown as {
@@ -252,8 +259,69 @@ describe("ActorSystem.broadcastAndResolve", () => {
     const msg = system.broadcastAndResolve("user", "请继续完善这个实现");
 
     expect(msg.content).toBe("请继续完善这个实现");
-    expect(coordinator.pendingInboxCount).toBe(2);
+    expect(coordinator.pendingInboxCount).toBe(1);
     expect(specialist.lastAssignedQuery).toBeUndefined();
+  });
+
+  it("exposes the active execution contract as the runtime source of truth", () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+    system.spawn(buildActorConfig("specialist", "Specialist"));
+
+    system.armExecutionContract({
+      contractId: "contract-1",
+      surface: "local_dialog",
+      executionStrategy: "coordinator",
+      summary: "Coordinator 协调 Specialist",
+      coordinatorActorId: "coordinator",
+      inputHash: "input-hash",
+      actorRosterHash: "roster-hash",
+      initialRecipientActorIds: ["coordinator"],
+      participantActorIds: ["coordinator", "specialist"],
+      allowedMessagePairs: [
+        { fromActorId: "coordinator", toActorId: "specialist" },
+        { fromActorId: "specialist", toActorId: "coordinator" },
+      ],
+      allowedSpawnPairs: [
+        { fromActorId: "coordinator", toActorId: "specialist" },
+      ],
+      plannedDelegations: [
+        {
+          id: "delegation-1",
+          targetActorId: "specialist",
+          task: "补充测试建议",
+          label: "验证支援",
+        },
+      ],
+      approvedAt: 1,
+      state: "sealed",
+    });
+
+    expect(system.getActiveExecutionContract()).toMatchObject({
+      contractId: "contract-1",
+      coordinatorActorId: "coordinator",
+      plannedDelegations: [
+        expect.objectContaining({
+          id: "delegation-1",
+          targetActorId: "specialist",
+        }),
+      ],
+    });
+    expect(system.getDialogExecutionPlan()).toMatchObject({
+      id: "contract-1",
+      coordinatorActorId: "coordinator",
+      plannedSpawns: [
+        expect.objectContaining({
+          id: "delegation-1",
+          targetActorId: "specialist",
+        }),
+      ],
+    });
+    expect(system.snapshot()).toMatchObject({
+      executionContract: expect.objectContaining({
+        contractId: "contract-1",
+      }),
+    });
   });
 });
 
@@ -377,7 +445,45 @@ describe("ActorSystem.spawnTask", () => {
     });
   });
 
-  it("supports nested child-agent creation while keeping the hierarchy scoped", () => {
+  it("derives the legacy dialog plan view from the active contract graph", () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+
+    system.armExecutionContract({
+      contractId: "contract-dynamic-legacy-view",
+      surface: "local_dialog",
+      executionStrategy: "coordinator",
+      summary: "Coordinator 可创建临时子 Agent",
+      coordinatorActorId: "coordinator",
+      inputHash: "input-hash",
+      actorRosterHash: "roster-hash",
+      initialRecipientActorIds: ["coordinator"],
+      participantActorIds: ["coordinator"],
+      allowedMessagePairs: [],
+      allowedSpawnPairs: [],
+      plannedDelegations: [],
+      approvedAt: 1,
+      state: "active",
+    });
+
+    const record = system.spawnTask("coordinator", "Independent Reviewer", "独立审查这次 patch 的回归风险", {
+      createIfMissing: true,
+      createChildSpec: {
+        description: "只负责独立审查 patch 的风险和边界条件",
+        capabilities: ["code_review", "testing"],
+      },
+      cleanup: "keep",
+    });
+
+    expect("error" in record).toBe(false);
+    if ("error" in record) return;
+
+    expect(system.getActiveExecutionContract()?.participantActorIds).toContain(record.targetActorId);
+    expect(system.getDialogExecutionPlan()?.participantActorIds).toContain(record.targetActorId);
+    expect(system.snapshot().dialogExecutionPlan?.participantActorIds).toContain(record.targetActorId);
+  });
+
+  it("rejects nested child-agent creation so only the top-level coordinator can keep delegating", () => {
     const system = new ActorSystem();
     system.spawn(buildActorConfig("coordinator", "Coordinator"));
 
@@ -414,22 +520,12 @@ describe("ActorSystem.spawnTask", () => {
       cleanup: "keep",
     });
 
-    expect("error" in tester).toBe(false);
-    if ("error" in tester) return;
+    expect("error" in tester).toBe(true);
+    if (!("error" in tester)) return;
+    expect(tester.error).toContain("只允许顶层协调者创建子线程");
 
     expect(fixer.parentRunId).toBeUndefined();
     expect(fixer.rootRunId).toBe(fixer.runId);
-    expect(tester.parentRunId).toBe(fixer.runId);
-    expect(tester.rootRunId).toBe(fixer.runId);
-
-    expect(system.getDialogExecutionPlan()?.allowedSpawnPairs).toContainEqual({
-      fromActorId: fixer.targetActorId,
-      toActorId: tester.targetActorId,
-    });
-    expect(system.getDialogExecutionPlan()?.allowedMessagePairs).toContainEqual({
-      fromActorId: tester.targetActorId,
-      toActorId: fixer.targetActorId,
-    });
 
     expect(system.getDescendantTasks("coordinator").map((task) => ({
       runId: task.runId,
@@ -441,24 +537,45 @@ describe("ActorSystem.spawnTask", () => {
         parentRunId: undefined,
         depth: 1,
       },
-      {
-        runId: tester.runId,
-        parentRunId: fixer.runId,
-        depth: 2,
-      },
     ]);
 
     expect(system.getDescendantTasks(fixer.targetActorId).map((task) => ({
       runId: task.runId,
       parentRunId: task.parentRunId,
       depth: task.depth,
-    }))).toEqual([
-      {
-        runId: tester.runId,
-        parentRunId: fixer.runId,
-        depth: 1,
-      },
-    ]);
+    }))).toEqual([]);
+  });
+
+  it("can abort an open child session by runId and clear focus", () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+    const reviewer = system.spawn(buildActorConfig("reviewer", "Reviewer")) as unknown as {
+      assignTask: (query: string, images?: string[]) => Promise<unknown>;
+      abort: ReturnType<typeof vi.fn>;
+    };
+
+    reviewer.abort = vi.fn();
+    reviewer.assignTask = vi.fn(() => new Promise(() => undefined));
+
+    const record = system.spawnTask("coordinator", "reviewer", "继续做实现审查", {
+      mode: "session",
+      cleanup: "keep",
+    });
+
+    expect("error" in record).toBe(false);
+    if ("error" in record) return;
+
+    system.focusSpawnedSession(record.runId);
+    system.abortSpawnedTask(record.runId, {
+      error: "用户手动中止子会话",
+    });
+
+    const aborted = system.getSpawnedTask(record.runId);
+    expect(reviewer.abort).toHaveBeenCalledTimes(1);
+    expect(aborted?.status).toBe("aborted");
+    expect(aborted?.sessionOpen).toBe(false);
+    expect(aborted?.error).toBe("用户手动中止子会话");
+    expect(system.getFocusedSpawnedSessionRunId()).toBeNull();
   });
 
   it("applies read-only defaults to reviewer-like temporary child agents", () => {
@@ -493,6 +610,7 @@ describe("ActorSystem.spawnTask", () => {
     const child = system.get(record.targetActorId);
     expect(record.roleBoundary).toBe("reviewer");
     expect(child?.toolPolicyConfig?.deny).toEqual(expect.arrayContaining([
+      "spawn_task",
       "write_file",
       "str_replace_edit",
       "json_edit",
@@ -535,6 +653,7 @@ describe("ActorSystem.spawnTask", () => {
     const child = system.get(record.targetActorId);
     expect(record.roleBoundary).toBe("validator");
     expect(child?.toolPolicyConfig?.deny).toEqual(expect.arrayContaining([
+      "spawn_task",
       "write_file",
       "str_replace_edit",
       "json_edit",
@@ -587,6 +706,7 @@ describe("ActorSystem.spawnTask", () => {
     const child = system.get(record.targetActorId);
     expect(record.roleBoundary).toBe("executor");
     expect(child?.toolPolicyConfig?.deny).toEqual(expect.arrayContaining([
+      "spawn_task",
       "delete_file",
       "native_*",
       "ssh_*",
@@ -630,6 +750,7 @@ describe("ActorSystem.spawnTask", () => {
     const child = system.get(record.targetActorId);
     expect(record.roleBoundary).toBe("validator");
     expect(child?.toolPolicyConfig?.deny).toEqual(expect.arrayContaining([
+      "spawn_task",
       "write_file",
       "str_replace_edit",
       "json_edit",
@@ -681,6 +802,9 @@ describe("ActorSystem.spawnTask", () => {
     expect("error" in record).toBe(false);
     if ("error" in record) return;
 
+    expect(record.contractId).toBe("plan-boundary-sync");
+    expect(record.plannedDelegationId).toBe("spawn-1");
+    expect(record.dispatchSource).toBe("contract_suggestion");
     expect(record.roleBoundary).toBe("validator");
     expect(record.label).toBe("验证支援");
     expect(specialist.lastAssignedQuery).toContain("## 本轮职责边界");
@@ -688,10 +812,60 @@ describe("ActorSystem.spawnTask", () => {
     expect(specialist.lastAssignedQuery).toContain("## 已知上下文");
     expect(specialist.lastAssignedQuery).toContain("重点覆盖回归与复现路径");
   });
+
+  it("resolves target linkage from plannedDelegationId when coordinator spawns from the approved contract graph", () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+    system.spawn(buildActorConfig("specialist", "Specialist"));
+
+    system.armExecutionContract({
+      contractId: "contract-delegation-id",
+      surface: "local_dialog",
+      executionStrategy: "coordinator",
+      summary: "Coordinator 协调 Specialist",
+      coordinatorActorId: "coordinator",
+      inputHash: "input-hash",
+      actorRosterHash: "roster-hash",
+      initialRecipientActorIds: ["coordinator"],
+      participantActorIds: ["coordinator", "specialist"],
+      allowedMessagePairs: [
+        { fromActorId: "coordinator", toActorId: "specialist" },
+        { fromActorId: "specialist", toActorId: "coordinator" },
+      ],
+      allowedSpawnPairs: [
+        { fromActorId: "coordinator", toActorId: "specialist" },
+      ],
+      plannedDelegations: [
+        {
+          id: "delegation-graph-1",
+          targetActorId: "specialist",
+          task: "从验证视角补充实现风险与测试建议。",
+          label: "验证支援",
+          roleBoundary: "validator",
+        },
+      ],
+      approvedAt: 1,
+      state: "active",
+    });
+
+    const record = system.spawnTask("coordinator", "", "补充验证结论", {
+      plannedDelegationId: "delegation-graph-1",
+      cleanup: "keep",
+    });
+
+    expect("error" in record).toBe(false);
+    if ("error" in record) return;
+
+    expect(record.targetActorId).toBe("specialist");
+    expect(record.contractId).toBe("contract-delegation-id");
+    expect(record.plannedDelegationId).toBe("delegation-graph-1");
+    expect(record.dispatchSource).toBe("contract_suggestion");
+    expect(record.roleBoundary).toBe("validator");
+  });
 });
 
 describe("ActorSystem.send", () => {
-  it("delivers a bootstrap to the primary actor when direct user delivery activates the plan", async () => {
+  it("does not deliver a bootstrap to the primary actor when direct user delivery activates the plan", async () => {
     const system = new ActorSystem();
     const reviewer = system.spawn(buildActorConfig("reviewer", "Reviewer"));
     const specialist = system.spawn(buildActorConfig("fixer", "Fixer")) as unknown as {
@@ -726,7 +900,7 @@ describe("ActorSystem.send", () => {
 
     system.send("user", "reviewer", "帮我 review 这次改动");
 
-    expect(reviewer.pendingInboxCount).toBe(2);
+    expect(reviewer.pendingInboxCount).toBe(1);
     expect(specialist.lastAssignedQuery).toBeUndefined();
   });
 });

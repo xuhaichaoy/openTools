@@ -428,6 +428,7 @@ export interface TranscriptSession {
     systemPrompt?: string;
     capabilities?: import("./types").AgentCapabilities;
     toolPolicy?: import("./types").ToolPolicy;
+    executionPolicy?: import("./types").ExecutionPolicy;
     workspace?: string;
     thinkingLevel?: import("./types").ThinkingLevel;
   }>;

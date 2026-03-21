@@ -112,4 +112,48 @@ describe("PromptBuildMiddleware", () => {
     expect(ctx.rolePrompt).toContain("## 当前执行上下文");
     expect(ctx.rolePrompt).toContain("你的工作目录为: /repo");
   });
+
+  it("summarizes the active contract and avoids mandatory immediate wait wording", async () => {
+    const ctx = createContext();
+    ctx.actorSystem = {
+      size: 2,
+      getAll: () => [
+        { id: "actor-1", role: { name: "Builder" } },
+        { id: "actor-2", role: { name: "Reviewer" } },
+      ],
+      getCoordinator: () => ({ id: "actor-1" }),
+      getActiveExecutionContract: () => ({
+        contractId: "contract-1",
+        surface: "local_dialog",
+        executionStrategy: "coordinator",
+        summary: "Builder 负责统筹，Reviewer 做独立审查",
+        inputHash: "input-hash",
+        actorRosterHash: "roster-hash",
+        initialRecipientActorIds: ["actor-1"],
+        participantActorIds: ["actor-1", "actor-2"],
+        allowedMessagePairs: [],
+        allowedSpawnPairs: [],
+        plannedDelegations: [
+          {
+            id: "delegation-1",
+            targetActorId: "actor-2",
+            targetActorName: "Reviewer",
+            task: "独立审查本轮改动",
+            label: "独立审查",
+          },
+        ],
+        approvedAt: 1,
+        state: "active" as const,
+      }),
+    } as ActorRunContext["actorSystem"];
+
+    await new PromptBuildMiddleware().apply(ctx);
+
+    expect(ctx.rolePrompt).toContain("## 当前执行契约");
+    expect(ctx.rolePrompt).toContain("独立审查 -> Reviewer");
+    expect(ctx.rolePrompt).toContain("已批准建议委派只是许可与建议");
+    expect(ctx.rolePrompt).toContain("当你的下一步明确依赖子任务结果时");
+    expect(ctx.rolePrompt).not.toContain("务必立刻调用 `wait_for_spawned_tasks`");
+    expect(ctx.rolePrompt).not.toContain("请**必须调用 `wait_for_spawned_tasks`");
+  });
 });

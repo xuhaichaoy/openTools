@@ -11,19 +11,25 @@ import {
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 
-import { buildSpawnedTaskCheckpoint, collectSpawnedTaskTranscriptEntries, type SpawnedTaskCheckpoint, type SpawnedTaskTranscriptEntry } from "@/core/agent/actor/spawned-task-checkpoint";
+import { buildSpawnedTaskCheckpoint, type SpawnedTaskCheckpoint } from "@/core/agent/actor/spawned-task-checkpoint";
 import type { TodoItem } from "@/core/agent/actor/middlewares";
 import type { ClusterPlan } from "@/core/agent/cluster/types";
 import type {
   DialogArtifactRecord,
   DialogContextSummary,
   DialogMessage,
+  DialogRoomCompactionState,
   SessionUploadRecord,
   SpawnedTaskRecord,
 } from "@/core/agent/actor/types";
 import type { DialogDispatchPlanBundle } from "@/core/agent/actor/dialog-dispatch-plan";
-import { buildDialogContextBreakdown, type DialogContextBreakdown } from "@/core/ai/dialog-context-breakdown";
+import type {
+  CollaborationChildSession,
+  CollaborationContractDelegation,
+} from "@/core/collaboration/types";
+import type { DialogContextBreakdown } from "@/core/ai/dialog-context-breakdown";
 import {
+  buildDialogContextNarrative,
   hasDialogContextSnapshotContent,
   type DialogContextSnapshot,
 } from "@/plugins/builtin/SmartAgent/core/dialog-context-snapshot";
@@ -50,15 +56,6 @@ function formatShortTime(timestamp?: number): string {
   });
 }
 
-function formatElapsedTime(ms?: number): string {
-  if (!ms || ms < 1000) return "刚刚";
-  const totalSeconds = Math.floor(ms / 1000);
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  if (minutes > 0) return `${minutes}分${seconds}秒`;
-  return `${seconds}秒`;
-}
-
 function formatTokenCount(tokens?: number): string {
   if (!tokens || tokens <= 0) return "0";
   if (tokens >= 10000) return `${Math.round(tokens / 1000)}k`;
@@ -69,6 +66,161 @@ function formatTokenCount(tokens?: number): string {
 function formatRatioAsPercent(ratio?: number): string {
   if (!ratio || ratio <= 0) return "0%";
   return `${Math.round(ratio * 100)}%`;
+}
+
+function compactLongText(text: string | undefined, maxLength = 260): string {
+  const normalized = String(text ?? "").replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(1, maxLength - 1)).trimEnd()}…`;
+}
+
+function buildContinuationItems(
+  snapshot: DialogContextSnapshot | null,
+): string[] {
+  if (!snapshot) {
+    return ["当前会沿用最近房间消息、主 Agent 的当前任务，以及共享工作集继续执行。"];
+  }
+
+  const items = [
+    snapshot.workspaceRoot ? `工作区会继续锁定在 ${snapshot.workspaceRoot}` : "",
+    snapshot.focusedSessionLabel
+      ? `新输入默认会优先接到聚焦中的线程 ${snapshot.focusedSessionLabel}`
+      : snapshot.openSessionCount > 0
+        ? `当前还有 ${snapshot.openSessionCount} 个后台线程可继续复用，但默认仍先发给主 Agent`
+        : "当前默认仍由主 Agent 接住新输入，再决定是否继续派工",
+    snapshot.pendingInteractionCount > 0
+      ? `还有 ${snapshot.pendingInteractionCount} 条待回复/待确认交互，会优先于新的自由输入`
+      : "",
+    snapshot.queuedFollowUpCount > 0
+      ? `已有 ${snapshot.queuedFollowUpCount} 条排队消息，房间空闲后会继续发送`
+      : "",
+    snapshot.memoryHitCount > 0
+      ? `本轮还会带入 ${snapshot.memoryHitCount} 条长期记忆命中`
+      : snapshot.memoryRecallAttempted
+        ? "本轮已经检索过长期记忆，但没有额外命中"
+        : "",
+    snapshot.transcriptRecallHitCount > 0
+      ? `还会回补 ${snapshot.transcriptRecallHitCount} 条历史轨迹线索`
+      : snapshot.transcriptRecallAttempted
+        ? "已经检索过会话轨迹，但没有额外命中"
+        : "",
+  ].filter(Boolean);
+
+  return items.length > 0
+    ? items
+    : ["当前会沿用最近房间消息、主 Agent 的当前任务，以及共享工作集继续执行。"];
+}
+
+function buildCompactionItems(
+  snapshot: DialogContextSnapshot | null,
+  dialogRoomCompaction: DialogRoomCompactionState | null,
+): string[] {
+  if (!dialogRoomCompaction && !snapshot?.roomCompactionMessageCount) {
+    return [
+      "当前还没有触发房间级压缩；如果上下文继续变重，系统会把较早消息、子任务和产物整理成可续跑摘要。",
+    ];
+  }
+
+  const messageCount = snapshot?.roomCompactionMessageCount ?? dialogRoomCompaction?.compactedMessageCount ?? 0;
+  const taskCount = snapshot?.roomCompactionTaskCount ?? dialogRoomCompaction?.compactedSpawnedTaskCount ?? 0;
+  const artifactCount = snapshot?.roomCompactionArtifactCount ?? dialogRoomCompaction?.compactedArtifactCount ?? 0;
+  const reasons = snapshot?.roomCompactionTriggerReasons ?? dialogRoomCompaction?.triggerReasons ?? [];
+  const identifiers = snapshot?.roomCompactionPreservedIdentifiers ?? dialogRoomCompaction?.preservedIdentifiers ?? [];
+  const memoryConfirmed = snapshot?.roomCompactionMemoryConfirmedCount ?? dialogRoomCompaction?.memoryConfirmedCount ?? 0;
+  const memoryQueued = snapshot?.roomCompactionMemoryQueuedCount ?? dialogRoomCompaction?.memoryQueuedCount ?? 0;
+  const summaryPreview = snapshot?.roomCompactionSummaryPreview ?? compactLongText(dialogRoomCompaction?.summary, 180);
+
+  return [
+    `较早的 ${messageCount} 条消息、${taskCount} 条子任务线索、${artifactCount} 条产物线索已经压缩为结构化续跑摘要`,
+    reasons.length > 0 ? `本次压缩主要是因为：${reasons.join("；")}` : "",
+    summaryPreview ? `后续续跑会优先参考：${summaryPreview}` : "",
+    identifiers.length > 0 ? `压缩后仍保留的关键线索：${identifiers.slice(0, 6).join("、")}` : "",
+    memoryConfirmed > 0 || memoryQueued > 0
+      ? `压缩内容已沉淀为记忆：确认 ${memoryConfirmed} 条，候选 ${memoryQueued} 条`
+      : "",
+  ].filter(Boolean);
+}
+
+function getChildSessionStatusMeta(
+  status: CollaborationChildSession["status"] | SpawnedTaskRecord["status"] | undefined,
+): {
+  label: string;
+  className: string;
+} {
+  switch (status) {
+    case "running":
+      return {
+        label: "运行中",
+        className: "bg-emerald-500/10 text-emerald-700",
+      };
+    case "waiting":
+      return {
+        label: "已暂停",
+        className: "bg-blue-500/10 text-blue-700",
+      };
+    case "completed":
+      return {
+        label: "已完成",
+        className: "bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]",
+      };
+    case "failed":
+    case "error":
+      return {
+        label: "失败",
+        className: "bg-red-500/10 text-red-700",
+      };
+    case "aborted":
+      return {
+        label: "已中止",
+        className: "bg-amber-500/10 text-amber-700",
+      };
+    default:
+      return {
+        label: "待启动",
+        className: "bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]",
+      };
+  }
+}
+
+function getContractDelegationStatusMeta(
+  status: CollaborationContractDelegation["state"] | undefined,
+): {
+  label: string;
+  className: string;
+} {
+  switch (status) {
+    case "running":
+      return {
+        label: "运行中",
+        className: "bg-emerald-500/10 text-emerald-700",
+      };
+    case "waiting":
+      return {
+        label: "待继续",
+        className: "bg-blue-500/10 text-blue-700",
+      };
+    case "completed":
+      return {
+        label: "已完成",
+        className: "bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]",
+      };
+    case "failed":
+      return {
+        label: "失败",
+        className: "bg-red-500/10 text-red-700",
+      };
+    case "stale":
+      return {
+        label: "已过期",
+        className: "bg-amber-500/10 text-amber-700",
+      };
+    default:
+      return {
+        label: "待派工",
+        className: "bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]",
+      };
+  }
 }
 
 function getContextStatusMeta(status: DialogContextBreakdown["actors"][number]["status"]): {
@@ -137,25 +289,6 @@ function getArtifactSourceMeta(source: DialogArtifactRecord["source"]): {
   }
 }
 
-function collectTaskTranscript(params: {
-  task: SpawnedTaskRecord | null;
-  actorById: Map<string, ActorSnapshot>;
-  dialogHistory: DialogMessage[];
-}): SpawnedTaskTranscriptEntry[] {
-  const { task, actorById, dialogHistory } = params;
-  if (!task) return [];
-
-  const targetActor = actorById.get(task.targetActorId);
-  return collectSpawnedTaskTranscriptEntries({
-    task,
-    targetActor,
-    actorNameById: new Map(
-      [...actorById.entries()].map(([id, actor]) => [id, actor.roleName]),
-    ),
-    dialogHistory,
-  });
-}
-
 function ArtifactPathActions({ filePath, available }: { filePath: string; available: boolean }) {
   const fileName = basename(filePath);
 
@@ -205,16 +338,19 @@ export function DialogWorkspaceDock({
   artifacts,
   sessionUploads,
   spawnedTasks,
+  childSessions,
+  contractDelegations,
   selectedRunId,
   onSelectRunId,
-  focusedSessionRunId,
-  onFocusSession,
+  onSteerSession,
   onCloseSession,
+  onKillSession,
   onContinueTaskWithAgent,
   draftPlan,
   draftInsight,
   contextBreakdown,
   contextSnapshot,
+  dialogRoomCompaction,
   dialogContextSummary,
   requirePlanApproval,
   onTogglePlanApproval,
@@ -230,16 +366,19 @@ export function DialogWorkspaceDock({
   artifacts: DialogArtifact[];
   sessionUploads: SessionUploadRecord[];
   spawnedTasks: SpawnedTaskRecord[];
+  childSessions: CollaborationChildSession[];
+  contractDelegations: CollaborationContractDelegation[];
   selectedRunId: string | null;
   onSelectRunId: (runId: string) => void;
-  focusedSessionRunId: string | null;
-  onFocusSession: (runId: string | null) => void;
+  onSteerSession: (runId: string) => void;
   onCloseSession: (runId: string) => void;
+  onKillSession: (runId: string) => void;
   onContinueTaskWithAgent: (runId: string) => void;
   draftPlan: ClusterPlan | null;
   draftInsight: DialogDispatchPlanBundle["insight"] | null;
   contextBreakdown: DialogContextBreakdown;
   contextSnapshot: DialogContextSnapshot | null;
+  dialogRoomCompaction: DialogRoomCompactionState | null;
   dialogContextSummary: DialogContextSummary | null;
   requirePlanApproval: boolean;
   onTogglePlanApproval: (value: boolean) => void;
@@ -247,6 +386,8 @@ export function DialogWorkspaceDock({
   graphAvailable: boolean;
   onOpenGraph: (() => void) | null;
 }) {
+  const [showFullEarlySummary, setShowFullEarlySummary] = useState(false);
+  const [showFullRoomCompaction, setShowFullRoomCompaction] = useState(false);
   const actorById = useMemo(() => {
     const map = new Map<string, ActorSnapshot>();
     actors.forEach((actor) => map.set(actor.id, actor));
@@ -265,19 +406,6 @@ export function DialogWorkspaceDock({
       return b.spawnedAt - a.spawnedAt;
     });
   }, [spawnedTasks]);
-
-  const selectedTask = useMemo(() => {
-    if (sortedTasks.length === 0) return null;
-    return sortedTasks.find((task) => task.runId === selectedRunId) ?? sortedTasks[0];
-  }, [sortedTasks, selectedRunId]);
-
-  const selectedTaskTranscript = useMemo(() => {
-    return collectTaskTranscript({
-      task: selectedTask,
-      actorById,
-      dialogHistory,
-    });
-  }, [actorById, dialogHistory, selectedTask]);
   const taskCheckpointByRunId = useMemo(() => {
     const map = new Map<string, SpawnedTaskCheckpoint>();
     for (const task of sortedTasks) {
@@ -295,12 +423,95 @@ export function DialogWorkspaceDock({
     }
     return map;
   }, [sortedTasks, actorById, actorTodos, dialogHistory, artifacts, actorNameById]);
-  const selectedTaskCheckpoint = useMemo<SpawnedTaskCheckpoint | null>(() => {
-    if (!selectedTask) return null;
-    return taskCheckpointByRunId.get(selectedTask.runId) ?? null;
-  }, [selectedTask, taskCheckpointByRunId]);
+  const taskByRunId = useMemo(() => {
+    const map = new Map<string, SpawnedTaskRecord>();
+    sortedTasks.forEach((task) => map.set(task.runId, task));
+    return map;
+  }, [sortedTasks]);
+  const childSessionByRunId = useMemo(() => {
+    const map = new Map<string, CollaborationChildSession>();
+    childSessions.forEach((session) => map.set(session.runId, session));
+    return map;
+  }, [childSessions]);
+  const compactThreadRows = useMemo(() => {
+    if (contractDelegations.length > 0) {
+      return contractDelegations
+        .map((delegation) => {
+          const task = delegation.runId ? taskByRunId.get(delegation.runId) ?? null : null;
+          const childSession = delegation.runId ? childSessionByRunId.get(delegation.runId) ?? null : null;
+          const checkpoint = delegation.runId ? taskCheckpointByRunId.get(delegation.runId) ?? null : null;
+          const targetActorId = task?.targetActorId ?? childSession?.targetActorId ?? delegation.targetActorId;
+          const targetName = actorById.get(targetActorId)?.roleName ?? targetActorId;
+          const summary = checkpoint?.summary
+            || childSession?.lastResultSummary
+            || task?.label
+            || task?.task
+            || `${delegation.label} 尚未派发`;
+          const updatedAt = childSession?.updatedAt
+            ?? task?.lastActiveAt
+            ?? task?.completedAt
+            ?? task?.spawnedAt
+            ?? 0;
+          return {
+            id: delegation.delegationId,
+            runId: delegation.runId ?? null,
+            targetName,
+            label: delegation.label,
+            summary,
+            updatedAt,
+            statusMeta: getContractDelegationStatusMeta(delegation.state),
+            task,
+            childSession,
+            delegation,
+          };
+        })
+        .sort((left, right) => right.updatedAt - left.updatedAt);
+    }
+
+    return sortedTasks.map((task) => {
+      const childSession = childSessionByRunId.get(task.runId) ?? null;
+      const checkpoint = taskCheckpointByRunId.get(task.runId) ?? null;
+      return {
+        id: task.runId,
+        runId: task.runId,
+        targetName: actorById.get(task.targetActorId)?.roleName ?? task.targetActorId,
+        label: task.label ?? task.task,
+        summary: checkpoint?.summary || childSession?.lastResultSummary || task.task,
+        updatedAt: childSession?.updatedAt ?? task.lastActiveAt ?? task.completedAt ?? task.spawnedAt,
+        statusMeta: getChildSessionStatusMeta(childSession?.status ?? task.status),
+        task,
+        childSession,
+        delegation: null,
+      };
+    });
+  }, [actorById, childSessionByRunId, contractDelegations, sortedTasks, taskByRunId, taskCheckpointByRunId]);
+  const contextNarrative = useMemo(
+    () => buildDialogContextNarrative(contextSnapshot),
+    [contextSnapshot],
+  );
+  const continuationItems = useMemo(
+    () => buildContinuationItems(contextSnapshot),
+    [contextSnapshot],
+  );
+  const compactionItems = useMemo(
+    () => buildCompactionItems(contextSnapshot, dialogRoomCompaction),
+    [contextSnapshot, dialogRoomCompaction],
+  );
+  const earlySummaryPreview = useMemo(
+    () => compactLongText(dialogContextSummary?.summary, 320),
+    [dialogContextSummary],
+  );
+  const roomCompactionPreview = useMemo(
+    () => compactLongText(dialogRoomCompaction?.summary, 360),
+    [dialogRoomCompaction],
+  );
 
   const [artifactAvailabilityByPath, setArtifactAvailabilityByPath] = useState<Record<string, ArtifactAvailability>>({});
+
+  useEffect(() => {
+    setShowFullEarlySummary(false);
+    setShowFullRoomCompaction(false);
+  }, [panel, dialogContextSummary?.updatedAt, dialogRoomCompaction?.updatedAt]);
 
   useEffect(() => {
     if (panel !== "artifacts") return;
@@ -390,7 +601,7 @@ export function DialogWorkspaceDock({
       label: "子任务",
       icon: Network,
       count: sortedTasks.length,
-      description: openSessionCount > 0 ? `${openSessionCount} 个子会话仍可继续交互` : "查看已派发子任务与子会话",
+      description: openSessionCount > 0 ? `${openSessionCount} 个后台线程仍在保留` : "查看已派发子任务与后台线程",
     },
     {
       id: "context",
@@ -469,7 +680,7 @@ export function DialogWorkspaceDock({
       {panel && activePanelMeta && (
         <>
           <div className="absolute inset-0 z-20 bg-black/20" onClick={() => onPanelChange(null)} />
-          <div className="absolute inset-3 z-30 flex flex-col overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-2xl md:inset-y-3 md:right-3 md:left-auto md:w-[min(420px,calc(100%-1rem))]">
+          <div className="absolute inset-3 z-30 flex flex-col overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-2xl md:inset-y-3 md:right-3 md:left-auto md:w-[min(760px,calc(100%-1rem))]">
             <div className="flex items-start justify-between gap-3 border-b border-[var(--color-border)] bg-[var(--color-bg)]/95 px-3.5 py-2.5 backdrop-blur-sm">
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
@@ -705,194 +916,166 @@ export function DialogWorkspaceDock({
 
               {panel === "subtasks" && (
                 <div className="p-3 space-y-2.5">
-                  {sortedTasks.length === 0 ? (
+                  {compactThreadRows.length === 0 ? (
                     <div className="text-[12px] text-[var(--color-text-tertiary)]">当前还没有派发子任务。</div>
                   ) : (
-                    <>
-                      <div className="space-y-2">
-                        {sortedTasks.map((task) => {
-                          const isSelected = task.runId === selectedTask?.runId;
-                          const targetActor = actorById.get(task.targetActorId);
-                          const checkpoint = taskCheckpointByRunId.get(task.runId);
-                          return (
+                    <div className="space-y-2">
+                      {compactThreadRows.map((row) => {
+                        const isSelected = Boolean(row.runId && row.runId === selectedRunId);
+                        const canSteer = Boolean(row.runId && row.childSession?.mode === "session" && row.childSession.resumable);
+                        const canClose = Boolean(row.runId && row.task?.mode === "session" && row.task.sessionOpen && row.childSession?.resumable);
+                        const canKill = Boolean(row.runId && row.task?.mode === "session" && row.task.sessionOpen);
+                        const note = row.delegation?.state === "available"
+                          ? "这是已批准的建议委派。是否真的派工，由主 Agent 自主决定。"
+                          : row.delegation?.state === "stale"
+                            ? "这条建议委派关联的是旧线程或失效目标，当前只保留摘要。"
+                            : row.childSession?.status === "waiting"
+                              ? "后台线程已保留，主 Agent 后续可以继续复用这段上下文。"
+                              : row.childSession?.status === "completed"
+                                ? "该线程已结束，当前保留的是结果摘要。"
+                                : row.childSession?.lastError
+                                  ? row.childSession.lastError
+                                  : null;
+
+                        return (
+                          <div
+                            key={row.id}
+                            className={`rounded-xl border px-3 py-2.5 ${
+                              isSelected
+                                ? "border-[var(--color-accent)]/30 bg-[var(--color-accent)]/8"
+                                : "border-[var(--color-border)]/80 bg-[var(--color-bg)]"
+                            }`}
+                          >
                             <button
-                              key={task.runId}
-                              onClick={() => onSelectRunId(task.runId)}
-                              className={`w-full rounded-xl border px-3 py-2.5 text-left transition-colors ${
-                                isSelected
-                                  ? "border-[var(--color-accent)]/30 bg-[var(--color-accent)]/8"
-                                  : "border-[var(--color-border)]/80 bg-[var(--color-bg)] hover:border-[var(--color-accent)]/15"
-                              }`}
+                              type="button"
+                              onClick={() => {
+                                if (row.runId) onSelectRunId(row.runId);
+                              }}
+                              className="flex w-full items-start gap-2 text-left"
                             >
-                              <div className="flex flex-wrap items-center gap-2">
-                                <div className="text-[12px] font-medium text-[var(--color-text)]">
-                                  {targetActor?.roleName ?? task.targetActorId}
-                                </div>
-                                <span className="rounded-full bg-[var(--color-bg-secondary)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
-                                  {task.status}
-                                </span>
-                                {task.mode === "session" && (
-                                  <span className="rounded-full bg-blue-500/10 px-1.5 py-0.5 text-[10px] text-blue-700">
-                                    子会话
-                                  </span>
-                                )}
-                                {task.roleBoundary && (
-                                  <span className="rounded-full bg-violet-500/10 px-1.5 py-0.5 text-[10px] text-violet-700">
-                                    {task.roleBoundary}
-                                  </span>
-                                )}
-                                <span className="ml-auto text-[10px] text-[var(--color-text-tertiary)]">
-                                  {formatShortTime(task.spawnedAt)}
-                                </span>
-                              </div>
-                              <div className="mt-1 text-[11px] text-[var(--color-text-secondary)] whitespace-pre-wrap break-words">
-                                {task.task}
-                              </div>
-                              {checkpoint?.summary && (
-                                <div className="mt-2 text-[10px] leading-relaxed text-[var(--color-text-tertiary)]">
-                                  {checkpoint.summary}
-                                </div>
-                              )}
-                            </button>
-                          );
-                        })}
-                      </div>
-
-                      {selectedTask && (
-                        <div className="rounded-xl border border-[var(--color-border)]/80 bg-[var(--color-bg)] px-3 py-3">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <div className="text-[12px] font-medium text-[var(--color-text)]">
-                              {actorById.get(selectedTask.targetActorId)?.roleName ?? selectedTask.targetActorId}
-                            </div>
-                            <span className="rounded-full bg-[var(--color-bg-secondary)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
-                              {selectedTask.status}
-                            </span>
-                            <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                              持续 {formatElapsedTime((selectedTask.completedAt ?? Date.now()) - selectedTask.spawnedAt)}
-                            </span>
-                            <span className="ml-auto text-[10px] text-[var(--color-text-tertiary)]">
-                              {selectedTask.runId}
-                            </span>
-                          </div>
-                          {selectedTaskCheckpoint && (
-                            <div className="mt-2 space-y-2">
-                              <div className="rounded-lg border border-[var(--color-border)]/70 bg-[var(--color-bg-secondary)]/60 px-3 py-2">
-                                <div className="flex flex-wrap items-center gap-2 text-[10px] text-[var(--color-text-tertiary)]">
-                                  <span>检查点</span>
-                                  <span>更新于 {formatShortTime(selectedTaskCheckpoint.updatedAt)}</span>
-                                </div>
-                                <div className="mt-1 text-[11px] leading-relaxed text-[var(--color-text-secondary)] whitespace-pre-wrap break-words">
-                                  {selectedTaskCheckpoint.summary || "暂无检查点摘要"}
-                                </div>
-                              </div>
-                              {selectedTaskCheckpoint.activeTodos.length > 0 && (
-                                <div>
-                                  <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">待办快照</div>
-                                  <div className="mt-1 space-y-1.5">
-                                    {selectedTaskCheckpoint.activeTodos.map((todo, index) => (
-                                      <div key={`${todo}-${index}`} className="rounded-lg border border-[var(--color-border)]/70 bg-[var(--color-bg-secondary)]/60 px-3 py-2">
-                                        <div className="text-[11px] font-medium text-[var(--color-text)]">{todo}</div>
-                                      </div>
-                                    ))}
+                              <div className="min-w-0 flex-1">
+                                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                                  <div className="truncate text-[12px] font-medium text-[var(--color-text)]">
+                                    {row.label}
                                   </div>
+                                  <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] ${row.statusMeta.className}`}>
+                                    {row.statusMeta.label}
+                                  </span>
+                                  {row.task?.mode === "session" && (
+                                    <span className="shrink-0 rounded-full bg-blue-500/10 px-1.5 py-0.5 text-[10px] text-blue-700">
+                                      子会话
+                                    </span>
+                                  )}
+                                  {row.childSession?.focusable && (
+                                    <span className="shrink-0 rounded-full bg-cyan-500/10 px-1.5 py-0.5 text-[10px] text-cyan-700">
+                                      已保留
+                                    </span>
+                                  )}
+                                  {row.task?.roleBoundary && (
+                                    <span className="shrink-0 rounded-full bg-violet-500/10 px-1.5 py-0.5 text-[10px] text-violet-700">
+                                      {row.task.roleBoundary}
+                                    </span>
+                                  )}
+                                  <span className="shrink-0 text-[10px] text-[var(--color-text-tertiary)]">
+                                    {row.targetName}
+                                  </span>
+                                  {row.updatedAt > 0 && (
+                                    <span className="ml-auto shrink-0 text-[10px] text-[var(--color-text-tertiary)]">
+                                      {formatShortTime(row.updatedAt)}
+                                    </span>
+                                  )}
                                 </div>
-                              )}
-                              {selectedTaskCheckpoint.relatedArtifactPaths.length > 0 && (
-                                <div>
-                                  <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">关联产物</div>
-                                  <div className="mt-1 space-y-1.5">
-                                    {selectedTaskCheckpoint.relatedArtifactPaths.map((artifactPath, index) => (
-                                      <div key={`${artifactPath}-${index}`} className="rounded-lg border border-[var(--color-border)]/70 bg-[var(--color-bg-secondary)]/60 px-3 py-2">
-                                        <div className="text-[11px] font-medium text-[var(--color-text)]">
-                                          {artifactPath.split("/").pop() || artifactPath}
-                                        </div>
-                                        <div className="mt-1 break-all text-[10px] text-[var(--color-text-tertiary)]">
-                                          {artifactPath}
-                                        </div>
-                                      </div>
-                                    ))}
-                                  </div>
+                                <div
+                                  className="mt-1 truncate text-[11px] text-[var(--color-text-secondary)]"
+                                  title={row.summary}
+                                >
+                                  {row.summary}
                                 </div>
-                              )}
-                            </div>
-                          )}
-
-                          {selectedTask.mode === "session" && selectedTask.sessionOpen && (
-                            <div className="mt-3 rounded-lg border border-blue-500/15 bg-blue-500/5 px-3 py-2 text-[11px] text-blue-700">
-                              这个子任务已经提升为可持续交互的子会话。聚焦后，输入框会把后续消息直接发给这个 Agent，而不是发给主协调者。
-                            </div>
-                          )}
-
-                          <div className="mt-3 flex flex-wrap items-center gap-2">
-                            {selectedTask.mode === "session" && (
-                              <button
-                                onClick={() => onFocusSession(focusedSessionRunId === selectedTask.runId ? null : selectedTask.runId)}
-                                className={`rounded-full px-3 py-1 text-[10px] transition-colors ${
-                                  focusedSessionRunId === selectedTask.runId
-                                    ? "bg-blue-500/10 text-blue-700"
-                                    : "border border-[var(--color-border)] bg-[var(--color-bg)] text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
-                                }`}
-                              >
-                                {focusedSessionRunId === selectedTask.runId ? "取消聚焦子会话" : "聚焦子会话"}
-                              </button>
-                            )}
-                            <button
-                              onClick={() => onContinueTaskWithAgent(selectedTask.runId)}
-                              className="rounded-full bg-[var(--color-accent)]/10 px-3 py-1 text-[10px] text-[var(--color-accent)] transition-colors hover:bg-[var(--color-accent)]/15"
-                            >
-                              转到 Agent 继续
+                              </div>
                             </button>
-                            {selectedTask.mode === "session" && (
-                              <button
-                                onClick={() => onCloseSession(selectedTask.runId)}
-                                className="rounded-full border border-amber-500/25 bg-amber-500/8 px-3 py-1 text-[10px] text-amber-700 transition-colors hover:bg-amber-500/12"
-                              >
-                                关闭子会话
-                              </button>
-                            )}
-                          </div>
 
-                          <div className="mt-4">
-                            <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">子会话视图</div>
-                            {selectedTaskTranscript.length === 0 ? (
-                              <div className="mt-1 text-[11px] text-[var(--color-text-tertiary)]">这个子任务还没有可聚焦的会话片段。</div>
-                            ) : (
-                              <div className="mt-2 space-y-2 max-h-[160px] overflow-auto">
-                                {selectedTaskTranscript.map((entry, index) => (
-                                  <div
-                                    key={entry.id || `${entry.timestamp}-${index}`}
-                                    className={`rounded-lg px-3 py-2 ${
-                                      entry.source === "dialog"
-                                        ? "border border-blue-500/15 bg-blue-500/5"
-                                        : "bg-[var(--color-bg-secondary)]/70"
-                                    }`}
+                            {note && (
+                              <div className="mt-2 text-[10px] leading-relaxed text-[var(--color-text-tertiary)]">
+                                {note}
+                              </div>
+                            )}
+
+                            {row.runId && (
+                              <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                                {canSteer && (
+                                  <button
+                                    onClick={() => onSteerSession(row.runId!)}
+                                    className="rounded-full border border-sky-500/25 bg-sky-500/8 px-3 py-1 text-[10px] text-sky-700 transition-colors hover:bg-sky-500/12"
                                   >
-                                    <div className="flex flex-wrap items-center gap-2 text-[10px] text-[var(--color-text-tertiary)]">
-                                      <span>{entry.label}</span>
-                                      {entry.kindLabel && (
-                                        <span className="px-1.5 py-0.5 rounded-full bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]">
-                                          {entry.kindLabel}
-                                        </span>
-                                      )}
-                                      <span>{formatShortTime(entry.timestamp)}</span>
-                                    </div>
-                                    <div className="mt-1 text-[11px] text-[var(--color-text-secondary)] whitespace-pre-wrap break-words">
-                                      {entry.content}
-                                    </div>
-                                  </div>
-                                ))}
+                                    补充指令
+                                  </button>
+                                )}
+                                <button
+                                  onClick={() => onContinueTaskWithAgent(row.runId!)}
+                                  className="rounded-full bg-[var(--color-accent)]/10 px-3 py-1 text-[10px] text-[var(--color-accent)] transition-colors hover:bg-[var(--color-accent)]/15"
+                                >
+                                  转到 Agent 继续
+                                </button>
+                                {canClose && (
+                                  <button
+                                    onClick={() => onCloseSession(row.runId!)}
+                                    className="rounded-full border border-amber-500/25 bg-amber-500/8 px-3 py-1 text-[10px] text-amber-700 transition-colors hover:bg-amber-500/12"
+                                  >
+                                    结束保留
+                                  </button>
+                                )}
+                                {canKill && (
+                                  <button
+                                    onClick={() => onKillSession(row.runId!)}
+                                    className="rounded-full border border-red-500/25 bg-red-500/8 px-3 py-1 text-[10px] text-red-700 transition-colors hover:bg-red-500/12"
+                                  >
+                                    立即中止
+                                  </button>
+                                )}
                               </div>
                             )}
                           </div>
-                        </div>
-                      )}
-                    </>
+                        );
+                      })}
+                    </div>
                   )}
                 </div>
               )}
 
               {panel === "context" && (
                 <div className="p-3 space-y-2.5">
+                  <div className="rounded-xl border border-[var(--color-border)]/80 bg-[var(--color-bg)] px-3 py-3">
+                    <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
+                      这页在说明什么
+                    </div>
+                    <div className="mt-2 text-[12px] leading-6 text-[var(--color-text)]">
+                      {contextNarrative}
+                    </div>
+                  </div>
+
+                  <div className="grid gap-2.5 md:grid-cols-2">
+                    <div className="rounded-xl border border-sky-500/15 bg-sky-500/5 px-3 py-3">
+                      <div className="text-[10px] uppercase tracking-[0.12em] text-sky-700">本轮会沿用什么</div>
+                      <div className="mt-2 space-y-1.5">
+                        {continuationItems.map((item) => (
+                          <div key={item} className="text-[11px] leading-relaxed text-[var(--color-text-secondary)]">
+                            {item}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="rounded-xl border border-emerald-500/15 bg-emerald-500/5 px-3 py-3">
+                      <div className="text-[10px] uppercase tracking-[0.12em] text-emerald-700">系统如何接住复杂房间</div>
+                      <div className="mt-2 space-y-1.5">
+                        {compactionItems.map((item) => (
+                          <div key={item} className="text-[11px] leading-relaxed text-[var(--color-text-secondary)]">
+                            {item}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
                   {dialogContextSummary && (
                     <div className="rounded-xl border border-cyan-500/15 bg-cyan-500/5 px-3 py-3">
                       <div className="flex flex-wrap items-center gap-2">
@@ -904,9 +1087,87 @@ export function DialogWorkspaceDock({
                           更新于 {formatShortTime(dialogContextSummary.updatedAt)}
                         </span>
                       </div>
-                      <div className="mt-2 whitespace-pre-wrap break-words text-[11px] leading-6 text-[var(--color-text-secondary)]">
-                        {dialogContextSummary.summary}
+                      <div className="mt-2 text-[11px] leading-6 text-[var(--color-text-secondary)]">
+                        {showFullEarlySummary ? dialogContextSummary.summary : earlySummaryPreview}
                       </div>
+                      {dialogContextSummary.summary.length > earlySummaryPreview.length && (
+                        <button
+                          onClick={() => setShowFullEarlySummary((value) => !value)}
+                          className="mt-2 rounded-full border border-cyan-500/20 bg-white/75 px-3 py-1 text-[10px] text-cyan-700 transition-colors hover:bg-white"
+                        >
+                          {showFullEarlySummary ? "收起详情" : "展开详情"}
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {dialogRoomCompaction && (
+                    <div className="rounded-xl border border-emerald-500/15 bg-emerald-500/5 px-3 py-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="text-[10px] uppercase tracking-[0.12em] text-emerald-700">房间压缩保留</div>
+                        <span className="rounded-full border border-emerald-500/20 bg-white/70 px-1.5 py-0.5 text-[10px] text-emerald-700">
+                          消息 {dialogRoomCompaction.compactedMessageCount}
+                        </span>
+                        <span className="rounded-full border border-emerald-500/20 bg-white/70 px-1.5 py-0.5 text-[10px] text-emerald-700">
+                          子任务 {dialogRoomCompaction.compactedSpawnedTaskCount}
+                        </span>
+                        <span className="rounded-full border border-emerald-500/20 bg-white/70 px-1.5 py-0.5 text-[10px] text-emerald-700">
+                          产物 {dialogRoomCompaction.compactedArtifactCount}
+                        </span>
+                        <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                          更新于 {formatShortTime(dialogRoomCompaction.updatedAt)}
+                        </span>
+                      </div>
+                      {dialogRoomCompaction.triggerReasons?.length ? (
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          {dialogRoomCompaction.triggerReasons.map((reason) => (
+                            <span
+                              key={reason}
+                              className="rounded-full border border-emerald-500/15 bg-white/70 px-2 py-0.5 text-[10px] text-emerald-700"
+                            >
+                              {reason}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
+                      <div className="mt-2 text-[11px] leading-6 text-[var(--color-text-secondary)]">
+                        {showFullRoomCompaction ? dialogRoomCompaction.summary : roomCompactionPreview}
+                      </div>
+                      {dialogRoomCompaction.summary.length > roomCompactionPreview.length && (
+                        <button
+                          onClick={() => setShowFullRoomCompaction((value) => !value)}
+                          className="mt-2 rounded-full border border-emerald-500/20 bg-white/75 px-3 py-1 text-[10px] text-emerald-700 transition-colors hover:bg-white"
+                        >
+                          {showFullRoomCompaction ? "收起详情" : "展开详情"}
+                        </button>
+                      )}
+                      {(dialogRoomCompaction.preservedIdentifiers.length > 0
+                        || (dialogRoomCompaction.memoryConfirmedCount ?? 0) > 0
+                        || (dialogRoomCompaction.memoryQueuedCount ?? 0) > 0) && (
+                        <div className="mt-3 space-y-2">
+                          {dialogRoomCompaction.preservedIdentifiers.length > 0 && (
+                            <div>
+                              <div className="text-[10px] uppercase tracking-[0.12em] text-emerald-700">保留线索</div>
+                              <div className="mt-1 flex flex-wrap gap-1.5">
+                                {dialogRoomCompaction.preservedIdentifiers.map((item) => (
+                                  <span
+                                    key={item}
+                                    className="rounded-full bg-white/80 px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]"
+                                  >
+                                    {item}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          {((dialogRoomCompaction.memoryConfirmedCount ?? 0) > 0
+                            || (dialogRoomCompaction.memoryQueuedCount ?? 0) > 0) && (
+                            <div className="rounded-lg border border-emerald-500/10 bg-white/70 px-3 py-2 text-[11px] text-[var(--color-text-secondary)]">
+                              已沉淀记忆：确认 {dialogRoomCompaction.memoryConfirmedCount ?? 0} 条，候选 {dialogRoomCompaction.memoryQueuedCount ?? 0} 条
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -914,7 +1175,7 @@ export function DialogWorkspaceDock({
                     <div className="rounded-xl border border-[var(--color-border)]/80 bg-[var(--color-bg)] px-3 py-3">
                       <div className="flex flex-wrap items-center gap-2">
                         <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
-                          当前上下文说明
+                          续跑细项清单
                         </div>
                         {contextSnapshot?.generatedAt && (
                           <span className="text-[10px] text-[var(--color-text-tertiary)]">
@@ -936,6 +1197,9 @@ export function DialogWorkspaceDock({
                   )}
 
                   <div className="rounded-xl border border-[var(--color-border)]/80 bg-[var(--color-bg)] px-3 py-3">
+                    <div className="mb-2 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
+                      成本观察
+                    </div>
                     <div className="grid gap-2 md:grid-cols-3">
                       <div className="rounded-lg bg-[var(--color-bg-secondary)]/70 px-3 py-2">
                         <div className="text-[10px] text-[var(--color-text-tertiary)]">共享工作集</div>

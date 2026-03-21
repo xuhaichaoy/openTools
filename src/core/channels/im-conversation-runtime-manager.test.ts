@@ -168,7 +168,140 @@ describe("IMConversationRuntimeManager persistence", () => {
 
     manager.clearConversation("ch-2", "conv-2");
 
+    expect(localStorage.getItem("mtools-im-conversation-runtime-v2")).toBeNull();
     expect(localStorage.getItem("mtools-im-conversation-runtime-v1")).toBeNull();
+
+    manager.dispose();
+  });
+
+  it("hydrates controller-first IM snapshots and restores queued IM messages", () => {
+    savePersistedIMConversationRuntimeSnapshot({
+      version: 2,
+      savedAt: 1710000000000,
+      conversations: [
+        {
+          key: "ch-3::conv-3",
+          channelType: "dingtalk",
+          conversationType: "private",
+          activeTopicId: "default",
+          nextTopicSeq: 2,
+          updatedAt: 1710000000000,
+        },
+      ],
+      runtimes: [
+        {
+          key: "ch-3::conv-3::default",
+          channelId: "ch-3",
+          channelType: "dingtalk",
+          conversationId: "conv-3",
+          conversationType: "private",
+          topicId: "default",
+          sessionId: "im-session-3",
+          updatedAt: 1710000000000,
+          queuedMessages: [
+            {
+              messageId: "queued-1",
+              text: "继续看一下刚才的异常",
+              briefContent: "[IM:Alice] 继续看一下刚才的异常",
+              timestamp: 1710000002000,
+              channelType: "dingtalk",
+              conversationType: "private",
+              displayLabel: "钉钉会话",
+              displayDetail: "钉钉 · 私聊",
+            },
+          ],
+          dialogHistory: [],
+          actorConfigs: [
+            {
+              id: "agent-lead-3",
+              roleName: "Lead",
+              maxIterations: 40,
+              executionPolicy: {
+                accessMode: "read_only",
+                approvalMode: "off",
+              },
+            },
+          ],
+          collaborationSnapshot: {
+            version: 1,
+            surface: "im_conversation",
+            sessionId: "im-session-3",
+            activeContract: {
+              contractId: "contract-im-3",
+              surface: "im_conversation",
+              executionStrategy: "coordinator",
+              executionPolicy: {
+                accessMode: "read_only",
+                approvalMode: "off",
+              },
+              summary: "读取 IM 上下文并继续答复",
+              inputHash: "input-hash-3",
+              actorRosterHash: "roster-hash-3",
+              initialRecipientActorIds: ["agent-lead-3"],
+              participantActorIds: ["agent-lead-3"],
+              allowedMessagePairs: [],
+              allowedSpawnPairs: [],
+              plannedDelegations: [],
+              approvedAt: 1710000000000,
+              state: "sealed",
+            },
+            pendingInteractions: [],
+            childSessions: [],
+            queuedFollowUps: [],
+            focusedChildSessionId: null,
+            presentationState: {
+              surface: "im_conversation",
+              status: "queued",
+              pendingInteractionCount: 0,
+              pendingApprovalCount: 0,
+              childSessionsPreview: [],
+              queuedFollowUpCount: 0,
+              focusedChildSessionId: null,
+              contractState: "sealed",
+              executionStrategy: "coordinator",
+            },
+            dialogMessages: [
+              {
+                id: "dialog-user-3",
+                from: "user",
+                content: "先帮我看一下日志",
+                timestamp: 1710000000000,
+                priority: "normal",
+                kind: "user_input",
+                externalChannelType: "dingtalk",
+                externalConversationType: "private",
+                runtimeDisplayLabel: "钉钉会话",
+                runtimeDisplayDetail: "钉钉 · 私聊",
+              },
+              {
+                id: "dialog-agent-3",
+                from: "agent-lead-3",
+                content: "已经开始检查日志。",
+                timestamp: 1710000001000,
+                priority: "normal",
+                kind: "agent_result",
+              },
+            ],
+            updatedAt: 1710000001000,
+          },
+        },
+      ],
+    });
+
+    const manager = new IMConversationRuntimeManager({
+      onReply: async () => undefined,
+    });
+
+    const preview = useIMConversationRuntimeStore.getState().sessionPreviews["im-session-3"];
+    const conversation = manager.getConversationSnapshots()[0];
+
+    expect(preview?.dialogHistory.length ?? 0).toBeGreaterThanOrEqual(2);
+    expect(preview?.dialogHistory.some((message) => message.content === "已经开始检查日志。")).toBe(true);
+    expect(preview?.lastInputText).toBe("继续看一下刚才的异常");
+    expect(preview?.queueLength ?? 0).toBeGreaterThanOrEqual(0);
+    expect(["sealed", "active", "completed"]).toContain(preview?.contractState);
+    expect(conversation?.pendingInteractionCount).toBe(0);
+    expect(["sealed", "active", "completed"]).toContain(conversation?.contractState);
 
     manager.dispose();
   });
