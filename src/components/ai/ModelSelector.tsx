@@ -6,6 +6,8 @@ import { useTeamStore } from "@/store/team-store";
 import { api } from "@/core/api/client";
 import { primeTeamModelCache } from "@/core/ai/router";
 import { buildAICenterModelScope } from "@/core/ai/ai-center-model-scope";
+import { resolveAIConfig } from "@/core/ai/resolved-ai-config";
+import type { AIConfig } from "@/core/ai/types";
 
 interface TeamModelInfo {
   config_id: string;
@@ -22,9 +24,9 @@ interface TeamModelsState {
 }
 
 export function ModelSelector({ scopeMode }: { scopeMode?: AICenterMode }) {
-  const { config, saveConfig, ownKeys, selectOwnKeyModel } =
-    useAIStore();
+  const { config, saveConfig, ownKeys } = useAIStore();
   const currentMode = useAppStore((s) => s.aiCenterMode);
+  const aiCenterModelScopes = useAppStore((s) => s.aiCenterModelScopes);
   const setAICenterModelScope = useAppStore((s) => s.setAICenterModelScope);
   const [open, setOpen] = useState(false);
   const [teamModelsState, setTeamModelsState] = useState<TeamModelsState>({
@@ -38,36 +40,57 @@ export function ModelSelector({ scopeMode }: { scopeMode?: AICenterMode }) {
   const btnRef = useRef<HTMLButtonElement>(null);
 
   const effectiveMode = scopeMode ?? currentMode;
+  const currentScope = aiCenterModelScopes[effectiveMode];
+  const effectiveConfig = resolveAIConfig({
+    baseConfig: config,
+    ownKeys,
+    scope: currentScope,
+  });
 
   const rememberScope = useCallback(
-    (nextConfig: typeof config) => {
+    (nextConfig: AIConfig) => {
       setAICenterModelScope(effectiveMode, buildAICenterModelScope(nextConfig));
     },
     [effectiveMode, setAICenterModelScope],
   );
 
-  const applyConfigPatch = useCallback(
-    (patch: Partial<typeof config>) => {
+  const applyScopePatch = useCallback(
+    (patch: Partial<AIConfig>) => {
+      const aiState = useAIStore.getState();
       const nextConfig = {
-        ...useAIStore.getState().config,
+        ...resolveAIConfig({
+          baseConfig: aiState.config,
+          ownKeys: aiState.ownKeys,
+          scope: useAppStore.getState().aiCenterModelScopes[effectiveMode],
+        }),
         ...patch,
       };
       rememberScope(nextConfig);
-      void saveConfig(nextConfig);
     },
-    [rememberScope, saveConfig],
+    [effectiveMode, rememberScope],
   );
 
   const { teams, loaded: teamsLoaded, loadTeams } = useTeamStore();
 
   // 自有 Key：仅当「已有选中但不在当前列表」时回退到第一个（避免 config 未加载完就被覆盖）
   useEffect(() => {
-    if (config.source !== "own_key" || ownKeys.length === 0) return;
-    const currentId = config.active_own_key_id;
+    if (effectiveConfig.source !== "own_key" || ownKeys.length === 0) return;
+    const currentId = effectiveConfig.active_own_key_id;
     if (!currentId) return;
     if (ownKeys.some((k) => k.id === currentId)) return;
-    selectOwnKeyModel(ownKeys[0].id);
-  }, [config.source, config.active_own_key_id, ownKeys, selectOwnKeyModel]);
+    const fallback = ownKeys[0];
+    applyScopePatch({
+      source: "own_key",
+      active_own_key_id: fallback.id,
+      model: fallback.model,
+      protocol: fallback.protocol,
+    });
+  }, [
+    effectiveConfig.source,
+    effectiveConfig.active_own_key_id,
+    ownKeys,
+    applyScopePatch,
+  ]);
 
   // 团队模式下先确保 teams 已加载
   useEffect(() => {
@@ -81,14 +104,18 @@ export function ModelSelector({ scopeMode }: { scopeMode?: AICenterMode }) {
     if (config.source !== "team" || !teamsLoaded || teams.length === 0) return;
     if (config.team_id && teams.some((t) => t.id === config.team_id)) return;
     const fallbackId = teams[0].id;
-    applyConfigPatch({ team_id: fallbackId, team_config_id: undefined });
-  }, [config.source, config.team_id, teamsLoaded, teams, applyConfigPatch]);
+    void saveConfig({
+      ...useAIStore.getState().config,
+      team_id: fallbackId,
+      team_config_id: undefined,
+    });
+  }, [config.source, config.team_id, teamsLoaded, teams, saveConfig]);
 
   // 加载团队模型（只在 team_id 经过验证后才请求）
   useEffect(() => {
-    if (config.source === "team" && config.team_id) {
-      if (!teamsLoaded || !teams.some((t) => t.id === config.team_id)) return;
-      const teamId = config.team_id;
+    if (effectiveConfig.source === "team" && effectiveConfig.team_id) {
+      if (!teamsLoaded || !teams.some((t) => t.id === effectiveConfig.team_id)) return;
+      const teamId = effectiveConfig.team_id;
       let cancelled = false;
       setTeamModelsState({
         teamId,
@@ -133,19 +160,19 @@ export function ModelSelector({ scopeMode }: { scopeMode?: AICenterMode }) {
         );
       });
     }
-  }, [config.source, config.team_id, teamsLoaded, teams]);
+  }, [effectiveConfig.source, effectiveConfig.team_id, teamsLoaded, teams]);
 
   // 团队模式下自动修正无效 team_config_id，并优先选中最高优先级模型
   useEffect(() => {
-    if (config.source !== "team" || !config.team_id) return;
-    if (teamModelsState.teamId !== config.team_id) return;
+    if (effectiveConfig.source !== "team" || !effectiveConfig.team_id) return;
+    if (teamModelsState.teamId !== effectiveConfig.team_id) return;
     if (teamModelsState.status !== "ready") return;
 
     const teamModels = teamModelsState.models;
     if (teamModels.length === 0) return;
 
-    const selected = config.team_config_id
-      ? teamModels.find((m) => m.config_id === config.team_config_id)
+    const selected = effectiveConfig.team_config_id
+      ? teamModels.find((m) => m.config_id === effectiveConfig.team_config_id)
       : undefined;
     if (selected) return;
 
@@ -154,24 +181,24 @@ export function ModelSelector({ scopeMode }: { scopeMode?: AICenterMode }) {
       | "openai"
       | "anthropic";
     if (
-      config.team_config_id !== fallback.config_id ||
-      config.model !== fallback.model_name ||
-      config.protocol !== nextProtocol
+      effectiveConfig.team_config_id !== fallback.config_id ||
+      effectiveConfig.model !== fallback.model_name ||
+      effectiveConfig.protocol !== nextProtocol
     ) {
-      applyConfigPatch({
+      applyScopePatch({
         team_config_id: fallback.config_id,
         model: fallback.model_name,
         protocol: nextProtocol,
       });
     }
   }, [
-    config.source,
-    config.team_config_id,
-    config.team_id,
-    config.model,
-    config.protocol,
+    effectiveConfig.source,
+    effectiveConfig.team_config_id,
+    effectiveConfig.team_id,
+    effectiveConfig.model,
+    effectiveConfig.protocol,
     teamModelsState,
-    applyConfigPatch,
+    applyScopePatch,
   ]);
 
   // 点击外部关闭
@@ -199,21 +226,21 @@ export function ModelSelector({ scopeMode }: { scopeMode?: AICenterMode }) {
     setOpen(!open);
   };
 
-  const currentModel = config.model || "gpt-4o";
-  const source = config.source || "own_key";
+  const currentModel = effectiveConfig.model || "gpt-4o";
+  const source = effectiveConfig.source || "own_key";
 
   // 找到当前模型的显示名
   const getDisplayName = () => {
     if (source === "own_key") {
-      const key = ownKeys.find((k) => k.id === config.active_own_key_id);
+      const key = ownKeys.find((k) => k.id === effectiveConfig.active_own_key_id);
       if (key) return key.name || key.model;
     }
     if (source === "team") {
-      const teamModels = teamModelsState.teamId === config.team_id
+      const teamModels = teamModelsState.teamId === effectiveConfig.team_id
         ? teamModelsState.models
         : [];
-      const tm = config.team_config_id
-        ? teamModels.find((m) => m.config_id === config.team_config_id)
+      const tm = effectiveConfig.team_config_id
+        ? teamModels.find((m) => m.config_id === effectiveConfig.team_config_id)
         : teamModels.find((m) => m.model_name === currentModel);
       if (tm) return tm.display_name;
     }
@@ -221,15 +248,20 @@ export function ModelSelector({ scopeMode }: { scopeMode?: AICenterMode }) {
   };
 
   const handleSelectOwnKey = (id: string) => {
-    selectOwnKeyModel(id);
-    queueMicrotask(() => {
-      rememberScope(useAIStore.getState().config);
+    const key = ownKeys.find((item) => item.id === id);
+    if (!key) return;
+    rememberScope({
+      ...effectiveConfig,
+      source: "own_key",
+      active_own_key_id: id,
+      model: key.model,
+      protocol: key.protocol,
     });
     setOpen(false);
   };
 
   const handleSelectTeamModel = (m: TeamModelInfo) => {
-    applyConfigPatch({
+    applyScopePatch({
       team_config_id: m.config_id,
       model: m.model_name,
       protocol: (m.protocol || "openai") as "openai" | "anthropic",
@@ -239,7 +271,7 @@ export function ModelSelector({ scopeMode }: { scopeMode?: AICenterMode }) {
 
   const handleCustomModel = (val: string) => {
     if (!val) return;
-    applyConfigPatch({ model: val });
+    applyScopePatch({ model: val });
     setOpen(false);
   };
 
@@ -325,7 +357,7 @@ export function ModelSelector({ scopeMode }: { scopeMode?: AICenterMode }) {
               <>
                 {ownKeys.length > 0 ? (
                   ownKeys.map((k) => {
-                    const isActive = config.active_own_key_id === k.id;
+                    const isActive = effectiveConfig.active_own_key_id === k.id;
                     return (
                       <button
                         key={k.id}
@@ -370,7 +402,7 @@ export function ModelSelector({ scopeMode }: { scopeMode?: AICenterMode }) {
               <>
                 {teamModelsState.models.length > 0 ? (
                   teamModelsState.models.map((m) => {
-                    const isActive = config.team_config_id === m.config_id;
+                    const isActive = effectiveConfig.team_config_id === m.config_id;
                     return (
                       <button
                         key={m.config_id}

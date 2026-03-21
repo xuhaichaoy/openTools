@@ -17,6 +17,7 @@ pub(super) async fn dispatch_plugin_api_call(
         }
         "showMainWindow" => {
             if let Some(w) = app.get_webview_window("main") {
+                let _ = crate::commands::window::prepare_main_window_for_show(&w);
                 let _ = w.show();
                 let _ = w.set_focus();
             }
@@ -28,10 +29,11 @@ pub(super) async fn dispatch_plugin_api_call(
                 if label.starts_with(&format!("plugin-{}", plugin_id)) {
                     let size = window.inner_size().map_err(|e| e.to_string())?;
                     let scale = window.scale_factor().unwrap_or(1.0);
-                    let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize {
-                        width: size.width,
-                        height: (height * scale) as u32,
-                    }));
+                    let logical_width = size.to_logical::<f64>(scale).width;
+                    let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
+                        logical_width.max(1.0),
+                        height.max(1.0),
+                    )));
                     break;
                 }
             }

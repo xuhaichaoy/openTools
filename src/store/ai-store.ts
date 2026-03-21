@@ -43,8 +43,9 @@ import {
   unregisterRuntimeAbortHandler,
   useRuntimeStateStore,
 } from "@/core/agent/context-runtime/runtime-state";
-import { applyAILocalConfigOverrides } from "@/core/ai/local-ai-config-preferences";
 import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
+import { resolveAIConfig } from "@/core/ai/resolved-ai-config";
+import { useAppStore } from "@/store/app-store";
 import { loadAndResolveSkills } from "@/store/skill-store";
 import { useMcpStore, executeMcpTool } from "@/store/mcp-store";
 import { useAISessionRuntimeStore } from "@/store/ai-session-runtime-store";
@@ -263,7 +264,7 @@ function normalizeConfig(config: AIConfig): AIConfig {
     disable_force_rag: undefined,
   };
 
-  const finalConfig = applyAILocalConfigOverrides(normalized);
+  const finalConfig = normalized;
   if (source !== "team") {
     finalConfig.team_id = undefined;
     finalConfig.team_config_id = undefined;
@@ -913,7 +914,12 @@ export const useAIStore = create<AIState>((set, get) => ({
         conversationId,
         assistantMessageId: assistantMessage.id,
         apiMessages,
-        config: state.config,
+        config: resolveAIConfig({
+          baseConfig: state.config,
+          ownKeys: state.ownKeys,
+          scope: useAppStore.getState().aiCenterModelScopes.ask,
+        }),
+        mode: "ask",
         extraTools: extraTools.length > 0 ? extraTools : undefined,
         onFrontendToolCall: extraTools.length > 0
           ? async (name, args) => executeMcpTool(name, args)

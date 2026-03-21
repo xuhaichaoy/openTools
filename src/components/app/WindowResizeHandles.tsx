@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { LogicalSize, getCurrentWindow } from "@tauri-apps/api/window";
+import { LogicalSize, currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
 import {
   MAX_WINDOW_HEIGHT,
   MAX_WINDOW_WIDTH,
@@ -12,6 +12,8 @@ import {
 } from "@/core/ui/local-ui-preferences";
 
 type ResizeDirection = "east" | "south" | "southeast";
+
+const WINDOW_MONITOR_MARGIN = 24;
 
 interface ResizeSession {
   direction: ResizeDirection;
@@ -39,6 +41,66 @@ function getCursor(direction: ResizeDirection): string {
   return "nwse-resize";
 }
 
+function clampDimension(value: number, min: number, max: number): number {
+  const upper = Math.max(1, Math.round(max));
+  const lower = Math.min(Math.max(1, Math.round(min)), upper);
+  return Math.min(Math.max(Math.round(value), lower), upper);
+}
+
+async function getCurrentMonitorLogicalBounds() {
+  const currentWindow = getCurrentWindow();
+  const [monitor, fallbackScale] = await Promise.all([
+    currentMonitor().catch(() => null),
+    currentWindow.scaleFactor().catch(() => window.devicePixelRatio || 1),
+  ]);
+  const scale =
+    monitor?.scaleFactor
+    ?? fallbackScale
+    ?? window.devicePixelRatio
+    ?? 1;
+  const physicalWidth = monitor?.workArea.size.width
+    ?? Math.round(window.screen.availWidth * scale);
+  const physicalHeight = monitor?.workArea.size.height
+    ?? Math.round(window.screen.availHeight * scale);
+
+  return {
+    width: Math.max(
+      1,
+      Math.floor(physicalWidth / scale) - WINDOW_MONITOR_MARGIN * 2,
+    ),
+    height: Math.max(
+      1,
+      Math.floor(physicalHeight / scale) - WINDOW_MONITOR_MARGIN * 2,
+    ),
+  };
+}
+
+async function clampWindowSizeToCurrentMonitor(
+  width: number,
+  height: number,
+  bucket: LocalWindowHeightBucket | null,
+) {
+  const monitorBounds = await getCurrentMonitorLogicalBounds();
+  const maxWidth = Math.max(
+    MIN_WINDOW_WIDTH,
+    Math.min(MAX_WINDOW_WIDTH, monitorBounds.width),
+  );
+  const maxHeight = Math.max(1, Math.min(MAX_WINDOW_HEIGHT, monitorBounds.height));
+  const minWidth = MIN_WINDOW_WIDTH;
+  const requestedMinHeight = bucket === "chat"
+    ? MIN_CHAT_WINDOW_HEIGHT
+    : bucket === "expanded"
+      ? MIN_EXPANDED_WINDOW_HEIGHT
+      : 1;
+  const minHeight = requestedMinHeight;
+  const boundedMaxHeight = Math.max(minHeight, maxHeight);
+
+  return {
+    width: clampDimension(width, minWidth, maxWidth),
+    height: clampDimension(height, minHeight, boundedMaxHeight),
+  };
+}
+
 export function WindowResizeHandles({
   bucket,
 }: {
@@ -59,6 +121,25 @@ export function WindowResizeHandles({
     bucketRef.current = bucket;
   }, [bucket]);
 
+  async function applyClampedWindowSize(
+    width: number,
+    height: number,
+  ): Promise<{ width: number; height: number }> {
+    const next = await clampWindowSizeToCurrentMonitor(width, height, bucketRef.current);
+    if (
+      Math.round(window.innerWidth) === next.width
+      && Math.round(window.innerHeight) === next.height
+    ) {
+      return next;
+    }
+
+    await getCurrentWindow()
+      .setSize(new LogicalSize(next.width, next.height))
+      .catch(() => {});
+
+    return next;
+  }
+
   function flushPendingSize() {
     if (frameRef.current !== null) return;
 
@@ -68,8 +149,7 @@ export function WindowResizeHandles({
       pendingSizeRef.current = null;
       if (!pending) return;
 
-      void getCurrentWindow()
-        .setSize(new LogicalSize(pending.width, pending.height))
+      void applyClampedWindowSize(pending.width, pending.height)
         .catch(() => {})
         .finally(() => {
           if (pendingSizeRef.current) {
@@ -108,16 +188,23 @@ export function WindowResizeHandles({
     dragRef.current = null;
 
     if (finalSize) {
-      void getCurrentWindow()
-        .setSize(new LogicalSize(finalSize.width, finalSize.height))
+      void applyClampedWindowSize(finalSize.width, finalSize.height)
+        .then((applied) => {
+          if (!persist) return;
+          persistWindowLayoutFromUserResize(
+            applied.width,
+            applied.height,
+            bucketRef.current,
+          );
+        })
         .catch(() => {});
     }
 
-    if (!persist) return;
+    if (!persist || finalSize) return;
 
     persistWindowLayoutFromUserResize(
-      finalSize?.width ?? window.innerWidth,
-      finalSize?.height ?? window.innerHeight,
+      Math.round(window.innerWidth),
+      Math.round(window.innerHeight),
       bucketRef.current,
     );
   }
@@ -161,11 +248,7 @@ export function WindowResizeHandles({
 
   useEffect(() => {
     const { width } = loadLocalWindowLayoutPreference();
-    if (Math.round(window.innerWidth) === width) return;
-
-    void getCurrentWindow()
-      .setSize(new LogicalSize(width, window.innerHeight))
-      .catch(() => {});
+    void applyClampedWindowSize(width, window.innerHeight);
   }, []);
 
   useEffect(() => {

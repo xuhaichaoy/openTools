@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Cpu, Loader2, Settings, Trash2 } from "lucide-react";
 import { api } from "@/core/api/client";
 import { handleError } from "@/core/errors";
-import { EmbeddingConfigSection } from "../AIModelTab";
+import { EmbeddingConfigSection } from "../AIModelTabSections";
 import { TeamQuotaSection } from "./TeamQuotaSection";
 import type { TeamMember } from "./TeamMembersSection";
 

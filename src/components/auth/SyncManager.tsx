@@ -274,7 +274,6 @@ async function syncAIConfig() {
     team_id: effectiveConfig.team_id,
     team_config_id: effectiveConfig.team_config_id,
     protocol: effectiveConfig.protocol,
-    active_own_key_id: effectiveConfig.active_own_key_id,
   };
 
   await pushData(dataType, [

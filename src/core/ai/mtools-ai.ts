@@ -14,10 +14,11 @@ import type {
 import { handleError } from "@/core/errors";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useAIStore } from "@/store/ai-store";
+import type { AICenterMode } from "@/store/app-store";
 import type { AIConfig } from "@/core/ai/types";
 import { AssistantReasoningStreamNormalizer } from "@/core/ai/reasoning-tag-stream";
 import { resolveModelCapabilities } from "@/core/ai/model-capabilities";
+import { getResolvedAIConfigForMode } from "@/core/ai/resolved-ai-config-store";
 import { withRoutedAIConfig } from "@/core/ai/router";
 import { mergeStreamChunk } from "@/core/ai/stream-chunk-merge";
 import { createLogger } from "@/core/logger";
@@ -205,8 +206,8 @@ function normalizeStreamChunk(params: {
 }
 
 /** 获取当前 AI 配置 */
-function getConfig(): AIConfig {
-  return useAIStore.getState().config;
+function getConfig(mode: AICenterMode): AIConfig {
+  return getResolvedAIConfigForMode(mode);
 }
 
 function applyRequestPolicy(
@@ -478,15 +479,15 @@ async function injectMemoryForMessages(
 
 /**
  * 创建 MToolsAI SDK 实例
- * 每次调用返回同一个单例；配置始终从 useAIStore 实时读取。
+ * 每个 mode 维护一个单例；配置始终从 stores 实时 resolve。
  */
-export function createMToolsAI(): MToolsAI {
+export function createMToolsAI(mode: AICenterMode = "ask"): MToolsAI {
   return {
     /**
      * 单轮对话 — 发送消息并等待完整回复
      */
     async chat(options) {
-      const config = getConfig();
+      const config = getConfig(mode);
       const conversationId = `sdk-${generateId()}`;
       const baseConfig: AIConfig = {
         ...config,
@@ -661,7 +662,7 @@ export function createMToolsAI(): MToolsAI {
      * 流式对话 — 逐 chunk 回调
      */
     async stream(options) {
-      const config = getConfig();
+      const config = getConfig(mode);
       const conversationId = `sdk-${generateId()}`;
       const effectiveConfig = applyRequestPolicy(config, options.requestPolicy);
       let fullContent = "";
@@ -862,12 +863,16 @@ export function createMToolsAI(): MToolsAI {
      * 文本向量化 — 通过后端 embedding API
      */
     async embedding(text: string) {
-      const config = getConfig();
+      const config = getConfig(mode);
       try {
-        const result = await invoke<number[]>("ai_embedding", {
-          text,
+        const result = await withRoutedAIConfig(
           config,
-        });
+          (routed) =>
+            invoke<number[]>("ai_embedding", {
+              text,
+              config: routed,
+            }),
+        );
         return result;
       } catch (e) {
         handleError(e, { context: "mtools.ai embedding", silent: true });
@@ -879,13 +884,17 @@ export function createMToolsAI(): MToolsAI {
      * 获取当前可用模型列表
      */
     async getModels() {
-      const config = getConfig();
+      const config = getConfig(mode);
       try {
-        const models = await invoke<{ id: string; name: string }[]>(
-          "ai_list_models",
-          {
-            config,
-          },
+        const models = await withRoutedAIConfig(
+          config,
+          (routed) =>
+            invoke<{ id: string; name: string }[]>(
+              "ai_list_models",
+              {
+                config: routed,
+              },
+            ),
         );
         return models;
       } catch {
@@ -900,7 +909,7 @@ export function createMToolsAI(): MToolsAI {
      */
     async streamWithTools(options) {
       const config: AIConfig = {
-        ...getConfig(),
+        ...getConfig(mode),
         ...(options.modelOverride ? { model: options.modelOverride } : {}),
         ...(options.thinkingLevel && options.thinkingLevel !== "adaptive"
           ? { thinking_level: options.thinkingLevel }
@@ -1579,13 +1588,16 @@ export function createMToolsAI(): MToolsAI {
   };
 }
 
-/** 全局单例 */
-let _instance: MToolsAI | null = null;
-export function getMToolsAI(): MToolsAI {
-  if (!_instance) {
-    _instance = createMToolsAI();
+/** 按 mode 缓存的单例 */
+const _instances = new Map<AICenterMode, MToolsAI>();
+export function getMToolsAI(mode: AICenterMode = "ask"): MToolsAI {
+  const existing = _instances.get(mode);
+  if (existing) {
+    return existing;
   }
-  return _instance;
+  const next = createMToolsAI(mode);
+  _instances.set(mode, next);
+  return next;
 }
 
 /**
@@ -1598,8 +1610,9 @@ export async function chatDirect(options: {
   model?: string;
   temperature?: number;
   signal?: AbortSignal;
+  mode?: AICenterMode;
 }): Promise<{ content: string }> {
-  const config = getConfig();
+  const config = getConfig(options.mode ?? "ask");
   return withRoutedAIConfig(
     {
       ...config,

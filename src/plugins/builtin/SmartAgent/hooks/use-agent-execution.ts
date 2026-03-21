@@ -8,6 +8,7 @@ import {
   useAgentStore,
 } from "@/store/agent-store";
 import { useAIStore } from "@/store/ai-store";
+import { getResolvedAIConfigForMode } from "@/core/ai/resolved-ai-config-store";
 import { useAgentMemoryStore } from "@/store/agent-memory-store";
 import { buildAgentFCCompatibilityKey } from "@/core/agent/fc-compatibility";
 import {
@@ -308,7 +309,9 @@ export function useAgentExecution({
         ?.tasks.find((t) => t.id === taskId);
       const collectedSteps: AgentStep[] = existingTask?.steps ? [...existingTask.steps] : [];
       let latestPromptContextSnapshot: AgentPromptContextSnapshot | null = null;
-      const fcCompatibilityKey = buildAgentFCCompatibilityKey(useAIStore.getState().config);
+      const fcCompatibilityKey = buildAgentFCCompatibilityKey(
+        getResolvedAIConfigForMode("agent"),
+      );
       let scrollTimer: ReturnType<typeof setTimeout> | null = null;
 
       const applyStep = (step: AgentStep, markProgress = true) => {

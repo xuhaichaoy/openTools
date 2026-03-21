@@ -21,6 +21,12 @@ import { DingTalkChannel } from "./dingtalk-channel";
 import { FeishuChannel } from "./feishu-channel";
 import { ChannelProgressEmitter } from "./channel-progress-emitter";
 import { IMConversationRuntimeManager } from "./im-conversation-runtime-manager";
+import {
+  clearPersistedConversationRoutes,
+  loadPersistedConversationRoutes,
+  savePersistedConversationRoutes,
+  type PersistedConversationRoute,
+} from "./channel-route-persistence";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { createLogger } from "@/core/logger";
 import type { IMConversationSnapshot } from "@/store/im-conversation-runtime-store";
@@ -75,6 +81,10 @@ export class ChannelManager {
 
   /** 路由表条目超时清理时间（30 分钟） */
   private static readonly ROUTE_TTL_MS = 30 * 60 * 1000;
+
+  constructor() {
+    this._hydrateConversationRoutes();
+  }
 
   /**
    * 将 ChannelManager 连接到 IM runtime 管理器。
@@ -201,21 +211,138 @@ export class ChannelManager {
     return this._conversationRoutes.get(this._buildConversationRouteKey(channelId, conversationId)) ?? null;
   }
 
+  private _normalizeConversationRoute(route: ConversationRoute): ConversationRoute | null {
+    const channelId = route.channelId.trim();
+    const conversationId = route.conversationId.trim();
+    if (!channelId || !conversationId || !Number.isFinite(route.lastActiveAt) || route.lastActiveAt <= 0) {
+      return null;
+    }
+
+    const now = Date.now();
+    const normalized: ConversationRoute = {
+      channelId,
+      conversationId,
+      lastActiveAt: route.lastActiveAt,
+      ...(route.conversationType ? { conversationType: route.conversationType } : {}),
+      ...(route.targetUserId?.trim() ? { targetUserId: route.targetUserId.trim() } : {}),
+      ...(route.messageId?.trim() ? { messageId: route.messageId.trim() } : {}),
+      ...(route.robotCode?.trim() ? { robotCode: route.robotCode.trim() } : {}),
+    };
+
+    if (
+      route.replyWebhookUrl?.trim()
+      && (!route.replyWebhookExpiresAt || route.replyWebhookExpiresAt > now)
+    ) {
+      normalized.replyWebhookUrl = route.replyWebhookUrl.trim();
+      if (route.replyWebhookExpiresAt) {
+        normalized.replyWebhookExpiresAt = route.replyWebhookExpiresAt;
+      }
+    }
+
+    return normalized;
+  }
+
+  private _persistConversationRoutes(): void {
+    if (this._conversationRoutes.size === 0) {
+      clearPersistedConversationRoutes();
+      return;
+    }
+
+    const persistedRoutes: PersistedConversationRoute[] = [];
+    for (const [key, route] of this._conversationRoutes) {
+      const normalized = this._normalizeConversationRoute(route);
+      if (!normalized) continue;
+      persistedRoutes.push({
+        key,
+        channelId: normalized.channelId,
+        conversationId: normalized.conversationId,
+        lastActiveAt: normalized.lastActiveAt,
+        ...(normalized.conversationType ? { conversationType: normalized.conversationType } : {}),
+        ...(normalized.targetUserId ? { targetUserId: normalized.targetUserId } : {}),
+        ...(normalized.messageId ? { messageId: normalized.messageId } : {}),
+        ...(normalized.replyWebhookUrl ? { replyWebhookUrl: normalized.replyWebhookUrl } : {}),
+        ...(normalized.replyWebhookExpiresAt ? { replyWebhookExpiresAt: normalized.replyWebhookExpiresAt } : {}),
+        ...(normalized.robotCode ? { robotCode: normalized.robotCode } : {}),
+      });
+    }
+
+    if (persistedRoutes.length === 0) {
+      clearPersistedConversationRoutes();
+      return;
+    }
+    savePersistedConversationRoutes(persistedRoutes);
+  }
+
+  private _hydrateConversationRoutes(): void {
+    const now = Date.now();
+    let changed = false;
+    for (const record of loadPersistedConversationRoutes()) {
+      if (now - record.lastActiveAt > ChannelManager.ROUTE_TTL_MS) {
+        changed = true;
+        continue;
+      }
+      const normalized = this._normalizeConversationRoute({
+        channelId: record.channelId,
+        conversationId: record.conversationId,
+        conversationType: record.conversationType,
+        targetUserId: record.targetUserId,
+        lastActiveAt: record.lastActiveAt,
+        messageId: record.messageId,
+        replyWebhookUrl: record.replyWebhookUrl,
+        replyWebhookExpiresAt: record.replyWebhookExpiresAt,
+        robotCode: record.robotCode,
+      });
+      if (!normalized) {
+        changed = true;
+        continue;
+      }
+      this._conversationRoutes.set(this._buildConversationRouteKey(normalized.channelId, normalized.conversationId), normalized);
+      if (
+        normalized.replyWebhookUrl !== record.replyWebhookUrl
+        || normalized.replyWebhookExpiresAt !== record.replyWebhookExpiresAt
+      ) {
+        changed = true;
+      }
+    }
+    if (changed) {
+      this._persistConversationRoutes();
+    }
+  }
+
+  private _setConversationRoute(route: ConversationRoute): void {
+    const normalized = this._normalizeConversationRoute(route);
+    if (!normalized) return;
+    this._conversationRoutes.set(
+      this._buildConversationRouteKey(normalized.channelId, normalized.conversationId),
+      normalized,
+    );
+    this._persistConversationRoutes();
+  }
+
   /** 清理超时的路由条目 */
   private _cleanupStaleRoutes(): void {
     const now = Date.now();
+    let removed = false;
     for (const [conversationId, route] of this._conversationRoutes) {
       if (now - route.lastActiveAt > ChannelManager.ROUTE_TTL_MS) {
         this._conversationRoutes.delete(conversationId);
+        removed = true;
       }
+    }
+    if (removed) {
+      this._persistConversationRoutes();
     }
   }
 
   private _clearConversationRoutes(channelId: string, conversationIds: string[]): void {
     if (conversationIds.length === 0) return;
+    let removed = false;
     for (const conversationId of conversationIds) {
       this._progressEmitter?.clear(channelId, conversationId);
-      this._conversationRoutes.delete(this._buildConversationRouteKey(channelId, conversationId));
+      removed = this._conversationRoutes.delete(this._buildConversationRouteKey(channelId, conversationId)) || removed;
+    }
+    if (removed) {
+      this._persistConversationRoutes();
     }
   }
 
@@ -257,6 +384,7 @@ export class ChannelManager {
         this._conversationRoutes.delete(key);
       }
     }
+    this._persistConversationRoutes();
     entry.unsubscribe?.();
     await entry.channel.disconnect();
     this.channels.delete(id);
@@ -351,6 +479,7 @@ export class ChannelManager {
         delivered = true;
         if (route) {
           route.lastActiveAt = Date.now();
+          this._persistConversationRoutes();
         }
       } catch (err) {
         log.error("Failed to send scheduled reminder through channel", err);
@@ -516,7 +645,7 @@ export class ChannelManager {
 
   private async _dispatchMessage(channelId: string, msg: ChannelIncomingMessage): Promise<string | void> {
     log.info(`Message from ${channelId}: [${msg.senderName}] ${msg.text.slice(0, 60)}`);
-    this._conversationRoutes.set(this._buildConversationRouteKey(channelId, msg.conversationId), {
+    this._setConversationRoute({
       channelId,
       conversationId: msg.conversationId,
       conversationType: msg.conversationType,
@@ -590,6 +719,7 @@ export class ChannelManager {
       const storedRoute = this._getConversationRoute(route.channelId, conversationId);
       if (storedRoute) {
         storedRoute.lastActiveAt = Date.now();
+        this._persistConversationRoutes();
       }
     } catch (err) {
       log.error("Failed to forward reply to source IM channel", err);

@@ -74,6 +74,7 @@ async function retryChat(
       if (CODING_PLAN_GATE_RE.test(msg)) {
         console.warn("[Cluster] API gateway blocked 'Coding Plan', falling back to chatDirect");
         return await chatDirect({
+          mode: "cluster",
           messages: params.messages.map((m) => ({
             role: m.role,
             content: m.content,
@@ -330,7 +331,7 @@ export class ClusterOrchestrator {
     query: string,
     forceMode?: ClusterMode,
   ): Promise<ClusterPlan> {
-    const ai = getMToolsAI();
+    const ai = getMToolsAI("cluster");
 
     const autoReview = this.options.autoReviewCodeSteps ?? false;
     const reviewHint = autoReview
@@ -989,7 +990,7 @@ ${stepResult}
     step: ClusterStep,
     stepResult: string,
   ): Promise<ReviewFeedback> {
-    const ai = getMToolsAI();
+    const ai = getMToolsAI("cluster");
     const modelOverride = this.resolveModel("reviewer");
     const chatRuntimeContext = await this.buildChatRuntimeContext(step.task);
 
@@ -1074,7 +1075,7 @@ ${stepResult}
       if (typeof singleResult === "string") return singleResult;
     }
 
-    const ai = getMToolsAI();
+    const ai = getMToolsAI("cluster");
     const { totalBudget: TOTAL_BUDGET, coderBudget: CODER_BUDGET } =
       getClusterAggregateBudgets({
         codingMode: this.options.codingMode,

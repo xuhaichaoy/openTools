@@ -184,12 +184,21 @@ fn is_allowed_mtplugin_path(app: &tauri::AppHandle, canonical: &std::path::Path)
 }
 
 /// 显示窗口的统一帮助函数：显示 → 聚焦，并临时抑制失焦隐藏
-fn show_window(window: &tauri::WebviewWindow, suppress: &Arc<AtomicUsize>) {
+fn show_window(
+    window: &tauri::WebviewWindow,
+    suppress: &Arc<AtomicUsize>,
+    last_monitor: &Arc<Mutex<Option<tauri::Monitor>>>,
+) {
     // 增加生成代数，表示新的抑制周期开始（非0即为抑制状态）
     let gen = suppress.fetch_add(1, Ordering::SeqCst) + 1;
-    // let _ = window.center(); // removed to keep last position
+    if let Err(e) = commands::window::prepare_main_window_for_show(window) {
+        log::warn!("显示主窗口前调整显示器位置失败: {}", e);
+    }
     let _ = window.show();
     let _ = window.set_focus();
+    if let Ok(mut current_monitor) = last_monitor.lock() {
+        *current_monitor = window.current_monitor().ok().flatten();
+    }
     // 1.5 秒后取消抑制，但只有当当前代数未发生变化时才重置（避免覆盖新的抑制请求）
     let s = suppress.clone();
     std::thread::spawn(move || {
@@ -568,15 +577,22 @@ pub fn run() {
                 let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             }
             let suppress_hide = Arc::new(AtomicUsize::new(0));
-            setup_tray(app, &suppress_hide)?;
-            setup_shortcuts(app, &suppress_hide)?;
+            let last_monitor = Arc::new(Mutex::new(None::<tauri::Monitor>));
+            setup_tray(app, &suppress_hide, &last_monitor)?;
+            setup_shortcuts(app, &suppress_hide, &last_monitor)?;
             let Some(main_window) = app.get_webview_window("main") else {
                 return Err("main window not found".into());
             };
+            if let Ok(mut current_monitor) = last_monitor.lock() {
+                *current_monitor = main_window.current_monitor().ok().flatten();
+            }
             place_main_window_top_center(&main_window);
-            setup_window_events(&main_window, app.handle(), &suppress_hide);
+            setup_window_events(&main_window, app.handle(), &suppress_hide, &last_monitor);
             setup_macos_window(&main_window);
-            show_window(&main_window, &suppress_hide);
+            show_window(&main_window, &suppress_hide, &last_monitor);
+            if let Ok(mut current_monitor) = last_monitor.lock() {
+                *current_monitor = main_window.current_monitor().ok().flatten();
+            }
             schedule_cleanup(app.handle());
             commands::clipboard::start_clipboard_watcher(app.handle());
             Ok(())
@@ -591,6 +607,7 @@ pub fn run() {
 fn setup_tray(
     app: &tauri::App,
     suppress_hide: &Arc<AtomicUsize>,
+    last_monitor: &Arc<Mutex<Option<tauri::Monitor>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let show_item = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
@@ -599,13 +616,15 @@ fn setup_tray(
 
     let suppress_for_menu = suppress_hide.clone();
     let suppress_for_tray = suppress_hide.clone();
+    let last_monitor_for_menu = last_monitor.clone();
+    let last_monitor_for_tray = last_monitor.clone();
     let mut tray_builder = TrayIconBuilder::with_id(MAIN_TRAY_ID)
         .menu(&menu)
         .tooltip(branding::APP_NAME)
         .on_menu_event(move |app, event| match event.id.as_ref() {
             "show" => {
                 if let Some(window) = app.get_webview_window("main") {
-                    show_window(&window, &suppress_for_menu);
+                    show_window(&window, &suppress_for_menu, &last_monitor_for_menu);
                 }
             }
             "quit" => {
@@ -632,7 +651,7 @@ fn setup_tray(
             {
                 let app = tray.app_handle();
                 if let Some(window) = app.get_webview_window("main") {
-                    show_window(&window, &suppress_for_tray);
+                    show_window(&window, &suppress_for_tray, &last_monitor_for_tray);
                 }
             }
         });
@@ -650,6 +669,7 @@ fn setup_tray(
 fn setup_shortcuts(
     app: &tauri::App,
     suppress_hide: &Arc<AtomicUsize>,
+    last_monitor: &Arc<Mutex<Option<tauri::Monitor>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
@@ -657,6 +677,7 @@ fn setup_shortcuts(
     app.manage(Mutex::new(CurrentShortcuts::default()));
 
     let suppress_for_shortcut = suppress_hide.clone();
+    let last_monitor_for_shortcut = last_monitor.clone();
     app.handle().plugin(
         tauri_plugin_global_shortcut::Builder::new()
             .with_handler(move |app, shortcut, event| {
@@ -670,7 +691,11 @@ fn setup_shortcuts(
                                 if window.is_visible().unwrap_or(false) {
                                     let _ = window.hide();
                                 } else {
-                                    show_window(&window, &suppress_for_shortcut);
+                                    show_window(
+                                        &window,
+                                        &suppress_for_shortcut,
+                                        &last_monitor_for_shortcut,
+                                    );
                                 }
                             }
                         } else if *shortcut == cur.context {
@@ -681,7 +706,11 @@ fn setup_shortcuts(
                                 let _ =
                                     app.emit("context-action", serde_json::json!({ "text": text }));
                                 if let Some(window) = app.get_webview_window("main") {
-                                    show_window(&window, &suppress_for_shortcut);
+                                    show_window(
+                                        &window,
+                                        &suppress_for_shortcut,
+                                        &last_monitor_for_shortcut,
+                                    );
                                 }
                             }
                         }
@@ -720,12 +749,14 @@ fn setup_window_events(
     main_window: &tauri::WebviewWindow,
     app_handle: &tauri::AppHandle,
     suppress_hide: &Arc<AtomicUsize>,
+    last_monitor: &Arc<Mutex<Option<tauri::Monitor>>>,
 ) {
     let window_clone = main_window.clone();
     let suppress_for_focus = suppress_hide.clone();
     let app_handle_for_focus = app_handle.clone();
-    main_window.on_window_event(move |event| {
-        if let tauri::WindowEvent::Focused(false) = event {
+    let last_monitor_for_events = last_monitor.clone();
+    main_window.on_window_event(move |event| match event {
+        tauri::WindowEvent::Focused(false) => {
             if suppress_for_focus.load(Ordering::SeqCst) > 0 {
                 return;
             }
@@ -760,6 +791,38 @@ fn setup_window_events(
                 }
             });
         }
+        tauri::WindowEvent::Moved(_) | tauri::WindowEvent::ScaleFactorChanged { .. } => {
+            let Some(current_monitor) = window_clone.current_monitor().ok().flatten() else {
+                return;
+            };
+            let previous_monitor = {
+                let Ok(mut last_monitor) = last_monitor_for_events.lock() else {
+                    return;
+                };
+                let previous = last_monitor.clone();
+                if previous
+                    .as_ref()
+                    .map(|monitor| commands::window::same_monitor(monitor, &current_monitor))
+                    .unwrap_or(false)
+                {
+                    return;
+                }
+                *last_monitor = Some(current_monitor.clone());
+                previous
+            };
+
+            if let Some(previous_monitor) = previous_monitor {
+                if let Err(error) = commands::window::fit_window_to_monitor(
+                    &window_clone,
+                    &current_monitor,
+                    Some(&previous_monitor),
+                    true,
+                ) {
+                    log::warn!("跨屏后调整主窗口尺寸失败: {}", error);
+                }
+            }
+        }
+        _ => {}
     });
 }
 

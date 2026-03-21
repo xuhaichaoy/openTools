@@ -96,6 +96,9 @@ pub struct AIConfig {
     /// Agent 重试退避基准毫秒
     #[serde(default = "default_agent_retry_backoff_ms")]
     pub agent_retry_backoff_ms: u64,
+    /// Agent 单次执行最大迭代步数
+    #[serde(default = "default_agent_max_iterations")]
+    pub agent_max_iterations: u32,
 }
 
 fn default_true() -> bool {
@@ -116,6 +119,10 @@ fn default_agent_retry_max() -> u32 {
 
 fn default_agent_retry_backoff_ms() -> u64 {
     5000
+}
+
+fn default_agent_max_iterations() -> u32 {
+    25
 }
 
 impl Default for AIConfig {
@@ -146,6 +153,7 @@ impl Default for AIConfig {
             agent_max_concurrency: default_agent_max_concurrency(),
             agent_retry_max: default_agent_retry_max(),
             agent_retry_backoff_ms: default_agent_retry_backoff_ms(),
+            agent_max_iterations: default_agent_max_iterations(),
         }
     }
 }

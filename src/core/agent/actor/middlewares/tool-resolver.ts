@@ -15,7 +15,7 @@ import { ensureMcpServersLoaded } from "@/store/mcp-store";
 import type { ActorMiddleware, ActorRunContext } from "../actor-middleware";
 
 function getPluginTools(): AgentTool[] {
-  const ai = getMToolsAI();
+  const ai = getMToolsAI("dialog");
   return registry.getAllActions().map(({ pluginId, pluginName, action }) =>
     pluginActionToTool(pluginId, pluginName, action, ai),
   );

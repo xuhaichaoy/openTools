@@ -1,9 +1,10 @@
 import { useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-import type { AIConfig, AIRequestMessage } from "@/core/ai/types";
+import type { AIRequestMessage } from "@/core/ai/types";
 import { handleError } from "@/core/errors";
 import { withRoutedAIConfig } from "@/core/ai/router";
+import { getResolvedAIConfigForMode } from "@/core/ai/resolved-ai-config-store";
 import {
   buildAssistantMemoryPromptForQuery,
   queueAssistantMemoryCandidates,
@@ -29,7 +30,7 @@ export function useAiCompletion(onAccept?: (text: string) => void) {
 
     try {
       // 1. Get current AI config
-      const config = await invoke<AIConfig>("ai_get_config");
+      const config = getResolvedAIConfigForMode("ask");
 
       // 2. Construct prompt for completion
       const prompt = `Continue the following text naturally. Requirements:

@@ -75,7 +75,7 @@ export async function aiComplexityCheck(
   query: string,
   signal?: AbortSignal,
 ): Promise<ComplexityAnalysis> {
-  const ai = getMToolsAI();
+  const ai = getMToolsAI("cluster");
 
   const response = await ai.chat({
     messages: [

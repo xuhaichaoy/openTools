@@ -9,6 +9,7 @@ import { handleError, ErrorLevel } from "@/core/errors";
 import { registry } from "@/core/plugin-system/registry";
 import { useAIStore } from "@/store/ai-store";
 import { useAgentStore } from "@/store/agent-store";
+import { getResolvedAIConfigForMode } from "@/core/ai/resolved-ai-config-store";
 import { agentRuntimeManager } from "@/core/agent/runtime";
 import { buildAgentFCCompatibilityKey } from "@/core/agent/fc-compatibility";
 import {
@@ -54,7 +55,7 @@ export interface AgentRunnerServiceOptions {
 }
 
 function buildRunnerTools(): AgentTool[] {
-  const ai = getMToolsAI();
+  const ai = getMToolsAI("agent");
   const allActions = registry.getAllActions();
   const tools: AgentTool[] = allActions.map(({ pluginId, pluginName, action }) =>
     pluginActionToTool(pluginId, pluginName, action, ai),
@@ -372,7 +373,7 @@ export class AgentRunnerService {
       return;
     }
 
-    const ai = getMToolsAI();
+    const ai = getMToolsAI("agent");
     const aiConfig = useAIStore.getState().config;
     const availableTools = filterAssistantToolsByConfig(buildRunnerTools(), aiConfig);
 
@@ -413,7 +414,9 @@ export class AgentRunnerService {
     }
 
     const startedAt = Date.now();
-    const fcCompatibilityKey = buildAgentFCCompatibilityKey(aiConfig);
+    const fcCompatibilityKey = buildAgentFCCompatibilityKey(
+      getResolvedAIConfigForMode("agent"),
+    );
     store.updateTask(sessionId, taskId, {
       status: "running",
       retry_count: attempt,

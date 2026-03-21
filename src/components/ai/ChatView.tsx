@@ -30,6 +30,7 @@ import {
   hasAskContextSnapshotContent,
 } from "@/core/ai/ask-context-snapshot";
 import { modelSupportsImageInput } from "@/core/ai/model-capabilities";
+import { getResolvedAIConfigForMode } from "@/core/ai/resolved-ai-config-store";
 import { buildAskAgentHandoff } from "@/core/ai/ask-agent-handoff";
 import { inferCodingExecutionProfile } from "@/core/agent/coding-profile";
 import { resolveTaskScopeSnapshot } from "@/core/agent/context-runtime";
@@ -543,12 +544,13 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
     const hasAttachments = attachments.length > 0;
     if ((!trimmed && !hasAttachments) || isStreaming) return;
 
-    const source = config.source || "own_key";
-    if (source === "own_key" && !config.api_key) {
+    const resolvedConfig = getResolvedAIConfigForMode("ask");
+    const source = resolvedConfig.source || "own_key";
+    if (source === "own_key" && !resolvedConfig.api_key) {
       toast("warning", "请先在设置中配置 AI API Key");
       return;
     }
-    if (source === "team" && !config.team_id) {
+    if (source === "team" && !resolvedConfig.team_id) {
       toast("warning", "请先在设置中选择团队");
       return;
     }
@@ -557,7 +559,7 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
     if (
       imagesToSend
       && imagesToSend.length > 0
-      && !modelSupportsImageInput(config.model, config.protocol)
+      && !modelSupportsImageInput(resolvedConfig.model, resolvedConfig.protocol)
     ) {
       toast(
         "warning",

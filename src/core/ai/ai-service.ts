@@ -4,6 +4,9 @@
 
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { useAppStore, type AICenterMode } from "@/store/app-store";
+import { useAIStore } from "@/store/ai-store";
+import { resolveAIConfig } from './resolved-ai-config'
 import type {
   AIConfig,
   StreamChunkEvent,
@@ -32,7 +35,7 @@ export async function aiChat(
 /** 带记忆注入 + 配置路由的快捷对话（供 ContextActionPanel 等轻量场景使用） */
 export async function quickChat(
   messages: Array<{ role: string; content: string }>,
-  options?: { config?: AIConfig },
+  options?: { config?: AIConfig; mode?: AICenterMode },
 ): Promise<string> {
   const { withRoutedAIConfig } = await import('./router')
   const {
@@ -40,7 +43,12 @@ export async function quickChat(
     queueAssistantMemoryCandidates,
   } = await import('./assistant-memory')
 
-  const config = options?.config ?? (await getAIConfig())
+  const mode = options?.mode ?? "ask"
+  const config = resolveAIConfig({
+    baseConfig: options?.config ?? useAIStore.getState().config,
+    ownKeys: useAIStore.getState().ownKeys,
+    scope: useAppStore.getState().aiCenterModelScopes[mode],
+  })
 
   let enriched = [...messages]
 

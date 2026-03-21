@@ -1,4 +1,4 @@
-import { useAIStore } from "@/store/ai-store";
+import { getResolvedAIConfigForMode } from "@/core/ai/resolved-ai-config-store";
 import { buildAgentFCCompatibilityKey } from "@/core/agent/fc-compatibility";
 import type { ActorMiddleware, ActorRunContext } from "../actor-middleware";
 
@@ -11,7 +11,7 @@ export class FCCompatibilityMiddleware implements ActorMiddleware {
 
   async apply(ctx: ActorRunContext): Promise<void> {
     ctx.fcCompatibilityKey = buildAgentFCCompatibilityKey(
-      useAIStore.getState().config,
+      getResolvedAIConfigForMode("dialog"),
     );
   }
 }

@@ -18,7 +18,9 @@ import { createDebouncedPersister } from "@/core/storage";
 import { useAuthStore } from "@/store/auth-store";
 import { routeAIRequest } from "@/core/ai/router";
 import { AssistantReasoningStreamNormalizer } from "@/core/ai/reasoning-tag-stream";
+import { getResolvedAIConfigForMode } from "@/core/ai/resolved-ai-config-store";
 import { handleError } from "@/core/errors";
+import type { AICenterMode } from "@/store/app-store";
 import type {
   ToolCallInfo,
   ChatMessage,
@@ -183,12 +185,23 @@ export async function startStreamingChat(opts: {
   assistantMessageId: string;
   apiMessages: Array<{ role: string; content: string; images?: string[] }>;
   config: AIConfig;
+  mode?: AICenterMode;
   callbacks: StreamCallbacks;
   extraTools?: any[];
   onFrontendToolCall?: (name: string, args: string) => Promise<{ success: boolean; result: string }>;
 }): Promise<() => void> {
-  const { conversationId, assistantMessageId, apiMessages, config, callbacks, extraTools, onFrontendToolCall } = opts;
+  const {
+    conversationId,
+    assistantMessageId,
+    apiMessages,
+    config,
+    mode,
+    callbacks,
+    extraTools,
+    onFrontendToolCall,
+  } = opts;
   const { updateAssistant, setState, onPersist } = callbacks;
+  const effectiveConfig = mode ? getResolvedAIConfigForMode(mode) : config;
 
   // OpenClaw 风格的统一 reasoning 规范化层：
   // 原生 thinking 事件和 <think>/<final> 标签都先汇总到这里。
@@ -449,7 +462,7 @@ export async function startStreamingChat(opts: {
     const { token } = useAuthStore.getState();
     await routeAIRequest({
       messages: apiMessages,
-      config,
+      config: effectiveConfig,
       conversationId,
       token,
       extraTools,

@@ -2,9 +2,10 @@ import React, { useState, useCallback, useRef, useEffect, useMemo, lazy, Suspens
 import { useShallow } from "zustand/shallow";
 import {
   Users,
+  MessageSquareText,
+  Smartphone,
   Square,
   Loader2,
-  Plus,
   Trash2,
   Send,
   Settings2,
@@ -14,8 +15,6 @@ import {
   Reply,
   AlertTriangle,
   ChevronDown,
-  ChevronUp,
-  ChevronRight,
   FileDown,
   FolderOpen,
   RotateCcw,
@@ -24,10 +23,6 @@ import {
   Brain,
   ShieldCheck,
   ArrowRightCircle,
-  Star,
-  Pencil,
-  Check,
-  type LucideIcon,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import ReactMarkdown from "react-markdown";
@@ -39,13 +34,7 @@ import {
   type DialogDispatchInsight,
   type DialogDispatchPlanBundle,
 } from "@/core/agent/actor/dialog-dispatch-plan";
-import {
-  buildDialogSpawnedTaskHandoff,
-  buildSpawnedTaskCheckpoint,
-  collectSpawnedTaskTranscriptEntries,
-  type SpawnedTaskCheckpoint,
-  type SpawnedTaskTranscriptEntry,
-} from "@/core/agent/actor/spawned-task-checkpoint";
+import { buildDialogSpawnedTaskHandoff } from "@/core/agent/actor/spawned-task-checkpoint";
 import {
   describeCodingExecutionProfile,
   inferCodingExecutionProfile,
@@ -54,15 +43,20 @@ import { useActorSystemStore, type ActorSnapshot } from "@/store/actor-system-st
 import { useAIStore } from "@/store/ai-store";
 import { useAppStore, type AICenterHandoff } from "@/store/app-store";
 import { useAISessionRuntimeStore } from "@/store/ai-session-runtime-store";
-import { useTeamStore } from "@/store/team-store";
 import {
   useClusterPlanApprovalStore,
   type ApprovalDialogPresentation,
 } from "@/store/cluster-plan-approval-store";
 import { useConfirmDialogStore } from "@/store/confirm-dialog-store";
 import { useToolTrustStore } from "@/store/command-allowlist-store";
-import { api } from "@/core/api/client";
-import { getChannelManager } from "@/core/channels";
+import {
+  getChannelManager,
+  loadSavedChannels,
+  saveSavedChannels,
+  type ChannelStatus,
+  type ChannelType,
+  type SavedChannelEntry,
+} from "@/core/channels";
 import {
   buildAICenterHandoffScopedFileRefs,
   getAICenterHandoffImportPaths,
@@ -79,41 +73,22 @@ import {
   useRuntimeStateStore,
   type RuntimeSessionRecord,
 } from "@/core/agent/context-runtime/runtime-state";
-import {
-  hasDialogContextSnapshotContent,
-  type DialogContextSnapshot,
-} from "@/plugins/builtin/SmartAgent/core/dialog-context-snapshot";
+import { type DialogContextSnapshot } from "@/plugins/builtin/SmartAgent/core/dialog-context-snapshot";
 import { KnowledgeGraph } from "@/core/knowledge/knowledge-graph";
-import { primeTeamModelCache } from "@/core/ai/router";
 import { queueAssistantMemoryCandidates } from "@/core/ai/assistant-memory";
 import { shouldAutoSaveAssistantMemory } from "@/core/ai/assistant-config";
 import { DIALOG_FULL_ROLE } from "@/core/agent/actor/agent-actor";
 import { getSpawnedTaskRoleBoundaryMeta } from "@/core/agent/actor/spawned-task-role-boundary";
-import {
-  decodePartialToolContent,
-  formatArtifactPreviewBody,
-  hasArtifactPayloadKey,
-  parsePartialToolJSON,
-  recoverArtifactBodyFromRaw,
-} from "@/plugins/builtin/SmartAgent/core/tool-streaming-preview";
 import type {
-  AgentCapability,
-  AgentCapabilities,
-    ApprovalDecisionOption,
-    ApprovalLevel,
-    DialogArtifactRecord,
-    DialogContextSummary,
-    DialogQueuedFollowUp,
-    DialogExecutionPlan,
-    DialogMessage,
-    MiddlewareOverrides,
-    PendingInteraction,
-    SessionUploadRecord,
-    SpawnedTaskRecord,
-    ThinkingLevel,
-    ToolPolicy,
-  } from "@/core/agent/actor/types";
-import { ChatImage } from "@/components/ai/MessageBubble";
+  DialogArtifactRecord,
+  DialogContextSummary,
+  DialogExecutionPlan,
+  DialogMessage,
+  DialogQueuedFollowUp,
+  PendingInteraction,
+  SessionUploadRecord,
+  SpawnedTaskRecord,
+} from "@/core/agent/actor/types";
 import {
   DIALOG_PRESETS,
   loadCustomPresets,
@@ -137,13 +112,33 @@ import {
 import { AttachDropdown } from "@/components/ui/AttachDropdown";
 import { DialogFollowUpDock } from "./DialogFollowUpDock";
 import { DialogContextStrip } from "./DialogContextStrip";
+import { ChannelSessionBoard, buildDialogChannelGroups, formatSessionStripTime, getDialogChannelConnectionLabel, getDialogViewLabel, inferIMChannelType, type DialogChannelConnectionMeta, type DialogSessionViewKey, type DialogTopSessionItem } from "./actor-chat-panel/DialogChannelBoard";
+import {
+  ActorStatusBar,
+  AddAgentForm,
+  getActorColor,
+  LiveActorRow,
+  MentionPopup,
+  normalizeAgentCapabilities,
+  ROUTING_MODES,
+  RoutingModeButton,
+  useAvailableModels,
+  type AddActorDraft,
+} from "./actor-chat-panel/ActorControls";
+import { ApprovalRequestDrawer, MessageBubble } from "./actor-chat-panel/MessageBubble";
+import {
+  buildToolStreamingPreview,
+  LiveExecutionCard,
+  ThinkingBlock,
+  ToolStreamingBlock,
+} from "./actor-chat-panel/StreamingBlocks";
+import { DialogWorkspaceDock, type DialogArtifact, type WorkspacePanel } from "./actor-chat-panel/WorkspaceDock";
 import { useToast } from "@/components/ui/Toast";
 import { modelSupportsImageInput } from "@/core/ai/model-capabilities";
 import { createLogger } from "@/core/logger";
 import {
   useIMConversationRuntimeStore,
   type IMConversationSnapshot,
-  type IMConversationRuntimeStatus,
   type IMConversationSessionPreview,
 } from "@/store/im-conversation-runtime-store";
 import { getRuntimeIndicatorStatus } from "@/core/agent/context-runtime/runtime-indicator";
@@ -192,34 +187,6 @@ function dirname(path: unknown): string {
   const parts = s.split("/");
   if (parts.length <= 1) return "";
   return parts.slice(0, -1).join("/") || "/";
-}
-
-function formatApprovalResponse(content: string): string | null {
-  const normalized = content.trim().toLowerCase();
-  if (!normalized) return null;
-  if (/^(允许|允许一次|本次允许|仅此一次|y|yes|ok|可以|同意|确认|approve|allow)$/i.test(normalized)) {
-    return "已批准本次执行";
-  }
-  if (/^(始终允许|本会话允许|always|always[\s-]?allow|总是允许)/i.test(normalized)) {
-    return `已批准并在本会话内记住：${content.trim()}`;
-  }
-  if (/^(拒绝|n|no|deny|reject)/i.test(normalized)) {
-    return "已拒绝此次执行";
-  }
-  return null;
-}
-
-function getInteractionStatusLabel(status?: DialogMessage["interactionStatus"]): string {
-  switch (status) {
-    case "answered":
-      return "已处理";
-    case "timed_out":
-      return "已超时";
-    case "cancelled":
-      return "已取消";
-    default:
-      return "等待批准";
-  }
 }
 
 function describeAgentActivity(
@@ -378,14 +345,20 @@ function buildActionDetail(toolName: string, input: Record<string, unknown>): st
   }
 }
 
-type ToolStreamingPreview = {
-  kind: "artifact" | "generic" | "thinking" | "spawn";
-  title: string;
-  body: string;
-  fullBody?: string;
-  meta?: string;
-  collapsible?: boolean;
-};
+function normalizeCurrentTaskStatus(
+  status?: string,
+): "pending" | "running" | "completed" | "error" | "aborted" | undefined {
+  switch (status) {
+    case "pending":
+    case "running":
+    case "completed":
+    case "error":
+    case "aborted":
+      return status;
+    default:
+      return undefined;
+  }
+}
 
 function truncateWorkflowText(value: string | undefined, max = 80): string | undefined {
   const normalized = value?.trim();
@@ -465,598 +438,6 @@ function buildDialogBoundaryApprovalPresentation(params: {
     permissions,
     notes,
   };
-}
-
-function buildSequentialThinkingPreview(parsed: ReturnType<typeof parsePartialToolJSON>): ToolStreamingPreview {
-  const thoughtText = decodePartialToolContent(parsed.thought || "");
-  const thoughtMeta = [
-    typeof parsed.thoughtNumber === "number" ? `步骤 ${parsed.thoughtNumber}` : "",
-    typeof parsed.totalThoughts === "number" ? `共 ${parsed.totalThoughts} 步` : "",
-  ].filter(Boolean).join(" · ");
-
-  return {
-    kind: "thinking",
-    title: "深度思考",
-    body: thoughtText || "正在组织思路...",
-    meta: thoughtMeta || "顺序推理中",
-  };
-}
-
-function buildSpawnTaskPreview(parsed: ReturnType<typeof parsePartialToolJSON>): ToolStreamingPreview {
-  const taskText = decodePartialToolContent(parsed.task || "");
-  const target = parsed.targetAgent || "未知 Agent";
-  const roleBoundaryMeta = getSpawnedTaskRoleBoundaryMeta(parsed.roleBoundary as SpawnedTaskRecord["roleBoundary"]);
-  const codingLabel = describeCodingExecutionProfile(
-    inferCodingExecutionProfile({ query: `${parsed.label}\n${taskText}` }).profile,
-  );
-  const title = codingLabel
-    ? `派发 ${codingLabel}${parsed.roleBoundary ? ` · ${roleBoundaryMeta.label}` : ""} 子任务 -> ${target}`
-    : `派发${parsed.roleBoundary ? `${roleBoundaryMeta.label}` : ""}子任务 -> ${target}`;
-  const meta = [
-    parsed.label ? `标签: ${parsed.label}` : "",
-    codingLabel ? `模式: ${codingLabel}` : "",
-    parsed.roleBoundary ? `职责: ${roleBoundaryMeta.label}` : "",
-  ].filter(Boolean).join(" · ");
-
-  return {
-    kind: "spawn",
-    title,
-    body: taskText || "正在整理委派任务...",
-    meta: meta || "协作派发中",
-  };
-}
-
-function getSpawnedTaskRoleBoundaryTone(roleBoundary?: SpawnedTaskRecord["roleBoundary"]) {
-  switch (roleBoundary) {
-    case "reviewer":
-      return "border-violet-500/20 bg-violet-500/10 text-violet-700";
-    case "validator":
-      return "border-emerald-500/20 bg-emerald-500/10 text-emerald-700";
-    case "executor":
-      return "border-amber-500/20 bg-amber-500/10 text-amber-700";
-    default:
-      return "border-[var(--color-border)] bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]";
-  }
-}
-
-function ThinkingBlock({
-  roleName,
-  content,
-  startedAt,
-  isStreaming,
-  color,
-}: {
-  roleName: string;
-  content: string;
-  startedAt: number;
-  isStreaming: boolean;
-  color: { bg: string; text: string; border: string; dot: string };
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const [now, setNow] = useState(Date.now());
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!isStreaming) return;
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, [isStreaming]);
-
-  useEffect(() => {
-    if (expanded && containerRef.current) {
-      containerRef.current.scrollTop = containerRef.current.scrollHeight;
-    }
-  }, [expanded, content]);
-
-  const elapsed = Math.floor(((isStreaming ? now : Date.now()) - startedAt) / 1000);
-  const timeLabel = elapsed >= 60
-    ? `${Math.floor(elapsed / 60)}分${elapsed % 60}秒`
-    : `${elapsed}秒`;
-  const displayContent = content.trim() || "模型正在深度思考，暂未返回可展示内容。";
-
-  return (
-    <div className={`flex gap-2 ${color.text}`}>
-      <div className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 ${color.bg}`}>
-        <Brain className="w-3.5 h-3.5" />
-      </div>
-      <div className="max-w-[88%] min-w-[200px] lg:max-w-[78%]">
-        <div className="text-[10px] mb-0.5">{roleName}</div>
-        <div className={`rounded-xl ${color.bg} overflow-hidden`}>
-          <button
-            onClick={() => setExpanded((v) => !v)}
-            className="w-full flex items-center gap-1.5 px-3 py-1.5 text-[11px] cursor-pointer hover:opacity-80 transition-opacity"
-          >
-            {expanded
-              ? <ChevronDown className="w-3 h-3 shrink-0" />
-              : <ChevronRight className="w-3 h-3 shrink-0" />
-            }
-            <span className="opacity-70">
-              深度思考{isStreaming ? "中" : "完成"}
-            </span>
-            <span className="opacity-50 ml-auto tabular-nums">
-              {isStreaming && <Loader2 className="w-3 h-3 animate-spin inline mr-1" />}
-              {timeLabel}
-            </span>
-          </button>
-          {expanded && (
-            <div
-              ref={containerRef}
-              className="px-3 pb-2 text-[12px] leading-relaxed opacity-70 max-h-[300px] overflow-y-auto whitespace-pre-wrap break-words border-t border-current/5"
-            >
-              {displayContent}
-              {isStreaming && <span className="inline-block w-1.5 h-3 bg-current animate-pulse ml-0.5" />}
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function LiveExecutionCard({
-  roleName,
-  title,
-  detail,
-  startedAt,
-  isStreaming,
-  color,
-  icon: Icon = Settings2,
-}: {
-  roleName: string;
-  title: string;
-  detail?: string;
-  startedAt: number;
-  isStreaming: boolean;
-  color: { bg: string; text: string; border: string; dot: string };
-  icon?: LucideIcon;
-}) {
-  const [now, setNow] = useState(Date.now());
-
-  useEffect(() => {
-    if (!isStreaming) return;
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, [isStreaming]);
-
-  const elapsed = Math.floor(((isStreaming ? now : Date.now()) - startedAt) / 1000);
-  const timeLabel = elapsed >= 60 ? `${Math.floor(elapsed / 60)}分${elapsed % 60}秒` : `${elapsed}秒`;
-
-  return (
-    <div className={`flex gap-2 ${color.text}`}>
-      <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full ${color.bg}`}>
-        <Icon className="h-3.5 w-3.5" />
-      </div>
-      <div className="max-w-[88%] min-w-[220px] lg:max-w-[78%]">
-        <div className="mb-0.5 text-[10px]">{roleName}</div>
-        <div className={`rounded-xl border border-current/10 ${color.bg} px-3 py-2`}>
-          <div className="flex items-center gap-2 text-[12px]">
-            {isStreaming && <Loader2 className="h-3.5 w-3.5 animate-spin opacity-70" />}
-            <span className="font-medium">{title}</span>
-            <span className="ml-auto text-[10px] opacity-50 tabular-nums">{timeLabel}</span>
-          </div>
-          {detail && (
-            <div className="mt-1 whitespace-pre-wrap break-words text-[11px] leading-relaxed opacity-75">
-              {detail}
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function inferStreamingArtifactLanguage(path: string): string | undefined {
-  const fileName = basename(path).toLowerCase();
-  const ext = fileName.includes(".") ? fileName.split(".").pop() : "";
-  switch (ext) {
-    case "html":
-    case "htm":
-      return "HTML";
-    case "tsx":
-    case "ts":
-      return "TypeScript";
-    case "jsx":
-    case "js":
-      return "JavaScript";
-    case "css":
-    case "scss":
-    case "less":
-      return "CSS";
-    case "json":
-      return "JSON";
-    case "md":
-      return "Markdown";
-    case "py":
-      return "Python";
-    case "rs":
-      return "Rust";
-    case "sh":
-    case "bash":
-    case "zsh":
-      return "Shell";
-    default:
-      return ext ? ext.toUpperCase() : undefined;
-  }
-}
-
-function shouldRevealStreamingArtifactBody(path: string, body: string, formattedBody: string): boolean {
-  const normalized = body.trim();
-  if (!normalized) return false;
-  if (normalized.includes("\n")) return true;
-  if (formattedBody.includes("\n")) return true;
-  if (normalized.length >= 72) return true;
-
-  const ext = basename(path).toLowerCase().split(".").pop() || "";
-  const codeLikePattern = /<!doctype html>|<html\b|<head\b|<body\b|<div\b|<main\b|<section\b|function\b|const\b|let\b|var\b|class\b|import\b|export\b|body\s*\{|@media\b/i;
-  if (["html", "htm", "css", "scss", "less", "js", "jsx", "ts", "tsx", "json", "md"].includes(ext)) {
-    return normalized.length >= 24 || codeLikePattern.test(normalized);
-  }
-
-  return codeLikePattern.test(normalized);
-}
-
-function buildStreamingArtifactPreview(path: string, body: string): {
-  meta: string;
-  previewBody: string;
-  fullBody: string;
-  truncated: boolean;
-} {
-  const normalized = formatArtifactPreviewBody(path, body);
-  const lines = normalized ? normalized.split("\n") : [];
-  const maxLines = 18;
-  const maxChars = 1200;
-  const previewByLines = lines.slice(0, maxLines).join("\n");
-  const previewBase = previewByLines.length > maxChars
-    ? `${previewByLines.slice(0, maxChars)}...`
-    : previewByLines;
-  const truncated = normalized.length > previewBase.length || lines.length > maxLines;
-  const previewBody = truncated ? `${previewBase}\n...` : previewBase;
-  const language = inferStreamingArtifactLanguage(path);
-  const metaParts = [
-    language,
-    lines.length > 0 ? `${lines.length} 行` : "",
-    normalized.length > 0 ? `${normalized.length} 字符` : "",
-  ].filter(Boolean);
-
-  return {
-    meta: metaParts.join(" · "),
-    previewBody,
-    fullBody: normalized,
-    truncated,
-  };
-}
-
-function buildToolStreamingPreview(jsonStr: string): ToolStreamingPreview {
-  const parsed = parsePartialToolJSON(jsonStr);
-  const raw = decodePartialToolContent(jsonStr);
-  const looksLikeArtifact = Boolean(
-    parsed.path
-      && (
-        parsed.content
-        || hasArtifactPayloadKey(jsonStr)
-      ),
-  );
-
-  if (parsed.thought.trim()) {
-    return buildSequentialThinkingPreview(parsed);
-  }
-
-  if (parsed.targetAgent.trim() && parsed.task.trim()) {
-    return buildSpawnTaskPreview(parsed);
-  }
-
-  if (looksLikeArtifact) {
-    const artifactBody = decodePartialToolContent(parsed.content || "")
-      || recoverArtifactBodyFromRaw(jsonStr, parsed.path);
-    const preview = buildStreamingArtifactPreview(parsed.path || "未知文件", artifactBody);
-    return {
-      kind: "artifact",
-      title: `生成文件: ${parsed.path || "未知文件"}`,
-      body: preview.previewBody,
-      fullBody: preview.fullBody,
-      meta: preview.meta,
-      collapsible: preview.truncated,
-    };
-  }
-
-  if (parsed.query) {
-    return {
-      kind: "generic",
-      title: `准备搜索: ${parsed.query.slice(0, 48)}`,
-      body: raw,
-    };
-  }
-  if (parsed.url) {
-    return {
-      kind: "generic",
-      title: `准备访问: ${parsed.url.replace(/^https?:\/\//, "").slice(0, 56)}`,
-      body: raw,
-    };
-  }
-  if (parsed.command) {
-    return {
-      kind: "generic",
-      title: `准备执行命令`,
-      body: raw,
-    };
-  }
-  if (parsed.path) {
-    return {
-      kind: "generic",
-      title: `准备处理: ${basename(parsed.path)}`,
-      body: raw,
-    };
-  }
-
-  return {
-    kind: "generic",
-    title: "准备调用工具",
-    body: raw,
-  };
-}
-
-function ToolStreamingBlock({
-  roleName,
-  content,
-  startedAt,
-  isStreaming,
-  color,
-}: {
-  roleName: string;
-  content: string;
-  startedAt: number;
-  isStreaming: boolean;
-  color: { bg: string; text: string; border: string; dot: string };
-}) {
-  const [now, setNow] = useState(Date.now());
-  const containerRef = useRef<HTMLPreElement>(null);
-
-  useEffect(() => {
-    if (!isStreaming) return;
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, [isStreaming]);
-  
-  useEffect(() => {
-    if (containerRef.current) {
-      containerRef.current.scrollTop = containerRef.current.scrollHeight;
-    }
-  }, [content]);
-
-  const elapsed = Math.floor(((isStreaming ? now : Date.now()) - startedAt) / 1000);
-  const timeLabel = elapsed >= 60 ? `${Math.floor(elapsed / 60)}分${elapsed % 60}秒` : `${elapsed}秒`;
-  const parsed = parsePartialToolJSON(content);
-  const artifactPath = parsed.path || "未知文件";
-  const rawArtifactBody = decodePartialToolContent(parsed.content || "")
-    || recoverArtifactBodyFromRaw(content, artifactPath);
-  const normalizedArtifactBody = rawArtifactBody
-    .replace(/\r\n/g, "\n")
-    .replace(/\r/g, "\n")
-    .trim();
-  const formattedArtifactBody = normalizedArtifactBody
-    ? formatArtifactPreviewBody(artifactPath, normalizedArtifactBody)
-    : "";
-  const streamingArtifactBody = shouldRevealStreamingArtifactBody(
-    artifactPath,
-    normalizedArtifactBody,
-    formattedArtifactBody,
-  )
-    ? (formattedArtifactBody || normalizedArtifactBody)
-    : "";
-  const displayedBody = isStreaming
-    ? streamingArtifactBody
-    : (formattedArtifactBody || normalizedArtifactBody);
-  const isBufferingPreview = !displayedBody;
-
-  return (
-    <div className={`flex gap-2 ${color.text} mt-2`}>
-      <div className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 ${color.bg}`}>
-        <FileDown className="w-3.5 h-3.5" />
-      </div>
-      <div className="max-w-[90%] min-w-[250px] flex-1">
-        <div className="text-[10px] mb-0.5">{roleName}</div>
-        <div className={`rounded-xl border border-current/10 bg-[var(--color-bg)] overflow-hidden shadow-sm`}>
-          <div className={`flex items-center gap-2 px-3 py-2 text-[11px] border-b border-current/10 ${color.bg}`}>
-            <span className="font-medium opacity-90 truncate max-w-[70%]">
-              生成文件: {artifactPath}
-            </span>
-            <span className="opacity-50 ml-auto tabular-nums flex items-center gap-1">
-              {isStreaming && <Loader2 className="w-3 h-3 animate-spin" />}
-              {timeLabel}
-            </span>
-          </div>
-          <pre
-            ref={containerRef}
-            className="max-h-[350px] overflow-auto whitespace-pre bg-[#1e1e1e] p-3 font-mono text-[12px] leading-[1.6] text-[#d4d4d4]"
-          >
-            {displayedBody || (
-              <span className="opacity-30">{isBufferingPreview ? "正在整理代码内容..." : "准备写入中..."}</span>
-            )}
-            {isStreaming && <span className="inline-block w-1.5 h-3 bg-current animate-pulse ml-0.5" />}
-          </pre>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-const ACTOR_COLORS = [
-  { bg: "bg-blue-500/10", text: "text-blue-600", border: "border-blue-500/20", dot: "bg-blue-500" },
-  { bg: "bg-purple-500/10", text: "text-purple-600", border: "border-purple-500/20", dot: "bg-purple-500" },
-  { bg: "bg-emerald-500/10", text: "text-emerald-600", border: "border-emerald-500/20", dot: "bg-emerald-500" },
-  { bg: "bg-amber-500/10", text: "text-amber-600", border: "border-amber-500/20", dot: "bg-amber-500" },
-  { bg: "bg-rose-500/10", text: "text-rose-600", border: "border-rose-500/20", dot: "bg-rose-500" },
-  { bg: "bg-cyan-500/10", text: "text-cyan-600", border: "border-cyan-500/20", dot: "bg-cyan-500" },
-];
-
-function getActorColor(index: number) {
-  return ACTOR_COLORS[index % ACTOR_COLORS.length];
-}
-
-const generateId = () =>
-  Math.random().toString(36).substring(2, 8);
-
-const MARKDOWN_REMARK_PLUGINS = [remarkGfm];
-
-const FILE_PATH_REGEX = /(?:\/[\w.\-/]+\.(?:xlsx|csv|pdf|docx|pptx|xls))/g;
-const NEW_MESSAGE_TARGET = "__new_message__";
-const DIALOG_PLAN_APPROVAL_KEY = "dialog-plan-approval-enabled";
-
-type DialogArtifact = DialogArtifactRecord & {
-  actorName: string;
-};
-
-type ArtifactAvailability = "ready" | "missing" | "unknown";
-
-type WorkspacePanel = "todos" | "artifacts" | "uploads" | "subtasks" | "context" | "plan" | null;
-
-function formatShortTime(timestamp?: number): string {
-  if (!timestamp) return "刚刚";
-  return new Date(timestamp).toLocaleTimeString("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function formatElapsedTime(ms?: number): string {
-  if (!ms || ms < 1000) return "刚刚";
-  const totalSeconds = Math.floor(ms / 1000);
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  if (minutes > 0) return `${minutes}分${seconds}秒`;
-  return `${seconds}秒`;
-}
-
-function formatTokenCount(tokens?: number): string {
-  if (!tokens || tokens <= 0) return "0";
-  if (tokens >= 10000) return `${Math.round(tokens / 1000)}k`;
-  if (tokens >= 1000) return `${(tokens / 1000).toFixed(1)}k`;
-  return `${tokens}`;
-}
-
-function formatRatioAsPercent(ratio?: number): string {
-  if (!ratio || ratio <= 0) return "0%";
-  return `${Math.round(ratio * 100)}%`;
-}
-
-function getContextStatusMeta(status: DialogContextBreakdown["actors"][number]["status"]): {
-  badge: string;
-  bar: string;
-  text: string;
-} {
-  switch (status) {
-    case "tight":
-      return {
-        badge: "bg-red-500/10 text-red-600",
-        bar: "bg-red-500",
-        text: "预算偏紧",
-      };
-    case "busy":
-      return {
-        badge: "bg-amber-500/10 text-amber-700",
-        bar: "bg-amber-500",
-        text: "预算偏忙",
-      };
-    default:
-      return {
-        badge: "bg-emerald-500/10 text-emerald-700",
-        bar: "bg-emerald-500",
-        text: "预算宽松",
-      };
-  }
-}
-
-function summarizeToolPolicy(policy?: ToolPolicy): string {
-  if (!policy) return "全工具";
-  const parts: string[] = [];
-  if (policy.allow?.length) parts.push(`允许 ${policy.allow.join(", ")}`);
-  if (policy.deny?.length) parts.push(`禁止 ${policy.deny.join(", ")}`);
-  return parts.length > 0 ? parts.join(" · ") : "全工具";
-}
-
-function summarizeMiddleware(middleware?: MiddlewareOverrides): string {
-  if (!middleware) return "默认审批";
-  const parts: string[] = [];
-  if (middleware.approvalLevel) parts.push(`审批 ${middleware.approvalLevel}`);
-  if (middleware.disable?.length) parts.push(`关闭 ${middleware.disable.join(", ")}`);
-  return parts.length > 0 ? parts.join(" · ") : "默认审批";
-}
-
-function getApprovalActions(approval?: DialogMessage["approvalRequest"]): ApprovalDecisionOption[] {
-  if (approval?.decisionOptions?.length) return approval.decisionOptions;
-  return [
-    { label: "允许一次", policy: "ask-every-time" },
-    { label: "本会话允许", policy: "always-allow" },
-    { label: "拒绝", policy: "deny" },
-  ];
-}
-
-function getApprovalActionClass(option: ApprovalDecisionOption): string {
-  if (option.policy === "deny") {
-    return "border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-red-600 hover:border-red-500/30 hover:bg-red-500/5";
-  }
-  if (option.policy === "ask-every-time") {
-    return "bg-[var(--color-accent)] text-white hover:opacity-90";
-  }
-  return "border border-amber-500/30 bg-amber-500/10 text-amber-700 hover:bg-amber-500/15";
-}
-
-function getArtifactSourceMeta(source: DialogArtifactRecord["source"]): {
-  label: string;
-  className: string;
-  missingHint: string;
-} {
-  switch (source) {
-    case "approval":
-      return {
-        label: "审批预览",
-        className: "bg-amber-500/10 text-amber-700",
-        missingHint: "这是审批阶段的候选产物，确认写入后才会真正落盘。",
-      };
-    case "tool_write":
-      return {
-        label: "工具写入",
-        className: "bg-emerald-500/10 text-emerald-700",
-        missingHint: "运行记录显示它曾被写入，但当前没有检测到磁盘文件。",
-      };
-    case "tool_edit":
-      return {
-        label: "工具编辑",
-        className: "bg-sky-500/10 text-sky-700",
-        missingHint: "运行记录显示它曾被编辑，但当前没有检测到磁盘文件。",
-      };
-    case "upload":
-      return {
-        label: "用户上传",
-        className: "bg-violet-500/10 text-violet-700",
-        missingHint: "这份上传文件当前已不在原路径，可能已被移动或删除。",
-      };
-    default:
-      return {
-        label: "消息引用",
-        className: "bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]",
-        missingHint: "当前没有检测到该路径对应的文件。",
-      };
-  }
-}
-
-function collectTaskTranscript(params: {
-  task: SpawnedTaskRecord | null;
-  actorById: Map<string, ActorSnapshot>;
-  dialogHistory: DialogMessage[];
-}): SpawnedTaskTranscriptEntry[] {
-  const { task, actorById, dialogHistory } = params;
-  if (!task) return [];
-
-  const targetActor = actorById.get(task.targetActorId);
-  return collectSpawnedTaskTranscriptEntries({
-    task,
-    targetActor,
-    actorNameById: new Map(
-      [...actorById.entries()].map(([id, actor]) => [id, actor.roleName]),
-    ),
-    dialogHistory,
-  });
 }
 
 function collectArtifacts(
@@ -1207,7 +588,7 @@ function buildDialogAgentHandoff(params: {
     ? "以下是之前 Dialog 协作房间的最近上下文，并已附带当前仍相关的视觉参考图与文件，请继续落地执行："
     : attachmentPaths.length > 0
       ? "以下是之前 Dialog 协作房间的最近上下文，并已附带相关图片/文件，请继续落地执行："
-    : "以下是之前 Dialog 协作房间的最近上下文，请继续落地执行：";
+      : "以下是之前 Dialog 协作房间的最近上下文，请继续落地执行：";
   const earlySummary = dialogContextSummary
     ? `已整理更早的 ${dialogContextSummary.summarizedMessageCount} 条房间消息：\n${dialogContextSummary.summary}`
     : "";
@@ -1289,2993 +670,15 @@ function buildDialogAgentHandoff(params: {
   });
 }
 
-function FileActionButtons({ content }: { content: string }) {
-  const paths = content.match(FILE_PATH_REGEX);
-  if (!paths?.length) return null;
+const generateId = () =>
+  Math.random().toString(36).substring(2, 8);
 
-  const unique = [...new Set(paths)];
+const MARKDOWN_REMARK_PLUGINS = [remarkGfm];
 
-  return (
-    <div className="flex flex-wrap gap-1.5 mt-1.5">
-      {unique.map((filePath) => {
-        const fileName = filePath.replace(/^.*[/\\]/, "");
-        return (
-          <div key={filePath} className="flex items-center gap-1 text-[11px]">
-            <button
-              onClick={() => {
-                void invoke("open_file_location", { filePath });
-              }}
-              className="flex items-center gap-1 px-2 py-1 rounded-md bg-[var(--color-bg)] border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/40 hover:text-[var(--color-accent)] transition-colors"
-              title={filePath}
-            >
-              <FolderOpen className="w-3 h-3" />
-              <span className="max-w-[120px] truncate">{fileName}</span>
-            </button>
-            <button
-              onClick={async () => {
-                try {
-                  const { save } = await import("@tauri-apps/plugin-dialog");
-                  const { readFile, writeFile } = await import("@tauri-apps/plugin-fs");
-                  const dest = await save({ defaultPath: fileName });
-                  if (dest) {
-                    const data = await readFile(filePath);
-                    await writeFile(dest, data);
-                  }
-                } catch (err) {
-                  if (err && typeof err === "object" && "message" in err && /cancel/i.test(String((err as Error).message))) return;
-                  console.warn("[ActorChatPanel] File save failed:", err);
-                }
-              }}
-              className="flex items-center gap-1 px-2 py-1 rounded-md bg-[var(--color-accent)]/10 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/20 transition-colors"
-              title="另存为..."
-            >
-              <FileDown className="w-3 h-3" />
-              下载
-            </button>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// ── Models Hook ──
-
-interface ModelOption {
-  id: string;
-  name: string;
-  model: string;
-}
-
-function useAvailableModels(): ModelOption[] {
-  const config = useAIStore((s) => s.config);
-  const ownKeys = useAIStore((s) => s.ownKeys);
-  const { teams, loaded: teamsLoaded, loadTeams } = useTeamStore();
-  const [teamModels, setTeamModels] = useState<ModelOption[]>([]);
-  const source = config.source || "own_key";
-
-  useEffect(() => {
-    if (source === "team" && !teamsLoaded) void loadTeams();
-  }, [source, teamsLoaded, loadTeams]);
-
-  useEffect(() => {
-    if (source !== "team" || !config.team_id) { setTeamModels([]); return; }
-    if (!teamsLoaded || !teams.some((t) => t.id === config.team_id)) return;
-    let cancelled = false;
-    api
-      .get<{ models: { config_id: string; display_name: string; model_name: string }[] }>(
-        `/teams/${config.team_id}/ai-models`,
-      )
-      .then((res) => {
-        if (!cancelled) {
-          primeTeamModelCache(config.team_id!, res.models || []);
-          setTeamModels((res.models || []).map((m) => ({ id: m.config_id, name: m.display_name, model: m.model_name })));
-        }
-      })
-      .catch((err) => { if (!cancelled) { console.warn("[ActorChatPanel] Failed to load team models:", err); setTeamModels([]); } });
-    return () => { cancelled = true; };
-  }, [source, config.team_id, teamsLoaded, teams]);
-
-  if (source === "team") return teamModels;
-  return ownKeys.map((k) => ({ id: k.id, name: k.name, model: k.model }));
-}
-
-// ── Message Bubble ──
-
-interface MessageBubbleProps {
-  message: DialogMessage;
-  actorIndex: number;
-  actorName: string;
-  targetName?: string;
-  isUser: boolean;
-  isWaitingReply?: boolean;
-  pendingInteraction?: PendingInteraction;
-  onReplyToInteraction?: (messageId: string, content: string) => void;
-  onOpenApprovalDrawer?: (messageId: string) => void;
-}
-
-function RecallInfoChips({ message }: { message: DialogMessage }) {
-  const memoryPreview = message.appliedMemoryPreview ?? [];
-  const transcriptPreview = message.appliedTranscriptPreview ?? [];
-  const transcriptHitCount = Math.max(
-    0,
-    message.transcriptRecallHitCount ?? transcriptPreview.length,
-  );
-
-  if (
-    message.memoryRecallAttempted !== true
-    && message.transcriptRecallAttempted !== true
-    && memoryPreview.length === 0
-    && transcriptPreview.length === 0
-  ) {
-    return null;
-  }
-
-  return (
-    <div className="mt-1.5 flex max-w-full flex-col gap-1">
-      <div className="flex flex-wrap gap-1.5">
-        {message.memoryRecallAttempted && (
-          <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-700">
-            {memoryPreview.length > 0 ? `已用记忆 ${memoryPreview.length} 条` : "记忆已检索"}
-          </span>
-        )}
-        {message.transcriptRecallAttempted && (
-          <span className="rounded-full border border-violet-500/20 bg-violet-500/10 px-2 py-0.5 text-[10px] text-violet-700">
-            {transcriptHitCount > 0 ? `已回补轨迹 ${transcriptHitCount} 条` : "轨迹已检索"}
-          </span>
-        )}
-      </div>
-      {memoryPreview.length > 0 && (
-        <div className="rounded-xl border border-amber-500/15 bg-amber-500/5 px-2.5 py-1.5 text-[10px] leading-relaxed text-amber-800/90">
-          记忆命中：{memoryPreview.join("；")}
-        </div>
-      )}
-      {transcriptPreview.length > 0 && (
-        <div className="rounded-xl border border-violet-500/15 bg-violet-500/5 px-2.5 py-1.5 text-[10px] leading-relaxed text-violet-800/90">
-          轨迹回补：{transcriptPreview.join("；")}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ApprovalRequestCard({
-  message,
-  pendingInteraction,
-  onOpenApprovalDrawer,
-}: {
-  message: DialogMessage;
-  pendingInteraction?: PendingInteraction;
-  onOpenApprovalDrawer?: (messageId: string) => void;
-}) {
-  const approval = pendingInteraction?.approvalRequest ?? message.approvalRequest;
-
-  if (!approval) return null;
-
-  const detailItems = (approval.details ?? []).slice(0, 3);
-  const hasPreview = Boolean(approval.preview?.trim());
-  const status = pendingInteraction?.status ?? message.interactionStatus;
-  const canRespond = status === "pending" && Boolean(pendingInteraction);
-  const isStalePending = status === "pending" && !pendingInteraction;
-  const fileName = approval.targetPath ? basename(approval.targetPath) : "";
-  const directory = approval.targetPath ? dirname(approval.targetPath) : "";
-  const statusLabel = isStalePending ? "需重新发起" : getInteractionStatusLabel(status);
-
-  return (
-    <div className="w-[min(100%,620px)] rounded-2xl border border-amber-500/20 bg-gradient-to-br from-amber-500/10 via-[var(--color-bg)] to-[var(--color-bg-secondary)] overflow-hidden shadow-sm">
-      <div className="flex items-start gap-3 px-4 py-3">
-        <div className="w-9 h-9 rounded-2xl bg-amber-500/15 text-amber-600 flex items-center justify-center shrink-0">
-          <AlertTriangle className="w-4 h-4" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-[13px] font-semibold text-[var(--color-text)]">
-              {approval.title}
-            </span>
-            <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-700">
-              {statusLabel}
-            </span>
-            <span className="text-[10px] px-2 py-0.5 rounded-full bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]">
-              {approval.toolName}
-            </span>
-          </div>
-          <p className="mt-1 text-[12px] leading-relaxed text-[var(--color-text)]">
-            {approval.summary}
-          </p>
-          {approval.riskDescription && (
-            <p className="mt-1 text-[11px] text-amber-700/90">
-              风险：{approval.riskDescription}
-            </p>
-          )}
-          {approval.cacheScopeSummary && (
-            <p className="mt-1 text-[11px] text-[var(--color-text-secondary)]">
-              记住范围：{approval.cacheScopeSummary}
-            </p>
-          )}
-        </div>
-      </div>
-
-      <div className="px-4 pb-4 space-y-3">
-        {approval.targetPath && (
-          <div className="rounded-xl border border-[var(--color-border)]/70 bg-[var(--color-bg)]/70 px-3 py-2.5">
-            <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-              目标位置
-            </div>
-            <div className="mt-1 text-[13px] font-medium text-[var(--color-text)] break-all">
-              {fileName || approval.targetPath}
-            </div>
-            <div className="mt-0.5 text-[11px] text-[var(--color-text-secondary)] break-all">
-              {directory || approval.targetPath}
-            </div>
-          </div>
-        )}
-
-        {detailItems.length > 0 && (
-          <div className="grid gap-2 sm:grid-cols-3">
-            {detailItems.map((detail) => (
-              <div key={`${detail.label}-${detail.value}`} className="min-w-0 rounded-xl border border-[var(--color-border)]/70 bg-[var(--color-bg)]/60 px-3 py-2">
-                <div className="text-[10px] text-[var(--color-text-tertiary)]">
-                  {detail.label}
-                </div>
-                <div className={`mt-1 text-[12px] text-[var(--color-text)] break-all ${detail.mono ? "font-mono" : ""}`}>
-                  {detail.value}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-
-        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/15 bg-[var(--color-bg)]/55 px-3 py-2.5">
-          <div className="text-[11px] text-[var(--color-text-secondary)]">
-            {canRespond
-              ? hasPreview
-                ? "代码和操作按钮已移到右侧审批面板，阅读空间更大。"
-                : "详情和操作按钮已移到右侧审批面板。"
-              : isStalePending
-                ? "这条审批来自历史会话，可查看详情。"
-                : status === "timed_out"
-                  ? "审批已超时，可查看详情后让 Agent 重新发起。"
-                  : "可查看本次审批详情。"}
-          </div>
-          <button
-            onClick={() => onOpenApprovalDrawer?.(message.id)}
-            className="px-3 py-1.5 rounded-xl text-[12px] font-medium border border-amber-500/30 bg-amber-500/10 text-amber-700 hover:bg-amber-500/15 transition-colors"
-          >
-            {canRespond ? "查看并审批" : "查看详情"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ApprovalRequestDrawer({
-  message,
-  pendingInteraction,
-  actorName,
-  onClose,
-  onReplyToInteraction,
-}: {
-  message: DialogMessage;
-  pendingInteraction?: PendingInteraction;
-  actorName: string;
-  onClose: () => void;
-  onReplyToInteraction?: (messageId: string, content: string) => void;
-}) {
-  const approval = pendingInteraction?.approvalRequest ?? message.approvalRequest;
-  const [activeTab, setActiveTab] = useState<"overview" | "preview" | "full">("overview");
-
-  useEffect(() => {
-    setActiveTab("overview");
-  }, [message.id]);
-
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        onClose();
-      }
-    };
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
-
-  if (!approval) return null;
-
-  const detailItems = approval.details ?? [];
-  const status = pendingInteraction?.status ?? message.interactionStatus;
-  const canRespond = status === "pending" && Boolean(pendingInteraction && onReplyToInteraction);
-  const isStalePending = status === "pending" && !pendingInteraction;
-  const fullContent = approval.fullContent ?? approval.preview ?? "";
-  const fileName = approval.targetPath ? basename(approval.targetPath) : "";
-  const directory = approval.targetPath ? dirname(approval.targetPath) : "";
-  const statusLabel = isStalePending ? "需重新发起" : getInteractionStatusLabel(status);
-  const approvalActions = getApprovalActions(approval);
-  const tabs: Array<{ key: "overview" | "preview" | "full"; label: string }> = [
-    { key: "overview", label: "概览" },
-    { key: "preview", label: approval.previewLabel ?? "代码预览" },
-    { key: "full", label: "完整内容" },
-  ];
-
-  return (
-    <>
-      <div className="absolute inset-0 bg-black/25 z-40" onClick={onClose} />
-      <div className="absolute inset-3 z-50 rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-2xl overflow-hidden flex flex-col md:inset-y-3 md:right-3 md:left-auto md:w-[min(68vw,760px)]">
-        <div className="px-4 py-3 border-b border-[var(--color-border)] bg-[var(--color-bg)]/95 backdrop-blur-sm">
-          <div className="flex items-start gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-amber-500/12 text-amber-600 flex items-center justify-center shrink-0">
-              <AlertTriangle className="w-4.5 h-4.5" />
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-[15px] font-semibold text-[var(--color-text)]">
-                  {approval.title}
-                </span>
-                <span className="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-700">
-                  {statusLabel}
-                </span>
-                <span className="text-[11px] px-2 py-0.5 rounded-full bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]">
-                  {approval.toolName}
-                </span>
-              </div>
-              <p className="mt-1.5 text-[13px] leading-relaxed text-[var(--color-text)]">
-                {approval.summary}
-              </p>
-              <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-[var(--color-text-secondary)]">
-                <span>发起者：{actorName}</span>
-                {approval.targetPath && <span className="truncate max-w-full">目标：{approval.targetPath}</span>}
-              </div>
-              {approval.riskDescription && (
-                <p className="mt-1 text-[11px] text-amber-700/90">
-                  风险：{approval.riskDescription}
-                </p>
-              )}
-            </div>
-            <button
-              onClick={onClose}
-              className="p-2 rounded-xl text-[var(--color-text-tertiary)] hover:text-[var(--color-text)] hover:bg-[var(--color-bg-secondary)] transition-colors"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-          <div className="mt-4 flex flex-wrap gap-2">
-            {tabs.map((tab) => (
-              <button
-                key={tab.key}
-                onClick={() => setActiveTab(tab.key)}
-                className={`px-3 py-1.5 rounded-xl text-[12px] font-medium transition-colors ${
-                  activeTab === tab.key
-                    ? "bg-[var(--color-accent)]/12 text-[var(--color-accent)] border border-[var(--color-accent)]/20"
-                    : "bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)] border border-transparent hover:text-[var(--color-text)]"
-                }`}
-              >
-                {tab.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="flex-1 overflow-y-auto px-4 py-3 bg-[var(--color-bg-secondary)]/35">
-          {activeTab === "overview" && (
-            <div className="space-y-4">
-              {approval.targetPath && (
-                <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] p-4">
-                  <div className="text-[11px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                    目标位置
-                  </div>
-                  <div className="mt-2 text-[15px] font-semibold text-[var(--color-text)] break-all">
-                    {fileName || approval.targetPath}
-                  </div>
-                  <div className="mt-1 text-[12px] text-[var(--color-text-secondary)] break-all font-mono">
-                    {directory || approval.targetPath}
-                  </div>
-                </div>
-              )}
-              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                {detailItems.map((detail) => (
-                  <div key={`${detail.label}-${detail.value}`} className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] p-4">
-                    <div className="text-[11px] text-[var(--color-text-tertiary)]">
-                      {detail.label}
-                    </div>
-                    <div className={`mt-2 text-[13px] leading-relaxed text-[var(--color-text)] break-all ${detail.mono ? "font-mono" : ""}`}>
-                      {detail.value}
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 p-4">
-                <div className="text-[12px] font-medium text-amber-800">
-                  审批说明
-                </div>
-                <p className="mt-2 text-[12px] leading-relaxed text-amber-900/80">
-                  {canRespond
-                    ? "代码内容和审批按钮已固定在右侧面板里，阅读时不再受聊天区域宽度限制。"
-                    : isStalePending
-                      ? "这是历史审批记录，当前无法直接执行，但你仍然可以查看当时的内容。"
-                      : status === "timed_out"
-                        ? "这次审批已经超时，如需继续请让 Agent 重新发起。"
-                        : "这次审批已经处理完成，下面保留的是本次操作详情。"}
-                </p>
-              </div>
-            </div>
-          )}
-
-          {activeTab === "preview" && (
-            <div className="rounded-2xl border border-[var(--color-border)] bg-[#0f172a] text-[#e5e7eb] overflow-hidden">
-              <div className="px-4 py-2.5 border-b border-white/10 text-[11px] flex items-center justify-between">
-                <span>{approval.previewLabel ?? "代码预览"}</span>
-                {approval.previewTruncated && (
-                  <span className="text-[#94a3b8]">当前展示的是截断预览</span>
-                )}
-              </div>
-              <pre className="p-4 text-[12px] leading-[1.7] overflow-auto whitespace-pre-wrap break-words font-mono min-h-[360px] max-h-[calc(100vh-22rem)]">
-                {approval.preview || "暂无预览内容"}
-              </pre>
-            </div>
-          )}
-
-          {activeTab === "full" && (
-            <div className="rounded-2xl border border-[var(--color-border)] bg-[#0b1120] text-[#e2e8f0] overflow-hidden">
-              <div className="px-4 py-2.5 border-b border-white/10 text-[11px] flex items-center justify-between">
-                <span>完整内容</span>
-                <span className="text-[#94a3b8]">
-                  {fullContent ? `${fullContent.length} 字符` : "暂无内容"}
-                </span>
-              </div>
-              <pre className="p-4 text-[12px] leading-[1.7] overflow-auto whitespace-pre-wrap break-words font-mono min-h-[420px] max-h-[calc(100vh-22rem)]">
-                {fullContent || approval.preview || "暂无内容"}
-              </pre>
-            </div>
-          )}
-        </div>
-
-        <div className="px-4 py-3 border-t border-[var(--color-border)] bg-[var(--color-bg)]/96 backdrop-blur-sm">
-          {canRespond ? (
-            <div className="flex flex-wrap items-center gap-2">
-              {approvalActions.map((option) => (
-                <button
-                  key={option.label}
-                  onClick={() => onReplyToInteraction?.(message.id, option.label)}
-                  className={`px-4 py-2 rounded-xl text-[13px] font-medium transition-colors ${getApprovalActionClass(option)}`}
-                  title={option.description}
-                >
-                  {option.label}
-                </button>
-              ))}
-              <div className="text-[11px] text-[var(--color-text-tertiary)] md:ml-auto">
-                {approval.cacheScopeSummary
-                  ? `也可以直接在输入框回复这些选项，记住范围：${approval.cacheScopeSummary}`
-                  : "也可以直接在输入框回复审批选项"}
-              </div>
-            </div>
-          ) : (
-            <div className="text-[12px] text-[var(--color-text-secondary)]">
-              {isStalePending
-                ? "这条审批来自历史会话，当前不能直接执行。"
-                : status === "timed_out"
-                  ? "审批已超时，可让 Agent 重新发起。"
-                  : "审批已结束。"}
-            </div>
-          )}
-        </div>
-      </div>
-    </>
-  );
-}
-
-function MessageBubbleBase({
-  message,
-  actorIndex,
-  actorName,
-  targetName,
-  isUser,
-  isWaitingReply,
-  pendingInteraction,
-  onReplyToInteraction,
-  onOpenApprovalDrawer,
-}: MessageBubbleProps) {
-  const [showFullContext, setShowFullContext] = useState(false);
-  const color = isUser ? null : getActorColor(actorIndex);
-  const approvalResponseText = message.kind === "approval_response"
-    ? formatApprovalResponse(message.content)
-    : null;
-  const hasBrief = !approvalResponseText && isUser && !!message._briefContent && message._briefContent !== message.content;
-  const displayText = approvalResponseText ?? (hasBrief && !showFullContext ? message._briefContent! : message.content);
-  const isStructuredApproval = message.kind === "approval_request" && !!message.approvalRequest;
-  const interactionStatus = pendingInteraction?.status ?? message.interactionStatus;
-  const showTimedOutHint = !isUser && message.expectReply && !isStructuredApproval && interactionStatus === "timed_out";
-  const bubbleClassName = isStructuredApproval
-    ? "bg-transparent p-0 rounded-none shadow-none"
-    : isUser
-      ? "bg-[var(--color-accent)]/10 text-[var(--color-text)]"
-      : `${color!.bg} text-[var(--color-text)]`;
-  return (
-    <div className={`flex gap-2 ${isUser ? "flex-row-reverse justify-start" : ""}`}>
-      <div className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 ${
-        isUser
-          ? "bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
-          : `${color!.bg} ${color!.text}`
-      }`}>
-        {isUser ? <User className="w-3.5 h-3.5" /> : <Bot className="w-3.5 h-3.5" />}
-      </div>
-      <div className={`max-w-[88%] min-w-0 lg:max-w-[78%] ${isUser ? "flex flex-col items-end text-right" : ""}`}>
-        <div className={`text-[10px] mb-0.5 ${isUser ? "text-[var(--color-accent)]" : color!.text}`}>
-          {actorName}
-          {targetName && (
-            <span className="text-[var(--color-text-tertiary)] ml-1">
-              → {targetName}
-            </span>
-          )}
-          <span className="text-[var(--color-text-tertiary)] ml-1">
-            {new Date(message.timestamp).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
-          </span>
-        </div>
-        <div className={`inline-block w-fit text-[13px] leading-relaxed max-w-full ${bubbleClassName} ${isStructuredApproval ? "" : "rounded-xl px-3 py-2"}`}>
-          {!isStructuredApproval && message.images && message.images.length > 0 && (
-            <div className="flex gap-1.5 flex-wrap mb-1.5">
-              {message.images.map((imgPath: string, i: number) => (
-                <ChatImage
-                  key={i}
-                  path={imgPath}
-                  className="max-w-[200px] max-h-[200px] object-cover rounded-lg cursor-zoom-in hover:opacity-90 transition-opacity"
-                />
-              ))}
-            </div>
-          )}
-          {isStructuredApproval ? (
-            <ApprovalRequestCard
-              message={message}
-              pendingInteraction={pendingInteraction}
-              onOpenApprovalDrawer={onOpenApprovalDrawer}
-            />
-          ) : (
-            <>
-              <div className={`prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-headings:mt-2 prose-headings:mb-1 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_code]:break-words [&_p]:whitespace-pre-wrap [&_li]:whitespace-pre-wrap ${isUser ? "[&_p]:text-right [&_li]:text-right [&_ol]:text-right [&_ul]:text-right" : ""}`}>
-                <ReactMarkdown remarkPlugins={MARKDOWN_REMARK_PLUGINS}>
-                  {displayText}
-                </ReactMarkdown>
-              </div>
-              {hasBrief && (
-                <button
-                  onClick={() => setShowFullContext((v) => !v)}
-                  className="mt-1 text-[10px] text-[var(--color-text-tertiary)] hover:text-[var(--color-accent)] flex items-center gap-0.5 ml-auto transition-colors"
-                >
-                  <ChevronDown className={`w-3 h-3 transition-transform ${showFullContext ? "rotate-180" : ""}`} />
-                  {showFullContext ? "收起上下文" : "查看完整上下文"}
-                </button>
-              )}
-              {!isUser && message.kind !== "approval_request" && <FileActionButtons content={message.content} />}
-            </>
-          )}
-        </div>
-        {isWaitingReply && !isStructuredApproval && (
-          <div className="flex items-center gap-1 mt-1 text-[10px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-600 animate-pulse">
-            <Loader2 className="w-2.5 h-2.5 animate-spin" />
-            等待你的回复...
-          </div>
-        )}
-        {showTimedOutHint && (
-          <div className="mt-1 max-w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2.5 py-1.5 text-[10px] leading-relaxed text-[var(--color-text-secondary)]">
-            这次提问会保持已超时。Agent 已按已有信息继续或结束当前分支；现在再发送内容，只会作为新的跟进消息发给原提问 Actor，不会把状态改回已处理，也不会接回原等待流程。
-          </div>
-        )}
-        {!isUser && <RecallInfoChips message={message} />}
-      </div>
-    </div>
-  );
-}
-
-const MessageBubble = React.memo(
-  MessageBubbleBase,
-  (prev, next) =>
-    prev.message.id === next.message.id &&
-    prev.message.content === next.message.content &&
-    prev.message._briefContent === next.message._briefContent &&
-    prev.message.images === next.message.images &&
-    prev.message.timestamp === next.message.timestamp &&
-    prev.message.memoryRecallAttempted === next.message.memoryRecallAttempted &&
-    (prev.message.appliedMemoryPreview?.join("\n") || "") ===
-      (next.message.appliedMemoryPreview?.join("\n") || "") &&
-    prev.message.transcriptRecallAttempted === next.message.transcriptRecallAttempted &&
-    prev.message.transcriptRecallHitCount === next.message.transcriptRecallHitCount &&
-    (prev.message.appliedTranscriptPreview?.join("\n") || "") ===
-      (next.message.appliedTranscriptPreview?.join("\n") || "") &&
-    prev.actorIndex === next.actorIndex &&
-    prev.actorName === next.actorName &&
-    prev.targetName === next.targetName &&
-    prev.isUser === next.isUser &&
-    prev.isWaitingReply === next.isWaitingReply &&
-    prev.pendingInteraction?.id === next.pendingInteraction?.id &&
-    prev.pendingInteraction?.status === next.pendingInteraction?.status &&
-    prev.onReplyToInteraction === next.onReplyToInteraction &&
-    prev.onOpenApprovalDrawer === next.onOpenApprovalDrawer,
-);
-
-// ── Capability Badge ──
-
-const CAPABILITY_LABELS: Record<string, { label: string; color: string }> = {
-  coordinator: { label: "协调", color: "bg-blue-500/20 text-blue-600" },
-  code_review: { label: "Review", color: "bg-green-500/20 text-green-600" },
-  code_write: { label: "编写", color: "bg-emerald-500/20 text-emerald-600" },
-  code_analysis: { label: "分析", color: "bg-teal-500/20 text-teal-600" },
-  security: { label: "安全", color: "bg-red-500/20 text-red-600" },
-  performance: { label: "性能", color: "bg-orange-500/20 text-orange-600" },
-  architecture: { label: "架构", color: "bg-purple-500/20 text-purple-600" },
-  debugging: { label: "调试", color: "bg-rose-500/20 text-rose-600" },
-  research: { label: "调研", color: "bg-cyan-500/20 text-cyan-600" },
-  documentation: { label: "文档", color: "bg-slate-500/20 text-slate-600" },
-  testing: { label: "测试", color: "bg-indigo-500/20 text-indigo-600" },
-  devops: { label: "DevOps", color: "bg-amber-500/20 text-amber-600" },
-  data_analysis: { label: "数据", color: "bg-pink-500/20 text-pink-600" },
-  creative: { label: "创意", color: "bg-violet-500/20 text-violet-600" },
-  synthesis: { label: "整合", color: "bg-cyan-500/20 text-cyan-600" },
-};
-
-function CapabilityBadges({ tags }: { tags?: AgentCapability[] }) {
-  if (!tags?.length) return null;
-  return (
-    <div className="flex items-center gap-0.5 ml-1">
-      {tags.slice(0, 3).map((tag) => {
-        const info = CAPABILITY_LABELS[tag];
-        return (
-          <span
-            key={tag}
-            className={`text-[8px] px-1 rounded-full ${info?.color ?? "bg-gray-500/20 text-gray-600"}`}
-            title={tag}
-          >
-            {info?.label ?? tag}
-          </span>
-        );
-      })}
-      {tags.length > 3 && (
-        <span className="text-[8px] text-gray-400">+{tags.length - 3}</span>
-      )}
-    </div>
-  );
-}
-
-// ── Status Bar ──
-
-function ActorStatusBar({ actors, compact = false }: { actors: ActorSnapshot[]; compact?: boolean }) {
-  return (
-    <div className="flex items-center gap-1.5 flex-wrap">
-      {actors.map((actor, i) => {
-        const color = getActorColor(i);
-        const isThinking = actor.status === "running";
-        return (
-          <div
-            key={actor.id}
-            className={`flex items-center gap-1.5 rounded-full border ${compact ? "px-2 py-0.5 text-[10px]" : "px-2 py-1 text-[10px]"} ${color.bg} ${color.text} ${color.border}`}
-          >
-            <div className={`w-1.5 h-1.5 rounded-full ${color.dot} ${isThinking ? "animate-pulse" : ""}`} />
-            <span className="font-medium">{actor.roleName}</span>
-            {!compact && <CapabilityBadges tags={actor.capabilities?.tags} />}
-            {!compact && actor.modelOverride && (
-              <span className="opacity-60 max-w-[80px] truncate">{actor.modelOverride}</span>
-            )}
-            {isThinking && <Loader2 className="w-2.5 h-2.5 animate-spin" />}
-            {actor.pendingInbox > 0 && (
-              <span className="bg-red-500 text-white text-[8px] w-3.5 h-3.5 rounded-full flex items-center justify-center">
-                {actor.pendingInbox}
-              </span>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// ── @ Mention Popup ──
-
-function MentionPopup({
-  actors,
-  filter,
-  onSelect,
-  onClose,
-}: {
-  actors: ActorSnapshot[];
-  filter: string;
-  onSelect: (name: string) => void;
-  onClose: () => void;
-}) {
-  const filtered = actors.filter((a) =>
-    a.roleName.toLowerCase().includes(filter.toLowerCase()),
-  );
-
-  if (filtered.length === 0) return null;
-
-  return (
-    <div className="absolute bottom-full mb-1 left-0 w-48 bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg shadow-xl overflow-hidden z-50">
-      <div className="py-1 max-h-[150px] overflow-y-auto">
-        {filtered.map((a, i) => {
-          const color = getActorColor(i);
-          return (
-            <button
-              key={a.id}
-              className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-[var(--color-bg-hover)] transition-colors text-left"
-              onMouseDown={(e) => { e.preventDefault(); onSelect(a.roleName); }}
-            >
-              <div className={`w-2 h-2 rounded-full ${color.dot}`} />
-              <span>{a.roleName}</span>
-              {a.status === "running" && <Loader2 className="w-2.5 h-2.5 animate-spin opacity-50" />}
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-// ── Live Actor Config Row (for settings panel) ──
-
-function LiveActorRow({
-  actor,
-  index,
-  isCoordinator,
-  isFirst,
-  isLast,
-  onRemove,
-  onMoveUp,
-  onMoveDown,
-  onSetDefault,
-  onUpdate,
-  models,
-}: {
-  actor: ActorSnapshot;
-  index: number;
-  isCoordinator: boolean;
-  isFirst: boolean;
-  isLast: boolean;
-  onRemove: () => void;
-  onMoveUp: () => void;
-  onMoveDown: () => void;
-  onSetDefault: () => void;
-  onUpdate: (patch: {
-    name?: string;
-    modelOverride?: string;
-    workspace?: string;
-    thinkingLevel?: ThinkingLevel;
-    toolPolicy?: ToolPolicy;
-    middlewareOverrides?: MiddlewareOverrides;
-    capabilities?: AgentCapabilities;
-  }) => void;
-  models: ModelOption[];
-}) {
-  const color = getActorColor(index);
-  const isRunning = actor.status === "running";
-  const [editing, setEditing] = useState(false);
-  const [editName, setEditName] = useState(actor.roleName);
-  const [editModel, setEditModel] = useState(actor.modelOverride || "");
-  const [editWorkspace, setEditWorkspace] = useState(actor.workspace || "");
-  const [editThinking, setEditThinking] = useState<ThinkingLevel>(actor.thinkingLevel || "adaptive");
-  const [editCaps, setEditCaps] = useState<AgentCapability[]>(actor.capabilities?.tags ?? []);
-  const [showCapMenu, setShowCapMenu] = useState(false);
-
-  const handleOpenEdit = () => {
-    if (isRunning) return;
-    setEditName(actor.roleName);
-    setEditModel(actor.modelOverride || "");
-    setEditWorkspace(actor.workspace || "");
-    setEditThinking(actor.thinkingLevel || "adaptive");
-    setEditCaps(actor.capabilities?.tags ?? []);
-    setEditing(true);
-  };
-
-  const handleSave = () => {
-    onUpdate({
-      name: editName.trim() || undefined,
-      modelOverride: editModel,
-      workspace: editWorkspace.trim() || undefined,
-      thinkingLevel: editThinking !== "adaptive" ? editThinking : undefined,
-      capabilities: editCaps.length > 0 ? { tags: editCaps } : undefined,
-    });
-    setEditing(false);
-  };
-
-  const toggleCap = (cap: AgentCapability) => {
-    setEditCaps((prev) =>
-      prev.includes(cap) ? prev.filter((c) => c !== cap) : [...prev, cap]
-    );
-  };
-
-  return (
-    <div className={`p-1.5 rounded-xl border ${isCoordinator ? "border-amber-400/50 ring-1 ring-amber-400/20" : color.border} ${color.bg}`}>
-      <div className="flex items-center gap-1.5">
-        {/* 排序按钮 */}
-        <div className="flex flex-col -space-y-0.5">
-          <button
-            onClick={onMoveUp}
-            disabled={isFirst || isRunning}
-            className="p-0 rounded hover:bg-white/20 text-[var(--color-text-tertiary)] hover:text-[var(--color-text)] disabled:opacity-20 disabled:cursor-not-allowed"
-            title="上移"
-          >
-            <ChevronUp className="w-3 h-3" />
-          </button>
-          <button
-            onClick={onMoveDown}
-            disabled={isLast || isRunning}
-            className="p-0 rounded hover:bg-white/20 text-[var(--color-text-tertiary)] hover:text-[var(--color-text)] disabled:opacity-20 disabled:cursor-not-allowed"
-            title="下移"
-          >
-            <ChevronDown className="w-3 h-3" />
-          </button>
-        </div>
-
-        <div className={`w-2 h-2 rounded-full ${color.dot} ${isRunning ? "animate-pulse" : ""} shrink-0`} />
-        <span className="text-[11px] font-medium min-w-[60px]">{actor.roleName}</span>
-        <span className="text-[10px] text-[var(--color-text-tertiary)] truncate max-w-[100px]">
-          {actor.modelOverride || "(默认模型)"}
-        </span>
-        {isCoordinator && (
-          <span className="text-[8px] px-1 py-0.5 rounded-full bg-amber-500/20 text-amber-600 font-medium" title="默认发送 Agent">
-            默认
-          </span>
-        )}
-        <div className="flex-1" />
-        {isRunning && <Loader2 className="w-3 h-3 animate-spin opacity-50" />}
-
-        {/* 设为默认 */}
-        <button
-          onClick={onSetDefault}
-          disabled={isCoordinator || isRunning}
-          className={`p-0.5 rounded hover:bg-amber-500/10 transition-colors ${isCoordinator ? "text-amber-500 opacity-50 cursor-not-allowed" : "text-[var(--color-text-tertiary)] hover:text-amber-500"} disabled:opacity-30 disabled:cursor-not-allowed`}
-          title={isCoordinator ? "已是默认发送 Agent" : "设为默认发送"}
-        >
-          <Star className={`w-3 h-3 ${isCoordinator ? "fill-current" : ""}`} />
-        </button>
-
-        {/* 编辑 */}
-        <button
-          onClick={handleOpenEdit}
-          disabled={isRunning}
-          className="p-0.5 rounded hover:bg-blue-500/10 text-[var(--color-text-tertiary)] hover:text-blue-500 disabled:opacity-30 disabled:cursor-not-allowed"
-          title={isRunning ? "运行中，无法编辑" : "编辑配置"}
-        >
-          <Pencil className="w-3 h-3" />
-        </button>
-
-        {/* 移除 */}
-        <button
-          onClick={onRemove}
-          disabled={isRunning}
-          className="p-0.5 rounded hover:bg-red-500/10 text-[var(--color-text-tertiary)] hover:text-red-500 disabled:opacity-30 disabled:cursor-not-allowed"
-          title={isRunning ? "运行中，无法移除" : "移除此 Agent"}
-        >
-          <X className="w-3 h-3" />
-        </button>
-      </div>
-
-      {/* 标签行 */}
-      <div className="mt-1.5 flex flex-wrap gap-1">
-        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg)]/80 text-[var(--color-text-secondary)]">
-          {summarizeToolPolicy(actor.toolPolicy)}
-        </span>
-        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg)]/80 text-[var(--color-text-secondary)]">
-          {summarizeMiddleware(actor.middlewareOverrides)}
-        </span>
-        {actor.workspace && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg)]/80 text-[var(--color-text-secondary)]">
-            工作区 {actor.workspace}
-          </span>
-        )}
-        {actor.thinkingLevel && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg)]/80 text-[var(--color-text-secondary)]">
-            思考 {actor.thinkingLevel}
-          </span>
-        )}
-      </div>
-
-      {/* 内联编辑面板 */}
-      {editing && (
-        <div className="mt-2 p-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] space-y-1.5">
-          <div className="flex items-center gap-1.5 flex-wrap">
-            <input
-              value={editName}
-              onChange={(e) => setEditName(e.target.value)}
-              placeholder="名称"
-              className="text-[10px] px-1.5 py-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] w-[96px]"
-            />
-            <select
-              value={editModel}
-              onChange={(e) => setEditModel(e.target.value)}
-              className="text-[10px] px-1.5 py-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] min-w-[108px] max-w-[160px]"
-            >
-              <option value="">(默认模型)</option>
-              {models.map((m) => (
-                <option key={m.id} value={m.model}>{m.name}</option>
-              ))}
-            </select>
-            <input
-              value={editWorkspace}
-              onChange={(e) => setEditWorkspace(e.target.value)}
-              placeholder="工作目录"
-              className="text-[10px] px-1.5 py-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] w-[120px]"
-            />
-            <select
-              value={editThinking}
-              onChange={(e) => setEditThinking(e.target.value as ThinkingLevel)}
-              className="text-[10px] px-1.5 py-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)]"
-            >
-              {THINKING_LEVELS.map((level) => (
-                <option key={level} value={level}>思考 {level}</option>
-              ))}
-            </select>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <div className="relative">
-              <button
-                type="button"
-                onClick={() => setShowCapMenu(!showCapMenu)}
-                className="text-[10px] px-1.5 py-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] flex items-center gap-1 hover:bg-[var(--color-bg-hover)]"
-              >
-                <span className="text-[var(--color-text-tertiary)]">能力:</span>
-                {editCaps.length > 0 ? (
-                  <span className="text-[var(--color-accent)]">{editCaps.length}</span>
-                ) : (
-                  <span className="text-[var(--color-text-tertiary)]">选择</span>
-                )}
-              </button>
-              {showCapMenu && (
-                <div className="absolute top-full mt-1 left-0 w-48 max-h-32 overflow-auto bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg shadow-xl z-50 p-1">
-                  {ALL_CAPABILITIES.map((cap) => (
-                    <label
-                      key={cap.value}
-                      className="flex items-center gap-1.5 px-2 py-1 text-[10px] hover:bg-[var(--color-bg-hover)] cursor-pointer rounded"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={editCaps.includes(cap.value)}
-                        onChange={() => toggleCap(cap.value)}
-                        className="w-3 h-3 rounded"
-                      />
-                      <span>{cap.label}</span>
-                    </label>
-                  ))}
-                </div>
-              )}
-            </div>
-            <div className="flex-1" />
-            <button
-              onClick={() => setEditing(false)}
-              className="px-2 py-1 text-[10px] rounded-lg border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]"
-            >
-              取消
-            </button>
-            <button
-              onClick={handleSave}
-              className="flex items-center gap-0.5 px-2 py-1 text-[10px] rounded-lg bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity"
-            >
-              <Check className="w-3 h-3" /> 保存
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ── Add Agent Inline Form ──
-
-const ALL_CAPABILITIES: { value: AgentCapability; label: string }[] = [
-  { value: "coordinator", label: "协调者" },
-  { value: "code_review", label: "代码审查" },
-  { value: "code_write", label: "代码编写" },
-  { value: "code_analysis", label: "代码分析" },
-  { value: "security", label: "安全评估" },
-  { value: "performance", label: "性能优化" },
-  { value: "architecture", label: "架构设计" },
-  { value: "debugging", label: "调试排错" },
-  { value: "research", label: "调研搜索" },
-  { value: "documentation", label: "文档撰写" },
-  { value: "testing", label: "测试编写" },
-  { value: "devops", label: "DevOps" },
-  { value: "data_analysis", label: "数据分析" },
-  { value: "creative", label: "创意头脑风暴" },
-  { value: "synthesis", label: "综合整合" },
-  { value: "vision", label: "视觉识别" },
-];
-
-const AGENT_CAPABILITY_SET = new Set<AgentCapability>(ALL_CAPABILITIES.map((c) => c.value));
-const APPROVAL_LEVELS: ApprovalLevel[] = ["normal", "permissive", "strict", "off"];
-const THINKING_LEVELS: ThinkingLevel[] = ["adaptive", "minimal", "low", "medium", "high", "xhigh", "off"];
-
-function normalizeAgentCapabilities(tags?: string[]): AgentCapability[] | undefined {
-  if (!tags?.length) return undefined;
-  const normalized = tags.filter((tag): tag is AgentCapability =>
-    AGENT_CAPABILITY_SET.has(tag as AgentCapability),
-  );
-  return normalized.length ? normalized : undefined;
-}
-
-interface AddActorDraft {
-  name: string;
-  model: string;
-  capabilities?: AgentCapabilities;
-  workspace?: string;
-  toolPolicy?: ToolPolicy;
-  middlewareOverrides?: MiddlewareOverrides;
-  thinkingLevel?: ThinkingLevel;
-}
-
-function AddAgentForm({
-  models,
-  existingNames,
-  onAdd,
-}: {
-  models: ModelOption[];
-  existingNames: string[];
-  onAdd: (draft: AddActorDraft) => void;
-}) {
-  const [name, setName] = useState("");
-  const [model, setModel] = useState("");
-  const [selectedCaps, setSelectedCaps] = useState<AgentCapability[]>([]);
-  const [showCapMenu, setShowCapMenu] = useState(false);
-  const [showAdvanced, setShowAdvanced] = useState(false);
-  const [workspace, setWorkspace] = useState("");
-  const [toolAllow, setToolAllow] = useState("");
-  const [toolDeny, setToolDeny] = useState("");
-  const [approvalLevel, setApprovalLevel] = useState<ApprovalLevel>("normal");
-  const [disabledMiddlewares, setDisabledMiddlewares] = useState("");
-  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>("adaptive");
-
-  const handleAdd = () => {
-    const trimmed = name.trim();
-    let agentName = trimmed;
-
-    // 如果未填写名称，则根据现有 Agent 生成不重名的默认名称：Agent 1, Agent 2, ...
-    if (!agentName) {
-      const taken = new Set(existingNames);
-      let index = 1;
-      while (taken.has(`Agent ${index}`)) {
-        index += 1;
-      }
-      agentName = `Agent ${index}`;
-    }
-
-    const capabilities = selectedCaps.length > 0 ? { tags: selectedCaps } : undefined;
-    const allow = toolAllow.split(",").map((item) => item.trim()).filter(Boolean);
-    const deny = toolDeny.split(",").map((item) => item.trim()).filter(Boolean);
-    const disabled = disabledMiddlewares.split(",").map((item) => item.trim()).filter(Boolean);
-    onAdd({
-      name: agentName,
-      model,
-      capabilities,
-      workspace: workspace.trim() || undefined,
-      toolPolicy: allow.length > 0 || deny.length > 0
-        ? {
-            allow: allow.length > 0 ? allow : undefined,
-            deny: deny.length > 0 ? deny : undefined,
-          }
-        : undefined,
-      middlewareOverrides: approvalLevel !== "normal" || disabled.length > 0
-        ? {
-            approvalLevel,
-            disable: disabled.length > 0 ? disabled : undefined,
-          }
-        : undefined,
-      thinkingLevel: thinkingLevel !== "adaptive" ? thinkingLevel : undefined,
-    });
-    setName("");
-    setModel("");
-    setSelectedCaps([]);
-    setWorkspace("");
-    setToolAllow("");
-    setToolDeny("");
-    setApprovalLevel("normal");
-    setDisabledMiddlewares("");
-    setThinkingLevel("adaptive");
-  };
-
-  const toggleCap = (cap: AgentCapability) => {
-    setSelectedCaps((prev) =>
-      prev.includes(cap) ? prev.filter((c) => c !== cap) : [...prev, cap]
-    );
-  };
-
-  return (
-    <div className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-2 space-y-1.5">
-      <div className="flex items-center gap-1.5 flex-wrap">
-        <input
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="名称 (可选)"
-          className="text-[10px] px-1.5 py-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] w-[96px]"
-        />
-        <select
-          value={model}
-          onChange={(e) => setModel(e.target.value)}
-          className="text-[10px] px-1.5 py-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] min-w-[108px] max-w-[160px]"
-        >
-          <option value="">(默认模型)</option>
-          {models.map((m) => (
-            <option key={m.id} value={m.model}>{m.name}</option>
-          ))}
-        </select>
-        <div className="relative">
-          <button
-            type="button"
-            onClick={() => setShowCapMenu(!showCapMenu)}
-            className="text-[10px] px-1.5 py-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] flex items-center gap-1 hover:bg-[var(--color-bg-hover)]"
-          >
-            <span className="text-[var(--color-text-tertiary)]">能力:</span>
-            {selectedCaps.length > 0 ? (
-              <span className="text-[var(--color-accent)]">{selectedCaps.length}</span>
-            ) : (
-              <span className="text-[var(--color-text-tertiary)]">选择</span>
-            )}
-          </button>
-          {showCapMenu && (
-            <div className="absolute top-full mt-1 left-0 w-48 max-h-32 overflow-auto bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg shadow-xl z-50 p-1">
-              {ALL_CAPABILITIES.map((cap) => (
-                <label
-                  key={cap.value}
-                  className="flex items-center gap-1.5 px-2 py-1 text-[10px] hover:bg-[var(--color-bg-hover)] cursor-pointer rounded"
-                >
-                  <input
-                    type="checkbox"
-                    checked={selectedCaps.includes(cap.value)}
-                    onChange={() => toggleCap(cap.value)}
-                    className="w-3 h-3 rounded"
-                  />
-                  <span>{cap.label}</span>
-                </label>
-              ))}
-            </div>
-          )}
-        </div>
-        <button
-          type="button"
-          onClick={() => setShowAdvanced((value) => !value)}
-          className="text-[10px] px-1.5 py-1 rounded-lg border border-dashed border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-accent)] hover:border-[var(--color-accent)]/40"
-        >
-          {showAdvanced ? "收起高级" : "高级配置"}
-        </button>
-        <button
-          onClick={handleAdd}
-          className="ml-auto flex items-center gap-1 px-2 py-1 text-[10px] rounded-lg bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity"
-        >
-          <Plus className="w-3 h-3" /> 添加
-        </button>
-      </div>
-      {showAdvanced && (
-        <div className="grid gap-1.5 md:grid-cols-2">
-          <input
-            value={workspace}
-            onChange={(e) => setWorkspace(e.target.value)}
-            placeholder="工作目录，如 /project/root"
-            className="text-[10px] px-2 py-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)]"
-          />
-          <select
-            value={approvalLevel}
-            onChange={(e) => setApprovalLevel(e.target.value as ApprovalLevel)}
-            className="text-[10px] px-2 py-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)]"
-          >
-            {APPROVAL_LEVELS.map((level) => (
-              <option key={level} value={level}>
-                审批 {level}
-              </option>
-            ))}
-          </select>
-          <input
-            value={toolAllow}
-            onChange={(e) => setToolAllow(e.target.value)}
-            placeholder="允许工具，逗号分隔"
-            className="text-[10px] px-2 py-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)]"
-          />
-          <input
-            value={toolDeny}
-            onChange={(e) => setToolDeny(e.target.value)}
-            placeholder="禁止工具，逗号分隔"
-            className="text-[10px] px-2 py-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)]"
-          />
-          <input
-            value={disabledMiddlewares}
-            onChange={(e) => setDisabledMiddlewares(e.target.value)}
-            placeholder="关闭中间件，逗号分隔"
-            className="text-[10px] px-2 py-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)]"
-          />
-          <select
-            value={thinkingLevel}
-            onChange={(e) => setThinkingLevel(e.target.value as ThinkingLevel)}
-            className="text-[10px] px-2 py-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)]"
-          >
-            {THINKING_LEVELS.map((level) => (
-              <option key={level} value={level}>
-                思考 {level}
-              </option>
-            ))}
-          </select>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ── Routing Mode Button ──
-
-const ROUTING_MODES = [
-  { value: "coordinator" as const, icon: "👤", label: "自动协作", desc: "默认交给主代理，必要时再临时创建子代理" },
-  { value: "smart" as const, icon: "⚡", label: "定向路由", desc: "自动选择最合适的现有 Agent" },
-  { value: "broadcast" as const, icon: "📢", label: "并行讨论", desc: "把同一条消息发给所有 Agent" },
-];
-
-function RoutingModeButton({
-  value,
-  onChange,
-}: {
-  value: "coordinator" | "smart" | "broadcast";
-  onChange: (v: "coordinator" | "smart" | "broadcast") => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-  const current = ROUTING_MODES.find((m) => m.value === value) ?? ROUTING_MODES[0];
-
-  useEffect(() => {
-    if (!open) return;
-    const handleClick = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
-  }, [open]);
-
-  return (
-    <div className="relative" ref={ref}>
-      <button
-        type="button"
-        onClick={() => setOpen(!open)}
-        className="flex items-center gap-1 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1 text-[10px] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/30 hover:text-[var(--color-text)] transition-colors"
-      >
-        <span>{current.icon}</span>
-        <span>{current.label}</span>
-        <ChevronDown className={`w-3 h-3 transition-transform ${open ? "rotate-180" : ""}`} />
-      </button>
-      {open && (
-        <div className="absolute bottom-full mb-2 left-0 w-52 bg-[var(--color-bg)] border border-[var(--color-border)] rounded-2xl shadow-xl overflow-hidden z-50">
-          <div className="py-1">
-            {ROUTING_MODES.map((mode) => (
-              <button
-                key={mode.value}
-                className={`w-full flex items-center gap-2 px-3 py-2 text-xs hover:bg-[var(--color-bg-hover)] transition-colors text-left ${
-                  mode.value === value ? "bg-[var(--color-accent)]/5 text-[var(--color-accent)]" : ""
-                }`}
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  onChange(mode.value);
-                  setOpen(false);
-                }}
-              >
-                <span className="text-sm">{mode.icon}</span>
-                <div className="flex-1 min-w-0">
-                  <div className="font-medium">{mode.label}</div>
-                  <div className="text-[10px] text-[var(--color-text-tertiary)] mt-0.5">{mode.desc}</div>
-                </div>
-                {mode.value === value && (
-                  <div className="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)] shrink-0" />
-                )}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ArtifactPathActions({ filePath, available }: { filePath: string; available: boolean }) {
-  const fileName = basename(filePath);
-
-  if (!available) return null;
-
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      <button
-        onClick={() => {
-          void invoke("open_file_location", { filePath });
-        }}
-        className="flex items-center gap-1 px-2 py-1 rounded-md bg-[var(--color-bg)] border border-[var(--color-border)] text-[11px] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/40 hover:text-[var(--color-accent)] transition-colors"
-      >
-        <FolderOpen className="w-3 h-3" />
-        打开位置
-      </button>
-      <button
-        onClick={async () => {
-          try {
-            const { save } = await import("@tauri-apps/plugin-dialog");
-            const { readFile, writeFile } = await import("@tauri-apps/plugin-fs");
-            const dest = await save({ defaultPath: fileName });
-            if (dest) {
-              const data = await readFile(filePath);
-              await writeFile(dest, data);
-            }
-          } catch (err) {
-            if (err && typeof err === "object" && "message" in err && /cancel/i.test(String((err as Error).message))) return;
-            console.warn("[ActorChatPanel] File save failed:", err);
-          }
-        }}
-        className="flex items-center gap-1 px-2 py-1 rounded-md bg-[var(--color-accent)]/10 text-[11px] text-[var(--color-accent)] hover:bg-[var(--color-accent)]/20 transition-colors"
-      >
-        <FileDown className="w-3 h-3" />
-        下载
-      </button>
-    </div>
-  );
-}
-
-function DialogWorkspaceDock({
-  panel,
-  onPanelChange,
-  actors,
-  actorTodos,
-  dialogHistory,
-  artifacts,
-  sessionUploads,
-  spawnedTasks,
-  selectedRunId,
-  onSelectRunId,
-  focusedSessionRunId,
-  onFocusSession,
-  onCloseSession,
-  onContinueTaskWithAgent,
-  draftPlan,
-  draftInsight,
-  contextBreakdown,
-  contextSnapshot,
-  dialogContextSummary,
-  requirePlanApproval,
-  onTogglePlanApproval,
-  lastPlanReview,
-  graphAvailable,
-  onOpenGraph,
-}: {
-  panel: WorkspacePanel;
-  onPanelChange: (panel: WorkspacePanel) => void;
-  actors: ActorSnapshot[];
-  actorTodos: Record<string, TodoItem[]>;
-  dialogHistory: DialogMessage[];
-  artifacts: DialogArtifact[];
-  sessionUploads: SessionUploadRecord[];
-  spawnedTasks: SpawnedTaskRecord[];
-  selectedRunId: string | null;
-  onSelectRunId: (runId: string) => void;
-  focusedSessionRunId: string | null;
-  onFocusSession: (runId: string | null) => void;
-  onCloseSession: (runId: string) => void;
-  onContinueTaskWithAgent: (runId: string) => void;
-  draftPlan: ClusterPlan | null;
-  draftInsight: DialogDispatchPlanBundle["insight"] | null;
-  contextBreakdown: DialogContextBreakdown;
-  contextSnapshot: DialogContextSnapshot | null;
-  dialogContextSummary: DialogContextSummary | null;
-  requirePlanApproval: boolean;
-  onTogglePlanApproval: (value: boolean) => void;
-  lastPlanReview: { status: "approved" | "rejected"; timestamp: number; plan: ClusterPlan } | null;
-  graphAvailable: boolean;
-  onOpenGraph: (() => void) | null;
-}) {
-  const actorById = useMemo(() => {
-    const map = new Map<string, ActorSnapshot>();
-    actors.forEach((actor) => map.set(actor.id, actor));
-    return map;
-  }, [actors]);
-  const actorNameById = useMemo(() => {
-    const map = new Map<string, string>();
-    actors.forEach((actor) => map.set(actor.id, actor.roleName));
-    return map;
-  }, [actors]);
-
-  const sortedTasks = useMemo(() => {
-    return [...spawnedTasks].sort((a, b) => {
-      if (a.status === "running" && b.status !== "running") return -1;
-      if (a.status !== "running" && b.status === "running") return 1;
-      return b.spawnedAt - a.spawnedAt;
-    });
-  }, [spawnedTasks]);
-
-  const selectedTask = useMemo(() => {
-    if (sortedTasks.length === 0) return null;
-    return sortedTasks.find((task) => task.runId === selectedRunId) ?? sortedTasks[0];
-  }, [sortedTasks, selectedRunId]);
-
-  const selectedTaskTranscript = useMemo(() => {
-    return collectTaskTranscript({
-      task: selectedTask,
-      actorById,
-      dialogHistory,
-    });
-  }, [actorById, dialogHistory, selectedTask]);
-  const taskCheckpointByRunId = useMemo(() => {
-    const map = new Map<string, SpawnedTaskCheckpoint>();
-    for (const task of sortedTasks) {
-      const checkpoint = buildSpawnedTaskCheckpoint({
-        task,
-        targetActor: actorById.get(task.targetActorId),
-        actorTodos: actorTodos[task.targetActorId] ?? [],
-        dialogHistory,
-        artifacts,
-        actorNameById,
-      });
-      if (checkpoint) {
-        map.set(task.runId, checkpoint);
-      }
-    }
-    return map;
-  }, [sortedTasks, actorById, actorTodos, dialogHistory, artifacts, actorNameById]);
-  const selectedTaskCheckpoint = useMemo<SpawnedTaskCheckpoint | null>(() => {
-    if (!selectedTask) return null;
-    return taskCheckpointByRunId.get(selectedTask.runId) ?? null;
-  }, [selectedTask, taskCheckpointByRunId]);
-
-  const [artifactAvailabilityByPath, setArtifactAvailabilityByPath] = useState<Record<string, ArtifactAvailability>>({});
-
-  useEffect(() => {
-    if (panel !== "artifacts") return;
-    if (artifacts.length === 0) {
-      setArtifactAvailabilityByPath({});
-      return;
-    }
-
-    let cancelled = false;
-    void (async () => {
-      try {
-        const { exists } = await import("@tauri-apps/plugin-fs");
-        const entries = await Promise.all(
-          artifacts.map(async (artifact) => [
-            artifact.path,
-            (await exists(artifact.path)) ? "ready" : "missing",
-          ] as const),
-        );
-        if (!cancelled) {
-          setArtifactAvailabilityByPath(Object.fromEntries(entries));
-        }
-      } catch (error) {
-        console.warn("[ActorChatPanel] Failed to verify artifact existence:", error);
-        if (!cancelled) {
-          setArtifactAvailabilityByPath(
-            Object.fromEntries(artifacts.map((artifact) => [artifact.path, "unknown" as ArtifactAvailability])),
-          );
-        }
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [panel, artifacts]);
-
-  const activeTodoCount = useMemo(
-    () =>
-      Object.values(actorTodos).reduce(
-        (sum, todos) =>
-          sum + todos.filter((todo) => todo.status === "pending" || todo.status === "in_progress").length,
-        0,
-      ),
-    [actorTodos],
-  );
-
-  const totalTodoCount = useMemo(
-    () => Object.values(actorTodos).reduce((sum, todos) => sum + todos.length, 0),
-    [actorTodos],
-  );
-
-  const openSessionCount = useMemo(
-    () => sortedTasks.filter((task) => task.mode === "session" && task.sessionOpen).length,
-    [sortedTasks],
-  );
-
-  const workspaceTabs: Array<{
-    id: Exclude<WorkspacePanel, null>;
-    label: string;
-    icon: LucideIcon;
-    count: number;
-    description: string;
-  }> = [
-    {
-      id: "todos",
-      label: "待办",
-      icon: ListChecks,
-      count: activeTodoCount || totalTodoCount,
-      description: activeTodoCount > 0 ? `${activeTodoCount} 个活跃待办` : "查看全部 Agent 待办",
-    },
-    {
-      id: "artifacts",
-      label: "产物",
-      icon: FileDown,
-      count: artifacts.length,
-      description: artifacts.length > 0 ? "浏览本轮生成的文件产物" : "当前还没有生成文件产物",
-    },
-    {
-      id: "uploads",
-      label: "上传",
-      icon: FolderOpen,
-      count: sessionUploads.length,
-      description: sessionUploads.length > 0 ? "查看会话上传与上下文附件" : "当前会话没有登记上传项",
-    },
-    {
-      id: "subtasks",
-      label: "子任务",
-      icon: Network,
-      count: sortedTasks.length,
-      description: openSessionCount > 0 ? `${openSessionCount} 个子会话仍可继续交互` : "查看已派发子任务与子会话",
-    },
-    {
-      id: "context",
-      label: "上下文",
-      icon: Brain,
-      count: contextBreakdown.totalSharedTokens + contextBreakdown.totalRuntimeTokens,
-      description: "查看共享工作集、专属预算和运行现场的 token 估算",
-    },
-    {
-      id: "plan",
-      label: "计划",
-      icon: ShieldCheck,
-      count: draftPlan?.steps.length ?? 0,
-      description: requirePlanApproval ? "发送前会先审批执行计划" : "当前发送将直接进入执行",
-    },
-  ];
-
-  const activePanelMeta = panel
-    ? workspaceTabs.find((tab) => tab.id === panel) ?? null
-    : null;
-  const ActivePanelIcon = activePanelMeta?.icon ?? ListChecks;
-  const defaultPanel = useMemo<Exclude<WorkspacePanel, null>>(() => {
-    if (activeTodoCount > 0 || totalTodoCount > 0) return "todos";
-    if (sortedTasks.length > 0) return "subtasks";
-    if (contextBreakdown.totalSharedTokens > 0 || contextBreakdown.totalRuntimeTokens > 0) return "context";
-    if (artifacts.length > 0) return "artifacts";
-    if (sessionUploads.length > 0) return "uploads";
-    return "plan";
-  }, [
-    activeTodoCount,
-    totalTodoCount,
-    sortedTasks.length,
-    contextBreakdown.totalRuntimeTokens,
-    contextBreakdown.totalSharedTokens,
-    artifacts.length,
-    sessionUploads.length,
-  ]);
-  const summaryItems = useMemo(() => {
-    const items = [
-      { key: "todos", label: "待办", value: activeTodoCount || totalTodoCount },
-      { key: "artifacts", label: "产物", value: artifacts.length },
-      { key: "uploads", label: "上传", value: sessionUploads.length },
-      { key: "subtasks", label: "子任务", value: sortedTasks.length },
-    ];
-    return items.filter((item) => item.value > 0).slice(0, 3);
-  }, [activeTodoCount, totalTodoCount, artifacts.length, sessionUploads.length, sortedTasks.length]);
-  const currentPanelLabel = activePanelMeta ? `工作台 · ${activePanelMeta.label}` : "工作台";
-
-  return (
-    <>
-      <div className="flex flex-wrap items-center justify-end gap-1.5">
-        {summaryItems.map((item) => (
-          <span
-            key={item.key}
-            className="inline-flex items-center gap-1 rounded-full border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/80 px-2 py-1 text-[10px] text-[var(--color-text-secondary)]"
-          >
-            <span>{item.label}</span>
-            <span className="rounded-full bg-[var(--color-bg)] px-1.5 py-0.5 text-[9px] text-[var(--color-text-tertiary)]">
-              {item.value}
-            </span>
-          </span>
-        ))}
-        <span
-          className={`inline-flex items-center rounded-full border px-2 py-1 text-[10px] ${
-            requirePlanApproval
-              ? "border-amber-500/25 bg-amber-500/10 text-amber-700"
-              : "border-[var(--color-border)] bg-[var(--color-bg-secondary)]/80 text-[var(--color-text-secondary)]"
-          }`}
-        >
-          {requirePlanApproval ? "发送前审批" : "直接发送"}
-        </span>
-        {graphAvailable && onOpenGraph && (
-          <button
-            onClick={onOpenGraph}
-            className="inline-flex items-center gap-1 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1 text-[10px] text-[var(--color-text-secondary)] hover:border-fuchsia-500/30 hover:text-fuchsia-600 transition-colors"
-            title="查看当前房间的角色关系、消息流和子任务派发"
-          >
-            <Network className="w-3 h-3" />
-            协作图
-          </button>
-        )}
-        <button
-          onClick={() => onPanelChange(panel ? null : defaultPanel)}
-          className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] transition-colors ${
-            panel
-              ? "border-[var(--color-accent)]/35 bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
-              : "border-[var(--color-border)] bg-[var(--color-bg)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/25 hover:text-[var(--color-text)]"
-          }`}
-          title="打开会话工作台"
-        >
-          <ListChecks className="w-3 h-3" />
-          {currentPanelLabel}
-        </button>
-      </div>
-
-      {panel && activePanelMeta && (
-        <>
-          <div className="absolute inset-0 z-20 bg-black/20" onClick={() => onPanelChange(null)} />
-          <div className="absolute inset-3 z-30 flex flex-col overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-2xl md:inset-y-3 md:right-3 md:left-auto md:w-[min(420px,calc(100%-1rem))]">
-            <div className="flex items-start justify-between gap-3 border-b border-[var(--color-border)] bg-[var(--color-bg)]/95 px-3.5 py-2.5 backdrop-blur-sm">
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="flex h-7 w-7 items-center justify-center rounded-2xl bg-[var(--color-accent)]/12 text-[var(--color-accent)]">
-                    <ActivePanelIcon className="w-3.5 h-3.5" />
-                  </span>
-                  <span className="text-[13px] font-medium text-[var(--color-text)]">{activePanelMeta.label}</span>
-                  <span className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
-                    {formatTokenCount(activePanelMeta.count)}
-                  </span>
-                </div>
-                <div className="mt-1 text-[10px] leading-relaxed text-[var(--color-text-secondary)]">
-                  {activePanelMeta.description}
-                </div>
-              </div>
-              <button
-                onClick={() => onPanelChange(null)}
-                className="rounded-xl p-1.5 text-[var(--color-text-tertiary)] hover:bg-[var(--color-bg-secondary)] hover:text-[var(--color-text)] transition-colors"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="border-b border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2">
-              <div className="flex flex-wrap gap-1.5">
-                {workspaceTabs.map((tab) => {
-                  const active = panel === tab.id;
-                  const Icon = tab.icon;
-                  return (
-                    <button
-                      key={tab.id}
-                      onClick={() => onPanelChange(tab.id)}
-                      className={`group inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] transition-all ${
-                        active
-                          ? "border-[var(--color-accent)]/35 bg-[var(--color-accent)]/10 text-[var(--color-text)] shadow-sm"
-                          : "border-[var(--color-border)] bg-[var(--color-bg)]/75 text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/25 hover:text-[var(--color-text)]"
-                      }`}
-                      title={tab.description}
-                    >
-                      <span
-                        className={`flex h-5 w-5 items-center justify-center rounded-full ${
-                          active ? "bg-[var(--color-accent)]/12 text-[var(--color-accent)]" : "bg-[var(--color-bg-secondary)] text-[var(--color-text-tertiary)] group-hover:text-[var(--color-text-secondary)]"
-                        }`}
-                      >
-                        <Icon className="w-3 h-3" />
-                      </span>
-                      <span>{tab.label}</span>
-                      {tab.count > 0 && (
-                        <span
-                          className={`rounded-full px-1.5 py-0.5 text-[9px] ${
-                            active
-                              ? "bg-[var(--color-bg)] text-[var(--color-text-secondary)]"
-                              : "bg-[var(--color-bg-secondary)] text-[var(--color-text-tertiary)]"
-                          }`}
-                        >
-                          {formatTokenCount(tab.count)}
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="flex-1 overflow-auto bg-[var(--color-bg-secondary)]/35">
-        {panel === "todos" && (
-          <div className="p-3 space-y-2.5">
-            {actors.map((actor) => {
-              const todos = actorTodos[actor.id] ?? [];
-              const activeTodos = todos.filter((todo) => todo.status === "pending" || todo.status === "in_progress");
-              return (
-                <div key={actor.id} className="rounded-xl border border-[var(--color-border)]/80 p-2.5">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="text-[12px] font-medium text-[var(--color-text)]">{actor.roleName}</div>
-                    <div className="text-[10px] text-[var(--color-text-tertiary)]">
-                      活跃 {activeTodos.length} / 全部 {todos.length}
-                    </div>
-                  </div>
-                  {todos.length === 0 ? (
-                    <div className="mt-2 text-[11px] text-[var(--color-text-tertiary)]">当前没有待办。</div>
-                  ) : (
-                    <div className="mt-2 grid gap-1.5 md:grid-cols-2 xl:grid-cols-3">
-                      {todos
-                        .slice()
-                        .sort((a, b) => b.updatedAt - a.updatedAt)
-                        .map((todo) => (
-                          <div key={todo.id} className="rounded-lg border border-[var(--color-border)]/70 bg-[var(--color-bg-secondary)]/70 px-2.5 py-1.5">
-                            <div className="flex items-center gap-2">
-                              <span className="text-[11px] font-medium text-[var(--color-text)]">{todo.title}</span>
-                              <span className="ml-auto text-[10px] text-[var(--color-text-tertiary)]">{todo.priority}</span>
-                            </div>
-                            <div className="mt-1 flex items-center gap-2 text-[10px] text-[var(--color-text-secondary)]">
-                              <span>{todo.status}</span>
-                              <span>更新于 {formatShortTime(todo.updatedAt)}</span>
-                            </div>
-                            {todo.notes && (
-                              <div className="mt-1 text-[11px] text-[var(--color-text-secondary)]">{todo.notes}</div>
-                            )}
-                          </div>
-                        ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        {panel === "artifacts" && (
-          <div className="p-3 space-y-2.5">
-            {artifacts.length === 0 ? (
-              <div className="text-[12px] text-[var(--color-text-tertiary)]">当前还没有检测到文件产物。</div>
-            ) : (
-              artifacts.map((artifact) => (
-                <div key={artifact.id} className="rounded-xl border border-[var(--color-border)]/80 p-2.5">
-                  {(() => {
-                    const sourceMeta = getArtifactSourceMeta(artifact.source);
-                    const availability = artifactAvailabilityByPath[artifact.path] ?? "unknown";
-                    const availabilityLabel = availability === "ready"
-                      ? "已落盘"
-                      : availability === "missing"
-                        ? (artifact.source === "approval" ? "未落盘" : "文件缺失")
-                        : "未验证";
-                    const availabilityClass = availability === "ready"
-                      ? "bg-emerald-500/10 text-emerald-700"
-                      : availability === "missing"
-                        ? "bg-amber-500/10 text-amber-700"
-                        : "bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]";
-
-                    return (
-                      <>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <div className="text-[12px] font-medium text-[var(--color-text)]">{artifact.fileName}</div>
-                          <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${sourceMeta.className}`}>
-                            {sourceMeta.label}
-                          </span>
-                          {artifact.relatedRunId && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-500/10 text-blue-600">
-                              子会话产物
-                            </span>
-                          )}
-                          {artifact.toolName && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]">
-                              {artifact.toolName}
-                            </span>
-                          )}
-                          <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${availabilityClass}`}>
-                            {availabilityLabel}
-                          </span>
-                          <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                            {artifact.actorName} · {formatShortTime(artifact.timestamp)}
-                          </span>
-                        </div>
-                        <div className="mt-1 text-[11px] text-[var(--color-text-secondary)] break-all">
-                          {artifact.path}
-                        </div>
-                        <div className="mt-2 text-[11px] text-[var(--color-text-secondary)]">{artifact.summary}</div>
-                        {availability !== "ready" && (
-                          <div className="mt-2 text-[11px] text-[var(--color-text-tertiary)]">
-                            {availability === "missing"
-                              ? sourceMeta.missingHint
-                              : "当前环境无法确认该文件是否已存在。"}
-                          </div>
-                        )}
-                        <div className="mt-3">
-                          <ArtifactPathActions filePath={artifact.path} available={availability === "ready"} />
-                        </div>
-                      </>
-                    );
-                  })()}
-                </div>
-              ))
-            )}
-          </div>
-        )}
-
-        {panel === "uploads" && (
-          <div className="p-3 space-y-2.5">
-            {sessionUploads.length === 0 ? (
-              <div className="text-[12px] text-[var(--color-text-tertiary)]">当前会话里还没有登记过上传文件。</div>
-            ) : (
-              sessionUploads.map((upload) => (
-                <div key={upload.id} className="rounded-xl border border-[var(--color-border)]/80 p-2.5">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <div className="text-[12px] font-medium text-[var(--color-text)]">{upload.name}</div>
-                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]">
-                      {upload.type}
-                    </span>
-                    <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                      {formatShortTime(upload.addedAt)}
-                    </span>
-                  </div>
-                  {upload.path ? (
-                    <div className="mt-1 text-[11px] text-[var(--color-text-secondary)] break-all">{upload.path}</div>
-                  ) : (
-                    <div className="mt-1 text-[11px] text-[var(--color-text-tertiary)]">该上传项来自临时附件，当前没有可再次读取的物理路径。</div>
-                  )}
-                  {upload.excerpt && (
-                    <div className="mt-2 rounded-lg bg-[var(--color-bg-secondary)]/70 px-3 py-2 text-[11px] text-[var(--color-text-secondary)] whitespace-pre-wrap break-words max-h-[100px] overflow-auto">
-                      {upload.excerpt}
-                    </div>
-                  )}
-                  {upload.path && (
-                    <div className="mt-3">
-                      <ArtifactPathActions filePath={upload.path} available />
-                    </div>
-                  )}
-                </div>
-              ))
-            )}
-          </div>
-        )}
-
-        {panel === "subtasks" && (
-          <div className="p-3">
-            {sortedTasks.length === 0 ? (
-              <div className="text-[12px] text-[var(--color-text-tertiary)]">还没有 spawn_task 记录。</div>
-            ) : (
-              <div className="grid gap-3 lg:grid-cols-[280px_minmax(0,1fr)]">
-                <div className="space-y-2">
-                  {sortedTasks.map((task) => {
-                    const spawner = actorById.get(task.spawnerActorId)?.roleName ?? task.spawnerActorId;
-                    const target = actorById.get(task.targetActorId)?.roleName ?? task.targetActorId;
-                    const checkpoint = taskCheckpointByRunId.get(task.runId);
-                    const roleBoundaryMeta = getSpawnedTaskRoleBoundaryMeta(task.roleBoundary);
-                    const roleBoundaryTone = getSpawnedTaskRoleBoundaryTone(task.roleBoundary);
-                    return (
-                      <button
-                        key={task.runId}
-                        onClick={() => onSelectRunId(task.runId)}
-                        className={`w-full text-left rounded-xl border px-3 py-2 transition-colors ${
-                          selectedTask?.runId === task.runId
-                            ? "border-[var(--color-accent)]/40 bg-[var(--color-accent)]/5"
-                            : "border-[var(--color-border)] hover:border-[var(--color-accent)]/30"
-                        }`}
-                      >
-                        <div className="flex items-center gap-2">
-                          <span className="text-[11px] font-medium text-[var(--color-text)] truncate">
-                            {task.label || task.task.slice(0, 24)}
-                          </span>
-                          <span className={`text-[10px] px-1.5 py-0.5 rounded-full border ${roleBoundaryTone}`}>
-                            {roleBoundaryMeta.shortLabel}
-                          </span>
-                          {task.mode === "session" && task.sessionOpen && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-500/10 text-blue-600">
-                              子会话
-                            </span>
-                          )}
-                          {checkpoint && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-cyan-500/10 text-cyan-700">
-                              {checkpoint.stageLabel}
-                            </span>
-                          )}
-                          <span className="ml-auto text-[10px] text-[var(--color-text-tertiary)]">{task.status}</span>
-                        </div>
-                        <div className="mt-1 text-[10px] text-[var(--color-text-secondary)] truncate">
-                          {spawner} → {target}
-                        </div>
-                        {checkpoint?.summary && (
-                          <div className="mt-1 text-[10px] text-[var(--color-text-secondary)] line-clamp-2 text-left">
-                            {checkpoint.summary}
-                          </div>
-                        )}
-                        <div className="mt-1 text-[10px] text-[var(--color-text-tertiary)]">
-                          {formatShortTime(task.spawnedAt)}
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-                {selectedTask && (
-                  <div className="rounded-xl border border-[var(--color-border)] p-2.5 space-y-2.5">
-                    {(() => {
-                      const roleBoundaryMeta = getSpawnedTaskRoleBoundaryMeta(selectedTask.roleBoundary);
-                      const roleBoundaryTone = getSpawnedTaskRoleBoundaryTone(selectedTask.roleBoundary);
-                      return (
-                        <>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <div className="text-[13px] font-medium text-[var(--color-text)]">
-                        {selectedTask.label || selectedTask.task.slice(0, 32)}
-                      </div>
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full border ${roleBoundaryTone}`}>
-                        {roleBoundaryMeta.label}
-                      </span>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]">
-                        {selectedTask.status}
-                      </span>
-                      <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                        持续 {formatElapsedTime((selectedTask.completedAt ?? Date.now()) - selectedTask.spawnedAt)}
-                      </span>
-                      <button
-                        onClick={() => onContinueTaskWithAgent(selectedTask.runId)}
-                        className="ml-auto text-[10px] px-2 py-1 rounded-full border border-cyan-500/20 bg-cyan-500/5 text-cyan-700 hover:border-cyan-500/35 hover:bg-cyan-500/10 transition-colors"
-                        title="把当前子任务的 checkpoint、待办、最近子会话记录和相关文件带到 Agent 继续执行"
-                      >
-                        转 Agent 接力
-                      </button>
-                      {selectedTask.mode === "session" && selectedTask.sessionOpen && (
-                        <>
-                          <button
-                            onClick={() => onFocusSession(focusedSessionRunId === selectedTask.runId ? null : selectedTask.runId)}
-                            className={`text-[10px] px-2 py-1 rounded-full border transition-colors ${
-                              focusedSessionRunId === selectedTask.runId
-                                ? "border-blue-500/30 bg-blue-500/10 text-blue-600"
-                                : "border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-blue-500/30 hover:text-blue-600"
-                            }`}
-                          >
-                            {focusedSessionRunId === selectedTask.runId ? "取消聚焦" : "聚焦子会话"}
-                          </button>
-                          <button
-                            onClick={() => onCloseSession(selectedTask.runId)}
-                            className="text-[10px] px-2 py-1 rounded-full border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-red-500/30 hover:text-red-600 transition-colors"
-                          >
-                            关闭会话
-                          </button>
-                        </>
-                      )}
-                    </div>
-                    <div className="rounded-lg border border-[var(--color-border)]/70 bg-[var(--color-bg-secondary)]/65 px-3 py-2">
-                      <div className="text-[10px] text-[var(--color-text-tertiary)]">职责边界</div>
-                      <div className="mt-1 text-[12px] text-[var(--color-text)]">{roleBoundaryMeta.label}</div>
-                      <div className="mt-1 text-[11px] text-[var(--color-text-secondary)]">{roleBoundaryMeta.description}</div>
-                    </div>
-                    <div className="text-[11px] text-[var(--color-text-secondary)] whitespace-pre-wrap break-words">
-                      {selectedTask.task}
-                    </div>
-                    <div className="grid gap-2 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
-                      <div className="rounded-lg bg-[var(--color-bg-secondary)]/70 px-3 py-2">
-                        <div className="text-[10px] text-[var(--color-text-tertiary)]">派发者</div>
-                        <div className="mt-1 text-[12px] text-[var(--color-text)]">
-                          {actorById.get(selectedTask.spawnerActorId)?.roleName ?? selectedTask.spawnerActorId}
-                        </div>
-                      </div>
-                      <div className="rounded-lg bg-[var(--color-bg-secondary)]/70 px-3 py-2">
-                        <div className="text-[10px] text-[var(--color-text-tertiary)]">执行者</div>
-                        <div className="mt-1 text-[12px] text-[var(--color-text)]">
-                          {actorById.get(selectedTask.targetActorId)?.roleName ?? selectedTask.targetActorId}
-                        </div>
-                      </div>
-                      <div className="rounded-lg bg-[var(--color-bg-secondary)]/70 px-3 py-2">
-                        <div className="text-[10px] text-[var(--color-text-tertiary)]">任务类型</div>
-                        <div className="mt-1 text-[12px] text-[var(--color-text)]">
-                          {selectedTask.mode === "session" ? "子会话" : "一次性子任务"}
-                        </div>
-                      </div>
-                    </div>
-                    {selectedTaskCheckpoint && (
-                      <div className="rounded-xl border border-cyan-500/15 bg-cyan-500/5 px-3 py-2.5">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <div className="text-[10px] uppercase tracking-[0.12em] text-cyan-700">Checkpoint</div>
-                          <span className="rounded-full border border-cyan-500/20 bg-white/70 px-1.5 py-0.5 text-[10px] text-cyan-700">
-                            {selectedTaskCheckpoint.stageLabel}
-                          </span>
-                          {selectedTaskCheckpoint.activeTodoCount > 0 && (
-                            <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-700">
-                              {selectedTaskCheckpoint.activeTodoCount} 个活跃待办
-                            </span>
-                          )}
-                          <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                            更新于 {formatShortTime(selectedTaskCheckpoint.updatedAt)}
-                          </span>
-                        </div>
-                        <div className="mt-2 text-[11px] text-[var(--color-text-secondary)] whitespace-pre-wrap break-words">
-                          {selectedTaskCheckpoint.summary}
-                        </div>
-                        {selectedTaskCheckpoint.nextStep && (
-                          <div className="mt-2 rounded-lg bg-white/60 px-2.5 py-2 text-[11px] text-[var(--color-text-secondary)]">
-                            下一步：{selectedTaskCheckpoint.nextStep}
-                          </div>
-                        )}
-                        {(selectedTaskCheckpoint.activeTodos.length > 0 || selectedTaskCheckpoint.relatedArtifactPaths.length > 0) && (
-                          <div className="mt-2 grid gap-2 md:grid-cols-2">
-                            {selectedTaskCheckpoint.activeTodos.length > 0 && (
-                              <div className="rounded-lg bg-white/60 px-2.5 py-2">
-                                <div className="text-[10px] text-[var(--color-text-tertiary)]">活跃待办</div>
-                                <div className="mt-1 space-y-1">
-                                  {selectedTaskCheckpoint.activeTodos.map((todo) => (
-                                    <div key={todo} className="text-[11px] text-[var(--color-text-secondary)]">
-                                      {todo}
-                                    </div>
-                                  ))}
-                                </div>
-                              </div>
-                            )}
-                            {selectedTaskCheckpoint.relatedArtifactPaths.length > 0 && (
-                              <div className="rounded-lg bg-white/60 px-2.5 py-2">
-                                <div className="text-[10px] text-[var(--color-text-tertiary)]">相关文件</div>
-                                <div className="mt-1 space-y-1">
-                                  {selectedTaskCheckpoint.relatedArtifactPaths.slice(0, 3).map((filePath) => (
-                                    <div key={filePath} className="text-[11px] text-[var(--color-text-secondary)] break-all">
-                                      {filePath}
-                                    </div>
-                                  ))}
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                    {selectedTask.result && (
-                      <div>
-                        <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">结果摘要</div>
-                        <div className="mt-1 rounded-lg bg-[var(--color-bg-secondary)]/70 px-3 py-2 text-[11px] text-[var(--color-text-secondary)] whitespace-pre-wrap break-words max-h-[120px] overflow-auto">
-                          {selectedTask.result}
-                        </div>
-                      </div>
-                    )}
-                    {selectedTask.error && (
-                      <div className="rounded-lg border border-red-500/20 bg-red-500/5 px-3 py-2 text-[11px] text-red-600 whitespace-pre-wrap break-words">
-                        {selectedTask.error}
-                      </div>
-                    )}
-                    {selectedTask.mode === "session" && selectedTask.sessionOpen && (
-                      <div className="rounded-lg border border-blue-500/15 bg-blue-500/5 px-3 py-2 text-[11px] text-blue-700">
-                        这个子任务已经提升为可持续交互的子会话。聚焦后，输入框会把后续消息直接发给这个 Agent，而不是发给主协调者。
-                      </div>
-                    )}
-                    <div>
-                      <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">子会话视图</div>
-                      {selectedTaskTranscript.length === 0 ? (
-                        <div className="mt-1 text-[11px] text-[var(--color-text-tertiary)]">这个子任务还没有可聚焦的会话片段。</div>
-                      ) : (
-                        <div className="mt-2 space-y-2 max-h-[160px] overflow-auto">
-                          {selectedTaskTranscript.map((entry, index) => (
-                            <div
-                              key={entry.id || `${entry.timestamp}-${index}`}
-                              className={`rounded-lg px-3 py-2 ${
-                                entry.source === "dialog"
-                                  ? "border border-blue-500/15 bg-blue-500/5"
-                                  : "bg-[var(--color-bg-secondary)]/70"
-                              }`}
-                            >
-                              <div className="flex flex-wrap items-center gap-2 text-[10px] text-[var(--color-text-tertiary)]">
-                                <span>{entry.label}</span>
-                                {entry.kindLabel && (
-                                  <span className="px-1.5 py-0.5 rounded-full bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]">
-                                    {entry.kindLabel}
-                                  </span>
-                                )}
-                                <span>{formatShortTime(entry.timestamp)}</span>
-                              </div>
-                              <div className="mt-1 text-[11px] text-[var(--color-text-secondary)] whitespace-pre-wrap break-words">
-                                {entry.content}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                        </>
-                      );
-                    })()}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        {panel === "context" && (
-          <div className="p-3 space-y-2.5">
-            {dialogContextSummary && (
-              <div className="rounded-xl border border-cyan-500/15 bg-cyan-500/5 px-3 py-3">
-                <div className="flex flex-wrap items-center gap-2">
-                  <div className="text-[10px] uppercase tracking-[0.12em] text-cyan-700">早期协作摘要</div>
-                  <span className="rounded-full border border-cyan-500/20 bg-white/70 px-1.5 py-0.5 text-[10px] text-cyan-700">
-                    已整理 {dialogContextSummary.summarizedMessageCount} 条消息
-                  </span>
-                  <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                    更新于 {formatShortTime(dialogContextSummary.updatedAt)}
-                  </span>
-                </div>
-                <div className="mt-2 whitespace-pre-wrap break-words text-[11px] leading-6 text-[var(--color-text-secondary)]">
-                  {dialogContextSummary.summary}
-                </div>
-              </div>
-            )}
-
-            {hasDialogContextSnapshotContent(contextSnapshot) && (
-              <div className="rounded-xl border border-[var(--color-border)]/80 bg-[var(--color-bg)] px-3 py-3">
-                <div className="flex flex-wrap items-center gap-2">
-                  <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
-                    当前上下文说明
-                  </div>
-                  {contextSnapshot?.generatedAt && (
-                    <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                      更新于 {formatShortTime(contextSnapshot.generatedAt)}
-                    </span>
-                  )}
-                </div>
-                <div className="mt-2 space-y-1.5">
-                  {contextSnapshot?.contextLines.map((line, index) => (
-                    <div
-                      key={`${index}-${line}`}
-                      className="text-[11px] leading-relaxed text-[var(--color-text-secondary)]"
-                    >
-                      {line}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            <div className="rounded-xl border border-[var(--color-border)]/80 bg-[var(--color-bg)] px-3 py-3">
-              <div className="grid gap-2 md:grid-cols-3">
-                <div className="rounded-lg bg-[var(--color-bg-secondary)]/70 px-3 py-2">
-                  <div className="text-[10px] text-[var(--color-text-tertiary)]">共享工作集</div>
-                  <div className="mt-1 text-[18px] font-semibold text-[var(--color-text)]">
-                    ~{formatTokenCount(contextBreakdown.totalSharedTokens)}
-                  </div>
-                  <div className="mt-1 text-[11px] text-[var(--color-text-secondary)]">
-                    房间消息、上传、产物、子任务与计划草案的总估算
-                  </div>
-                </div>
-                <div className="rounded-lg bg-[var(--color-bg-secondary)]/70 px-3 py-2">
-                  <div className="text-[10px] text-[var(--color-text-tertiary)]">运行现场</div>
-                  <div className="mt-1 text-[18px] font-semibold text-[var(--color-text)]">
-                    ~{formatTokenCount(contextBreakdown.totalRuntimeTokens)}
-                  </div>
-                  <div className="mt-1 text-[11px] text-[var(--color-text-secondary)]">
-                    正在执行的 query 与近期步骤轨迹估算
-                  </div>
-                </div>
-                <div className="rounded-lg bg-[var(--color-bg-secondary)]/70 px-3 py-2">
-                  <div className="text-[10px] text-[var(--color-text-tertiary)]">附件与会话</div>
-                  <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-[var(--color-text-secondary)]">
-                    <span className="rounded-full bg-[var(--color-bg)] px-2 py-0.5">
-                      文件 {contextBreakdown.attachmentCount}
-                    </span>
-                    <span className="rounded-full bg-[var(--color-bg)] px-2 py-0.5">
-                      图片 {contextBreakdown.imageCount}
-                    </span>
-                    <span className="rounded-full bg-[var(--color-bg)] px-2 py-0.5">
-                      开放子会话 {contextBreakdown.openSessionCount}
-                    </span>
-                  </div>
-                  <div className="mt-1 text-[11px] text-[var(--color-text-secondary)]">
-                    这些元素越多，后续协作越容易变重
-                  </div>
-                </div>
-              </div>
-              <div className="mt-2 text-[10px] leading-relaxed text-[var(--color-text-tertiary)]">
-                这里展示的是前端侧的粗略 token 估算，便于判断“哪里在变重”。不包含 provider framing、系统保留字段和服务端额外压缩。
-              </div>
-            </div>
-
-            {contextBreakdown.warnings.length > 0 && (
-              <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 px-3 py-2.5">
-                <div className="text-[10px] uppercase tracking-[0.12em] text-amber-700">上下文提醒</div>
-                <div className="mt-2 space-y-1.5">
-                  {contextBreakdown.warnings.map((warning) => (
-                    <div key={warning} className="text-[11px] leading-relaxed text-amber-800">
-                      {warning}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            <div className="rounded-xl border border-[var(--color-border)]/80 bg-[var(--color-bg)] px-3 py-3">
-              <div className="flex items-center justify-between gap-2">
-                <div className="text-[11px] font-medium text-[var(--color-text)]">共享工作集拆解</div>
-                <div className="text-[10px] text-[var(--color-text-tertiary)]">
-                  合计 ~{formatTokenCount(contextBreakdown.totalSharedTokens)}
-                </div>
-              </div>
-              <div className="mt-2 space-y-2">
-                {contextBreakdown.sharedSections.length === 0 ? (
-                  <div className="text-[11px] text-[var(--color-text-tertiary)]">当前还没有足够的共享上下文线索。</div>
-                ) : (
-                  contextBreakdown.sharedSections.map((section) => {
-                    const share = contextBreakdown.totalSharedTokens > 0
-                      ? section.tokens / contextBreakdown.totalSharedTokens
-                      : 0;
-                    return (
-                      <div key={section.id} className="rounded-lg border border-[var(--color-border)]/70 bg-[var(--color-bg-secondary)]/60 px-3 py-2">
-                        <div className="flex items-center gap-2">
-                          <span className="text-[11px] font-medium text-[var(--color-text)]">{section.label}</span>
-                          <span className="rounded-full bg-[var(--color-bg)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
-                            ~{formatTokenCount(section.tokens)}
-                          </span>
-                          {section.itemCount > 0 && (
-                            <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                              {section.itemCount} 项
-                            </span>
-                          )}
-                          <span className="ml-auto text-[10px] text-[var(--color-text-tertiary)]">
-                            {formatRatioAsPercent(share)}
-                          </span>
-                        </div>
-                        <div className="mt-1 text-[11px] text-[var(--color-text-secondary)]">
-                          {section.description}
-                        </div>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-            </div>
-
-            <div className="rounded-xl border border-[var(--color-border)]/80 bg-[var(--color-bg)] px-3 py-3">
-              <div className="flex items-center justify-between gap-2">
-                <div className="text-[11px] font-medium text-[var(--color-text)]">Agent 估算上下文与运行现场</div>
-                <div className="text-[10px] text-[var(--color-text-tertiary)]">
-                  总估算 = 共享工作集 + 专属记忆 + 运行现场
-                </div>
-              </div>
-              <div className="mt-2 space-y-2">
-                {contextBreakdown.actors.length === 0 ? (
-                  <div className="text-[11px] text-[var(--color-text-tertiary)]">当前还没有 Agent。</div>
-                ) : (
-                  contextBreakdown.actors.map((actor) => {
-                    const statusMeta = getContextStatusMeta(actor.status);
-                    return (
-                      <div key={actor.actorId || actor.roleName} className="rounded-lg border border-[var(--color-border)]/70 bg-[var(--color-bg-secondary)]/60 px-3 py-2.5">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <div className="text-[12px] font-medium text-[var(--color-text)]">{actor.roleName}</div>
-                          <span className={`rounded-full px-1.5 py-0.5 text-[10px] ${statusMeta.badge}`}>
-                            {statusMeta.text}
-                          </span>
-                          <span className="rounded-full bg-[var(--color-bg)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
-                            {actor.modelLabel}
-                          </span>
-                          {actor.thinkingLevel && actor.thinkingLevel !== "adaptive" && (
-                            <span className="rounded-full bg-[var(--color-bg)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
-                              思考 {actor.thinkingLevel}
-                            </span>
-                          )}
-                          {actor.workspaceLabel && (
-                            <span className="max-w-[160px] truncate rounded-full bg-[var(--color-bg)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-secondary)]" title={actor.workspaceLabel}>
-                              {actor.workspaceLabel}
-                            </span>
-                          )}
-                        </div>
-                        <div className="mt-2">
-                          <div className="flex items-center justify-between gap-2 text-[10px] text-[var(--color-text-tertiary)]">
-                            <span>预计总上下文占用</span>
-                            <span>
-                              ~{formatTokenCount(actor.estimatedTotalTokens)} / {formatTokenCount(actor.budgetTokens)} · {formatRatioAsPercent(actor.estimatedTotalRatio)}
-                            </span>
-                          </div>
-                          <div className="mt-1 h-2 overflow-hidden rounded-full bg-[var(--color-bg)]">
-                            <div
-                              className={`h-full rounded-full ${statusMeta.bar}`}
-                              style={{ width: `${Math.min(actor.estimatedTotalRatio * 100, 100)}%` }}
-                            />
-                          </div>
-                        </div>
-                        <div className="mt-2 grid gap-2 md:grid-cols-4">
-                          <div className="rounded-lg bg-[var(--color-bg)] px-2.5 py-2">
-                            <div className="text-[10px] text-[var(--color-text-tertiary)]">共享工作集</div>
-                            <div className="mt-1 text-[12px] text-[var(--color-text)]">~{formatTokenCount(actor.sharedTokens)}</div>
-                          </div>
-                          <div className="rounded-lg bg-[var(--color-bg)] px-2.5 py-2">
-                            <div className="text-[10px] text-[var(--color-text-tertiary)]">历史记忆</div>
-                            <div className="mt-1 text-[12px] text-[var(--color-text)]">~{formatTokenCount(actor.memoryTokens)}</div>
-                          </div>
-                          <div className="rounded-lg bg-[var(--color-bg)] px-2.5 py-2">
-                            <div className="text-[10px] text-[var(--color-text-tertiary)]">角色附加提示</div>
-                            <div className="mt-1 text-[12px] text-[var(--color-text)]">~{formatTokenCount(actor.promptTokens)}</div>
-                          </div>
-                          <div className="rounded-lg bg-[var(--color-bg)] px-2.5 py-2">
-                            <div className="text-[10px] text-[var(--color-text-tertiary)]">运行现场</div>
-                            <div className="mt-1 text-[12px] text-[var(--color-text)]">~{formatTokenCount(actor.runtimeTokens)}</div>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {panel === "plan" && (
-          <div className="p-3 space-y-2.5">
-            <div className="flex flex-wrap items-center gap-3">
-              <label className="flex items-center gap-2 text-[12px] text-[var(--color-text)]">
-                <input
-                  type="checkbox"
-                  checked={requirePlanApproval}
-                  onChange={(e) => onTogglePlanApproval(e.target.checked)}
-                  className="rounded"
-                />
-                发送前先审批执行计划
-              </label>
-              {lastPlanReview && (
-                <span className={`text-[10px] px-2 py-0.5 rounded-full ${
-                  lastPlanReview.status === "approved"
-                    ? "bg-emerald-500/10 text-emerald-600"
-                    : "bg-red-500/10 text-red-600"
-                }`}>
-                  最近一次{lastPlanReview.status === "approved" ? "已批准" : "已拒绝"} · {formatShortTime(lastPlanReview.timestamp)}
-                </span>
-              )}
-            </div>
-            {draftPlan ? (
-              <div className="space-y-2">
-                {draftInsight?.autoModeLabel && (
-                  <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
-                    <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-emerald-700">
-                      自动识别 {draftInsight.autoModeLabel}
-                    </span>
-                    {draftInsight.focusLabel && (
-                      <span className="rounded-full border border-sky-500/20 bg-sky-500/10 px-2 py-0.5 text-sky-700">
-                        {draftInsight.focusLabel}
-                      </span>
-                    )}
-                    {draftInsight.reasons[0] && (
-                      <span
-                        className="truncate text-[10px] text-[var(--color-text-tertiary)]"
-                        title={draftInsight.reasons.join(" · ")}
-                      >
-                        {draftInsight.reasons[0]}
-                      </span>
-                    )}
-                  </div>
-                )}
-                <div className="text-[11px] text-[var(--color-text-secondary)]">
-                  当前输入会生成以下 dispatch plan 预览。
-                </div>
-                {draftPlan.steps.map((step) => (
-                  <div key={step.id} className="rounded-xl border border-[var(--color-border)]/80 px-3 py-2">
-                    <div className="flex items-center gap-2">
-                      <span className="text-[11px] font-medium text-[var(--color-text)]">{step.role}</span>
-                      <span className="text-[10px] text-[var(--color-text-tertiary)]">{step.id}</span>
-                    </div>
-                    <div className="mt-1 text-[11px] text-[var(--color-text-secondary)]">{step.task}</div>
-                    {step.dependencies.length > 0 && (
-                      <div className="mt-1 text-[10px] text-[var(--color-text-tertiary)]">
-                        依赖: {step.dependencies.join(", ")}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="text-[12px] text-[var(--color-text-tertiary)]">
-                输入一条新任务后，这里会显示即将发送给 dialog runtime 的执行计划预览。
-              </div>
-            )}
-          </div>
-        )}
-            </div>
-          </div>
-        </>
-      )}
-    </>
-  );
-}
-
+const FILE_PATH_REGEX = /(?:\/[\w.\-/]+\.(?:xlsx|csv|pdf|docx|pptx|xls))/g;
+const NEW_MESSAGE_TARGET = "__new_message__";
+const DIALOG_PLAN_APPROVAL_KEY = "dialog-plan-approval-enabled";
 // ── Main Panel ──
-
-type DialogSessionViewKey = "local" | "dingtalk" | "feishu";
-
-type DialogChannelConversationItem = {
-  key: string;
-  conversationId: string;
-  channelType: "dingtalk" | "feishu";
-  label: string;
-  detail: string;
-  statusLabel: string;
-  updatedAt: number;
-  activeTopicId: string;
-  backgroundTopicCount: number;
-  activeSessionId?: string;
-  conversation: IMConversationSnapshot;
-  preview?: IMConversationSessionPreview;
-  runtimeRecord?: RuntimeSessionRecord;
-};
-
-type DialogChannelGroup = {
-  key: "dingtalk" | "feishu";
-  label: string;
-  detail: string;
-  statusLabel: string;
-  updatedAt: number;
-  conversations: DialogChannelConversationItem[];
-};
-
-type DialogTopSessionItem = {
-  key: DialogSessionViewKey;
-  label: string;
-  detail: string;
-  statusLabel: string;
-  updatedAt: number;
-};
-
-const CHANNEL_GROUP_META: Record<"dingtalk" | "feishu", { label: string; detail: string }> = {
-  dingtalk: {
-    label: "钉钉渠道",
-    detail: "查看钉钉 IM 会话",
-  },
-  feishu: {
-    label: "飞书渠道",
-    detail: "查看飞书 IM 会话",
-  },
-};
-
-function formatSessionStripTime(timestamp: number): string {
-  if (!timestamp) return "--";
-  return new Date(timestamp).toLocaleTimeString("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function getDialogViewLabel(view: DialogSessionViewKey): string {
-  switch (view) {
-    case "dingtalk":
-      return "钉钉渠道";
-    case "feishu":
-      return "飞书渠道";
-    default:
-      return "本机";
-  }
-}
-
-function getIMRuntimeStatusLabel(status: IMConversationRuntimeStatus): string {
-  switch (status) {
-    case "running":
-      return "执行中";
-    case "waiting":
-      return "等待中";
-    case "queued":
-      return "排队中";
-    default:
-      return "空闲";
-  }
-}
-
-function inferIMChannelType(params: {
-  preview?: IMConversationSessionPreview | null;
-  runtimeRecord?: RuntimeSessionRecord | null;
-}): "dingtalk" | "feishu" | null {
-  if (params.preview?.channelType === "dingtalk" || params.preview?.channelType === "feishu") {
-    return params.preview.channelType;
-  }
-  const hint = `${params.runtimeRecord?.displayLabel || ""} ${params.runtimeRecord?.displayDetail || ""}`;
-  if (hint.includes("钉钉")) return "dingtalk";
-  if (hint.includes("飞书")) return "feishu";
-  return null;
-}
-
-function buildDialogChannelGroups(params: {
-  currentRoomSessionId?: string | null;
-  conversations: IMConversationSnapshot[];
-  runtimeSessions: Record<string, RuntimeSessionRecord>;
-  sessionPreviews: Record<string, IMConversationSessionPreview>;
-}): Record<"dingtalk" | "feishu", DialogChannelGroup> {
-  const groups: Record<"dingtalk" | "feishu", DialogChannelGroup> = {
-    dingtalk: {
-      key: "dingtalk",
-      label: CHANNEL_GROUP_META.dingtalk.label,
-      detail: CHANNEL_GROUP_META.dingtalk.detail,
-      statusLabel: "暂无会话",
-      updatedAt: 0,
-      conversations: [],
-    },
-    feishu: {
-      key: "feishu",
-      label: CHANNEL_GROUP_META.feishu.label,
-      detail: CHANNEL_GROUP_META.feishu.detail,
-      statusLabel: "暂无会话",
-      updatedAt: 0,
-      conversations: [],
-    },
-  };
-  const currentRoomSessionId = params.currentRoomSessionId?.trim() || "";
-
-  for (const conversation of params.conversations) {
-    const channelType = conversation.channelType;
-    if (channelType !== "dingtalk" && channelType !== "feishu") continue;
-    const activeSessionId = conversation.activeSessionId?.trim() || "";
-    const preview = activeSessionId ? params.sessionPreviews[activeSessionId] : undefined;
-    const runtimeRecord = activeSessionId
-      ? params.runtimeSessions[buildRuntimeSessionKey("dialog", activeSessionId)]
-      : undefined;
-    if (activeSessionId && activeSessionId === currentRoomSessionId) continue;
-    const statusLabel = runtimeRecord
-      ? getRuntimeIndicatorStatus(runtimeRecord)
-      : getIMRuntimeStatusLabel(conversation.activeStatus);
-    const detailParts = [conversation.displayDetail];
-    if (conversation.conversationType === "group") {
-      detailParts.push("群聊");
-    } else {
-      detailParts.push("私聊");
-    }
-    groups[channelType].conversations.push({
-      key: conversation.key,
-      conversationId: conversation.conversationId,
-      channelType,
-      label: conversation.displayLabel || "IM 会话",
-      detail: detailParts.filter(Boolean).join(" · "),
-      statusLabel,
-      updatedAt: Math.max(runtimeRecord?.updatedAt ?? 0, preview?.updatedAt ?? 0, conversation.updatedAt),
-      activeTopicId: conversation.activeTopicId,
-      backgroundTopicCount: conversation.backgroundTopicCount,
-      activeSessionId: conversation.activeSessionId,
-      conversation,
-      preview,
-      runtimeRecord,
-    });
-  }
-
-  for (const runtimeRecord of Object.values(params.runtimeSessions)) {
-    if (runtimeRecord.mode !== "dialog") continue;
-    if (runtimeRecord.sessionId === currentRoomSessionId) continue;
-    const alreadyCovered = Object.values(groups).some((group) =>
-      group.conversations.some((conversation) => conversation.activeSessionId === runtimeRecord.sessionId),
-    );
-    if (alreadyCovered) continue;
-    const preview = params.sessionPreviews[runtimeRecord.sessionId];
-    // Runtime state is persisted separately from IM previews. If we only have a
-    // stale runtime record, showing it as a live channel conversation is misleading.
-    if (!preview) continue;
-    const channelType = inferIMChannelType({ preview, runtimeRecord });
-    if (!channelType) continue;
-    groups[channelType].conversations.push({
-      key: `runtime:${runtimeRecord.sessionId}`,
-      conversationId: preview?.conversationId ?? runtimeRecord.sessionId,
-      channelType,
-      label: runtimeRecord.displayLabel?.trim() || preview?.displayLabel || "IM 会话",
-      detail: runtimeRecord.displayDetail?.trim() || "外部运行时会话",
-      statusLabel: getRuntimeIndicatorStatus(runtimeRecord),
-      updatedAt: runtimeRecord.updatedAt,
-      activeTopicId: preview?.topicId ?? "default",
-      backgroundTopicCount: 0,
-      activeSessionId: runtimeRecord.sessionId,
-      conversation: {
-        key: `runtime:${runtimeRecord.sessionId}`,
-        channelId: preview?.channelId ?? "",
-        channelType,
-        conversationId: preview?.conversationId ?? runtimeRecord.sessionId,
-        conversationType: preview?.conversationType ?? "private",
-        displayLabel: runtimeRecord.displayLabel?.trim() || preview?.displayLabel || "IM 会话",
-        displayDetail: runtimeRecord.displayDetail?.trim() || preview?.displayDetail || "外部运行时会话",
-        activeTopicId: preview?.topicId ?? "default",
-        nextTopicSeq: 2,
-        updatedAt: runtimeRecord.updatedAt,
-        activeSessionId: runtimeRecord.sessionId,
-        activeStatus: preview?.status ?? "running",
-        activeQueueLength: preview?.queueLength ?? 0,
-        backgroundTopicCount: 0,
-        topics: preview
-          ? [{
-              runtimeKey: preview.runtimeKey,
-              topicId: preview.topicId,
-              sessionId: preview.sessionId,
-              status: preview.status,
-              queueLength: preview.queueLength,
-              updatedAt: preview.updatedAt,
-              startedAt: preview.startedAt,
-              lastInputText: preview.lastInputText,
-            }]
-          : [],
-      },
-      preview,
-      runtimeRecord,
-    });
-  }
-
-  for (const channelType of ["dingtalk", "feishu"] as const) {
-    groups[channelType].conversations.sort((a, b) => b.updatedAt - a.updatedAt);
-    if (groups[channelType].conversations.length > 1) {
-      // 当前产品策略：每个渠道只展示一个逻辑会话。
-      // 底层 runtime 仍可能保留历史/后台会话，但渠道页先收敛成“最近一条”。
-      groups[channelType].conversations = [groups[channelType].conversations[0]];
-    }
-    groups[channelType].updatedAt = groups[channelType].conversations[0]?.updatedAt ?? 0;
-    groups[channelType].statusLabel = groups[channelType].conversations[0]?.statusLabel ?? "暂无会话";
-    groups[channelType].detail = groups[channelType].conversations.length > 0
-      ? "当前会话"
-      : CHANNEL_GROUP_META[channelType].detail;
-  }
-
-  return groups;
-}
-
-function RuntimeSessionPreview({
-  preview,
-  currentRoomSessionId,
-  onReturnToCurrentRoom,
-  compact = false,
-  hideHeader = false,
-}: {
-  preview: IMConversationSessionPreview;
-  currentRoomSessionId?: string | null;
-  onReturnToCurrentRoom?: (() => void) | null;
-  compact?: boolean;
-  hideHeader?: boolean;
-}) {
-  const actorById = useMemo(
-    () => new Map(preview.actors.map((actor) => [actor.id, actor] as const)),
-    [preview.actors],
-  );
-  const actorIdToIndex = useMemo(
-    () => new Map(preview.actors.map((actor, index) => [actor.id, index] as const)),
-    [preview.actors],
-  );
-
-  return (
-    <div className={compact ? "flex min-h-0 flex-1 flex-col gap-2.5" : "space-y-3"}>
-      {!hideHeader && (
-        <div className={`rounded-2xl border border-sky-500/15 bg-sky-500/5 ${compact ? "px-3.5 py-2.5" : "px-4 py-3"}`}>
-          <div className="flex flex-wrap items-start gap-2">
-            <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-center gap-1.5">
-                <Users className="h-4 w-4 text-sky-600" />
-                <span className="text-[13px] font-semibold text-[var(--color-text)]">
-                  {preview.displayLabel || "IM 会话"}
-                </span>
-                <span className="rounded-full bg-sky-500/10 px-2 py-0.5 text-[10px] text-sky-700">
-                  只读预览
-                </span>
-                <span className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
-                  {getIMRuntimeStatusLabel(preview.status)}
-                </span>
-              </div>
-              <div className="mt-1 text-[11px] text-[var(--color-text-secondary)]">
-                {[preview.displayDetail, preview.topicId].filter(Boolean).join(" · ")}
-              </div>
-              <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-[var(--color-text-tertiary)]">
-                <span className="rounded-full border border-[var(--color-border)] px-2 py-0.5">
-                  {preview.actors.length} 个 Agent
-                </span>
-                <span className="rounded-full border border-[var(--color-border)] px-2 py-0.5">
-                  {preview.dialogHistory.length} 条消息
-                </span>
-                <span className="rounded-full border border-[var(--color-border)] px-2 py-0.5">
-                  最近更新 {formatSessionStripTime(preview.updatedAt)}
-                </span>
-              </div>
-            </div>
-            {currentRoomSessionId && onReturnToCurrentRoom && (
-              <button
-                onClick={onReturnToCurrentRoom}
-                className="inline-flex items-center gap-1.5 rounded-full border border-sky-500/20 bg-[var(--color-bg)] px-3 py-1 text-[10px] text-sky-700 hover:border-sky-500/35 hover:bg-sky-500/10 transition-colors"
-              >
-                返回当前房间
-              </button>
-            )}
-          </div>
-        </div>
-      )}
-
-      {preview.dialogHistory.length === 0 ? (
-        <div className={`rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-secondary)]/20 text-center text-[12px] text-[var(--color-text-secondary)] ${compact ? "flex min-h-[220px] flex-1 items-center justify-center px-3.5 py-3.5" : "px-4 py-4"}`}>
-          这个 IM 会话还没有可展示的 Dialog 内容。
-        </div>
-      ) : (
-        <div className={compact ? "min-h-0 flex-1 space-y-2 overflow-y-auto pr-1" : "space-y-3"}>
-          {preview.dialogHistory.map((msg) => {
-            const isUser = msg.from === "user";
-            const actorIdx = actorIdToIndex.get(msg.from) ?? 0;
-            const actor = actorById.get(msg.from);
-            const actorName = isUser ? "你" : (actor?.roleName ?? msg.from);
-            const targetName = msg.to
-              ? (msg.to === "user" ? "你" : (actorById.get(msg.to)?.roleName ?? msg.to))
-              : undefined;
-
-            return (
-              <div key={msg.id} className="max-w-full">
-                <MessageBubble
-                  message={msg}
-                  actorIndex={actorIdx}
-                  actorName={actorName}
-                  targetName={targetName}
-                  isUser={isUser}
-                  isWaitingReply={false}
-                  pendingInteraction={undefined}
-                  onReplyToInteraction={() => {}}
-                  onOpenApprovalDrawer={() => {}}
-                />
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function RuntimeSessionPreviewPlaceholder({
-  sessionId,
-  runtimeRecord,
-  currentRoomSessionId,
-  onReturnToCurrentRoom,
-  compact = false,
-  hideHeader = false,
-}: {
-  sessionId: string;
-  runtimeRecord?: RuntimeSessionRecord | null;
-  currentRoomSessionId?: string | null;
-  onReturnToCurrentRoom?: (() => void) | null;
-  compact?: boolean;
-  hideHeader?: boolean;
-}) {
-  const label = runtimeRecord?.displayLabel?.trim() || "外部会话";
-  const detail = runtimeRecord?.displayDetail?.trim() || "会话已切换，但还没有同步到可展示的预览内容。";
-  const statusLabel = runtimeRecord ? getRuntimeIndicatorStatus(runtimeRecord) : "等待同步";
-  const updatedAt = runtimeRecord?.updatedAt ?? 0;
-
-  return (
-    <div className={compact ? "flex min-h-0 flex-1 flex-col gap-2.5" : "space-y-3"}>
-      {!hideHeader && (
-        <div className={`rounded-2xl border border-sky-500/15 bg-sky-500/5 ${compact ? "px-3.5 py-2.5" : "px-4 py-3"}`}>
-          <div className="flex flex-wrap items-start gap-2">
-            <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-center gap-1.5">
-                <Users className="h-4 w-4 text-sky-600" />
-                <span className="text-[13px] font-semibold text-[var(--color-text)]">{label}</span>
-                <span className="rounded-full bg-sky-500/10 px-2 py-0.5 text-[10px] text-sky-700">
-                  已切换会话
-                </span>
-              </div>
-              <div className="mt-1 text-[11px] text-[var(--color-text-secondary)]">{detail}</div>
-              <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-[var(--color-text-tertiary)]">
-                <span className="rounded-full border border-[var(--color-border)] px-2 py-0.5">
-                  {statusLabel}
-                </span>
-                {updatedAt > 0 && (
-                  <span className="rounded-full border border-[var(--color-border)] px-2 py-0.5">
-                    最近更新 {formatSessionStripTime(updatedAt)}
-                  </span>
-                )}
-                <span className="rounded-full border border-[var(--color-border)] px-2 py-0.5">
-                  {sessionId}
-                </span>
-              </div>
-            </div>
-            {currentRoomSessionId && onReturnToCurrentRoom && (
-              <button
-                onClick={onReturnToCurrentRoom}
-                className="inline-flex items-center gap-1.5 rounded-full border border-sky-500/20 bg-[var(--color-bg)] px-3 py-1 text-[10px] text-sky-700 hover:border-sky-500/35 hover:bg-sky-500/10 transition-colors"
-              >
-                返回当前房间
-              </button>
-            )}
-          </div>
-        </div>
-      )}
-
-      <div className={`rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-secondary)]/20 text-center ${compact ? "flex min-h-[220px] flex-1 items-center justify-center px-3.5 py-3.5" : "px-4 py-4"}`}>
-        <div className="text-[13px] font-medium text-[var(--color-text)]">会话已经切换</div>
-        <div className="mt-1 text-[11px] leading-relaxed text-[var(--color-text-secondary)]">
-          当前外部会话还没有同步到可展示的历史内容，或者这条记录只保留了运行时状态。
-          <br />
-          如果这是一个刚启动的会话，等首条消息写入后这里会自动出现预览。
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ChannelSessionBoard({
-  group,
-  selectedConversationKey,
-  currentRoomSessionId,
-  onSelectConversation,
-  onClearExtraConversations,
-  onReturnToCurrentRoom,
-}: {
-  group: DialogChannelGroup;
-  selectedConversationKey?: string | null;
-  currentRoomSessionId?: string | null;
-  onSelectConversation: (conversationKey: string) => void;
-  onClearExtraConversations?: (() => void) | null;
-  onReturnToCurrentRoom?: (() => void) | null;
-}) {
-  const selectedConversation = group.conversations.find((item) => item.key === selectedConversationKey)
-    ?? group.conversations[0]
-    ?? null;
-
-  if (group.conversations.length === 0) {
-    return (
-      <div className="rounded-[26px] border border-sky-500/15 bg-[linear-gradient(135deg,rgba(14,165,233,0.10),rgba(255,255,255,0.65)_55%)] px-4 py-4 shadow-[0_20px_45px_-38px_rgba(14,165,233,0.55)]">
-        <div className="flex flex-wrap items-start gap-2">
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-1.5">
-              <Users className="h-4 w-4 text-sky-600" />
-              <span className="text-[13px] font-semibold text-[var(--color-text)]">{group.label}</span>
-              <span className="rounded-full bg-sky-500/10 px-2 py-0.5 text-[10px] text-sky-700">
-                暂无会话
-              </span>
-            </div>
-            <div className="mt-1 text-[11px] text-[var(--color-text-secondary)]">
-              等该渠道收到消息后，这里会显示最近的会话和预览内容。
-            </div>
-          </div>
-          {currentRoomSessionId && onReturnToCurrentRoom && (
-            <button
-              onClick={onReturnToCurrentRoom}
-              className="inline-flex items-center gap-1.5 rounded-full border border-sky-500/20 bg-[var(--color-bg)] px-3 py-1 text-[10px] text-sky-700 hover:border-sky-500/35 hover:bg-sky-500/10 transition-colors"
-            >
-              返回本机
-            </button>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  if (group.conversations.length === 1 && selectedConversation) {
-    return (
-      <div className="flex min-h-full flex-col gap-2.5">
-        <div className="rounded-[24px] border border-sky-500/15 bg-[linear-gradient(135deg,rgba(14,165,233,0.09),rgba(255,255,255,0.76)_58%)] px-3.5 py-3 shadow-[0_18px_40px_-36px_rgba(14,165,233,0.55)]">
-          <div className="flex flex-wrap items-start gap-2">
-            <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-center gap-1.5">
-                <Users className="h-4 w-4 text-sky-600" />
-                <span className="text-[13px] font-semibold text-[var(--color-text)]">{group.label}</span>
-                <span className="rounded-full bg-sky-500/10 px-2 py-0.5 text-[10px] text-sky-700">
-                  1 个会话
-                </span>
-                <span className="rounded-full border border-white/80 bg-white/75 px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
-                  {selectedConversation.statusLabel}
-                </span>
-              </div>
-              <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] text-[var(--color-text-secondary)]">
-                <span>{selectedConversation.label}</span>
-                <span>·</span>
-                <span>{selectedConversation.detail}</span>
-                <span>·</span>
-                <span>{formatSessionStripTime(selectedConversation.updatedAt)}</span>
-              </div>
-            </div>
-            {currentRoomSessionId && onReturnToCurrentRoom && (
-              <button
-                onClick={onReturnToCurrentRoom}
-                className="inline-flex items-center gap-1.5 rounded-full border border-sky-500/20 bg-[var(--color-bg)] px-3 py-1 text-[10px] text-sky-700 hover:border-sky-500/35 hover:bg-sky-500/10 transition-colors"
-              >
-                返回本机
-              </button>
-            )}
-          </div>
-        </div>
-
-        <div className="min-h-0 flex-1">
-          {selectedConversation.preview ? (
-            <RuntimeSessionPreview
-              preview={selectedConversation.preview}
-              currentRoomSessionId={currentRoomSessionId}
-              onReturnToCurrentRoom={onReturnToCurrentRoom}
-              compact
-              hideHeader
-            />
-          ) : (
-            <RuntimeSessionPreviewPlaceholder
-              sessionId={selectedConversation.activeSessionId || selectedConversation.conversationId}
-              runtimeRecord={selectedConversation.runtimeRecord}
-              currentRoomSessionId={currentRoomSessionId}
-              onReturnToCurrentRoom={onReturnToCurrentRoom}
-              compact
-              hideHeader
-            />
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="grid min-h-full gap-3 xl:grid-cols-[300px_minmax(0,1fr)]">
-      <div className="flex min-h-0 flex-col rounded-[26px] border border-sky-500/15 bg-[linear-gradient(145deg,rgba(14,165,233,0.10),rgba(255,255,255,0.70)_58%)] p-3 shadow-[0_20px_45px_-38px_rgba(14,165,233,0.55)]">
-        <div className="flex flex-wrap items-start gap-2">
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-1.5">
-              <Users className="h-4 w-4 text-sky-600" />
-              <span className="text-[13px] font-semibold text-[var(--color-text)]">{group.label}</span>
-              <span className="rounded-full bg-sky-500/10 px-2 py-0.5 text-[10px] text-sky-700">
-                {group.conversations.length} 个会话
-              </span>
-            </div>
-            <div className="mt-1 text-[11px] text-[var(--color-text-secondary)]">{group.detail}</div>
-            <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-[var(--color-text-tertiary)]">
-              <span className="rounded-full border border-white/70 bg-white/60 px-2 py-0.5">
-                当前状态 {group.statusLabel}
-              </span>
-              {group.updatedAt > 0 && (
-                <span className="rounded-full border border-white/70 bg-white/60 px-2 py-0.5">
-                  最近更新 {formatSessionStripTime(group.updatedAt)}
-                </span>
-              )}
-            </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-1.5">
-            {group.conversations.length > 1 && onClearExtraConversations && (
-              <button
-                onClick={onClearExtraConversations}
-                className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/20 bg-[var(--color-bg)] px-3 py-1 text-[10px] text-amber-700 hover:border-amber-500/35 hover:bg-amber-500/10 transition-colors"
-              >
-                清理多余会话
-              </button>
-            )}
-            {currentRoomSessionId && onReturnToCurrentRoom && (
-              <button
-                onClick={onReturnToCurrentRoom}
-                className="inline-flex items-center gap-1.5 rounded-full border border-sky-500/20 bg-[var(--color-bg)] px-3 py-1 text-[10px] text-sky-700 hover:border-sky-500/35 hover:bg-sky-500/10 transition-colors"
-              >
-                返回本机
-              </button>
-            )}
-          </div>
-        </div>
-
-        <div className="mt-3 flex min-h-0 flex-1 flex-col rounded-[22px] border border-white/70 bg-white/70 p-2.5 backdrop-blur-sm">
-          <div className="flex items-center justify-between gap-2 px-1">
-            <span className="text-[10px] font-medium tracking-[0.02em] text-[var(--color-text-secondary)]">
-              会话列表
-            </span>
-            <span className="text-[10px] text-[var(--color-text-tertiary)]">
-              选择后在右侧查看
-            </span>
-          </div>
-          <div className="mt-2 min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
-            {group.conversations.map((conversation) => {
-              const isSelected = conversation.key === selectedConversation?.key;
-              const topicHint = conversation.backgroundTopicCount > 0
-                ? ` · ${conversation.backgroundTopicCount} 个后台话题`
-                : "";
-              return (
-                <button
-                  key={conversation.key}
-                  onClick={() => onSelectConversation(conversation.key)}
-                  className={`w-full rounded-[20px] border px-3 py-2.5 text-left transition-all ${
-                    isSelected
-                      ? "border-sky-500/35 bg-sky-500/12 shadow-[0_14px_28px_-24px_rgba(14,165,233,0.65)]"
-                      : "border-[var(--color-border)] bg-[var(--color-bg)]/90 hover:border-sky-500/20 hover:bg-[var(--color-bg)]"
-                  }`}
-                >
-                  <div className="flex items-start gap-2">
-                    <div className={`mt-1 h-2 w-2 rounded-full shrink-0 ${isSelected ? "bg-sky-500" : "bg-[var(--color-border)]"}`} />
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-[11px] font-semibold text-[var(--color-text)]">
-                        {conversation.label}
-                      </div>
-                      <div className="mt-1 truncate text-[10px] text-[var(--color-text-secondary)]">
-                        {conversation.detail}
-                      </div>
-                      <div className="mt-1 truncate text-[9px] text-[var(--color-text-tertiary)]">
-                        当前话题 {conversation.activeTopicId}{topicHint}
-                      </div>
-                      <div className="mt-1 flex items-center gap-1.5 text-[9px] text-[var(--color-text-tertiary)]">
-                        <span>{conversation.statusLabel}</span>
-                        <span>·</span>
-                        <span>{formatSessionStripTime(conversation.updatedAt)}</span>
-                      </div>
-                    </div>
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-
-      <div className="min-w-0 min-h-0 flex">
-        {selectedConversation?.preview ? (
-          <RuntimeSessionPreview
-            preview={selectedConversation.preview}
-            currentRoomSessionId={currentRoomSessionId}
-            onReturnToCurrentRoom={onReturnToCurrentRoom}
-            compact
-          />
-        ) : selectedConversation ? (
-          <RuntimeSessionPreviewPlaceholder
-            sessionId={selectedConversation.activeSessionId || selectedConversation.conversationId}
-            runtimeRecord={selectedConversation.runtimeRecord}
-            currentRoomSessionId={currentRoomSessionId}
-            onReturnToCurrentRoom={onReturnToCurrentRoom}
-            compact
-          />
-        ) : null}
-      </div>
-    </div>
-  );
-}
 
 export function ActorChatPanel({ active = true }: { active?: boolean }) {
   const [showConfig, setShowConfig] = useState(false);
@@ -4401,6 +804,11 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   const pendingAICenterHandoff = useAppStore((s) => (active ? s.pendingAICenterHandoff : null));
   const config = useAIStore((s) => s.config);
   const { toast } = useToast();
+  const [dialogSavedChannels, setDialogSavedChannels] = useState<SavedChannelEntry[]>([]);
+  const [dialogChannelStatuses, setDialogChannelStatuses] = useState<Record<string, ChannelStatus>>({});
+  const [dialogChannelConnectPending, setDialogChannelConnectPending] = useState<
+    Partial<Record<"dingtalk" | "feishu", boolean>>
+  >({});
   const { runtimeSessions, foregroundDialogSessionId } = useRuntimeStateStore(
     useShallow((state) => ({
       runtimeSessions: active ? state.sessions : EMPTY_RUNTIME_SESSIONS,
@@ -4413,6 +821,22 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       imSessionPreviews: active ? state.sessionPreviews : EMPTY_IM_SESSION_PREVIEWS,
     })),
   );
+  const refreshDialogChannelMeta = useCallback(() => {
+    const saved = loadSavedChannels();
+    setDialogSavedChannels(saved);
+    const statusMap: Record<string, ChannelStatus> = {};
+    for (const status of getChannelManager().getStatuses()) {
+      statusMap[status.id] = status.status;
+    }
+    setDialogChannelStatuses(statusMap);
+  }, []);
+
+  useEffect(() => {
+    if (!active) return;
+    refreshDialogChannelMeta();
+    const timer = window.setInterval(refreshDialogChannelMeta, 4000);
+    return () => window.clearInterval(timer);
+  }, [active, refreshDialogChannelMeta]);
 
   const runningActors = useMemo(() => actors.filter((a) => a.status === "running"), [actors]);
   const confirmDangerousAction = useCallback(
@@ -4440,6 +864,39 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       }),
     [currentRoomSessionId, imConversations, imSessionPreviews, runtimeSessions],
   );
+  const dialogChannelConnectionMeta = useMemo<Record<"dingtalk" | "feishu", DialogChannelConnectionMeta>>(() => {
+    const buildMeta = (channelType: "dingtalk" | "feishu"): DialogChannelConnectionMeta => {
+      const entries = dialogSavedChannels.filter((entry) => entry.config.type === channelType);
+      const configured = entries.length > 0;
+      const statuses = entries.map((entry) => dialogChannelStatuses[entry.config.id] ?? "disconnected");
+      const connectedCount = statuses.filter((status) => status === "connected").length;
+      const hasConnecting = Boolean(dialogChannelConnectPending[channelType]) || statuses.some((status) => status === "connecting");
+      const hasError = statuses.some((status) => status === "error");
+      const hasLiveConversation = dialogChannelGroups[channelType].conversations.length > 0;
+      const connectionState: DialogChannelConnectionMeta["connectionState"] = !configured
+        ? (hasLiveConversation ? "unconfigured" : "unconfigured")
+        : connectedCount > 0
+          ? "connected"
+          : hasConnecting
+            ? "connecting"
+            : hasError
+              ? "error"
+              : "disconnected";
+      return {
+        channelType,
+        entries,
+        configured,
+        connectionState,
+        connectionLabel: getDialogChannelConnectionLabel(connectionState, configured, connectedCount),
+        canAutoConnect: configured && connectionState !== "connected" && connectionState !== "connecting",
+      };
+    };
+
+    return {
+      dingtalk: buildMeta("dingtalk"),
+      feishu: buildMeta("feishu"),
+    };
+  }, [dialogChannelConnectPending, dialogChannelGroups, dialogChannelStatuses, dialogSavedChannels]);
   const selectedDialogSessionId = useMemo(() => {
     const normalized = foregroundDialogSessionId?.trim() || "";
     if (normalized) return normalized;
@@ -4459,35 +916,44 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     );
     return preview || hasLiveConversation ? channelType : "local";
   }, [currentRoomSessionId, dialogChannelGroups, imSessionPreviews, runtimeSessions, selectedDialogSessionId]);
-  const activeDialogView = manualDialogView ?? derivedDialogView;
+  const requestedDialogView = manualDialogView ?? derivedDialogView;
   const dialogTopSessionItems = useMemo<DialogTopSessionItem[]>(() => {
     const localRuntimeRecord = currentRoomSessionId
       ? runtimeSessions[buildRuntimeSessionKey("dialog", currentRoomSessionId)]
       : null;
-    return [
+    const items: DialogTopSessionItem[] = [
       {
         key: "local",
         label: "本机",
         detail: "本地 Dialog 协作房间",
         statusLabel: localRuntimeRecord ? getRuntimeIndicatorStatus(localRuntimeRecord) : "本机协作",
         updatedAt: localRuntimeRecord?.updatedAt ?? (dialogHistory[dialogHistory.length - 1]?.timestamp ?? 0),
-      },
-      {
-        key: "dingtalk",
-        label: "钉钉渠道",
-        detail: dialogChannelGroups.dingtalk.detail,
-        statusLabel: dialogChannelGroups.dingtalk.statusLabel,
-        updatedAt: dialogChannelGroups.dingtalk.updatedAt,
-      },
-      {
-        key: "feishu",
-        label: "飞书渠道",
-        detail: dialogChannelGroups.feishu.detail,
-        statusLabel: dialogChannelGroups.feishu.statusLabel,
-        updatedAt: dialogChannelGroups.feishu.updatedAt,
+        connectionState: "connected",
+        connectionLabel: "本机协作",
       },
     ];
-  }, [currentRoomSessionId, dialogChannelGroups, dialogHistory, runtimeSessions]);
+    for (const channelType of ["dingtalk", "feishu"] as const) {
+      const group = dialogChannelGroups[channelType];
+      const connectionMeta = dialogChannelConnectionMeta[channelType];
+      if (!connectionMeta.configured && group.conversations.length === 0) {
+        continue;
+      }
+      items.push({
+        key: channelType,
+        label: channelType === "dingtalk" ? "钉钉渠道" : "飞书渠道",
+        detail: group.detail,
+        statusLabel: group.statusLabel,
+        updatedAt: group.updatedAt,
+        connectionState: connectionMeta.connectionState,
+        connectionLabel: connectionMeta.connectionLabel,
+        canAutoConnect: connectionMeta.canAutoConnect,
+      });
+    }
+    return items;
+  }, [currentRoomSessionId, dialogChannelConnectionMeta, dialogChannelGroups, dialogHistory, runtimeSessions]);
+  const activeDialogView = dialogTopSessionItems.some((item) => item.key === requestedDialogView)
+    ? requestedDialogView
+    : "local";
   const activeChannelGroup = activeDialogView === "local"
     ? null
     : dialogChannelGroups[activeDialogView];
@@ -4524,6 +990,75 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       useRuntimeStateStore.getState().setForegroundSession("dialog", targetSessionId);
     }
   }, [currentRoomSessionId, dialogChannelGroups, selectedDialogSessionId]);
+  const ensureDialogChannelConnected = useCallback(async (channelType: "dingtalk" | "feishu"): Promise<boolean> => {
+    const meta = dialogChannelConnectionMeta[channelType];
+    if (!meta.configured || meta.entries.length === 0) {
+      return false;
+    }
+    setDialogChannelConnectPending((prev) => ({ ...prev, [channelType]: true }));
+    try {
+      const manager = getChannelManager();
+      const latestSaved = loadSavedChannels();
+      const nextSaved = latestSaved.map((entry) => (
+        entry.config.type === channelType && entry.config.enabled === false
+          ? { config: { ...entry.config, enabled: true } }
+          : entry
+      ));
+      if (nextSaved.some((entry, index) => entry !== latestSaved[index])) {
+        saveSavedChannels(nextSaved);
+        setDialogSavedChannels(nextSaved);
+      }
+
+      const results = await Promise.allSettled(
+        nextSaved
+          .filter((entry) => entry.config.type === channelType)
+          .map(async (entry) => {
+            const currentStatus = manager.getStatuses().find((status) => status.id === entry.config.id)?.status;
+            if (currentStatus === "connected" || currentStatus === "connecting") {
+              return entry.config.id;
+            }
+            const configToConnect = { ...entry.config, enabled: true };
+            await manager.register(configToConnect);
+            return entry.config.id;
+          }),
+      );
+      refreshDialogChannelMeta();
+
+      const successCount = results.filter((result) => result.status === "fulfilled").length;
+      if (successCount === 0) {
+        const firstFailure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+        throw firstFailure?.reason ?? new Error("未知连接错误");
+      }
+
+      toast("success", `${channelType === "dingtalk" ? "钉钉" : "飞书"}渠道已连接`);
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      toast("error", `连接${channelType === "dingtalk" ? "钉钉" : "飞书"}渠道失败：${message}`);
+      refreshDialogChannelMeta();
+      return false;
+    } finally {
+      setDialogChannelConnectPending((prev) => ({ ...prev, [channelType]: false }));
+    }
+  }, [dialogChannelConnectionMeta, refreshDialogChannelMeta, toast]);
+  const handleDialogTopViewClick = useCallback(async (item: DialogTopSessionItem) => {
+    if (item.key === "local") {
+      handleSelectDialogView("local");
+      return;
+    }
+    const connectionMeta = dialogChannelConnectionMeta[item.key];
+    if (connectionMeta.connectionState === "connecting") {
+      return;
+    }
+    if (connectionMeta.connectionState === "connected" || !connectionMeta.canAutoConnect) {
+      handleSelectDialogView(item.key);
+      return;
+    }
+    const connected = await ensureDialogChannelConnected(item.key);
+    if (connected) {
+      handleSelectDialogView(item.key);
+    }
+  }, [dialogChannelConnectionMeta, ensureDialogChannelConnected, handleSelectDialogView]);
   const actorSupportsImageInput = useCallback((actorId?: string | null) => {
     if (!actorId) {
       return modelSupportsImageInput(config.model || "", config.protocol);
@@ -5827,6 +2362,65 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       || runningActors.some((actor) => actor.id !== coordinatorActorId),
     [spawnedTasks, runningActors, coordinatorActorId],
   );
+  const headerMetaItems = useMemo(() => {
+    const items: string[] = [];
+    if (coordinatorName) {
+      items.push(`主代理 ${coordinatorName}`);
+    }
+    items.push(routingModeMeta.label);
+    if (activeDialogView !== "local") {
+      items.push(`当前查看 ${getDialogViewLabel(activeDialogView)}`);
+    }
+    return items;
+  }, [activeDialogView, coordinatorName, routingModeMeta.label]);
+  const localStatusBadges = useMemo(() => {
+    if (activeDialogView !== "local") return [];
+    const badges: Array<{ key: string; label: string; className: string }> = [];
+    if (pendingUserInteractions.length > 0) {
+      badges.push({
+        key: "pending-replies",
+        label: `${pendingUserInteractions.length} 条待回复`,
+        className: "bg-amber-500/10 text-amber-700",
+      });
+    }
+    if (hasRunningActors) {
+      badges.push({
+        key: "running-actors",
+        label: `${runningActors.length} 个运行中`,
+        className: "bg-amber-500/10 text-amber-700",
+      });
+    }
+    if (openSessionCount > 0) {
+      badges.push({
+        key: "open-sessions",
+        label: `${openSessionCount} 个子会话可继续`,
+        className: "bg-blue-500/10 text-blue-700",
+      });
+    }
+    if (activeTodoCount > 0) {
+      badges.push({
+        key: "active-todos",
+        label: `${activeTodoCount} 个活跃待办`,
+        className: "bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]",
+      });
+    }
+    if (queuedFollowUps.length > 0) {
+      badges.push({
+        key: "queued-followups",
+        label: `${queuedFollowUps.length} 条排队消息`,
+        className: "bg-cyan-500/10 text-cyan-700",
+      });
+    }
+    return badges;
+  }, [
+    activeDialogView,
+    activeTodoCount,
+    hasRunningActors,
+    openSessionCount,
+    pendingUserInteractions.length,
+    queuedFollowUps.length,
+    runningActors.length,
+  ]);
 
   useEffect(() => {
     if (dialogHistory.length === 0) {
@@ -5857,50 +2451,58 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   return (
     <div className="relative flex h-full flex-col overflow-hidden bg-[var(--color-bg)]">
       <div className="shrink-0 border-b border-[var(--color-border)] bg-[var(--color-bg)]">
-        <div className="flex w-full min-w-0 flex-col gap-2 px-3 py-2 sm:px-4 lg:px-5">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-              <Users className="h-4 w-4 text-[var(--color-accent)]" />
-              <span className="text-[13px] font-semibold text-[var(--color-text)]">Dialog 工作台</span>
-              <span className={`rounded-full px-2 py-0.5 text-[10px] ${
-                actors.length > 0
-                  ? "bg-emerald-500/10 text-emerald-600"
-                  : "bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]"
-              }`}>
-                {actors.length > 0 ? `${actors.length} 个 Agent` : "等待配置"}
-              </span>
-              {coordinatorName && (
-                <span className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
-                  主代理 {coordinatorName}
-                </span>
-              )}
-              <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
-                {routingModeMeta.icon} {routingModeMeta.label}
-              </span>
-            </div>
-            {dialogTopSessionItems.length > 0 && (
-              <div className="flex shrink-0 items-center gap-1 rounded-full border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/80 p-0.5">
-                <span className="px-1.5 text-[9px] font-medium text-[var(--color-text-tertiary)]">视图</span>
-                {dialogTopSessionItems.map((item) => {
-                  const isSelected = item.key === activeDialogView;
-                  return (
-                    <button
-                      key={item.key}
-                      onClick={() => handleSelectDialogView(item.key)}
-                      className={`rounded-full px-2 py-1 text-[10px] transition-colors ${
-                        isSelected
-                          ? "bg-[var(--color-accent)]/12 text-[var(--color-accent)]"
-                          : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg)] hover:text-[var(--color-text)]"
-                      }`}
-                      title={`${item.label} · ${item.statusLabel}`}
-                    >
-                      {item.label}
-                    </button>
-                  );
-                })}
+        <div className="flex w-full min-w-0 flex-col gap-2.5 px-3 py-2.5 sm:px-4 lg:px-5">
+          <div className="flex flex-wrap items-start gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <div className="flex h-8 w-8 items-center justify-center rounded-2xl bg-[var(--color-accent)]/10 text-[var(--color-accent)]">
+                  <Users className="h-4 w-4" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
+                    <span className="text-[14px] font-semibold text-[var(--color-text)]">Dialog 工作台</span>
+                    <span className={`rounded-full px-2 py-0.5 text-[10px] ${
+                      actors.length > 0
+                        ? "bg-emerald-500/10 text-emerald-600"
+                        : "bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]"
+                    }`}>
+                      {actors.length > 0 ? `${actors.length} 个 Agent` : "等待配置"}
+                    </span>
+                  </div>
+                  {headerMetaItems.length > 0 && (
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-[var(--color-text-secondary)]">
+                      {headerMetaItems.map((item, index) => (
+                        <React.Fragment key={item}>
+                          {index > 0 && <span className="text-[var(--color-text-tertiary)]">·</span>}
+                          <span>{item}</span>
+                        </React.Fragment>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
-            )}
-            <div className="ml-auto flex flex-wrap items-center gap-1.5">
+            </div>
+            <div className="ml-auto flex flex-wrap items-center justify-end gap-1.5">
+              {activeDialogView === "local" && dialogHistory.length > 0 && (
+                <button
+                  onClick={handleNewTopic}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1 text-[10px] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/25 hover:text-[var(--color-text)] transition-colors"
+                  title="清空对话和 Agent 记忆，保留当前 Agent 阵容"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  新话题
+                </button>
+              )}
+              {activeDialogView === "local" && (
+                <button
+                  onClick={handleFullReset}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1 text-[10px] text-[var(--color-text-secondary)] hover:border-red-500/20 hover:bg-red-500/5 hover:text-red-600 transition-colors"
+                  title="销毁所有 Agent，回到初始状态"
+                >
+                  <Trash2 className="w-3 h-3" />
+                  重置房间
+                </button>
+              )}
               <button
                 onClick={handleToggleConfig}
                 className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] transition-colors ${
@@ -5947,88 +2549,165 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
             </div>
           </div>
 
-          {activeDialogView === "local" && (pendingUserInteractions.length > 0 || hasRunningActors || openSessionCount > 0 || activeTodoCount > 0 || queuedFollowUps.length > 0 || dialogHistory.length > 0) && (
-            <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-[var(--color-text-secondary)]">
-              {pendingUserInteractions.length > 0 && (
-                <span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-amber-700">
-                  {pendingUserInteractions.length} 条待回复
-                </span>
-              )}
-              {hasRunningActors && (
-                <span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-amber-700">
-                  {runningActors.length} 个运行中
-                </span>
-              )}
-              {openSessionCount > 0 && (
-                <span className="rounded-full bg-blue-500/10 px-2 py-0.5 text-blue-700">
-                  {openSessionCount} 个子会话可继续
-                </span>
-              )}
-              {activeTodoCount > 0 && (
-                <span className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5">
-                  {activeTodoCount} 个活跃待办
-                </span>
-              )}
-              {queuedFollowUps.length > 0 && (
-                <span className="rounded-full bg-cyan-500/10 px-2 py-0.5 text-cyan-700">
-                  {queuedFollowUps.length} 条排队消息
-                </span>
-              )}
-              <div className="ml-auto flex flex-wrap items-center gap-1.5">
-                {dialogHistory.length > 0 && (
-                  <button
-                    onClick={handleNewTopic}
-                    className="inline-flex items-center gap-1 rounded-full border border-transparent px-2 py-1 text-[10px] text-[var(--color-text-tertiary)] hover:border-[var(--color-border)] hover:bg-[var(--color-bg-secondary)] hover:text-[var(--color-text-secondary)] transition-colors"
-                    title="清空对话和 Agent 记忆，保留当前 Agent 阵容"
-                  >
-                    <RotateCcw className="w-3 h-3" />
-                    新话题
-                  </button>
-                )}
-                <button
-                  onClick={handleFullReset}
-                  className="inline-flex items-center gap-1 rounded-full border border-transparent px-2 py-1 text-[10px] text-[var(--color-text-tertiary)] hover:border-red-500/20 hover:bg-red-500/5 hover:text-red-600 transition-colors"
-                  title="销毁所有 Agent，回到初始状态"
-                >
-                  <Trash2 className="w-3 h-3" />
-                  重置房间
-                </button>
+          <div className="flex flex-col gap-2.5">
+            {dialogTopSessionItems.length > 0 && (
+              <div className="grid gap-1.5 md:grid-cols-3">
+                {dialogTopSessionItems.map((item) => {
+                  const isSelected = item.key === activeDialogView;
+                  const isConnectable = item.key !== "local" && item.canAutoConnect;
+                  const isConnecting = item.connectionState === "connecting";
+                  const indicatorClass = item.connectionState === "connected"
+                    ? "bg-emerald-500"
+                    : item.connectionState === "error"
+                      ? "bg-amber-500"
+                      : item.connectionState === "unconfigured"
+                        ? "bg-slate-400"
+                        : "bg-slate-300";
+                  const CardIcon = item.key === "local"
+                    ? MessageSquareText
+                    : item.key === "dingtalk"
+                      ? Smartphone
+                      : Bot;
+                  const cardHint = item.key === "local"
+                    ? "本地协作"
+                    : item.connectionState === "connected"
+                      ? "最近会话"
+                      : item.connectionState === "connecting"
+                        ? "建立连接中"
+                        : item.connectionState === "error"
+                          ? "点击重连"
+                          : item.connectionState === "unconfigured"
+                            ? "历史预览"
+                            : "点击连接";
+                  const statusBadgeLabel = item.connectionState === "connected"
+                    ? "在线"
+                    : item.connectionState === "connecting"
+                      ? "连接中"
+                      : item.connectionState === "error"
+                        ? "异常"
+                        : item.connectionState === "unconfigured"
+                          ? "历史"
+                          : "未连接";
+                  const footerLabel = item.key === "local"
+                    ? "房间主视图"
+                    : isSelected
+                      ? "当前渠道"
+                      : isConnectable
+                        ? "点击进入"
+                        : "可切换";
+                  const metaLabel = item.updatedAt > 0
+                    ? `${footerLabel} · ${formatSessionStripTime(item.updatedAt)}`
+                    : footerLabel;
+                  return (
+                    <button
+                      key={item.key}
+                      onClick={() => { void handleDialogTopViewClick(item); }}
+                      className={`group h-[62px] rounded-[16px] border px-2.5 py-1.5 text-left transition-all ${
+                        isSelected
+                          ? "border-[var(--color-accent)]/25 bg-[linear-gradient(145deg,rgba(99,102,241,0.12),rgba(255,255,255,0.96)_72%)] text-[var(--color-accent)] shadow-[0_12px_24px_-22px_rgba(99,102,241,0.45)]"
+                          : item.key !== "local" && item.connectionState !== "connected"
+                            ? "border-[var(--color-border)] bg-[linear-gradient(145deg,rgba(248,250,252,0.72),rgba(255,255,255,0.96))] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/18"
+                            : "border-[var(--color-border)] bg-[linear-gradient(145deg,rgba(255,255,255,0.96),rgba(248,250,252,0.88))] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/16 hover:text-[var(--color-text)]"
+                      }`}
+                      title={`${item.label} · ${item.connectionLabel}${isConnectable ? " · 点击自动连接" : ""}${item.statusLabel ? ` · ${item.statusLabel}` : ""}`}
+                    >
+                      <div className="flex h-full items-center gap-2">
+                        <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-xl border ${
+                            isSelected
+                              ? "border-[var(--color-accent)]/20 bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
+                              : "border-[var(--color-border)] bg-[var(--color-bg)] text-[var(--color-text-secondary)] group-hover:text-[var(--color-text)]"
+                          }`}>
+                          <CardIcon className="h-3.5 w-3.5" />
+                        </div>
+                        <div className="flex min-w-0 flex-1 items-center justify-between gap-2">
+                          <div className="min-w-0 flex-1">
+                            <div className={`truncate text-[12px] font-semibold leading-none ${isSelected ? "text-[var(--color-accent)]" : "text-[var(--color-text)]"}`}>
+                              {item.label}
+                            </div>
+                            <div className="mt-1 truncate text-[9px] leading-none text-[var(--color-text-secondary)]">
+                              {cardHint}
+                              <span className="mx-1 text-[var(--color-text-tertiary)]">/</span>
+                              {metaLabel}
+                            </div>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-1.5">
+                            <span className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[9px] ${
+                              item.connectionState === "connected"
+                                ? "bg-emerald-500/10 text-emerald-600"
+                                : item.connectionState === "connecting"
+                                  ? "bg-blue-500/10 text-blue-600"
+                                  : item.connectionState === "error"
+                                    ? "bg-amber-500/10 text-amber-700"
+                                    : "bg-[var(--color-bg)] text-[var(--color-text-tertiary)]"
+                            }`}>
+                              {isConnecting ? (
+                                <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                              ) : (
+                                <span className={`h-1.5 w-1.5 rounded-full ${indicatorClass}`} />
+                              )}
+                              <span>{statusBadgeLabel}</span>
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
-            </div>
-          )}
+            )}
 
-          {activeDialogView === "local" && actors.length > 0 && (
-            <div className="flex flex-wrap items-center gap-2">
-              <ActorStatusBar actors={actors} compact />
-              <div className="min-w-0 flex-1" />
-              <DialogWorkspaceDock
-                panel={workspacePanel}
-                onPanelChange={handleWorkspacePanelChange}
-                actors={actors}
-                actorTodos={actorTodos}
-                dialogHistory={dialogHistory}
-                artifacts={artifacts}
-                sessionUploads={sessionUploads}
-                spawnedTasks={spawnedTasks}
-                selectedRunId={selectedSpawnRunId}
-                onSelectRunId={setSelectedSpawnRunId}
-                focusedSessionRunId={focusedSpawnedSessionRunId}
-                onFocusSession={focusSpawnedSession}
-                onCloseSession={closeSpawnedSession}
-                onContinueTaskWithAgent={handleContinueSpawnedTaskWithAgent}
-                draftPlan={draftDispatchPlan}
-                draftInsight={draftDispatchInsight}
-                contextBreakdown={contextBreakdown}
-                contextSnapshot={contextSnapshot}
-                dialogContextSummary={dialogContextSummary}
-                requirePlanApproval={requirePlanApproval}
-                onTogglePlanApproval={setRequirePlanApproval}
-                lastPlanReview={lastPlanReview}
-                graphAvailable={collaborationGraphAvailable}
-                onOpenGraph={collaborationGraphAvailable ? () => handleToggleOverlay("graph") : null}
-              />
+            <div className="flex flex-wrap items-center gap-2.5">
+              {activeDialogView === "local" && localStatusBadges.length > 0 && (
+                <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5 text-[10px] text-[var(--color-text-secondary)]">
+                  {localStatusBadges.map((badge) => (
+                    <span
+                      key={badge.key}
+                      className={`rounded-full px-2 py-0.5 ${badge.className}`}
+                    >
+                      {badge.label}
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {activeDialogView === "local" && actors.length > 1 && (
+                <div className="min-w-0 flex-1">
+                  <ActorStatusBar actors={actors} compact />
+                </div>
+              )}
+
+              {activeDialogView === "local" && actors.length > 0 && (
+                <div className="ml-auto flex shrink-0 items-center">
+                  <DialogWorkspaceDock
+                    panel={workspacePanel}
+                    onPanelChange={handleWorkspacePanelChange}
+                    actors={actors}
+                    actorTodos={actorTodos}
+                    dialogHistory={dialogHistory}
+                    artifacts={artifacts}
+                    sessionUploads={sessionUploads}
+                    spawnedTasks={spawnedTasks}
+                    selectedRunId={selectedSpawnRunId}
+                    onSelectRunId={setSelectedSpawnRunId}
+                    focusedSessionRunId={focusedSpawnedSessionRunId}
+                    onFocusSession={focusSpawnedSession}
+                    onCloseSession={closeSpawnedSession}
+                    onContinueTaskWithAgent={handleContinueSpawnedTaskWithAgent}
+                    draftPlan={draftDispatchPlan}
+                    draftInsight={draftDispatchInsight}
+                    contextBreakdown={contextBreakdown}
+                    contextSnapshot={contextSnapshot}
+                    dialogContextSummary={dialogContextSummary}
+                    requirePlanApproval={requirePlanApproval}
+                    onTogglePlanApproval={setRequirePlanApproval}
+                    lastPlanReview={lastPlanReview}
+                    graphAvailable={collaborationGraphAvailable}
+                    onOpenGraph={collaborationGraphAvailable ? () => handleToggleOverlay("graph") : null}
+                  />
+                </div>
+              )}
             </div>
-          )}
+          </div>
         </div>
       </div>
 
@@ -6054,6 +2733,19 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                   onReturnToCurrentRoom={currentRoomSessionId
                     ? () => useRuntimeStateStore.getState().setForegroundSession("dialog", currentRoomSessionId)
                     : null}
+                  renderMessageBubble={({ message, actorIndex, actorName, targetName, isUser }) => (
+                    <MessageBubble
+                      message={message}
+                      actorIndex={actorIndex}
+                      actorName={actorName}
+                      targetName={targetName}
+                      isUser={isUser}
+                      isWaitingReply={false}
+                      pendingInteraction={undefined}
+                      onReplyToInteraction={() => {}}
+                      onOpenApprovalDrawer={() => {}}
+                    />
+                  )}
                 />
               </div>
             ) : (
@@ -6190,14 +2882,15 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                 const reversedSteps = [...steps].reverse();
                 const findLastStepIndex = (predicate: (step: AgentStep) => boolean) => {
                   for (let index = steps.length - 1; index >= 0; index -= 1) {
-                    if (predicate(steps[index])) return index;
+                    const step = steps[index];
+                    if (step && predicate(step)) return index;
                   }
                   return -1;
                 };
 
                 const latestStreamingAnswer = reversedSteps.find((s) => s.streaming && s.type === "answer");
                 const latestStreamingAnswerIndex = findLastStepIndex(
-                  (s) => s.streaming && s.type === "answer",
+                  (s) => Boolean(s.streaming) && s.type === "answer",
                 );
                 const latestThinkingStep = reversedSteps.find(
                   (s) => s.type === "thinking" || s.type === "thought",
@@ -6310,8 +3003,9 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                   && effectiveArtifactIndex >= 0
                   && effectiveArtifactIndex === effectiveLiveBlockIndex,
                 );
+                const currentTaskStatus = normalizeCurrentTaskStatus(a.currentTask?.status);
                 const executionCardTitle = showExecutionCard || showThinkingSummaryOnly
-                  ? describeAgentActivity(steps, a.roleName, false, a.currentTask?.status)
+                  ? describeAgentActivity(steps, a.roleName, false, currentTaskStatus)
                   : "";
                 const executionCardDetail = (() => {
                   if (latestExecutionToolPreview?.kind === "spawn") return latestExecutionToolPreview.body;
@@ -6425,7 +3119,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                         <span className="text-[11px] truncate max-w-[88%] lg:max-w-[78%]">
                           <span className="font-medium">{a.roleName}</span>
                           <span className="opacity-70 ml-1">
-                            {describeAgentActivity(steps, a.roleName, !!streamingContent, a.currentTask?.status)}
+                            {describeAgentActivity(steps, a.roleName, !!streamingContent, currentTaskStatus)}
                           </span>
                         </span>
                       </div>

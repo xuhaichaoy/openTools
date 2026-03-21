@@ -33,8 +33,8 @@ function buildExternalIMSystemPromptAppend(channelType?: ChannelType): string {
   ].join("\n");
 }
 
-function buildDefaultActorConfig(
-  roleName: "Lead",
+export function buildDefaultDialogActorConfig(
+  roleName: string,
   options?: DefaultDialogActorSpawnOptions,
 ): Pick<ActorConfig, "role" | "toolPolicy" | "middlewareOverrides"> {
   const isExternalIM = options?.mode === "external_im";
@@ -69,7 +69,7 @@ export function spawnDefaultDialogActors(
   system: ActorSystem,
   options?: DefaultDialogActorSpawnOptions,
 ): void {
-  const coordinatorConfig = buildDefaultActorConfig("Lead", options);
+  const coordinatorConfig = buildDefaultDialogActorConfig("Lead", options);
   system.spawn({
     id: `agent-${makeId()}`,
     role: coordinatorConfig.role,

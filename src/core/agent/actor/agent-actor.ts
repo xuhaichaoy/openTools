@@ -1196,7 +1196,7 @@ export class AgentActor {
 
     this.abortController = new AbortController();
     const signal = this.abortController.signal;
-    const ai = getMToolsAI();
+    const ai = getMToolsAI("dialog");
 
     const agent = new ReActAgent(
       ai,

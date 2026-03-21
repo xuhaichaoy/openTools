@@ -1,4 +1,5 @@
 import { getMToolsAI } from "@/core/ai/mtools-ai";
+import { getResolvedAIConfigForMode } from "@/core/ai/resolved-ai-config-store";
 import { useAIStore } from "@/store/ai-store";
 import { useAgentMemoryStore } from "@/store/agent-memory-store";
 import { loadAndResolveSkills } from "@/store/skill-store";
@@ -47,7 +48,7 @@ import type {
 export type AskUserCallback = (questions: AskUserQuestion[]) => Promise<AskUserAnswers>;
 
 function getPluginTools(): AgentTool[] {
-  const ai = getMToolsAI();
+  const ai = getMToolsAI("cluster");
   return registry.getAllActions().map(({ pluginId, pluginName, action }) =>
     pluginActionToTool(pluginId, pluginName, action, ai),
   );
@@ -121,7 +122,7 @@ export class LocalAgentBridge implements AgentBridge {
     context: Record<string, unknown>,
     options?: AgentBridgeRunOptions,
   ): Promise<AgentBridgeResult> {
-    const ai = getMToolsAI();
+    const ai = getMToolsAI("cluster");
     const aiConfig = useAIStore.getState().config;
     await ensureMcpServersLoaded();
     const builtinResult = getBuiltinTools(this.askUser);
@@ -139,7 +140,7 @@ export class LocalAgentBridge implements AgentBridge {
     const maxIterations = Math.max(1, Math.min(requestedMaxIterations, globalMaxIterations));
 
     const fcCompatibilityKey = buildAgentFCCompatibilityKey(
-      aiConfig,
+      getResolvedAIConfigForMode("cluster"),
     );
 
     const {

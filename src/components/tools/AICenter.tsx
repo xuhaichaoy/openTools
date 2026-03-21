@@ -26,16 +26,14 @@ import { useAppStore } from "@/store/app-store";
 import { isClusterRunning } from "@/core/agent/cluster/active-orchestrator";
 import { AI_CENTER_MODE_META } from "@/core/ai/ai-center-mode-meta";
 import {
-  applyAICenterModelScope,
   buildAICenterModelScope,
-  getAICenterModelScopeSource,
-  isAICenterModelScopeCompatible,
   matchesAICenterModelScope,
 } from "@/core/ai/ai-center-model-scope";
 import {
   describeAssistantConfigBrief,
   getAIConfigSourceLabel,
 } from "@/core/ai/assistant-config";
+import { resolveAIConfig } from "@/core/ai/resolved-ai-config";
 import { SkillsManager } from "@/components/ai/SkillsManager";
 import type { PluginContext } from "@/core/plugin-system/context";
 import type { ChatViewHandle } from "@/components/ai/ChatView";
@@ -78,8 +76,6 @@ export function AICenter({
   const aiSourceLabel = getAIConfigSourceLabel(aiConfig.source);
   const assistantConfigBrief = describeAssistantConfigBrief(aiConfig);
   const ownKeys = useAIStore((s) => s.ownKeys);
-  const saveConfig = useAIStore((s) => s.saveConfig);
-  const selectOwnKeyModel = useAIStore((s) => s.selectOwnKeyModel);
 
   useEffect(() => {
     const oneshot = useAppStore.getState().consumeAiInitialMode();
@@ -109,50 +105,18 @@ export function AICenter({
 
   useEffect(() => {
     const scope = aiCenterModelScopes[mode];
-    if (!scope) {
-      setAICenterModelScope(mode, buildAICenterModelScope(aiConfig));
-      return;
-    }
-    if (matchesAICenterModelScope(aiConfig, scope)) return;
-
-    const currentSource = aiConfig.source || "own_key";
-    const targetSource = getAICenterModelScopeSource(scope);
-    if (!targetSource) {
-      setAICenterModelScope(mode, buildAICenterModelScope(aiConfig));
-      return;
-    }
-    if (
-      targetSource === "own_key"
-      && scope.activeOwnKeyId
-      && (
-        currentSource !== "own_key"
-        || aiConfig.active_own_key_id !== scope.activeOwnKeyId
-      )
-    ) {
-      if (ownKeys.length === 0) return;
-      if (ownKeys.some((key) => key.id === scope.activeOwnKeyId)) {
-        selectOwnKeyModel(scope.activeOwnKeyId);
-        return;
-      }
-      return;
-    }
-
-    const nextConfig = applyAICenterModelScope(aiConfig, scope);
-    if (
-      !isAICenterModelScopeCompatible(nextConfig, scope)
-      || !matchesAICenterModelScope(nextConfig, scope)
-    ) {
-      setAICenterModelScope(mode, buildAICenterModelScope(aiConfig));
-      return;
-    }
-    void saveConfig(nextConfig);
+    const resolvedConfig = resolveAIConfig({
+      baseConfig: aiConfig,
+      ownKeys,
+      scope,
+    });
+    if (scope && matchesAICenterModelScope(resolvedConfig, scope)) return;
+    setAICenterModelScope(mode, buildAICenterModelScope(resolvedConfig));
   }, [
     mode,
     aiConfig,
     ownKeys,
     aiCenterModelScopes,
-    saveConfig,
-    selectOwnKeyModel,
     setAICenterModelScope,
   ]);
 

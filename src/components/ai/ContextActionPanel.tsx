@@ -8,6 +8,7 @@ import {
 import { invoke } from '@tauri-apps/api/core'
 import { useAIStore } from '@/store/ai-store'
 import { quickChat } from '@/core/ai/ai-service'
+import { getResolvedAIConfigForMode } from '@/core/ai/resolved-ai-config-store'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useDragWindow } from '@/hooks/useDragWindow'
@@ -63,7 +64,7 @@ export function ContextActionPanel({ selectedText, onBack }: ContextActionPanelP
 
   /** 调用 AI 接口（附带完整对话历史） */
   const callAI = async (messages: { role: string; content: string }[]): Promise<string> => {
-    return quickChat(messages, { config })
+    return quickChat(messages, { config, mode: 'ask' })
   }
 
   /** 处理特殊操作（无需 AI） */
@@ -131,8 +132,9 @@ export function ContextActionPanel({ selectedText, onBack }: ContextActionPanelP
     const handled = await handleSpecialAction(action)
     if (handled) return
 
-    const source = config.source || 'own_key'
-    if (source === 'own_key' && !config.api_key) {
+    const resolvedConfig = getResolvedAIConfigForMode('ask')
+    const source = resolvedConfig.source || 'own_key'
+    if (source === 'own_key' && !resolvedConfig.api_key) {
       setChatHistory([{ role: 'assistant', content: '❌ 请先在设置中配置 AI API Key' }])
       setActiveAction(action.id)
       return

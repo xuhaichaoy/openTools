@@ -61,7 +61,6 @@ describe("mergeCloudAIConfig", () => {
       team_id: "team-1",
       team_config_id: "cfg-2",
       protocol: "anthropic",
-      active_own_key_id: "key-cloud",
       enable_advanced_tools: true,
       enable_native_tools: true,
       enable_memory_auto_recall: false,
@@ -73,7 +72,7 @@ describe("mergeCloudAIConfig", () => {
     expect(merged.team_id).toBe("team-1");
     expect(merged.team_config_id).toBe("cfg-2");
     expect(merged.protocol).toBe("anthropic");
-    expect(merged.active_own_key_id).toBe("key-cloud");
+    expect(merged.active_own_key_id).toBe("key-local");
     expect(merged.enable_advanced_tools).toBe(false);
     expect(merged.enable_native_tools).toBe(false);
     expect(merged.enable_memory_auto_recall).toBe(false);

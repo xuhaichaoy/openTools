@@ -1,5 +1,8 @@
 import { ActorSystem } from "@/core/agent/actor/actor-system";
-import { spawnDefaultDialogActors } from "@/core/agent/actor/default-dialog-actors";
+import {
+  buildDefaultDialogActorConfig,
+  spawnDefaultDialogActors,
+} from "@/core/agent/actor/default-dialog-actors";
 import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
 import {
   registerRuntimeAbortHandler,
@@ -18,6 +21,14 @@ import type { DialogMessage } from "@/core/agent/actor/types";
 import type { IMConversationProgressEvent } from "./channel-progress-emitter";
 import type { ChannelIncomingMessage, ChannelType } from "./types";
 import {
+  clearPersistedIMConversationRuntimeSnapshot,
+  loadPersistedIMConversationRuntimeSnapshot,
+  savePersistedIMConversationRuntimeSnapshot,
+  type PersistedIMActorConfig,
+  type PersistedIMConversationRuntimeSnapshot,
+  type PersistedIMRuntimeRecord,
+} from "./im-conversation-persistence";
+import {
   deriveShareableIMMediaFromText,
   sanitizeIMReplyTextForMedia,
   shouldExplicitlyDeliverMediaToIM,
@@ -26,6 +37,7 @@ import { resolveChannelOutgoingMedia } from "./channel-outbound-media";
 
 const log = createLogger("IMConversationRuntime");
 const MAX_PREVIEW_MESSAGES = 120;
+const MAX_PERSISTED_DIALOG_MESSAGES = 200;
 
 interface PendingIMMessage {
   messageId: string;
@@ -169,6 +181,15 @@ function mergeUniqueAttachments(
   return merged.size > 0 ? [...merged.values()] : undefined;
 }
 
+function clonePendingIMMessage(message?: PendingIMMessage): PendingIMMessage | undefined {
+  if (!message) return undefined;
+  return {
+    ...message,
+    ...(message.images ? { images: [...message.images] } : {}),
+    ...(message.attachments ? { attachments: message.attachments.map((item) => ({ ...item })) } : {}),
+  };
+}
+
 export class IMConversationRuntimeManager {
   private readonly options: IMConversationRuntimeManagerOptions;
   private runtimes = new Map<string, IMConversationRuntime>();
@@ -176,6 +197,7 @@ export class IMConversationRuntimeManager {
 
   constructor(options: IMConversationRuntimeManagerOptions) {
     this.options = options;
+    this.hydratePersistedState();
   }
 
   async handleIncoming(params: {
@@ -412,23 +434,52 @@ export class IMConversationRuntimeManager {
     const existing = this.runtimes.get(key);
     if (existing) return existing;
 
-    const system = new ActorSystem();
-    spawnDefaultDialogActors(system, {
-      mode: "external_im",
-      channelType: params.channelType,
+    const runtime = this.createRuntime({
+      ...params,
+      topicId,
     });
+    this.runtimes.set(key, runtime);
+    this.refreshRuntime(runtime);
+    return runtime;
+  }
+
+  private createRuntime(params: {
+    channelId: string;
+    channelType: ChannelType;
+    conversationId: string;
+    conversationType: ChannelIncomingMessage["conversationType"];
+    topicId: string;
+  }, restored?: PersistedIMRuntimeRecord): IMConversationRuntime {
+    const system = new ActorSystem();
+    if (restored?.sessionId) {
+      (system as unknown as { sessionId: string }).sessionId = restored.sessionId;
+    }
+
+    if (restored?.actorConfigs?.length) {
+      this.restoreRuntimeActors(system, params.channelType, restored.actorConfigs);
+    } else {
+      spawnDefaultDialogActors(system, {
+        mode: "external_im",
+        channelType: params.channelType,
+      });
+    }
+
+    if (restored?.dialogHistory?.length) {
+      system.restoreDialogHistory(restored.dialogHistory.map((message) => cloneDialogMessage(message)));
+    }
 
     const runtime: IMConversationRuntime = {
-      key,
+      key: buildRuntimeKey(params.channelId, params.conversationId, params.topicId),
       channelId: params.channelId,
       channelType: params.channelType,
       conversationId: params.conversationId,
       conversationType: params.conversationType,
-      topicId,
+      topicId: params.topicId,
       system,
       queue: [],
-      status: "idle",
-      updatedAt: Date.now(),
+      status: restored ? "idle" : "idle",
+      ...(restored?.lastInput ? { lastInput: clonePendingIMMessage(restored.lastInput as PendingIMMessage) } : {}),
+      updatedAt: restored?.updatedAt ?? Date.now(),
       inFlight: false,
       pumping: false,
       settleTimer: null,
@@ -437,7 +488,45 @@ export class IMConversationRuntimeManager {
       unsubscribe: () => {},
     };
 
-    runtime.unsubscribe = system.onEvent((event) => {
+    this.attachRuntimeSubscription(runtime);
+    return runtime;
+  }
+
+  private restoreRuntimeActors(
+    system: ActorSystem,
+    channelType: ChannelType,
+    actorConfigs: PersistedIMActorConfig[],
+  ): void {
+    for (const config of actorConfigs) {
+      const baseConfig = buildDefaultDialogActorConfig(config.roleName, {
+        mode: "external_im",
+        channelType,
+      });
+      system.spawn({
+        id: config.id,
+        role: {
+          ...baseConfig.role,
+          name: config.roleName,
+          systemPrompt: config.systemPrompt ?? baseConfig.role.systemPrompt,
+        },
+        ...(config.capabilities ? { capabilities: config.capabilities } : {}),
+        ...(config.model ? { modelOverride: config.model } : {}),
+        maxIterations: typeof config.maxIterations === "number" ? config.maxIterations : 40,
+        ...(config.toolPolicy ? { toolPolicy: config.toolPolicy } : baseConfig.toolPolicy ? { toolPolicy: baseConfig.toolPolicy } : {}),
+        middlewareOverrides: config.middlewareOverrides ?? baseConfig.middlewareOverrides,
+        ...(config.workspace ? { workspace: config.workspace } : {}),
+        ...(typeof config.timeoutSeconds === "number" ? { timeoutSeconds: config.timeoutSeconds } : {}),
+        ...(typeof config.contextTokens === "number" ? { contextTokens: config.contextTokens } : {}),
+        ...(config.thinkingLevel ? { thinkingLevel: config.thinkingLevel } : {}),
+      });
+      if (config.sessionHistory?.length) {
+        system.restoreActorSessionHistory(config.id, config.sessionHistory);
+      }
+    }
+  }
+
+  private attachRuntimeSubscription(runtime: IMConversationRuntime): void {
+    runtime.unsubscribe = runtime.system.onEvent((event) => {
       if ("kind" in event) {
         const dialogEvent = event as DialogMessage;
         const latestDialogEvent = this.getLatestDialogMessage(runtime, dialogEvent.id) ?? dialogEvent;
@@ -537,10 +626,6 @@ export class IMConversationRuntimeManager {
       this.refreshRuntime(runtime);
       this.scheduleSettledRefresh(runtime);
     });
-
-    this.runtimes.set(key, runtime);
-    this.refreshRuntime(runtime);
-    return runtime;
   }
 
   private buildPendingMessage(
@@ -957,6 +1042,96 @@ export class IMConversationRuntimeManager {
       conversations: snapshots,
       sessionPreviews,
     });
+
+    const persistedSnapshot = this.buildPersistenceSnapshot();
+    if (!persistedSnapshot) {
+      clearPersistedIMConversationRuntimeSnapshot();
+      return;
+    }
+    savePersistedIMConversationRuntimeSnapshot(persistedSnapshot);
+  }
+
+  private hydratePersistedState(): void {
+    const persisted = loadPersistedIMConversationRuntimeSnapshot();
+    if (!persisted) return;
+
+    for (const conversation of persisted.conversations) {
+      this.conversations.set(conversation.key, {
+        channelType: conversation.channelType,
+        conversationType: conversation.conversationType,
+        activeTopicId: conversation.activeTopicId,
+        nextTopicSeq: conversation.nextTopicSeq,
+        updatedAt: conversation.updatedAt,
+      });
+    }
+
+    for (const runtimeRecord of persisted.runtimes.sort((left, right) => left.updatedAt - right.updatedAt)) {
+      if (this.runtimes.has(runtimeRecord.key)) continue;
+      const runtime = this.createRuntime({
+        channelId: runtimeRecord.channelId,
+        channelType: runtimeRecord.channelType,
+        conversationId: runtimeRecord.conversationId,
+        conversationType: runtimeRecord.conversationType,
+        topicId: runtimeRecord.topicId,
+      }, runtimeRecord);
+      this.runtimes.set(runtime.key, runtime);
+      this.refreshRuntime(runtime);
+    }
+
+    this.syncConversationSnapshots();
+  }
+
+  private buildPersistenceSnapshot(): PersistedIMConversationRuntimeSnapshot | null {
+    if (this.conversations.size === 0 && this.runtimes.size === 0) {
+      return null;
+    }
+
+    return {
+      version: 1,
+      savedAt: Date.now(),
+      conversations: [...this.conversations.entries()].map(([key, state]) => ({
+        key,
+        channelType: state.channelType,
+        conversationType: state.conversationType,
+        activeTopicId: state.activeTopicId,
+        nextTopicSeq: state.nextTopicSeq,
+        updatedAt: state.updatedAt,
+      })),
+      runtimes: [...this.runtimes.values()].map((runtime) => this.buildPersistedRuntimeRecord(runtime)),
+    };
+  }
+
+  private buildPersistedRuntimeRecord(runtime: IMConversationRuntime): PersistedIMRuntimeRecord {
+    return {
+      key: runtime.key,
+      channelId: runtime.channelId,
+      channelType: runtime.channelType,
+      conversationId: runtime.conversationId,
+      conversationType: runtime.conversationType,
+      topicId: runtime.topicId,
+      sessionId: runtime.system.sessionId,
+      updatedAt: runtime.updatedAt,
+      ...(runtime.lastInput ? { lastInput: clonePendingIMMessage(runtime.lastInput) } : {}),
+      dialogHistory: runtime.system
+        .getDialogHistory()
+        .slice(-MAX_PERSISTED_DIALOG_MESSAGES)
+        .map((message) => cloneDialogMessage(message)),
+      actorConfigs: runtime.system.getAll().map((actor) => ({
+        id: actor.id,
+        roleName: actor.role.name,
+        ...(actor.modelOverride ? { model: actor.modelOverride } : {}),
+        ...(actor.hasExplicitMaxIterationsConfig ? { maxIterations: actor.configuredMaxIterations } : {}),
+        ...(actor.getSystemPromptOverride() ? { systemPrompt: actor.getSystemPromptOverride() } : {}),
+        ...(actor.capabilities ? { capabilities: actor.capabilities } : {}),
+        ...(actor.toolPolicyConfig ? { toolPolicy: actor.toolPolicyConfig } : {}),
+        ...(actor.workspace ? { workspace: actor.workspace } : {}),
+        ...(typeof actor.timeoutSeconds === "number" ? { timeoutSeconds: actor.timeoutSeconds } : {}),
+        ...(typeof actor.contextTokens === "number" ? { contextTokens: actor.contextTokens } : {}),
+        ...(actor.thinkingLevel ? { thinkingLevel: actor.thinkingLevel } : {}),
+        ...(actor.middlewareOverrides ? { middlewareOverrides: actor.middlewareOverrides } : {}),
+        sessionHistory: actor.getSessionHistory(),
+      })),
+    };
   }
 
   private buildSessionPreview(runtime: IMConversationRuntime): IMConversationSessionPreview {
