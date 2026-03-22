@@ -11,6 +11,7 @@ import {
   buildInputHash,
   cloneExecutionContract,
   sealExecutionContract,
+  toDialogExecutionPlan,
 } from "./execution-contract";
 import { CollaborationSessionController } from "./session-controller";
 
@@ -213,6 +214,20 @@ describe("session-controller", () => {
     controller.enqueueFollowUp({ content: "等 reviewer 回复后继续" }, "queue");
 
     const snapshot = controller.snapshot();
+    expect(snapshot.presentationState.childSessionsPreview).toEqual([
+      {
+        id: "run-1",
+        label: "代码评审",
+        targetActorId: "reviewer",
+        status: "running",
+        mode: "session",
+        focusable: true,
+        resumable: true,
+        statusSummary: "代码评审 正在执行中",
+        nextStepHint: "等待子线程继续推进，只有被结果阻塞时再等待",
+        updatedAt: 120,
+      },
+    ]);
     const restored = new CollaborationSessionController(system, {
       surface: "local_dialog",
       actorRosterProvider: () => ROSTER,
@@ -270,6 +285,49 @@ describe("session-controller", () => {
     expect(system.activeContract?.contractId).toBe("contract-runtime-only");
     expect(system.dialogPlan).toBeNull();
     expect(controller.snapshot().activeContract?.contractId).toBe("contract-runtime-only");
+  });
+
+  it("only falls back to the legacy dialog plan when restoring an old snapshot without a contract", () => {
+    const system = new FakeSystem();
+    const legacyContract = sealExecutionContract(createDraft(), {
+      contractId: "contract-legacy-restore",
+      approvedAt: 10,
+      state: "active",
+    });
+    system.dialogPlan = toDialogExecutionPlan(legacyContract);
+
+    const controller = new CollaborationSessionController(system, {
+      surface: "local_dialog",
+      actorRosterProvider: () => ROSTER,
+    });
+
+    const snapshot = controller.restore({
+      version: 1,
+      surface: "local_dialog",
+      sessionId: "legacy-session",
+      activeContract: null,
+      pendingInteractions: [],
+      childSessions: [],
+      contractDelegations: [],
+      queuedFollowUps: [],
+      focusedChildSessionId: null,
+      presentationState: {
+        surface: "local_dialog",
+        status: "idle",
+        pendingInteractionCount: 0,
+        pendingApprovalCount: 0,
+        childSessionsPreview: [],
+        queuedFollowUpCount: 0,
+        focusedChildSessionId: null,
+        contractState: null,
+        executionStrategy: null,
+      },
+      dialogMessages: [],
+      updatedAt: 1,
+    });
+
+    expect(snapshot.activeContract?.contractId).toBe("contract-legacy-restore");
+    expect(system.activeContract?.contractId).toBe("contract-legacy-restore");
   });
 
   it("marks queued follow-up as needing reapproval when roster changes", () => {
@@ -360,12 +418,18 @@ describe("session-controller", () => {
         label: "代码评审",
         state: "waiting",
         runId: "run-delegation-1",
+        statusSummary: "代码评审 当前保留中",
+        nextStepHint: "主 Agent 可按需继续复用该子会话，补充新的指令",
+        updatedAt: 160,
       },
       {
         delegationId: "delegation-available",
         targetActorId: "coordinator",
         label: "主线程汇总",
         state: "available",
+        statusSummary: "等待主 Agent 自主决定",
+        nextStepHint: "主 Agent 可按需复用现有线程或发起新的派工",
+        updatedAt: undefined,
       },
     ]);
   });

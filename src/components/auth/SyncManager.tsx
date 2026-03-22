@@ -138,6 +138,8 @@ export function SyncManager() {
   return null;
 }
 
+export default SyncManager;
+
 // ── 工作流同步 ──
 
 async function syncWorkflows() {

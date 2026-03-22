@@ -16,7 +16,8 @@ interface ResultListProps {
 }
 
 export function ResultList({ items }: ResultListProps) {
-  const { selectedIndex, setSelectedIndex } = useAppStore();
+  const selectedIndex = useAppStore((s) => s.selectedIndex);
+  const setSelectedIndex = useAppStore((s) => s.setSelectedIndex);
 
   if (items.length === 0) return null;
 
@@ -34,7 +35,11 @@ export function ResultList({ items }: ResultListProps) {
             setSelectedIndex(index);
             item.action?.();
           }}
-          onMouseEnter={() => setSelectedIndex(index)}
+          onMouseEnter={() => {
+            if (index !== selectedIndex) {
+              setSelectedIndex(index);
+            }
+          }}
           title={item.description}
         >
           <div

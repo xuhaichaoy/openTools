@@ -45,6 +45,7 @@ import { useAppStore, type AICenterHandoff } from "@/store/app-store";
 import { useAISessionRuntimeStore } from "@/store/ai-session-runtime-store";
 import {
   useClusterPlanApprovalStore,
+  type ApprovalDialogPresentation,
 } from "@/store/cluster-plan-approval-store";
 import { useConfirmDialogStore } from "@/store/confirm-dialog-store";
 import { useToolTrustStore } from "@/store/command-allowlist-store";
@@ -143,6 +144,10 @@ import {
   type IMConversationSessionPreview,
 } from "@/store/im-conversation-runtime-store";
 import { getRuntimeIndicatorStatus } from "@/core/agent/context-runtime/runtime-indicator";
+import {
+  assessExecutionContractApproval,
+  type ExecutionContractApprovalAssessment,
+} from "@/core/collaboration/contract-approval";
 
 const TaskCenterPanel = lazy(() => import("../TaskCenterPanel"));
 const KnowledgeGraphView = lazy(() => import("../KnowledgeGraphView"));
@@ -176,6 +181,82 @@ const EMPTY_ACTOR_TODOS: Record<string, TodoItem[]> = {};
 const EMPTY_RUNTIME_SESSIONS: Record<string, RuntimeSessionRecord> = {};
 const EMPTY_IM_CONVERSATIONS: IMConversationSnapshot[] = [];
 const EMPTY_IM_SESSION_PREVIEWS: Record<string, IMConversationSessionPreview> = {};
+
+type DialogPlanReview = {
+  status: "approved" | "rejected";
+  timestamp: number;
+  plan?: ClusterPlan;
+  source: "human" | "auto_review" | "policy";
+  risk?: ExecutionContractApprovalAssessment["risk"];
+  reason?: string;
+};
+
+function mapTrustLevelToContractTrustMode(
+  trustLevel: ReturnType<typeof useToolTrustStore.getState>["trustLevel"],
+): "strict_manual" | "auto_review" | "full_auto" {
+  switch (trustLevel) {
+    case "always_ask":
+      return "strict_manual";
+    case "auto_approve":
+      return "full_auto";
+    default:
+      return "auto_review";
+  }
+}
+
+function contractRiskLabel(risk: ExecutionContractApprovalAssessment["risk"]): string {
+  switch (risk) {
+    case "safe":
+      return "安全";
+    case "low":
+      return "低风险";
+    case "medium":
+      return "中风险";
+    case "high":
+      return "高风险";
+    default:
+      return "不确定";
+  }
+}
+
+function mergeUniqueLines(lines: Array<string | undefined | null>): string[] {
+  const result: string[] = [];
+  for (const line of lines) {
+    const normalized = String(line ?? "").trim();
+    if (!normalized || result.includes(normalized)) continue;
+    result.push(normalized);
+  }
+  return result;
+}
+
+function decorateBoundaryApprovalPresentation(
+  presentation: ApprovalDialogPresentation,
+  assessment: ExecutionContractApprovalAssessment,
+): ApprovalDialogPresentation {
+  if (presentation.kind !== "boundary") return presentation;
+  const riskLabel = contractRiskLabel(assessment.risk);
+  const layerLabel = assessment.layer === "human"
+    ? "自动审核建议升级到人工确认"
+    : assessment.layer === "auto_review"
+      ? "自动审核允许直接通过"
+      : "当前策略可直接放行";
+  return {
+    ...presentation,
+    title: assessment.risk === "high" || assessment.risk === "unknown"
+      ? "确认高风险协作边界"
+      : presentation.title,
+    description: `${layerLabel}。当前判定为${riskLabel}：${assessment.reason}`,
+    permissions: mergeUniqueLines([
+      ...presentation.permissions,
+      ...assessment.permissions,
+    ]),
+    notes: mergeUniqueLines([
+      `自动审核：${riskLabel} · ${assessment.reason}`,
+      ...assessment.notes,
+      ...(presentation.notes ?? []),
+    ]),
+  };
+}
 
 function basename(path: unknown): string {
   const s = String(path ?? "");
@@ -641,7 +722,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       return false;
     }
   });
-  const [lastPlanReview, setLastPlanReview] = useState<{ status: "approved" | "rejected"; timestamp: number; plan: ClusterPlan } | null>(null);
+  const [lastPlanReview, setLastPlanReview] = useState<DialogPlanReview | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -781,6 +862,14 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     actors.forEach((a) => map.set(a.id, a));
     return map;
   }, [actors]);
+  const contractApprovalActors = useMemo(
+    () => actors.map((actor) => ({
+      id: actor.id,
+      roleName: actor.roleName,
+      executionPolicy: actor.executionPolicy,
+    })),
+    [actors],
+  );
   const dialogMemoryWorkspaceId = useMemo(
     () => (
       (coordinatorActorId ? actorById.get(coordinatorActorId)?.workspace : undefined)
@@ -1414,6 +1503,13 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     () => new Map((collaborationSnapshot?.childSessions ?? []).map((item) => [item.runId, item] as const)),
     [collaborationSnapshot],
   );
+  const collaborationDelegationByRunId = useMemo(
+    () => new Map(
+      (collaborationSnapshot?.contractDelegations ?? [])
+        .flatMap((item) => (item.runId ? [[item.runId, item] as const] : [])),
+    ),
+    [collaborationSnapshot],
+  );
   const pendingSteerSession = useMemo(() => {
     if (!pendingSteerSessionRunId) return null;
     return collaborationChildSessionByRunId.get(pendingSteerSessionRunId)
@@ -1633,6 +1729,8 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       dialogHistory,
       artifacts,
       actorNameById,
+      projectedChildSession: collaborationChildSessionByRunId.get(runId),
+      projectedDelegation: collaborationDelegationByRunId.get(runId),
       sourceSessionId: getSystem()?.sessionId,
     });
     if (!handoff) return;
@@ -1642,7 +1740,17 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       handoff,
       navigate: false,
     });
-  }, [spawnedTasks, actorById, actorNameById, actorTodos, dialogHistory, artifacts, getSystem]);
+  }, [
+    spawnedTasks,
+    actorById,
+    actorNameById,
+    actorTodos,
+    dialogHistory,
+    artifacts,
+    collaborationChildSessionByRunId,
+    collaborationDelegationByRunId,
+    getSystem,
+  ]);
   const handlePrepareChildSessionSteer = useCallback((runId: string) => {
     const childSession = collaborationChildSessionByRunId.get(runId);
     if (!childSession || childSession.mode !== "session" || !childSession.focusable) return;
@@ -1729,6 +1837,88 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       }
     });
   }, [config, dialogMemoryWorkspaceId, getSystem]);
+  const reviewExecutionContractBoundary = useCallback(async (params: {
+    draft: NonNullable<ReturnType<typeof buildExecutionContractDraftFromDialog>>;
+    plan: ClusterPlan | null;
+    sessionId?: string;
+    forceHuman?: boolean;
+  }): Promise<{
+    approved: boolean;
+    assessment: ExecutionContractApprovalAssessment;
+  }> => {
+    const trustMode = mapTrustLevelToContractTrustMode(useToolTrustStore.getState().trustLevel);
+    const assessment = assessExecutionContractApproval(params.draft, contractApprovalActors, {
+      trustMode,
+    });
+    const reviewPlan = params.plan ?? undefined;
+
+    if (assessment.decision === "deny") {
+      setLastPlanReview({
+        status: "rejected",
+        timestamp: Date.now(),
+        plan: reviewPlan,
+        source: "policy",
+        risk: assessment.risk,
+        reason: assessment.reason,
+      });
+      setInputNotice(assessment.reason);
+      inputRef.current?.focus();
+      return { approved: false, assessment };
+    }
+
+    const needsHuman = Boolean(params.forceHuman) || assessment.decision === "ask";
+    if (needsHuman) {
+      if (!params.plan) {
+        setInputNotice("当前协作契约需要人工确认，但没有可展示的审批草案，请先调整后再试。");
+        inputRef.current?.focus();
+        return { approved: false, assessment };
+      }
+      const approvalResult = await openPlanApprovalDialog({
+        plan: params.plan,
+        sessionId: params.sessionId,
+        presentation: decorateBoundaryApprovalPresentation(
+          buildClusterPresentationFromDraft({
+            draft: {
+              ...params.draft,
+              insight: params.draft.insight,
+            },
+            actors,
+          }),
+          assessment,
+        ),
+      });
+      if (approvalResult.status !== "approved") {
+        setLastPlanReview({
+          status: "rejected",
+          timestamp: Date.now(),
+          plan: params.plan,
+          source: "human",
+          risk: assessment.risk,
+          reason: assessment.reason,
+        });
+        return { approved: false, assessment };
+      }
+      setLastPlanReview({
+        status: "approved",
+        timestamp: Date.now(),
+        plan: params.plan,
+        source: "human",
+        risk: assessment.risk,
+        reason: assessment.reason,
+      });
+      return { approved: true, assessment };
+    }
+
+    setLastPlanReview({
+      status: "approved",
+      timestamp: Date.now(),
+      plan: reviewPlan,
+      source: assessment.layer === "policy" ? "policy" : "auto_review",
+      risk: assessment.risk,
+      reason: assessment.reason,
+    });
+    return { approved: true, assessment };
+  }, [actors, contractApprovalActors, openPlanApprovalDialog]);
 
   const handleEditQueuedFollowUpItem = useCallback(async (itemId: string) => {
     const nextItem = queuedFollowUps.find((item) => item.id === itemId);
@@ -1811,29 +2001,19 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
           return;
         }
         if (requirePlanApproval || nextItem.contractStatus === "needs_reapproval") {
-          if (!planBundle) {
-            setInputNotice("当前排队消息无法自动重建审批草案，请先编辑后重新发送。");
-            inputRef.current?.focus();
-            return;
-          }
-          const approvalResult = await openPlanApprovalDialog({
-            plan: planBundle.clusterPlan,
+          const reviewed = await reviewExecutionContractBoundary({
+            draft: executionDraft,
+            plan: planBundle?.clusterPlan ?? null,
             sessionId: getSystem()?.sessionId,
-            presentation: buildClusterPresentationFromDraft({
-              draft: {
-                ...executionDraft,
-                insight: executionDraft.insight,
-              },
-              actors,
-            }),
+            forceHuman: nextItem.contractStatus === "needs_reapproval",
           });
-          if (approvalResult.status !== "approved") {
-            setLastPlanReview({ status: "rejected", timestamp: Date.now(), plan: planBundle.clusterPlan });
-            setInputNotice("排队消息已保留，等待重新审批或编辑。");
+          if (!reviewed.approved) {
+            setInputNotice(nextItem.contractStatus === "needs_reapproval"
+              ? "排队消息已保留，等待重新审批或编辑。"
+              : (reviewed.assessment.reason || "当前协作边界未通过审批。"));
             inputRef.current?.focus();
             return;
           }
-          setLastPlanReview({ status: "approved", timestamp: Date.now(), plan: planBundle.clusterPlan });
         }
 
         const sealedContract = applyDraftExecutionContract(executionDraft, {
@@ -1882,11 +2062,11 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     coordinatorActorId,
     dispatchDialogInput,
     getSystem,
-    openPlanApprovalDialog,
     queueDialogUserMemoryCapture,
     queuedFollowUps,
     removeFollowUp,
     requirePlanApproval,
+    reviewExecutionContractBoundary,
     routeTask,
     runQueuedFollowUp,
   ]);
@@ -2039,28 +2219,20 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
         coordinatorActorId,
       });
 
-      if (planBundle && executionDraft && requirePlanApproval) {
-        const approvalResult = await openPlanApprovalDialog({
-          plan: planBundle.clusterPlan,
+      if (executionDraft && requirePlanApproval) {
+        const reviewed = await reviewExecutionContractBoundary({
+          draft: executionDraft,
+          plan: planBundle?.clusterPlan ?? null,
           sessionId: currentSystem.sessionId,
-          presentation: buildClusterPresentationFromDraft({
-            draft: {
-              ...executionDraft,
-              insight: executionDraft.insight,
-            },
-            actors,
-          }),
         });
-        if (approvalResult.status !== "approved") {
-          setLastPlanReview({ status: "rejected", timestamp: Date.now(), plan: planBundle.clusterPlan });
+        if (!reviewed.approved) {
           setShowConfig(false);
           setOverlay(null);
           setWorkspacePanel("plan");
-          setInputNotice("执行计划已取消，调整后可重新发送。");
+          setInputNotice(reviewed.assessment.reason || "执行计划已取消，调整后可重新发送。");
           inputRef.current?.focus();
           return;
         }
-        setLastPlanReview({ status: "approved", timestamp: Date.now(), plan: planBundle.clusterPlan });
       }
 
       sealedContract = applyDraftExecutionContract(executionDraft, {
@@ -2117,7 +2289,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     clearAttachments();
     setSourceHandoff(null);
     inputRef.current?.focus();
-  }, [input, hasAttachments, imagePaths, attachments, fileContextBlock, attachmentSummary, ensureSystem, pendingUserInteractions, pendingInteractionByMessageId, selectedPendingMessageId, parseMention, actors, routingMode, routeTask, clearAttachments, requirePlanApproval, openPlanApprovalDialog, coordinatorActorId, queueDialogUserMemoryCapture, inputAttachmentPaths, incomingHandoff, actorSupportsImageInput, toast, dispatchDialogInput, applyDraftExecutionContract, getSystem, setSourceHandoff, activeDialogView, pendingSteerTargetActorId]);
+  }, [input, hasAttachments, imagePaths, attachments, fileContextBlock, attachmentSummary, ensureSystem, pendingUserInteractions, pendingInteractionByMessageId, selectedPendingMessageId, parseMention, actors, routingMode, routeTask, clearAttachments, requirePlanApproval, coordinatorActorId, queueDialogUserMemoryCapture, inputAttachmentPaths, incomingHandoff, actorSupportsImageInput, toast, dispatchDialogInput, applyDraftExecutionContract, getSystem, setSourceHandoff, activeDialogView, pendingSteerTargetActorId, reviewExecutionContractBoundary]);
 
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value;

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
 /// 剪贴板历史条目
@@ -21,6 +22,8 @@ pub struct ClipboardHistory {
     pub next_id: u64,
     pub last_hash: u64,
     pub enabled: bool,
+    pub dirty: bool,
+    pub dirty_since: Option<Instant>,
 }
 
 impl Default for ClipboardHistory {
@@ -31,6 +34,8 @@ impl Default for ClipboardHistory {
             next_id: 1,
             last_hash: 0,
             enabled: true,
+            dirty: false,
+            dirty_since: None,
         }
     }
 }
@@ -66,6 +71,8 @@ fn load_history(app: &AppHandle) -> ClipboardHistory {
         next_id,
         last_hash,
         enabled: true,
+        dirty: false,
+        dirty_since: None,
     }
 }
 
@@ -78,6 +85,38 @@ fn save_history(app: &AppHandle, history: &ClipboardHistory) {
             let _ = store.save();
         }
     }
+}
+
+fn mark_history_dirty(history: &mut ClipboardHistory) {
+    history.dirty = true;
+    history.dirty_since = Some(Instant::now());
+}
+
+fn flush_history_if_needed(app: &AppHandle, force: bool) {
+    let state = app.state::<Mutex<ClipboardHistory>>();
+    let mut history = match state.lock() {
+        Ok(history) => history,
+        Err(_) => return,
+    };
+
+    let should_flush = history.dirty
+        && (force
+            || history
+                .dirty_since
+                .map(|dirty_since| dirty_since.elapsed() >= Duration::from_secs(2))
+                .unwrap_or(false));
+
+    if !should_flush {
+        return;
+    }
+
+    save_history(app, &history);
+    history.dirty = false;
+    history.dirty_since = None;
+}
+
+pub fn flush_clipboard_history(app: &AppHandle) {
+    flush_history_if_needed(app, true);
 }
 
 /// 初始化剪贴板监听（在 app setup 中调用）
@@ -93,6 +132,7 @@ pub fn start_clipboard_watcher(app: &AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+            flush_history_if_needed(&app_for_task, false);
 
             // 读取剪贴板
             let app_clone = app_for_task.clone();
@@ -174,8 +214,7 @@ pub fn start_clipboard_watcher(app: &AppHandle) {
                 history.entries.truncate(max);
             }
 
-            // 持久化
-            save_history(&app_for_task, &history);
+            mark_history_dirty(&mut history);
 
             // 通知前端
             let _ = app_for_task.emit(
@@ -223,7 +262,7 @@ pub async fn clipboard_history_clear(app: AppHandle) -> Result<(), String> {
     let mut history = state.lock().map_err(|e| e.to_string())?;
     history.entries.clear();
     history.last_hash = 0;
-    save_history(&app, &history);
+    mark_history_dirty(&mut history);
     Ok(())
 }
 
@@ -232,7 +271,7 @@ pub async fn clipboard_history_delete(app: AppHandle, id: u64) -> Result<(), Str
     let state = app.state::<Mutex<ClipboardHistory>>();
     let mut history = state.lock().map_err(|e| e.to_string())?;
     history.entries.retain(|e| e.id != id);
-    save_history(&app, &history);
+    mark_history_dirty(&mut history);
     Ok(())
 }
 

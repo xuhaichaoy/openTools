@@ -657,7 +657,6 @@ export class ActorSystem {
   private sessionUploads = new Map<string, SessionUploadRecord>();
   private coordinatorActorId: string | null = null;
   private activeExecutionContract: ExecutionContract | null = null;
-  private dialogExecutionPlan: DialogExecutionPlan | null = null;
   private legacyDialogExecutionPlanRuntimeState: LegacyDialogExecutionPlanRuntimeState | null = null;
   private dialogRoomCompaction: DialogRoomCompactionState | null = null;
   private focusedSpawnedSessionRunId: string | null = null;
@@ -791,7 +790,6 @@ export class ActorSystem {
     this.actors.clear();
     this.coordinatorActorId = null;
     this.activeExecutionContract = null;
-    this.dialogExecutionPlan = null;
     this.legacyDialogExecutionPlanRuntimeState = null;
     this.dialogHistory = [];
     this.pendingReplies.clear();
@@ -949,12 +947,16 @@ export class ActorSystem {
     return this.activeExecutionContract ? cloneExecutionContract(this.activeExecutionContract) : null;
   }
 
+  /**
+   * @deprecated 仅用于旧数据兼容与过渡期调试视图。
+   * 新运行态应统一读取 `getActiveExecutionContract()`。
+   */
   getDialogExecutionPlan(): DialogExecutionPlan | null {
     const contract = this.activeExecutionContract;
     if (contract) {
       return this.cloneLegacyDialogExecutionPlan(this.buildLegacyDialogExecutionPlanFromContract(contract));
     }
-    return this.cloneLegacyDialogExecutionPlan(this.dialogExecutionPlan);
+    return null;
   }
 
   getDialogRoomCompaction(): DialogRoomCompactionState | null {
@@ -1149,7 +1151,6 @@ export class ActorSystem {
       ...cloneExecutionContract(contract),
       state: "sealed",
     };
-    this.dialogExecutionPlan = null;
     this.setLegacyDialogExecutionPlanRuntimeState(null);
     log(`armExecutionContract: ${contract.summary}`);
   }
@@ -1157,7 +1158,6 @@ export class ActorSystem {
   restoreExecutionContract(contract: ExecutionContract): void {
     const shouldPreserveRuntimeState = this.activeExecutionContract?.contractId === contract.contractId;
     this.activeExecutionContract = cloneExecutionContract(contract);
-    this.dialogExecutionPlan = null;
     if (!shouldPreserveRuntimeState) {
       this.setLegacyDialogExecutionPlanRuntimeState(null);
     }
@@ -1165,18 +1165,16 @@ export class ActorSystem {
   }
 
   clearExecutionContract(): void {
-    const summary = this.activeExecutionContract?.summary ?? this.dialogExecutionPlan?.summary;
+    const summary = this.activeExecutionContract?.summary;
     if (summary) {
       log(`clearExecutionContract: ${summary}`);
     }
     this.activeExecutionContract = null;
-    this.dialogExecutionPlan = null;
     this.legacyDialogExecutionPlanRuntimeState = null;
   }
 
   armDialogExecutionPlan(plan: DialogExecutionPlan): void {
     const normalizedPlan = this.normalizeDialogExecutionPlan(plan);
-    this.dialogExecutionPlan = normalizedPlan;
     this.setLegacyDialogExecutionPlanRuntimeState(null);
     this.activeExecutionContract = buildExecutionContractFromDialogPlan({
       surface: this.getExecutionContractSurface(),
@@ -1187,7 +1185,6 @@ export class ActorSystem {
 
   restoreDialogExecutionPlan(plan: DialogExecutionPlan): void {
     const normalizedPlan = this.normalizeDialogExecutionPlan(plan, { preserveRuntimeState: true });
-    this.dialogExecutionPlan = normalizedPlan;
     this.setLegacyDialogExecutionPlanRuntimeState({
       activatedAt: normalizedPlan.activatedAt,
       sourceMessageId: normalizedPlan.sourceMessageId,
@@ -3188,7 +3185,6 @@ export class ActorSystem {
     }
     this.spawnedTasks.clear();
     this.activeExecutionContract = null;
-    this.dialogExecutionPlan = null;
     this.legacyDialogExecutionPlanRuntimeState = null;
 
     // 清空 transcript 内存缓存
@@ -3408,7 +3404,6 @@ export class ActorSystem {
       })),
       coordinatorActorId: this.getCoordinatorId(),
       executionContract: this.getActiveExecutionContract(),
-      dialogExecutionPlan: this.getDialogExecutionPlan(),
       dialogHistory: [...this.dialogHistory],
       pendingReplies: this.pendingReplies.size + this.pendingInteractions.size,
       spawnedTasks: [...this.spawnedTasks.values()].map((r) => ({

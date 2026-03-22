@@ -75,4 +75,34 @@ describe("runtime-state", () => {
     expect(record?.displayLabel).toBe("钉钉会话");
     expect(getForegroundRuntimeSession("im_conversation")?.sessionId).toBe("im-1");
   });
+
+  it("stores and clears compaction preview metadata", () => {
+    useRuntimeStateStore.getState().upsertSession({
+      mode: "dialog",
+      sessionId: "dialog-1",
+      query: "继续沿用刚才的话题",
+      startedAt: 400,
+      status: "running",
+      roomCompactionSummaryPreview: "已整理较早的对话上下文",
+      roomCompactionUpdatedAt: 450,
+      roomCompactionMessageCount: 24,
+      roomCompactionTaskCount: 2,
+      roomCompactionArtifactCount: 1,
+      roomCompactionPreservedIdentifiers: ["src/App.tsx", "README.md"],
+    });
+    useRuntimeStateStore.getState().patchSession("dialog", "dialog-1", {
+      roomCompactionSummaryPreview: undefined,
+      roomCompactionUpdatedAt: undefined,
+      roomCompactionMessageCount: undefined,
+      roomCompactionTaskCount: undefined,
+      roomCompactionArtifactCount: undefined,
+      roomCompactionPreservedIdentifiers: undefined,
+    });
+
+    const record = getRuntimeSession("dialog", "dialog-1");
+
+    expect(record?.roomCompactionSummaryPreview).toBeUndefined();
+    expect(record?.roomCompactionMessageCount).toBeUndefined();
+    expect(record?.roomCompactionPreservedIdentifiers).toBeUndefined();
+  });
 });

@@ -7,6 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { ModeIndicator, detectMode } from "./ModeIndicator";
 import { useDragWindow } from "@/hooks/useDragWindow";
 import { resolveAvatarUrl } from "@/utils/avatar";
+import { useShallow } from "zustand/shallow";
 
 const MODE_CONFIG = {
   search: { icon: Search, label: "搜索插件或应用...", color: "text-gray-400" },
@@ -22,7 +23,15 @@ export function SearchBar({
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const measureRef = useRef<HTMLSpanElement>(null);
-  const { mode, setMode, searchValue, setSearchValue, resetSearchState } = useAppStore();
+  const { mode, setMode, searchValue, setSearchValue, resetSearchState } = useAppStore(
+    useShallow((s) => ({
+      mode: s.mode,
+      setMode: s.setMode,
+      searchValue: s.searchValue,
+      setSearchValue: s.setSearchValue,
+      resetSearchState: s.resetSearchState,
+    })),
+  );
   const [pendingImages, setPendingImages] = useState<
     { path: string; preview: string }[]
   >([]);

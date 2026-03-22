@@ -79,7 +79,14 @@ export function FocusedChildSessionBanner({
   const actorLabel = targetActor?.roleName ?? actorNameById?.get(task.targetActorId) ?? task.targetActorId;
   const statusMeta = getStatusMeta(childSession?.status ?? task.status);
   const canResume = Boolean(childSession?.resumable ?? task.sessionOpen);
-  const previewText = summarizeText(childSession?.lastError ?? childSession?.lastResultSummary ?? task.result ?? task.error)
+  const previewText = summarizeText(
+    childSession?.statusSummary
+    ?? childSession?.nextStepHint
+    ?? childSession?.lastError
+    ?? childSession?.lastResultSummary
+    ?? task.result
+    ?? task.error,
+  )
     ?? `主 Agent 正在后台保留 ${actorLabel} 的持续线程，需要时再进入处理。`;
 
   return (

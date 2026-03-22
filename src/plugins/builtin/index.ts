@@ -316,8 +316,8 @@ export const builtinPlugins: MToolsPlugin[] = [
           text: { type: "string", description: "要记录的文字", required: true },
         },
         execute: async ({ text }) => {
-          const { createMark } = await import("@/core/database/marks");
-          await createMark("text", text as string);
+          const { captureTextMark } = await import("./non-ai-action-helpers");
+          await captureTextMark(text as string);
           return { success: true, message: "已录入" };
         },
       },
@@ -601,9 +601,8 @@ export const builtinPlugins: MToolsPlugin[] = [
           query: { type: "string", description: "搜索关键词", required: true },
         },
         execute: async ({ query }) => {
-          const { useSnippetStore } = await import("@/store/snippet-store");
-          useSnippetStore.getState().loadSnippets();
-          return useSnippetStore.getState().searchSnippets(query as string);
+          const { searchSnippets } = await import("./non-ai-action-helpers");
+          return searchSnippets(query as string);
         },
       },
       {
@@ -618,11 +617,8 @@ export const builtinPlugins: MToolsPlugin[] = [
           },
         },
         execute: async ({ keyword }, { ai }) => {
-          const { useSnippetStore } = await import("@/store/snippet-store");
-          useSnippetStore.getState().loadSnippets();
-          const snippet = useSnippetStore
-            .getState()
-            .matchByKeyword(keyword as string);
+          const { matchSnippetByKeyword } = await import("./non-ai-action-helpers");
+          const snippet = await matchSnippetByKeyword(keyword as string);
           if (!snippet) return { error: `未找到关键词为「${keyword}」的短语` };
           if (snippet.isDynamic && snippet.dynamicPrompt) {
             const result = await ai.chat({
@@ -682,11 +678,8 @@ export const builtinPlugins: MToolsPlugin[] = [
           query: { type: "string", description: "搜索关键词", required: true },
         },
         execute: async ({ query }) => {
-          const { useBookmarkStore } = await import("@/store/bookmark-store");
-          useBookmarkStore.getState().loadBookmarks();
-          const results = useBookmarkStore
-            .getState()
-            .searchBookmarks(query as string);
+          const { searchBookmarks } = await import("./non-ai-action-helpers");
+          const results = await searchBookmarks(query as string);
           return results.map((b) => ({
             title: b.title,
             url: b.url,

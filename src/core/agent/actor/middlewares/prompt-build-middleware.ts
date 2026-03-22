@@ -55,15 +55,8 @@ export class PromptBuildMiddleware implements ActorMiddleware {
     const coordinator = system.getCoordinator();
     const isCoordinator = coordinator?.id === ctx.actorId;
     const activeContract = system.getActiveExecutionContract();
-    const delegationSummary = activeContract?.plannedDelegations.length
-      ? activeContract.plannedDelegations
-        .slice(0, 4)
-        .map((delegation, index) => {
-          const targetLabel = delegation.targetActorName ?? delegation.targetActorId;
-          const label = delegation.label?.trim() || "建议委派";
-          return `${index + 1}. ${label} -> ${targetLabel}`;
-        })
-        .join("\n")
+    const delegationHint = activeContract?.plannedDelegations.length
+      ? `已批准建议委派 ${activeContract.plannedDelegations.length} 条，可按需参考和复用。`
       : "";
 
     let section = `\n\n## 多 Agent 协作（重要！）
@@ -72,9 +65,8 @@ export class PromptBuildMiddleware implements ActorMiddleware {
     if (activeContract) {
       section += `\n\n## 当前执行契约
 ${buildExecutionContractPresentationText(activeContract)}`;
-      if (delegationSummary) {
-        section += `\n已批准建议委派（按需复用，不必全部执行）：
-${delegationSummary}`;
+      if (delegationHint) {
+        section += `\n${delegationHint}`;
       }
     }
 

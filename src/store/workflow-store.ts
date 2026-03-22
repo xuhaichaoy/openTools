@@ -5,6 +5,7 @@ import type { Workflow, WorkflowExecution } from '@/core/workflows/types'
 import { handleError } from '@/core/errors'
 import { builtinWorkflows } from '@/core/workflows/builtin-workflows'
 import type { PluginInstance } from '@/core/plugin-system/types'
+import { usePluginStore } from '@/store/plugin-store'
 
 interface WorkflowState {
   workflows: Workflow[]
@@ -22,6 +23,28 @@ interface WorkflowState {
 
 const generateId = () => 'wf-' + Math.random().toString(36).substring(2, 10) + Date.now().toString(36)
 
+function extractPluginWorkflows(plugins: PluginInstance[]): Workflow[] {
+  return plugins.flatMap((plugin) => {
+    const manifest = plugin.manifest as PluginInstance['manifest'] & {
+      workflows?: Array<Record<string, any>>
+    }
+
+    if (!manifest.workflows || !Array.isArray(manifest.workflows)) return []
+
+    return manifest.workflows.map((def: any, i: number) => ({
+      id: `plugin-${plugin.id}-wf-${i}`,
+      name: def.name,
+      icon: def.icon || '🔌',
+      description: def.description || '',
+      category: def.category || '插件',
+      trigger: def.trigger || { type: 'manual' },
+      steps: def.steps || [],
+      builtin: true,
+      created_at: Date.now(),
+    } as Workflow))
+  })
+}
+
 export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   workflows: [],
   currentExecution: null,
@@ -35,22 +58,11 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       // 从已安装插件中提取工作流
       let pluginWorkflows: Workflow[] = []
       try {
-        const plugins = await invoke<PluginInstance[]>('plugin_list')
-        pluginWorkflows = plugins.flatMap((plugin) => {
-          const manifest = plugin.manifest as any
-          if (!manifest.workflows || !Array.isArray(manifest.workflows)) return []
-          return manifest.workflows.map((def: any, i: number) => ({
-            id: `plugin-${plugin.id}-wf-${i}`,
-            name: def.name,
-            icon: def.icon || '🔌',
-            description: def.description || '',
-            category: def.category || '插件',
-            trigger: def.trigger || { type: 'manual' },
-            steps: def.steps || [],
-            builtin: true,
-            created_at: Date.now(),
-          } as Workflow))
-        })
+        const pluginStore = usePluginStore.getState()
+        if (pluginStore.plugins.length === 0) {
+          await pluginStore.loadPlugins()
+        }
+        pluginWorkflows = extractPluginWorkflows(usePluginStore.getState().plugins)
       } catch { /* 插件系统可能未就绪 */ }
 
       const allWorkflows = [...builtinWorkflows, ...pluginWorkflows, ...customWorkflows]

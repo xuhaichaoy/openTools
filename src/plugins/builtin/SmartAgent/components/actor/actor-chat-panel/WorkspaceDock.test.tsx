@@ -206,6 +206,19 @@ describe("DialogWorkspaceDock child session actions", () => {
     expect(findButton(container!, "聚焦子会话")).toBeNull();
   });
 
+  it("prefers delegation projection summaries for compact thread rows", () => {
+    ({ container, root } = renderWorkspace({
+      contractDelegation: {
+        ...BASE_DELEGATION,
+        statusSummary: "主 Agent 已收到第一轮审查摘要，线程仍可复用。",
+        nextStepHint: "主 Agent 可按需补充新的审查范围。",
+      },
+    }));
+
+    expect(container?.textContent).toContain("主 Agent 已收到第一轮审查摘要，线程仍可复用。");
+    expect(container?.textContent).toContain("主 Agent 可按需补充新的审查范围。");
+  });
+
   it("explains continuation and compaction on the context panel", () => {
     ({ container, root } = renderWorkspace({
       panel: "context",
@@ -265,12 +278,17 @@ describe("DialogWorkspaceDock child session actions", () => {
     }));
 
     expect(container?.textContent).toContain("这页在说明什么");
+    expect(container?.textContent).toContain("执行概览");
     expect(container?.textContent).toContain("本轮会沿用什么");
+    expect(container?.textContent).toContain("记忆如何回补");
     expect(container?.textContent).toContain("系统如何接住复杂房间");
     expect(container?.textContent).toContain("续跑细项清单");
-    expect(container?.textContent).toContain("成本观察");
+    expect(container?.textContent).toContain("成本观察（调试）");
     expect(container?.textContent).toContain("当前会优先沿用工作区 /tmp/project");
     expect(container?.textContent).toContain("还有 1 条待回复/待确认交互");
+    expect(container?.textContent).toContain("本轮会自动回补 3 条长期记忆/历史轨迹");
+    expect(container?.textContent).toContain("长期记忆会回补 2 条：默认中文回答；注意保留暖色调");
+    expect(container?.textContent).toContain("会话轨迹会回补 1 条：Dialog：继续完成首页实现");
     expect(container?.textContent).toContain("较早的 12 条消息、1 条子任务线索、2 条产物线索已经压缩为结构化续跑摘要");
     expect(findButton(container!, "展开详情")).not.toBeNull();
 

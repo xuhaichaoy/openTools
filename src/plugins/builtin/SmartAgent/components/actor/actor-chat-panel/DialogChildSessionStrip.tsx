@@ -105,7 +105,12 @@ export function DialogChildSessionStrip({
         {visibleSessions.map((session) => {
           const actorLabel = actorNameById?.get(session.targetActorId) ?? session.targetActorId;
           const statusMeta = getChildSessionStatusMeta(session.status);
-          const detail = summarizeText(session.lastError ?? session.lastResultSummary) ?? "主 Agent 保留中的专项上下文";
+          const detail = summarizeText(
+            session.statusSummary
+            ?? session.nextStepHint
+            ?? session.lastError
+            ?? session.lastResultSummary,
+          ) ?? "主 Agent 保留中的专项上下文";
           const isPendingSteer = pendingSteerSessionRunId === session.runId;
 
           return (

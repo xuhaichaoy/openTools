@@ -134,4 +134,52 @@ describe("ChannelManager route persistence", () => {
       text: "继续沿用之前上下文",
     }));
   });
+
+  it("keeps IM conversation history when unregistering a channel by default", async () => {
+    const manager = new ChannelManager();
+    const fakeChannel = createFakeChannel();
+    const disposeChannel = vi.fn();
+    (manager as unknown as {
+      channels: Map<string, { channel: IMChannel; config: ChannelConfig; unsubscribe?: () => void }>;
+      _conversationRuntimeManager: { disposeChannel: (channelId: string) => void };
+    }).channels.set("ch-1", {
+      channel: fakeChannel,
+      config: createChannelConfig(),
+      unsubscribe: vi.fn(),
+    });
+    (manager as unknown as {
+      _conversationRuntimeManager: { disposeChannel: (channelId: string) => void };
+    })._conversationRuntimeManager = {
+      disposeChannel,
+    };
+
+    await manager.unregister("ch-1");
+
+    expect(disposeChannel).not.toHaveBeenCalled();
+    expect(fakeChannel.disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("still supports explicitly clearing IM conversation history on unregister", async () => {
+    const manager = new ChannelManager();
+    const fakeChannel = createFakeChannel();
+    const disposeChannel = vi.fn();
+    (manager as unknown as {
+      channels: Map<string, { channel: IMChannel; config: ChannelConfig; unsubscribe?: () => void }>;
+      _conversationRuntimeManager: { disposeChannel: (channelId: string) => void };
+    }).channels.set("ch-1", {
+      channel: fakeChannel,
+      config: createChannelConfig(),
+      unsubscribe: vi.fn(),
+    });
+    (manager as unknown as {
+      _conversationRuntimeManager: { disposeChannel: (channelId: string) => void };
+    })._conversationRuntimeManager = {
+      disposeChannel,
+    };
+
+    await manager.unregister("ch-1", { clearConversations: true });
+
+    expect(disposeChannel).toHaveBeenCalledWith("ch-1");
+    expect(fakeChannel.disconnect).toHaveBeenCalledTimes(1);
+  });
 });

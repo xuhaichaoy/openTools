@@ -17,6 +17,7 @@ import {
   getRuntimeIndicatorMeta,
   shouldPulseRuntimeIndicator,
 } from "@/core/agent/context-runtime/runtime-indicator";
+import { hasRuntimeSessionCompactionPreview } from "@/core/agent/context-runtime/runtime-session-compaction";
 
 const MODE_ORDER: RuntimeSessionMode[] = ["cluster", "agent", "dialog", "im_conversation", "ask"];
 
@@ -58,6 +59,7 @@ interface RuntimeIndicatorItem {
   onOpen: () => void;
   color: string;
   pulse: boolean;
+  compacted: boolean;
 }
 
 export function ClusterFloatingIndicator() {
@@ -148,6 +150,7 @@ export function ClusterFloatingIndicator() {
           onOpen: () => openRuntimeSession(mode, record.sessionId),
           color: meta.color,
           pulse: shouldPulseRuntimeIndicator(record),
+          compacted: hasRuntimeSessionCompactionPreview(record),
         });
       }
     }
@@ -194,6 +197,11 @@ export function ClusterFloatingIndicator() {
           </span>
           <span className="font-medium text-[var(--color-text-primary)]">{item.label}</span>
           <span className="text-[var(--color-text-secondary)] max-w-[200px] truncate">{item.detail}</span>
+          {item.compacted && (
+            <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-bg-tertiary)] px-1.5 py-0.5 text-[10px] leading-none text-[var(--color-text-secondary)]">
+              已整理
+            </span>
+          )}
           {item.elapsed && (
             <span className="text-[var(--color-text-tertiary)] tabular-nums">{item.elapsed}</span>
           )}

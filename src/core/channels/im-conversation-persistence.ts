@@ -1,5 +1,6 @@
 import type {
   DialogMessage,
+  DialogRoomCompactionState,
   AgentCapabilities,
   ExecutionPolicy,
   MiddlewareOverrides,
@@ -7,15 +8,33 @@ import type {
   ToolPolicy,
 } from "@/core/agent/actor/types";
 import {
-  cloneCollaborationSnapshot,
+  createEmptyCollaborationSnapshot,
+  cloneCollaborationSnapshotForPersistence,
   sanitizeCollaborationSnapshot,
 } from "@/core/collaboration/persistence";
-import type { CollaborationSessionSnapshot } from "@/core/collaboration/types";
+import { cloneExecutionContract } from "@/core/collaboration/execution-contract";
+import type {
+  CollaborationSessionSnapshot,
+  ExecutionContract,
+} from "@/core/collaboration/types";
+import { createLogger } from "@/core/logger";
 import type { ChannelIncomingMessage, ChannelType } from "./types";
 
 const IM_CONVERSATION_PERSIST_KEY = "mtools-im-conversation-runtime-v2";
 const IM_CONVERSATION_LEGACY_PERSIST_KEY = "mtools-im-conversation-runtime-v1";
 const IM_CONVERSATION_PERSIST_VERSION = 2;
+const log = createLogger("IMConversationPersistence");
+
+const PERSIST_FALLBACK_ATTEMPTS: Array<{
+  label: string;
+  maxDialogHistoryMessages?: number;
+  maxActorSessionHistoryEntries?: number;
+}> = [
+  { label: "full-history" },
+  { label: "dialog-600", maxDialogHistoryMessages: 600, maxActorSessionHistoryEntries: 24 },
+  { label: "dialog-300", maxDialogHistoryMessages: 300, maxActorSessionHistoryEntries: 16 },
+  { label: "dialog-120", maxDialogHistoryMessages: 120, maxActorSessionHistoryEntries: 8 },
+];
 
 export interface PersistedIMPendingMessage {
   messageId: string;
@@ -31,6 +50,10 @@ export interface PersistedIMPendingMessage {
     name: string;
     downloadCode: string;
   }>;
+  approvalState?: "awaiting_user" | "approved_ready";
+  approvalInteractionId?: string;
+  approvalMessageId?: string;
+  approvalContract?: ExecutionContract;
 }
 
 export interface PersistedIMActorConfig {
@@ -62,6 +85,7 @@ export interface PersistedIMRuntimeRecord {
   lastInput?: PersistedIMPendingMessage;
   queuedMessages?: PersistedIMPendingMessage[];
   dialogHistory: DialogMessage[];
+  dialogRoomCompaction?: DialogRoomCompactionState;
   actorConfigs: PersistedIMActorConfig[];
   collaborationSnapshot?: CollaborationSessionSnapshot;
 }
@@ -80,6 +104,180 @@ export interface PersistedIMConversationRuntimeSnapshot {
   savedAt: number;
   conversations: PersistedIMConversationStateRecord[];
   runtimes: PersistedIMRuntimeRecord[];
+}
+
+function cloneDialogMessage(message: DialogMessage): DialogMessage {
+  return {
+    ...message,
+    ...(message.images ? { images: [...message.images] } : {}),
+    ...(message.attachments ? { attachments: message.attachments.map((item) => ({ ...item })) } : {}),
+    ...(message.options ? { options: [...message.options] } : {}),
+    ...(message.appliedMemoryPreview ? { appliedMemoryPreview: [...message.appliedMemoryPreview] } : {}),
+    ...(message.appliedTranscriptPreview ? { appliedTranscriptPreview: [...message.appliedTranscriptPreview] } : {}),
+    ...(message.approvalRequest
+      ? {
+          approvalRequest: {
+            ...message.approvalRequest,
+            ...(message.approvalRequest.details
+              ? { details: message.approvalRequest.details.map((detail) => ({ ...detail })) }
+              : {}),
+            ...(message.approvalRequest.decisionOptions
+              ? {
+                  decisionOptions: message.approvalRequest.decisionOptions.map((option) => ({ ...option })),
+                }
+              : {}),
+          },
+        }
+      : {}),
+  };
+}
+
+function clonePersistedPendingMessage(
+  message: PersistedIMPendingMessage,
+): PersistedIMPendingMessage {
+  return {
+    ...message,
+    ...(message.images ? { images: [...message.images] } : {}),
+    ...(message.attachments ? { attachments: message.attachments.map((item) => ({ ...item })) } : {}),
+    ...(message.approvalContract ? { approvalContract: cloneExecutionContract(message.approvalContract) } : {}),
+  };
+}
+
+function cloneDialogRoomCompaction(
+  state: DialogRoomCompactionState,
+): DialogRoomCompactionState {
+  return {
+    ...state,
+    preservedIdentifiers: [...state.preservedIdentifiers],
+    ...(state.triggerReasons ? { triggerReasons: [...state.triggerReasons] } : {}),
+  };
+}
+
+function sanitizeDialogRoomCompaction(input: unknown): DialogRoomCompactionState | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const record = input as Partial<DialogRoomCompactionState>;
+  if (
+    typeof record.summary !== "string"
+    || typeof record.compactedMessageCount !== "number"
+    || typeof record.compactedSpawnedTaskCount !== "number"
+    || typeof record.compactedArtifactCount !== "number"
+    || !Array.isArray(record.preservedIdentifiers)
+    || typeof record.updatedAt !== "number"
+  ) {
+    return undefined;
+  }
+
+  return {
+    summary: record.summary,
+    compactedMessageCount: record.compactedMessageCount,
+    compactedSpawnedTaskCount: record.compactedSpawnedTaskCount,
+    compactedArtifactCount: record.compactedArtifactCount,
+    preservedIdentifiers: record.preservedIdentifiers
+      .filter((item): item is string => typeof item === "string"),
+    ...(Array.isArray(record.triggerReasons)
+      ? {
+          triggerReasons: record.triggerReasons
+            .filter((item): item is string => typeof item === "string"),
+        }
+      : {}),
+    ...(typeof record.memoryFlushNoteId === "string" ? { memoryFlushNoteId: record.memoryFlushNoteId } : {}),
+    ...(typeof record.memoryConfirmedCount === "number" ? { memoryConfirmedCount: record.memoryConfirmedCount } : {}),
+    ...(typeof record.memoryQueuedCount === "number" ? { memoryQueuedCount: record.memoryQueuedCount } : {}),
+    updatedAt: record.updatedAt,
+  };
+}
+
+function limitTail<T>(items: readonly T[] | undefined, maxEntries?: number): T[] | undefined {
+  if (!items?.length) return undefined;
+  if (typeof maxEntries !== "number" || maxEntries <= 0 || items.length <= maxEntries) {
+    return [...items];
+  }
+  return [...items.slice(-maxEntries)];
+}
+
+function safeJSONStringify(value: unknown): string {
+  const seen = new WeakSet<object>();
+  return JSON.stringify(value, (_key, currentValue) => {
+    if (typeof currentValue === "function") {
+      return undefined;
+    }
+    if (typeof currentValue === "object" && currentValue !== null) {
+      if (seen.has(currentValue)) {
+        return undefined;
+      }
+      seen.add(currentValue);
+    }
+    return currentValue;
+  });
+}
+
+function buildPersistableCollaborationSnapshot(
+  snapshot: CollaborationSessionSnapshot | undefined,
+): CollaborationSessionSnapshot | undefined {
+  if (!snapshot) return undefined;
+  const persistedSnapshot = cloneCollaborationSnapshotForPersistence(snapshot);
+  // IM persistence stores visible transcript in dialogHistory to avoid duplicating
+  // the same history inside collaborationSnapshot and blowing the localStorage quota.
+  persistedSnapshot.dialogMessages = [];
+  return persistedSnapshot;
+}
+
+function buildPersistableRuntimeRecord(
+  runtime: PersistedIMRuntimeRecord,
+  attempt?: {
+    maxDialogHistoryMessages?: number;
+    maxActorSessionHistoryEntries?: number;
+  },
+): PersistedIMRuntimeRecord {
+  const snapshotDialogHistory = runtime.collaborationSnapshot?.dialogMessages ?? [];
+  const effectiveDialogHistory = snapshotDialogHistory.length > runtime.dialogHistory.length
+    ? snapshotDialogHistory
+    : runtime.dialogHistory;
+  const limitedDialogHistory = limitTail(
+    effectiveDialogHistory.map((message) => cloneDialogMessage(message)),
+    attempt?.maxDialogHistoryMessages,
+  ) ?? [];
+  const persistedCollaborationSnapshot = buildPersistableCollaborationSnapshot(runtime.collaborationSnapshot);
+
+  return {
+    ...runtime,
+    ...(runtime.lastInput ? { lastInput: clonePersistedPendingMessage(runtime.lastInput) } : {}),
+    ...(runtime.queuedMessages?.length
+      ? {
+          queuedMessages: runtime.queuedMessages.map((message) => clonePersistedPendingMessage(message)),
+        }
+        : {}),
+    dialogHistory: limitedDialogHistory,
+    ...(runtime.dialogRoomCompaction
+      ? { dialogRoomCompaction: cloneDialogRoomCompaction(runtime.dialogRoomCompaction) }
+      : {}),
+    actorConfigs: runtime.actorConfigs.map((config) => ({
+      ...config,
+      ...(config.sessionHistory
+        ? {
+            sessionHistory: limitTail(config.sessionHistory, attempt?.maxActorSessionHistoryEntries),
+          }
+        : {}),
+    })),
+    ...(persistedCollaborationSnapshot
+      ? { collaborationSnapshot: persistedCollaborationSnapshot }
+      : {}),
+  };
+}
+
+function buildPersistableSnapshot(
+  snapshot: PersistedIMConversationRuntimeSnapshot,
+  attempt?: {
+    maxDialogHistoryMessages?: number;
+    maxActorSessionHistoryEntries?: number;
+  },
+): PersistedIMConversationRuntimeSnapshot {
+  return {
+    version: IM_CONVERSATION_PERSIST_VERSION,
+    savedAt: snapshot.savedAt,
+    conversations: snapshot.conversations.map((conversation) => ({ ...conversation })),
+    runtimes: snapshot.runtimes.map((runtime) => buildPersistableRuntimeRecord(runtime, attempt)),
+  };
 }
 
 function canUseLocalStorage(): boolean {
@@ -131,6 +329,22 @@ function sanitizePendingMessage(input: unknown): PersistedIMPendingMessage | und
             ))
             .map((item) => ({ name: item.name, downloadCode: item.downloadCode })),
         }
+      : {}),
+    ...(record.approvalState === "awaiting_user" || record.approvalState === "approved_ready"
+      ? { approvalState: record.approvalState }
+      : {}),
+    ...(typeof record.approvalInteractionId === "string" ? { approvalInteractionId: record.approvalInteractionId } : {}),
+    ...(typeof record.approvalMessageId === "string" ? { approvalMessageId: record.approvalMessageId } : {}),
+    ...(record.approvalContract && typeof record.approvalContract === "object"
+      ? (() => {
+          const sanitized = sanitizeCollaborationSnapshot({
+            ...createEmptyCollaborationSnapshot("im_conversation"),
+            activeContract: record.approvalContract,
+          }, "im_conversation");
+          return sanitized.activeContract
+            ? { approvalContract: cloneExecutionContract(sanitized.activeContract) }
+            : {};
+        })()
       : {}),
   };
 }
@@ -209,6 +423,9 @@ function sanitizeRuntimeRecord(input: unknown): PersistedIMRuntimeRecord | null 
         }
       : {}),
     dialogHistory: Array.isArray(record.dialogHistory) ? record.dialogHistory as DialogMessage[] : [],
+    ...(sanitizeDialogRoomCompaction(record.dialogRoomCompaction)
+      ? { dialogRoomCompaction: sanitizeDialogRoomCompaction(record.dialogRoomCompaction) }
+      : {}),
     actorConfigs: record.actorConfigs
       .map((item) => sanitizeActorConfig(item))
       .filter((item): item is PersistedIMActorConfig => Boolean(item)),
@@ -266,7 +483,8 @@ export function loadPersistedIMConversationRuntimeSnapshot(): PersistedIMConvers
         .map((item) => sanitizeRuntimeRecord(item))
         .filter((item): item is PersistedIMRuntimeRecord => Boolean(item)),
     };
-  } catch {
+  } catch (error) {
+    log.warn("Failed to load persisted IM conversation snapshot", error);
     return null;
   }
 }
@@ -275,21 +493,36 @@ export function savePersistedIMConversationRuntimeSnapshot(
   snapshot: PersistedIMConversationRuntimeSnapshot,
 ): void {
   if (!canUseLocalStorage()) return;
-  try {
-    localStorage.setItem(IM_CONVERSATION_PERSIST_KEY, JSON.stringify({
-      ...snapshot,
-      version: IM_CONVERSATION_PERSIST_VERSION,
-      runtimes: snapshot.runtimes.map((runtime) => ({
-        ...runtime,
-        ...(runtime.collaborationSnapshot
-          ? { collaborationSnapshot: cloneCollaborationSnapshot(runtime.collaborationSnapshot) }
-          : {}),
-      })),
-    }));
-    localStorage.removeItem(IM_CONVERSATION_LEGACY_PERSIST_KEY);
-  } catch {
-    // Ignore persistence failures for best-effort IM recovery.
+  let lastError: unknown = null;
+  for (const [index, attempt] of PERSIST_FALLBACK_ATTEMPTS.entries()) {
+    try {
+      const payload = safeJSONStringify(buildPersistableSnapshot(snapshot, attempt));
+      localStorage.setItem(IM_CONVERSATION_PERSIST_KEY, payload);
+      localStorage.removeItem(IM_CONVERSATION_LEGACY_PERSIST_KEY);
+      if (index > 0) {
+        log.warn("Persisted IM conversation snapshot with compacted history window", {
+          attempt: attempt.label,
+          payloadBytes: payload.length,
+        });
+      }
+      return;
+    } catch (error) {
+      lastError = error;
+      if (index < PERSIST_FALLBACK_ATTEMPTS.length - 1) {
+        log.warn("IM conversation snapshot exceeded storage budget, retrying with compaction", {
+          failedAttempt: attempt.label,
+          nextAttempt: PERSIST_FALLBACK_ATTEMPTS[index + 1]?.label,
+          runtimeCount: snapshot.runtimes.length,
+        });
+      }
+    }
   }
+
+  log.error("Failed to persist IM conversation snapshot after fallback compaction", {
+    error: lastError,
+    runtimeCount: snapshot.runtimes.length,
+    conversationCount: snapshot.conversations.length,
+  });
 }
 
 export function clearPersistedIMConversationRuntimeSnapshot(): void {

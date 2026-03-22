@@ -202,3 +202,5 @@ export function LoginModal() {
     </div>
   );
 }
+
+export default LoginModal;

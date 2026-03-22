@@ -105,8 +105,14 @@ export function useAppInitializer(
     useAIStore.getState().loadHistory();
     useAgentStore.getState().loadHistory();
     useAgentStore.getState().loadScheduledTasks();
-    useWorkflowStore.getState().loadWorkflows();
-    usePluginStore.getState().loadPlugins();
+    void usePluginStore
+      .getState()
+      .loadPlugins()
+      .finally(() => {
+        if (!cancelled) {
+          void useWorkflowStore.getState().loadWorkflows();
+        }
+      });
     useBookmarkStore.getState().loadBookmarks();
 
     invoke("workflow_scheduler_start").catch((e) =>

@@ -13,7 +13,6 @@ import {
   buildExecutionContractFromDialogPlan,
   cloneExecutionContract,
   doesExecutionContractMatchActorRoster,
-  toDialogExecutionPlan,
 } from "./execution-contract";
 import {
   cloneCollaborationSnapshot,
@@ -162,9 +161,6 @@ export interface CollaborationSessionControllerSystemAdapter {
   clearExecutionContract?(): void;
   getDialogMessagesSnapshot?(): DialogMessage[];
   getDialogHistory?(): readonly DialogMessage[];
-  armDialogExecutionPlan?(plan: ReturnType<typeof toDialogExecutionPlan>): void;
-  restoreDialogExecutionPlan?(plan: ReturnType<typeof toDialogExecutionPlan>): void;
-  clearDialogExecutionPlan?(): void;
   send?(
     from: string,
     to: string,
@@ -240,28 +236,14 @@ export class CollaborationSessionController {
   applyExecutionContract(contract: ExecutionContract | null): void {
     this.activeContract = contract ? cloneExecutionContract(contract) : null;
     if (!this.activeContract) {
-      if (this.system.clearExecutionContract) {
-        this.system.clearExecutionContract();
-      } else {
-        this.system.clearDialogExecutionPlan?.();
-      }
+      this.system.clearExecutionContract?.();
       this.refreshProjection();
       return;
     }
     if (this.activeContract.state === "sealed") {
-      if (this.system.armExecutionContract) {
-        this.system.armExecutionContract(this.activeContract);
-      } else {
-        const dialogPlan = toDialogExecutionPlan(this.activeContract);
-        this.system.armDialogExecutionPlan?.(dialogPlan);
-      }
+      this.system.armExecutionContract?.(this.activeContract);
     } else {
-      if (this.system.restoreExecutionContract) {
-        this.system.restoreExecutionContract(this.activeContract);
-      } else {
-        const dialogPlan = toDialogExecutionPlan(this.activeContract);
-        this.system.restoreDialogExecutionPlan?.(dialogPlan);
-      }
+      this.system.restoreExecutionContract?.(this.activeContract);
     }
     this.refreshProjection();
   }
@@ -275,11 +257,7 @@ export class CollaborationSessionController {
       this.activeContract = null;
       this.queuedFollowUps = [];
       this.focusedChildSessionId = null;
-      if (this.system.clearExecutionContract) {
-        this.system.clearExecutionContract();
-      } else {
-        this.system.clearDialogExecutionPlan?.();
-      }
+      this.system.clearExecutionContract?.();
       this.system.focusSpawnedSession?.(null);
       this.currentSnapshot = createEmptyCollaborationSnapshot(this.surface);
       return this.snapshot();
@@ -293,26 +271,12 @@ export class CollaborationSessionController {
     this.focusedChildSessionId = sanitized.focusedChildSessionId;
     if (this.activeContract) {
       if (this.activeContract.state === "sealed") {
-        if (this.system.armExecutionContract) {
-          this.system.armExecutionContract(this.activeContract);
-        } else {
-          const dialogPlan = toDialogExecutionPlan(this.activeContract);
-          this.system.armDialogExecutionPlan?.(dialogPlan);
-        }
+        this.system.armExecutionContract?.(this.activeContract);
       } else {
-        if (this.system.restoreExecutionContract) {
-          this.system.restoreExecutionContract(this.activeContract);
-        } else {
-          const dialogPlan = toDialogExecutionPlan(this.activeContract);
-          this.system.restoreDialogExecutionPlan?.(dialogPlan);
-        }
+        this.system.restoreExecutionContract?.(this.activeContract);
       }
     } else {
-      if (this.system.clearExecutionContract) {
-        this.system.clearExecutionContract();
-      } else {
-        this.system.clearDialogExecutionPlan?.();
-      }
+      this.system.clearExecutionContract?.();
     }
     this.system.focusSpawnedSession?.(this.focusedChildSessionId);
     return this.syncFromSystem();
@@ -709,6 +673,7 @@ export class CollaborationSessionController {
     if (liveContract) {
       return cloneExecutionContract(liveContract);
     }
+    // Legacy fallback: only used when restoring old snapshots that never saved a contract.
     const dialogPlan = this.system.getDialogExecutionPlan?.() ?? null;
     if (!dialogPlan) return null;
     const contract = buildExecutionContractFromDialogPlan({

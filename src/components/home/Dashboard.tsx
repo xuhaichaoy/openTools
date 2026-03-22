@@ -8,6 +8,7 @@ import {
 } from "@/components/icons/animated";
 import { useMemo } from "react";
 import { HOME_VIEW_ID } from "@/core/navigation/view-stack";
+import { useShallow } from "zustand/shallow";
 
 interface DashboardProps {
   onNavigate: (view: string) => void;
@@ -23,7 +24,14 @@ const PRIMARY_LAUNCHER_PLUGIN_IDS = [
 
 export function Dashboard({ onNavigate }: DashboardProps) {
   const { setSelectedIndex, setSearchValue, recentTools, addRecentTool } =
-    useAppStore();
+    useAppStore(
+      useShallow((s) => ({
+        setSelectedIndex: s.setSelectedIndex,
+        setSearchValue: s.setSearchValue,
+        recentTools: s.recentTools,
+        addRecentTool: s.addRecentTool,
+      })),
+    );
 
   const allTools = useMemo(() => {
     return PRIMARY_LAUNCHER_PLUGIN_IDS

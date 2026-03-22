@@ -79,6 +79,9 @@ export function deriveCollaborationPresentationState(params: {
     mode: session.mode,
     focusable: session.focusable,
     resumable: session.resumable,
+    statusSummary: session.statusSummary,
+    nextStepHint: session.nextStepHint,
+    updatedAt: session.updatedAt,
   }));
 
   let status: CollaborationPresentationState["status"] = "idle";

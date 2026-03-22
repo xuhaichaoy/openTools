@@ -57,6 +57,7 @@ export function ClusterPlanApprovalDialog({
 
   const effectivePresentation: ApprovalDialogPresentation = presentation ?? { kind: "plan" };
   const isBoundaryPresentation = effectivePresentation.kind === "boundary";
+  const isPlanPresentation = effectivePresentation.kind === "plan";
 
   return (
     <div className="fixed inset-0 z-[9998] flex items-center justify-center bg-black/40">
@@ -69,17 +70,17 @@ export function ClusterPlanApprovalDialog({
       >
         <div className="px-5 py-4 border-b border-[var(--color-border)]">
           <div className="flex items-center gap-2">
-            <ShieldCheck className="w-5 h-5 text-[var(--color-accent)]" />
-            <h3 className="text-sm font-semibold">
+              <ShieldCheck className="w-5 h-5 text-[var(--color-accent)]" />
+              <h3 className="text-sm font-semibold">
               {isBoundaryPresentation
                 ? (effectivePresentation.title ?? "审批协作边界")
-                : "审批执行计划"}
+                : (effectivePresentation.title ?? "审批执行计划")}
             </h3>
           </div>
           <p className="text-xs text-[var(--color-text-secondary)] mt-1">
             {isBoundaryPresentation
               ? (effectivePresentation.description ?? "请确认本轮协作边界与授权范围是否可以执行（Enter 批准，Esc 拒绝）")
-              : "请确认以下计划是否可以执行（Enter 批准，Esc 拒绝）"}
+              : (effectivePresentation.description ?? "请确认以下计划是否可以执行（Enter 批准，Esc 拒绝）")}
           </p>
         </div>
 
@@ -147,6 +148,23 @@ export function ClusterPlanApprovalDialog({
             </>
           ) : (
             <>
+              {isPlanPresentation && effectivePresentation.riskLabel && (
+                <div className="inline-flex items-center rounded-full bg-amber-500/10 px-2 py-1 text-[10px] text-amber-700">
+                  {effectivePresentation.riskLabel}
+                </div>
+              )}
+              {isPlanPresentation && effectivePresentation.notes && effectivePresentation.notes.length > 0 && (
+                <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2">
+                  <div className="text-[10px] font-medium text-amber-700">自动审核提示</div>
+                  <div className="mt-2 space-y-1.5">
+                    {effectivePresentation.notes.map((note, index) => (
+                      <p key={`${index}-${note}`} className="text-xs leading-relaxed text-amber-800/90">
+                        {note}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div className="text-xs text-[var(--color-text-secondary)]">
                 模式: {plan.mode === "multi_role" ? "多角色协作" : "并行分治"} · {plan.steps.length} 个步骤
               </div>

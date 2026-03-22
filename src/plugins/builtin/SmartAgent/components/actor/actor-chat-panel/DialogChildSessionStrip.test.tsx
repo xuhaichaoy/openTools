@@ -25,6 +25,8 @@ function createSession(
     announceToParent: input.announceToParent ?? true,
     lastResultSummary: input.lastResultSummary,
     lastError: input.lastError,
+    statusSummary: input.statusSummary,
+    nextStepHint: input.nextStepHint,
     startedAt: input.startedAt ?? 1,
     updatedAt: input.updatedAt ?? 2,
     endedAt: input.endedAt,
@@ -64,6 +66,7 @@ describe("DialogChildSessionStrip", () => {
               runId: "run-1",
               targetActorId: "reviewer",
               label: "Patch review",
+              statusSummary: "主 Agent 已收到第一轮审查摘要。",
               lastResultSummary: "第一轮审查已完成，等待继续。",
             }),
           ]}
@@ -75,7 +78,7 @@ describe("DialogChildSessionStrip", () => {
 
     expect(container?.textContent).toContain("Patch review");
     expect(container?.textContent).toContain("Reviewer");
-    expect(container?.textContent).toContain("第一轮审查已完成");
+    expect(container?.textContent).toContain("主 Agent 已收到第一轮审查摘要");
     expect(container?.textContent).toContain("后台线程 1");
     expect(container?.textContent).toContain("由主 Agent 在后台保留");
   });

@@ -271,10 +271,11 @@ export class ClusterOrchestrator {
         const approvalResult = await this.approvalPhase(plan);
         if (approvalResult.status === "rejected") {
           this.setStatus("done");
+          const rejectionReason = approvalResult.reason?.trim() || "用户取消了执行计划。";
           return {
             planId: plan.id,
             mode: plan.mode,
-            finalAnswer: "用户取消了执行计划。",
+            finalAnswer: rejectionReason,
             agentInstances: [],
             totalDurationMs: Date.now() - startTime,
           };

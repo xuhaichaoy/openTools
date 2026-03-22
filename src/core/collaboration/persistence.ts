@@ -190,6 +190,16 @@ export function cloneCollaborationSessionSnapshot(
   };
 }
 
+export function cloneCollaborationSnapshotForPersistence(
+  snapshot: CollaborationSessionSnapshot,
+): CollaborationSessionSnapshot {
+  const cloned = cloneCollaborationSessionSnapshot(snapshot);
+  // contractDelegations is a derived runtime projection; restore rebuilds it from
+  // activeContract + spawnedTasks, so we keep persisted snapshots contract-first.
+  cloned.contractDelegations = [];
+  return cloned;
+}
+
 export function sanitizeCollaborationSessionSnapshot(
   snapshot: CollaborationSessionSnapshot,
 ): CollaborationSessionSnapshot {

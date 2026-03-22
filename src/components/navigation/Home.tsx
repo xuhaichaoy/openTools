@@ -19,6 +19,7 @@ import { useDragWindow } from "@/hooks/useDragWindow";
 import { registry } from "@/core/plugin-system/registry";
 import { usePluginStore } from "@/store/plugin-store";
 import { isBuiltinPluginInstallRequired } from "@/plugins/builtin";
+import { useMemo } from "react";
 
 interface FeatureCard {
   id: string;
@@ -43,12 +44,16 @@ interface HomeProps {
 
 export function Home({ onNavigate, onBack }: HomeProps) {
   const { onMouseDown } = useDragWindow();
-  const { plugins } = usePluginStore();
-  const installedOfficialSlugSet = new Set(
-    plugins
-      .filter((plugin) => plugin.enabled && plugin.source === "official")
-      .map((plugin) => plugin.slug?.toLowerCase())
-      .filter(Boolean) as string[],
+  const plugins = usePluginStore((s) => s.plugins);
+  const installedOfficialSlugSet = useMemo(
+    () =>
+      new Set(
+        plugins
+          .filter((plugin) => plugin.enabled && plugin.source === "official")
+          .map((plugin) => plugin.slug?.toLowerCase())
+          .filter(Boolean) as string[],
+      ),
+    [plugins],
   );
 
   const hasTool = (viewId: string) => {

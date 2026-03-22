@@ -13,6 +13,7 @@ import type {
 import type { ChannelType, ChannelIncomingMessage } from "@/core/channels/types";
 
 export type IMConversationRuntimeStatus = "idle" | "running" | "waiting" | "queued";
+export type IMConversationApprovalStatus = "none" | "awaiting_user" | "approved" | "rejected";
 
 export interface IMConversationSessionActorPreview {
   id: string;
@@ -20,7 +21,23 @@ export interface IMConversationSessionActorPreview {
   status: ActorStatus;
 }
 
-export interface IMConversationSessionPreview {
+export interface IMConversationApprovalPreview {
+  approvalStatus?: IMConversationApprovalStatus;
+  approvalSummary?: string;
+  approvalRiskLabel?: string;
+  pendingApprovalReason?: string;
+}
+
+export interface IMConversationCompactionPreview {
+  roomCompactionSummaryPreview?: string;
+  roomCompactionUpdatedAt?: number;
+  roomCompactionMessageCount?: number;
+  roomCompactionTaskCount?: number;
+  roomCompactionArtifactCount?: number;
+  roomCompactionPreservedIdentifiers?: string[];
+}
+
+export interface IMConversationSessionPreview extends IMConversationApprovalPreview, IMConversationCompactionPreview {
   sessionId: string;
   runtimeKey: string;
   channelId: string;
@@ -44,7 +61,7 @@ export interface IMConversationSessionPreview {
   dialogHistory: DialogMessage[];
 }
 
-export interface IMConversationTopicSnapshot {
+export interface IMConversationTopicSnapshot extends IMConversationApprovalPreview, IMConversationCompactionPreview {
   runtimeKey: string;
   topicId: string;
   sessionId: string;
@@ -58,7 +75,7 @@ export interface IMConversationTopicSnapshot {
   lastInputText?: string;
 }
 
-export interface IMConversationSnapshot {
+export interface IMConversationSnapshot extends IMConversationApprovalPreview, IMConversationCompactionPreview {
   key: string;
   channelId: string;
   channelType: ChannelType;
@@ -245,7 +262,10 @@ function areChildSessionPreviewEqual(
     && left.status === right.status
     && left.mode === right.mode
     && left.focusable === right.focusable
-    && left.resumable === right.resumable;
+    && left.resumable === right.resumable
+    && left.statusSummary === right.statusSummary
+    && left.nextStepHint === right.nextStepHint
+    && left.updatedAt === right.updatedAt;
 }
 
 function areChildSessionPreviewListsEqual(
@@ -268,6 +288,16 @@ function areTopicSnapshotsEqual(left: IMConversationTopicSnapshot, right: IMConv
     && left.pendingInteractionCount === right.pendingInteractionCount
     && left.queuedFollowUpCount === right.queuedFollowUpCount
     && left.contractState === right.contractState
+    && left.approvalStatus === right.approvalStatus
+    && left.approvalSummary === right.approvalSummary
+    && left.approvalRiskLabel === right.approvalRiskLabel
+    && left.pendingApprovalReason === right.pendingApprovalReason
+    && left.roomCompactionSummaryPreview === right.roomCompactionSummaryPreview
+    && left.roomCompactionUpdatedAt === right.roomCompactionUpdatedAt
+    && left.roomCompactionMessageCount === right.roomCompactionMessageCount
+    && left.roomCompactionTaskCount === right.roomCompactionTaskCount
+    && left.roomCompactionArtifactCount === right.roomCompactionArtifactCount
+    && areStringListsEqual(left.roomCompactionPreservedIdentifiers, right.roomCompactionPreservedIdentifiers)
     && left.startedAt === right.startedAt
     && left.lastInputText === right.lastInputText;
 }
@@ -302,6 +332,16 @@ function areSessionPreviewsEqual(
     && left.pendingInteractionCount === right.pendingInteractionCount
     && left.queuedFollowUpCount === right.queuedFollowUpCount
     && left.contractState === right.contractState
+    && left.approvalStatus === right.approvalStatus
+    && left.approvalSummary === right.approvalSummary
+    && left.approvalRiskLabel === right.approvalRiskLabel
+    && left.pendingApprovalReason === right.pendingApprovalReason
+    && left.roomCompactionSummaryPreview === right.roomCompactionSummaryPreview
+    && left.roomCompactionUpdatedAt === right.roomCompactionUpdatedAt
+    && left.roomCompactionMessageCount === right.roomCompactionMessageCount
+    && left.roomCompactionTaskCount === right.roomCompactionTaskCount
+    && left.roomCompactionArtifactCount === right.roomCompactionArtifactCount
+    && areStringListsEqual(left.roomCompactionPreservedIdentifiers, right.roomCompactionPreservedIdentifiers)
     && left.startedAt === right.startedAt
     && left.lastInputText === right.lastInputText
     && areChildSessionPreviewListsEqual(left.childSessionsPreview, right.childSessionsPreview)
@@ -343,6 +383,16 @@ function areConversationSnapshotsEqual(
     && left.pendingInteractionCount === right.pendingInteractionCount
     && left.queuedFollowUpCount === right.queuedFollowUpCount
     && left.contractState === right.contractState
+    && left.approvalStatus === right.approvalStatus
+    && left.approvalSummary === right.approvalSummary
+    && left.approvalRiskLabel === right.approvalRiskLabel
+    && left.pendingApprovalReason === right.pendingApprovalReason
+    && left.roomCompactionSummaryPreview === right.roomCompactionSummaryPreview
+    && left.roomCompactionUpdatedAt === right.roomCompactionUpdatedAt
+    && left.roomCompactionMessageCount === right.roomCompactionMessageCount
+    && left.roomCompactionTaskCount === right.roomCompactionTaskCount
+    && left.roomCompactionArtifactCount === right.roomCompactionArtifactCount
+    && areStringListsEqual(left.roomCompactionPreservedIdentifiers, right.roomCompactionPreservedIdentifiers)
     && left.backgroundTopicCount === right.backgroundTopicCount
     && areChildSessionPreviewListsEqual(left.childSessionsPreview, right.childSessionsPreview)
     && areTopicSnapshotListsEqual(left.topics, right.topics);

@@ -4,6 +4,10 @@ import type { ClusterPlan, PlanApprovalRequest } from "@/core/agent/cluster/type
 export type ApprovalDialogPresentation =
   | {
       kind: "plan";
+      title?: string;
+      description?: string;
+      riskLabel?: string;
+      notes?: string[];
     }
   | {
       kind: "boundary";

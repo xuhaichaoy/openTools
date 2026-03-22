@@ -61,13 +61,15 @@ import {
   unregisterRuntimeAbortHandler,
   useRuntimeStateStore,
 } from "@/core/agent/context-runtime/runtime-state";
+import { buildRuntimeSessionCompactionPreview } from "@/core/agent/context-runtime/runtime-session-compaction";
 import { CollaborationSessionController } from "@/core/collaboration/session-controller";
 import {
   cloneCollaborationSnapshot,
+  cloneCollaborationSnapshotForPersistence,
   createEmptyCollaborationSnapshot,
 } from "@/core/collaboration/persistence";
 import {
-  buildExecutionContractDraftFromLegacyPlan,
+  buildExecutionContractFromDialogPlan,
   cloneExecutionContract,
   sealExecutionContract,
 } from "@/core/collaboration/execution-contract";
@@ -87,7 +89,7 @@ const log = createLogger("ActorStore");
 
 const LEGACY_STORAGE_KEY = "dialog_session";
 const ACTIVE_SESSION_POINTER_KEY = "dialog_session_pointer";
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 
 interface PersistedSpawnedTask {
   runId: string;
@@ -250,7 +252,6 @@ function buildSessionSnapshot(
   focusedSpawnedSessionRunId?: string | null,
   coordinatorActorId?: string | null,
   executionContract?: ExecutionContract | null,
-  dialogExecutionPlan?: DialogExecutionPlan | null,
   approvalCache?: Record<string, "always-allow" | "ask-every-time" | "deny">,
   sourceHandoff?: AICenterHandoff | null,
   contextSnapshot?: DialogContextSnapshot | null,
@@ -258,7 +259,6 @@ function buildSessionSnapshot(
   collaborationSnapshot?: CollaborationSessionSnapshot | null,
   sessionId?: string,
 ): PersistedSession {
-  const shouldPersistLegacyDialogPlan = !executionContract && !collaborationSnapshot?.activeContract;
   const persistedTasks: PersistedSpawnedTask[] = [];
   if (spawnedTasks) {
     for (const r of spawnedTasks.values()) {
@@ -334,12 +334,13 @@ function buildSessionSnapshot(
     focusedSpawnedSessionRunId,
     coordinatorActorId,
     executionContract: executionContract ? cloneExecutionContract(executionContract) : null,
-    dialogExecutionPlan: shouldPersistLegacyDialogPlan ? dialogExecutionPlan : null,
     approvalCache,
     sourceHandoff: cloneAICenterHandoff(sourceHandoff),
     contextSnapshot: cloneDialogContextSnapshot(contextSnapshot),
     dialogRoomCompaction: cloneDialogRoomCompaction(dialogRoomCompaction),
-    collaborationSnapshot: collaborationSnapshot ? cloneCollaborationSnapshot(collaborationSnapshot) : null,
+    collaborationSnapshot: collaborationSnapshot
+      ? cloneCollaborationSnapshotForPersistence(collaborationSnapshot)
+      : null,
     sessionId,
     savedAt: Date.now(),
   };
@@ -393,21 +394,22 @@ function buildLegacyCollaborationSnapshot(
   persisted: PersistedSession,
 ): CollaborationSessionSnapshot {
   const base = createEmptyCollaborationSnapshot("local_dialog");
-  const draft = !persisted.executionContract && persisted.dialogExecutionPlan
-    ? buildExecutionContractDraftFromLegacyPlan(persisted.dialogExecutionPlan, "local_dialog")
+  const actorRoster = buildCollaborationActorRoster(system.getAll().map(snapshotActor));
+  const legacyContract = !persisted.executionContract && persisted.dialogExecutionPlan
+    ? buildExecutionContractFromDialogPlan({
+        surface: "local_dialog",
+        plan: persisted.dialogExecutionPlan,
+        actorRoster,
+        input: { content: persisted.dialogExecutionPlan.summary ?? "" },
+      })
     : null;
 
   return {
     ...base,
     activeContract: persisted.executionContract
       ? cloneExecutionContract(persisted.executionContract)
-      : draft
-        ? sealExecutionContract(
-            draft,
-            buildCollaborationActorRoster(system.getAll().map(snapshotActor)),
-            { content: persisted.dialogExecutionPlan?.summary ?? "" },
-            persisted.dialogExecutionPlan?.approvedAt ?? persisted.savedAt,
-          )
+      : legacyContract
+        ? cloneExecutionContract(legacyContract)
         : null,
     queuedFollowUps: (persisted.queuedFollowUps ?? []).map((item) => ({
       id: item.id,
@@ -939,6 +941,7 @@ function syncDialogRuntimeState(params: {
     workspaceRoot,
     waitingStage,
     status,
+    ...buildRuntimeSessionCompactionPreview(params.system.getDialogRoomCompaction()),
   });
 }
 
@@ -969,6 +972,7 @@ function buildDialogSpawnedRuntimeSummary(
   record: SpawnedTaskRecord,
   actorNameById: ReadonlyMap<string, string>,
   options?: {
+    collaborationSnapshot?: CollaborationSessionSnapshot | null;
     actorSessionHistoryById?: ReadonlyMap<string, Array<{ role: "user" | "assistant"; content: string; timestamp: number }>>;
     actorTodosById?: Readonly<Record<string, TodoItem[]>>;
     dialogHistory?: readonly DialogMessage[];
@@ -976,6 +980,20 @@ function buildDialogSpawnedRuntimeSummary(
   },
 ): string | undefined {
   const targetName = actorNameById.get(record.targetActorId) ?? record.targetActorId;
+  const projectedChildSession = options?.collaborationSnapshot?.childSessions.find((session) => session.runId === record.runId);
+  const projectedDelegation = options?.collaborationSnapshot?.contractDelegations.find((delegation) => delegation.runId === record.runId);
+  const projectedSummary = summarizeAISessionRuntimeText(
+    [
+      projectedChildSession?.statusSummary,
+      projectedChildSession?.nextStepHint ? `下一步：${projectedChildSession.nextStepHint}` : "",
+      !projectedChildSession?.statusSummary && projectedDelegation?.statusSummary ? projectedDelegation.statusSummary : "",
+      !projectedChildSession?.nextStepHint && projectedDelegation?.nextStepHint ? `下一步：${projectedDelegation.nextStepHint}` : "",
+    ].filter(Boolean).join(" · "),
+    180,
+  );
+  if (projectedSummary) {
+    return projectedSummary;
+  }
   const checkpoint = buildSpawnedTaskCheckpoint({
     task: record,
     targetActor: {
@@ -1038,6 +1056,7 @@ function syncDialogSpawnedRuntimeSessions(
   spawnedTasks: readonly SpawnedTaskRecord[],
   actors?: ReadonlyArray<{ id: string; roleName: string }>,
   options?: {
+    collaborationSnapshot?: CollaborationSessionSnapshot | null;
     actorSessionHistoryById?: ReadonlyMap<string, Array<{ role: "user" | "assistant"; content: string; timestamp: number }>>;
     actorTodosById?: Readonly<Record<string, TodoItem[]>>;
     dialogHistory?: readonly DialogMessage[];
@@ -1157,10 +1176,8 @@ function loadActiveSessionPointer(): string | null {
 async function saveSessionSnapshot(system: ActorSystem): Promise<void> {
   const controller = useActorSystemStore.getState().controller;
   const collaborationSnapshot = controller?.syncFromSystem() ?? useActorSystemStore.getState().collaborationSnapshot;
-  const activeContractForPersistence = collaborationSnapshot?.activeContract ?? system.getActiveExecutionContract();
-  const legacyDialogPlanForPersistence = activeContractForPersistence
-    ? null
-    : system.getDialogExecutionPlan();
+  const activeContractForPersistence = collaborationSnapshot?.activeContract
+    ?? system.getActiveExecutionContract();
   const queuedFollowUps = collaborationSnapshot
     ? mapCollaborationQueuedFollowUps(collaborationSnapshot)
     : useActorSystemStore.getState().queuedFollowUps;
@@ -1176,7 +1193,6 @@ async function saveSessionSnapshot(system: ActorSystem): Promise<void> {
     focusedSpawnedSessionRunId,
     system.getCoordinatorId(),
     activeContractForPersistence,
-    legacyDialogPlanForPersistence,
     getSessionApprovalsSnapshot(),
     useActorSystemStore.getState().sourceHandoff,
     useActorSystemStore.getState().contextSnapshot,
@@ -1252,7 +1268,12 @@ function restoreSnapshot(system: ActorSystem, persisted: PersistedSession): void
   if (!persisted.collaborationSnapshot && persisted.executionContract) {
     system.restoreExecutionContract(persisted.executionContract);
   } else if (!persisted.collaborationSnapshot && persisted.dialogExecutionPlan) {
-    system.restoreDialogExecutionPlan(persisted.dialogExecutionPlan);
+    system.restoreExecutionContract(buildExecutionContractFromDialogPlan({
+      surface: "local_dialog",
+      plan: persisted.dialogExecutionPlan,
+      actorRoster: buildCollaborationActorRoster(system.getAll().map(snapshotActor)),
+      input: { content: persisted.dialogExecutionPlan.summary ?? "" },
+    }));
   }
   restoreSessionApprovals(persisted.approvalCache);
   if (persisted.artifacts?.length) {
@@ -2094,6 +2115,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
       sourceHandoff,
     });
     syncDialogSpawnedRuntimeSessions(system.sessionId, spawnedTasks, actors, {
+      collaborationSnapshot,
       actorSessionHistoryById: new Map(
         liveActors.map((actor) => [actor.id, actor.getSessionHistory()]),
       ),

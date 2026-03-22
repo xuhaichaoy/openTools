@@ -323,6 +323,67 @@ describe("ActorSystem.broadcastAndResolve", () => {
       }),
     });
   });
+
+  it("uses legacy dialog plan APIs as contract-only compatibility wrappers", () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+    system.spawn(buildActorConfig("specialist", "Specialist"));
+
+    system.restoreDialogExecutionPlan({
+      id: "legacy-plan-restore",
+      routingMode: "coordinator",
+      summary: "恢复旧版 dialog plan",
+      approvedAt: 1,
+      initialRecipientActorIds: ["coordinator"],
+      participantActorIds: ["coordinator", "specialist"],
+      coordinatorActorId: "coordinator",
+      allowedMessagePairs: [
+        { fromActorId: "coordinator", toActorId: "specialist" },
+        { fromActorId: "specialist", toActorId: "coordinator" },
+      ],
+      allowedSpawnPairs: [
+        { fromActorId: "coordinator", toActorId: "specialist" },
+      ],
+      plannedSpawns: [
+        {
+          id: "delegation-restore-1",
+          targetActorId: "specialist",
+          task: "恢复后补充验证",
+        },
+      ],
+      state: "active",
+      activatedAt: 123,
+      sourceMessageId: "msg-restore-1",
+    });
+
+    expect(system.getActiveExecutionContract()).toMatchObject({
+      contractId: "legacy-plan-restore",
+      state: "active",
+      plannedDelegations: [
+        expect.objectContaining({
+          id: "delegation-restore-1",
+          targetActorId: "specialist",
+        }),
+      ],
+    });
+    expect(system.getDialogExecutionPlan()).toMatchObject({
+      id: "legacy-plan-restore",
+      state: "active",
+      activatedAt: 123,
+      sourceMessageId: "msg-restore-1",
+      plannedSpawns: [
+        expect.objectContaining({
+          id: "delegation-restore-1",
+          targetActorId: "specialist",
+        }),
+      ],
+    });
+
+    system.clearExecutionContract();
+
+    expect(system.getActiveExecutionContract()).toBeNull();
+    expect(system.getDialogExecutionPlan()).toBeNull();
+  });
 });
 
 describe("ActorSystem.replyToMessage", () => {
@@ -480,7 +541,53 @@ describe("ActorSystem.spawnTask", () => {
 
     expect(system.getActiveExecutionContract()?.participantActorIds).toContain(record.targetActorId);
     expect(system.getDialogExecutionPlan()?.participantActorIds).toContain(record.targetActorId);
-    expect(system.snapshot().dialogExecutionPlan?.participantActorIds).toContain(record.targetActorId);
+    expect(system.snapshot().executionContract?.participantActorIds).toContain(record.targetActorId);
+  });
+
+  it("keeps the derived legacy dialog plan view in sync when participants are removed", () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+    system.spawn(buildActorConfig("specialist", "Specialist"));
+
+    system.armDialogExecutionPlan({
+      id: "plan-remove-specialist",
+      routingMode: "coordinator",
+      summary: "Coordinator 协调 Specialist",
+      approvedAt: Date.now(),
+      initialRecipientActorIds: ["coordinator"],
+      participantActorIds: ["coordinator", "specialist"],
+      coordinatorActorId: "coordinator",
+      allowedMessagePairs: [
+        { fromActorId: "coordinator", toActorId: "specialist" },
+        { fromActorId: "specialist", toActorId: "coordinator" },
+      ],
+      allowedSpawnPairs: [
+        { fromActorId: "coordinator", toActorId: "specialist" },
+      ],
+      plannedSpawns: [
+        {
+          id: "delegation-remove-1",
+          targetActorId: "specialist",
+          task: "补充验证",
+        },
+      ],
+      state: "armed",
+    });
+
+    system.kill("specialist");
+
+    expect(system.getActiveExecutionContract()).toMatchObject({
+      participantActorIds: ["coordinator"],
+      allowedMessagePairs: [],
+      allowedSpawnPairs: [],
+      plannedDelegations: [],
+    });
+    expect(system.getDialogExecutionPlan()).toMatchObject({
+      participantActorIds: ["coordinator"],
+      allowedMessagePairs: [],
+      allowedSpawnPairs: [],
+      plannedSpawns: [],
+    });
   });
 
   it("rejects nested child-agent creation so only the top-level coordinator can keep delegating", () => {

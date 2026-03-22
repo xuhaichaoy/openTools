@@ -350,7 +350,7 @@ export class ChannelManager {
   async register(config: ChannelConfig): Promise<void> {
     if (this.channels.has(config.id)) {
       log.warn(`Channel ${config.id} already registered, reconnecting...`);
-      await this.unregister(config.id);
+      await this.unregister(config.id, { clearConversations: false });
     }
 
     const factory = channelFactories[config.type];
@@ -373,11 +373,13 @@ export class ChannelManager {
   }
 
   /** 注销通道 */
-  async unregister(id: string): Promise<void> {
+  async unregister(id: string, options?: { clearConversations?: boolean }): Promise<void> {
     const entry = this.channels.get(id);
     if (!entry) return;
 
-    this._conversationRuntimeManager?.disposeChannel(id);
+    if (options?.clearConversations) {
+      this._conversationRuntimeManager?.disposeChannel(id);
+    }
     for (const [key, route] of this._conversationRoutes) {
       if (route.channelId === id) {
         this._progressEmitter?.clear(id, route.conversationId);
@@ -388,7 +390,9 @@ export class ChannelManager {
     entry.unsubscribe?.();
     await entry.channel.disconnect();
     this.channels.delete(id);
-    log.info(`Channel unregistered: ${id}`);
+    log.info(`Channel unregistered: ${id}`, {
+      clearConversations: options?.clearConversations === true,
+    });
   }
 
   /** 获取指定通道 */

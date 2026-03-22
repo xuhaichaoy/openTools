@@ -13,25 +13,17 @@ import {
   AppWindow,
   Rocket,
 } from "lucide-react";
-import {
-  PluginsIcon,
-  WorkflowsIcon,
-  BookmarksIcon,
-} from "@/components/icons/animated";
 import { createElement } from "react";
 
 import { registry } from "@/core/plugin-system/registry";
+import { RuntimeSearchIndex } from "@/core/search/runtime-search-index";
 import { useWorkflowStore } from "@/store/workflow-store";
 import { usePluginStore } from "@/store/plugin-store";
 import { useBookmarkStore } from "@/store/bookmark-store";
-import { useAppStore } from "@/store/app-store";
 import { commandRouter } from "@/shell/CommandRouter";
 import { useFileSearch } from "@/shell/useFileSearch";
 import { useAppSearch } from "@/shell/useAppSearch";
 import { formatFileSize } from "@/shell/ResultBuilder";
-import { isBuiltinPluginInstallRequired } from "@/plugins/builtin";
-
-// ── Pure helpers (no hooks, no deps) ──
 
 const ICON_CLASS = "w-6 h-6";
 
@@ -92,22 +84,20 @@ interface FileResult {
   file_type: string;
 }
 
-function fileResultToItem(f: FileResult): ResultItem {
-  const sizeStr = f.is_dir ? "文件夹" : formatFileSize(f.size);
+function fileResultToItem(file: FileResult): ResultItem {
+  const sizeStr = file.is_dir ? "文件夹" : formatFileSize(file.size);
   return {
-    id: `file-${f.path}`,
-    title: f.name,
-    description: `${f.path}${f.modified ? ` · ${f.modified}` : ""}${sizeStr ? ` · ${sizeStr}` : ""}`,
-    icon: getFileIcon(f.file_type),
-    color: getFileColor(f.file_type),
+    id: `file-${file.path}`,
+    title: file.name,
+    description: `${file.path}${file.modified ? ` · ${file.modified}` : ""}${sizeStr ? ` · ${sizeStr}` : ""}`,
+    icon: getFileIcon(file.file_type),
+    color: getFileColor(file.file_type),
     category: "文件",
     action: () => {
-      invoke("file_open", { path: f.path });
+      void invoke("file_open", { path: file.path });
     },
   };
 }
-
-// ── Hook ──
 
 export function useSearchResults(
   searchValue: string,
@@ -116,188 +106,88 @@ export function useSearchResults(
 ) {
   const fileResults = useFileSearch(searchValue);
   const appResults = useAppSearch(searchValue);
-
   const commandCtx = useMemo(() => ({ pushView }), [pushView]);
 
-  // Subscribe to reactive store slices so results update when data changes
-  const workflows = useWorkflowStore((s) => s.workflows);
-  const externalPlugins = usePluginStore((s) => s.plugins);
-  const bookmarks = useBookmarkStore((s) => s.bookmarks);
+  const workflows = useWorkflowStore((state) => state.workflows);
+  const externalPlugins = usePluginStore((state) => state.plugins);
+  const bookmarks = useBookmarkStore((state) => state.bookmarks);
+
+  const runtimeSearchIndex = useMemo(
+    () =>
+      new RuntimeSearchIndex({
+        builtinPlugins: registry.getSearchable(),
+        externalPlugins,
+        bookmarks,
+        pushView,
+        handleDirectColorPicker,
+      }),
+    [externalPlugins, bookmarks, pushView, handleDirectColorPicker],
+  );
 
   const filteredResults = useMemo((): ResultItem[] => {
-    // These reactive slices intentionally participate in memo invalidation so
-    // search results refresh when workflows/plugins/bookmarks change.
     void workflows;
-    void externalPlugins;
-    void bookmarks;
 
     if (!searchValue) return [];
 
-    // 1) Prefix commands
-    const cmdResults = commandRouter.match(searchValue, commandCtx);
-    if (cmdResults !== null) return cmdResults;
+    const commandResults = commandRouter.match(searchValue, commandCtx);
+    if (commandResults !== null) return commandResults;
 
-    // 2) File search prefix
     if (searchValue.startsWith("f ")) {
       return fileResults.map(fileResultToItem);
     }
 
-    // 3) App search prefix
     if (searchValue.startsWith("app ")) {
-      return appResults.map((a) => ({
-        id: `app-${a.path}`,
-        title: a.name,
-        description: a.path,
+      return appResults.map((app) => ({
+        id: `app-${app.path}`,
+        title: app.name,
+        description: app.path,
         icon: createElement(Rocket, { className: ICON_CLASS }),
         color: "text-green-500 bg-green-500/10",
         category: "应用",
         action: () => {
-          invoke("file_open", { path: a.path });
+          void invoke("file_open", { path: app.path });
         },
       }));
     }
 
-    // 4) Workflow match
     const workflowStore = useWorkflowStore.getState();
     const matchedWorkflow = workflowStore.matchByKeyword(searchValue);
     if (matchedWorkflow) {
-      return [
-        {
-          id: `wf-${matchedWorkflow.id}`,
-          title: `${matchedWorkflow.icon} 运行: ${matchedWorkflow.name}`,
-          description: matchedWorkflow.description,
-          icon: createElement(WorkflowsIcon, { className: ICON_CLASS }),
-          color: "text-teal-500 bg-teal-500/10",
-          category: "工作流",
-          action: () => {
-            workflowStore.executeWorkflow(matchedWorkflow.id);
-            pushView("workflows");
-          },
-        },
-      ];
+      return [runtimeSearchIndex.buildWorkflowResult(matchedWorkflow, workflowStore.executeWorkflow)];
     }
 
-    // 5) Built-in plugins
-    const builtinResults: ResultItem[] = registry
-      .search(searchValue)
-      .map(({ plugin }) => ({
-        id: plugin.id,
-        title: plugin.name,
-        description: plugin.description,
-        icon: plugin.icon,
-        color: plugin.color,
-        category: plugin.category,
-        action: () => pushView(plugin.viewId),
-      }));
+    const builtinResults = runtimeSearchIndex.searchBuiltinPlugins(searchValue);
+    const pluginResults = runtimeSearchIndex.searchExternalPlugins(searchValue);
+    const bookmarkItems = runtimeSearchIndex.searchBookmarks(searchValue);
+    const shortcutItems = runtimeSearchIndex.searchShortcuts(searchValue);
 
-    // 6) External plugins
-    const pluginMatches = usePluginStore
-      .getState()
-      .matchInput(searchValue)
-      .filter((pr) => {
-        const slug = pr.plugin.slug?.toLowerCase();
-        if (
-          pr.plugin.source === "official" &&
-          slug &&
-          isBuiltinPluginInstallRequired(slug) &&
-          registry.getByViewId(slug)
-        ) {
-          return false;
-        }
-        return true;
-      });
-    const BUILTIN_COLOR_PICKER = "color-picker";
-    const pluginResults: ResultItem[] = pluginMatches.map((pr) => {
-      const code = pr.feature.code;
-      const isColorPicker = code === BUILTIN_COLOR_PICKER;
-      const slug = pr.plugin.slug?.toLowerCase();
-      const openBuiltin = () => {
-        if (
-          slug &&
-          isBuiltinPluginInstallRequired(slug) &&
-          registry.getByViewId(slug)
-        ) {
-          pushView(slug);
-          return true;
-        }
-        return false;
-      };
-      return {
-        id: `plugin-${pr.plugin.id}-${code}`,
-        title: pr.plugin.manifest.pluginName,
-        description: pr.feature.explain,
-        icon: createElement(PluginsIcon, { className: ICON_CLASS }),
-        color: "text-orange-500 bg-orange-500/10",
-        category: "插件",
-        action: isColorPicker
-          ? handleDirectColorPicker
-          : () => {
-              if (openBuiltin()) return;
-              if (pr.plugin.manifest.mtools?.openMode === "embed") {
-                useAppStore.getState().requestEmbed({
-                  pluginId: pr.plugin.id,
-                  featureCode: code,
-                  title: pr.feature.explain || pr.plugin.manifest.pluginName,
-                });
-                return;
-              }
-              usePluginStore.getState().openPlugin(pr.plugin.id, code);
-            },
-      };
-    });
-
-    // 7) App results interleaved
-    const appItems: ResultItem[] = appResults.map((a) => ({
-      id: `app-${a.path}`,
-      title: a.name,
-      description: a.path,
+    const appItems: ResultItem[] = appResults.map((app) => ({
+      id: `app-${app.path}`,
+      title: app.name,
+      description: app.path,
       icon: createElement(Rocket, { className: ICON_CLASS }),
       color: "text-green-500 bg-green-500/10",
       category: "应用",
       action: () => {
-        invoke("file_open", { path: a.path });
-      },
-    }));
-
-    const fileItems: ResultItem[] = fileResults.map(fileResultToItem);
-
-    // 8) Bookmarks interleaved
-    const bmStore = useBookmarkStore.getState();
-    const bookmarkPluginInstalled = Boolean(registry.getByViewId("bookmarks"));
-    const bmMatches =
-      bookmarkPluginInstalled && searchValue.length >= 2
-        ? bmStore.searchBookmarks(searchValue).slice(0, 6)
-        : [];
-    const bookmarkItems: ResultItem[] = bmMatches.map((bm) => ({
-      id: `bm-${bm.id}`,
-      title: bm.title,
-      description: bm.url,
-      icon: createElement(BookmarksIcon, { className: ICON_CLASS }),
-      color: "text-blue-500 bg-blue-500/10",
-      category: "书签",
-      action: () => {
-        bmStore.markVisited(bm.id);
-        invoke("open_url", { url: bm.url });
+        void invoke("file_open", { path: app.path });
       },
     }));
 
     return [
       ...appItems,
+      ...shortcutItems,
       ...builtinResults,
       ...pluginResults,
-      ...fileItems,
+      ...fileResults.map(fileResultToItem),
       ...bookmarkItems,
     ];
   }, [
     searchValue,
     commandCtx,
-    handleDirectColorPicker,
     fileResults,
     appResults,
-    pushView,
     workflows,
-    externalPlugins,
-    bookmarks,
+    runtimeSearchIndex,
   ]);
 
   const getFilteredResults = useCallback(() => filteredResults, [filteredResults]);

@@ -1,7 +1,5 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, Suspense, lazy } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { LoginModal } from "@/components/auth/LoginModal";
-import { SyncManager } from "@/components/auth/SyncManager";
 import { GlobalAskUserDialog } from "@/components/global/GlobalAskUserDialog";
 import { GlobalConfirmDialog } from "@/components/global/GlobalConfirmDialog";
 import { GlobalClusterPlanApprovalDialog } from "@/components/global/GlobalClusterPlanApprovalDialog";
@@ -29,9 +27,18 @@ import { useAppInitializer } from "@/hooks/useAppInitializer";
 import { useSearchResults } from "@/hooks/useSearchResults";
 import { usePluginLifecycle } from "@/hooks/usePluginLifecycle";
 import { resolveWindowResizeBucket } from "@/core/ui/local-ui-preferences";
+import { useShallow } from "zustand/shallow";
 
 // 初始化：注册所有内置插件
 registry.registerAll(resolveBuiltinPlugins());
+
+const SyncManager = lazy(() =>
+  import("@/components/auth/SyncManager"),
+);
+
+const LoginModal = lazy(() =>
+  import("@/components/auth/LoginModal"),
+);
 
 function App() {
   return <MainApp />;
@@ -50,7 +57,18 @@ function MainApp() {
     popView,
     replaceView,
     resetToMain,
-  } = useAppStore();
+  } = useAppStore(
+    useShallow((s) => ({
+      mode: s.mode,
+      searchValue: s.searchValue,
+      setWindowExpanded: s.setWindowExpanded,
+      resetSearchState: s.resetSearchState,
+      pushView: s.pushView,
+      popView: s.popView,
+      replaceView: s.replaceView,
+      resetToMain: s.resetToMain,
+    })),
+  );
 
   const [contextText, setContextText] = useState("");
   const [windowFocused, setWindowFocused] = useState(() =>
@@ -204,8 +222,10 @@ function MainApp() {
         contextText={contextText}
       />
 
-      <LoginModal />
-      <SyncManager />
+      <Suspense fallback={null}>
+        <LoginModal />
+        <SyncManager />
+      </Suspense>
       <GlobalConfirmDialog />
       <GlobalClusterPlanApprovalDialog />
       <GlobalAskUserDialog />

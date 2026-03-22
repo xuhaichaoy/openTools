@@ -1,4 +1,5 @@
 import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
+import { buildRuntimeSessionCompactionHint } from "./runtime-session-compaction";
 import type { RuntimeSessionMode, RuntimeSessionRecord } from "./runtime-state";
 
 export interface RuntimeIndicatorMeta {
@@ -107,12 +108,21 @@ export function buildRuntimeIndicatorDetail(
   modeCount = 1,
 ): string {
   const status = getRuntimeIndicatorStatus(record);
+  const compactionHint = buildRuntimeSessionCompactionHint(record);
   const displayDetail = record.displayDetail?.trim();
   if (displayDetail) {
-    return `${status} · ${displayDetail}`;
+    return compactionHint
+      ? `${status} · ${displayDetail} · ${compactionHint}`
+      : `${status} · ${displayDetail}`;
   }
   if (record.mode === "cluster" && modeCount > 1) {
     return `${status} · ${modeCount} 个任务`;
+  }
+  if (compactionHint) {
+    const queryPreview = summarizeAISessionRuntimeText(record.query, 24);
+    return queryPreview
+      ? `${status} · ${compactionHint} · ${queryPreview}`
+      : `${status} · ${compactionHint}`;
   }
   const queryPreview = summarizeAISessionRuntimeText(record.query, 32);
   if (!queryPreview) return status;

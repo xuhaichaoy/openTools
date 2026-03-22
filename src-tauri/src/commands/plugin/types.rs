@@ -1,7 +1,8 @@
 //! 插件类型定义 — PluginManifest / PluginInfo / PluginCache 等
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
@@ -87,18 +88,56 @@ pub struct PluginInfo {
     pub data_profile: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct MtpluginResourceMeta {
+    pub file_len: u64,
+    pub modified_ms: u128,
+    pub etag: String,
+    pub last_modified: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MtpluginResourceCacheInfo {
+    pub is_temporary: bool,
+    pub is_dev: bool,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+}
+
+pub struct PluginRuntimeCache {
+    pub initialized: bool,
+    pub dirty: bool,
+    pub plugin_list: Vec<PluginInfo>,
+    pub allowed_mtplugin_roots: Vec<PathBuf>,
+    pub resource_meta: HashMap<String, MtpluginResourceMeta>,
+}
+
+impl PluginRuntimeCache {
+    pub fn new() -> Self {
+        Self {
+            initialized: false,
+            dirty: true,
+            plugin_list: Vec::new(),
+            allowed_mtplugin_roots: Vec::new(),
+            resource_meta: HashMap::new(),
+        }
+    }
+}
+
 pub struct PluginCache {
-    pub plugins: Vec<PluginInfo>,
+    pub settings_loaded: bool,
     pub dev_dirs: HashSet<String>,
     pub disabled_ids: HashSet<String>,
+    pub runtime: PluginRuntimeCache,
 }
 
 impl PluginCache {
     pub fn new() -> Self {
         Self {
-            plugins: Vec::new(),
+            settings_loaded: false,
             dev_dirs: HashSet::new(),
             disabled_ids: HashSet::new(),
+            runtime: PluginRuntimeCache::new(),
         }
     }
 }

@@ -8,7 +8,7 @@ use tauri::{Emitter, Manager, State};
 
 const SSH_KEEPALIVE_INTERVAL_SECS: u32 = 3;
 const TRANSPORT_READ_ERROR_RETRY_LIMIT: u32 = 400;
-const SSH_LOOP_IDLE_SLEEP_MS: u64 = 10;
+const SSH_EVENT_WAIT_MS: u64 = 100;
 
 fn is_transient_io_error(err: &std::io::Error) -> bool {
     matches!(
@@ -50,6 +50,35 @@ fn append_recent_output(recent: &mut String, chunk: &str, max_len: usize) {
     if recent.len() > max_len {
         let drain_len = recent.len() - max_len;
         recent.drain(..drain_len);
+    }
+}
+
+fn handle_shell_msg(
+    msg: ShellMsg,
+    pending_write: &mut Vec<u8>,
+    channel: &mut ssh2::Channel,
+    session_id_for_log: &str,
+) -> Result<(), String> {
+    match msg {
+        ShellMsg::Data(data) => {
+            if !data.is_empty() {
+                pending_write.extend_from_slice(&data);
+            }
+            Ok(())
+        }
+        ShellMsg::Resize(cols, rows) => {
+            if let Err(e) = channel.request_pty_size(cols, rows, None, None) {
+                log_ssh_warn(
+                    session_id_for_log,
+                    &format!(
+                        "request_pty_size failed cols={} rows={} err={}",
+                        cols, rows, e
+                    ),
+                );
+            }
+            Ok(())
+        }
+        ShellMsg::Close => Err("received close signal".to_string()),
     }
 }
 
@@ -383,12 +412,10 @@ pub async fn ssh_shell_open(
         let mut keepalive_success_count: u64 = 0;
         let mut transport_read_error_count: u32 = 0;
         let mut write_drain_error_count: u32 = 0;
-        let mut flush_drain_error_count: u32 = 0;
         let mut pending_write: Vec<u8> = Vec::new();
         let mut recent_output = String::new();
         log_ssh_info(&session_id_for_log, "shell thread started");
         let close_reason = 'shell_loop: loop {
-            let mut did_work = false;
             if last_keepalive.elapsed() >= Duration::from_secs(SSH_KEEPALIVE_INTERVAL_SECS as u64) {
                 // Keepalive failures can be transient on unstable networks.
                 // Do not force-close the shell here; real disconnects are still
@@ -414,36 +441,35 @@ pub async fn ssh_shell_open(
                     }
                 }
                 last_keepalive = Instant::now();
-                did_work = true;
             }
 
-            // 1) Process all pending write/resize messages
+            if pending_write.is_empty() {
+                match rx.recv_timeout(Duration::from_millis(SSH_EVENT_WAIT_MS)) {
+                    Ok(msg) => {
+                        if let Err(reason) = handle_shell_msg(
+                            msg,
+                            &mut pending_write,
+                            &mut channel,
+                            &session_id_for_log,
+                        ) {
+                            break 'shell_loop reason;
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        break 'shell_loop "shell command channel disconnected".to_string();
+                    }
+                }
+            }
+
             while let Ok(msg) = rx.try_recv() {
-                did_work = true;
-                match msg {
-                    ShellMsg::Data(data) => {
-                        if !data.is_empty() {
-                            pending_write.extend_from_slice(&data);
-                        }
-                    }
-                    ShellMsg::Resize(c, r) => {
-                        // Resize failures should not tear down the shell.
-                        if let Err(e) = channel.request_pty_size(c, r, None, None) {
-                            log_ssh_warn(
-                                &session_id_for_log,
-                                &format!("request_pty_size failed cols={} rows={} err={}", c, r, e),
-                            );
-                        }
-                    }
-                    ShellMsg::Close => {
-                        log_ssh_info(&session_id_for_log, "received close signal");
-                        session.set_timeout(0);
-                        let _ = channel.close();
-                        let _ = session.disconnect(None, "bye", None);
-                        let _ = app.emit(&event_closed, ());
-                        log_ssh_info(&session_id_for_log, "shell thread closed by signal");
-                        return;
-                    }
+                if let Err(reason) = handle_shell_msg(
+                    msg,
+                    &mut pending_write,
+                    &mut channel,
+                    &session_id_for_log,
+                ) {
+                    break 'shell_loop reason;
                 }
             }
 
@@ -465,7 +491,6 @@ pub async fn ssh_shell_open(
                     Ok(n) => {
                         pending_write.drain(..n);
                         write_drain_error_count = 0;
-                        did_work = true;
                     }
                     Err(ref e) if is_transient_channel_write_error(e) => {
                         write_drain_error_count += 1;
@@ -485,27 +510,6 @@ pub async fn ssh_shell_open(
                         break 'shell_loop format!("channel.write fatal error: {}", e);
                     }
                 }
-            } else {
-                match channel.flush() {
-                    Ok(_) => {
-                        flush_drain_error_count = 0;
-                    }
-                    Err(ref e) if is_transient_channel_write_error(e) => {
-                        flush_drain_error_count += 1;
-                        if flush_drain_error_count == 1 || flush_drain_error_count % 20 == 0 {
-                            log_ssh_warn(
-                                &session_id_for_log,
-                                &format!(
-                                    "flush transient/drain error count={} err={}",
-                                    flush_drain_error_count, e
-                                ),
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        break 'shell_loop format!("flush fatal error: {}", e);
-                    }
-                }
             }
 
             // 2) Read stdout (non-blocking)
@@ -514,7 +518,6 @@ pub async fn ssh_shell_open(
                 Ok(n) => {
                     transport_read_error_count = 0;
                     write_drain_error_count = 0;
-                    flush_drain_error_count = 0;
                     let data = String::from_utf8_lossy(&buf[..n]).to_string();
                     append_recent_output(&mut recent_output, &data, 1024);
                     let _ = app.emit(&event_out, data);
@@ -575,8 +578,6 @@ pub async fn ssh_shell_open(
                     let _ = app.emit(&event_out, data);
                     transport_read_error_count = 0;
                     write_drain_error_count = 0;
-                    flush_drain_error_count = 0;
-                    did_work = true;
                 }
                 _ => {}
             }
@@ -584,16 +585,15 @@ pub async fn ssh_shell_open(
             if channel.eof() {
                 break 'shell_loop "channel eof".to_string();
             }
-
-            if !did_work {
-                std::thread::sleep(Duration::from_millis(SSH_LOOP_IDLE_SLEEP_MS));
-            }
         };
 
         log_ssh_warn(
             &session_id_for_log,
             &format!("shell loop exiting: {}", close_reason),
         );
+        if close_reason == "received close signal" {
+            log_ssh_info(&session_id_for_log, "shell thread closed by signal");
+        }
         if !recent_output.is_empty() {
             let recent = recent_output.replace('\r', "\\r").replace('\n', "\\n");
             log_ssh_info(

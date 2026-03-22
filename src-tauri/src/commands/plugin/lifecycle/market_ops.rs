@@ -7,7 +7,7 @@ use tauri::{AppHandle, Manager};
 use zip::ZipArchive;
 
 use super::{
-    get_cached_plugins, get_official_plugins_dir, is_developer_mode_enabled,
+    get_cached_plugins, get_official_plugins_dir, invalidate_plugin_runtime, is_developer_mode_enabled,
     persist_plugin_settings, refresh_plugin_cache,
 };
 use crate::commands::plugin::types::{PluginCache, PluginInfo};
@@ -223,6 +223,8 @@ pub(super) async fn plugin_market_install(
     sha256: String,
     size_bytes: u64,
 ) -> Result<Vec<PluginInfo>, String> {
+    let _ = get_cached_plugins(&app);
+
     let slug = slug.trim().to_lowercase();
     if slug.is_empty() {
         return Err("插件 slug 不能为空".to_string());
@@ -294,6 +296,7 @@ pub(super) async fn plugin_market_install(
         cache.disabled_ids.remove(&slug);
         persist_plugin_settings(&app, &cache);
     }
+    invalidate_plugin_runtime(&app);
 
     Ok(refresh_plugin_cache(&app))
 }
@@ -302,6 +305,8 @@ pub(super) async fn plugin_market_install_official_local(
     app: AppHandle,
     slug: String,
 ) -> Result<Vec<PluginInfo>, String> {
+    let _ = get_cached_plugins(&app);
+
     if !is_developer_mode_enabled(&app) {
         return Err("PLUGIN_INSTALL_NOT_SUPPORTED: 本地官方包安装仅在开发者模式下可用".to_string());
     }
@@ -372,6 +377,7 @@ pub(super) async fn plugin_market_install_official_local(
         cache.disabled_ids.remove(&slug);
         persist_plugin_settings(&app, &cache);
     }
+    invalidate_plugin_runtime(&app);
 
     Ok(refresh_plugin_cache(&app))
 }
@@ -404,6 +410,7 @@ pub(super) async fn plugin_market_uninstall(
         cache.disabled_ids.remove(&plugin_id);
         persist_plugin_settings(&app, &cache);
     }
+    invalidate_plugin_runtime(&app);
 
     Ok(refresh_plugin_cache(&app))
 }

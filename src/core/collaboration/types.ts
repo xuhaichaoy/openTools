@@ -155,6 +155,8 @@ export interface CollaborationChildSession {
   announceToParent: boolean;
   lastResultSummary?: string;
   lastError?: string;
+  statusSummary?: string;
+  nextStepHint?: string;
   startedAt: number;
   updatedAt: number;
   endedAt?: number;
@@ -168,6 +170,9 @@ export interface CollaborationChildSessionPreview {
   mode: SpawnMode;
   focusable: boolean;
   resumable: boolean;
+  statusSummary?: string;
+  nextStepHint?: string;
+  updatedAt?: number;
 }
 
 export type CollaborationContractDelegationState =
@@ -184,6 +189,9 @@ export interface CollaborationContractDelegation {
   label: string;
   state: CollaborationContractDelegationState;
   runId?: string;
+  statusSummary?: string;
+  nextStepHint?: string;
+  updatedAt?: number;
 }
 
 export interface CollaborationQueuedFollowUp {

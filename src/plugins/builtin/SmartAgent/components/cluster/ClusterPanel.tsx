@@ -48,6 +48,10 @@ import {
 } from "@/core/ai/ai-center-mode-meta";
 import { ClusterOrchestrator } from "@/core/agent/cluster/cluster-orchestrator";
 import {
+  assessClusterPlanApproval,
+  type ClusterPlanApprovalAssessment,
+} from "@/core/agent/cluster/plan-approval";
+import {
   setActiveOrchestrator,
   getActiveSessionIds,
   getActiveOrchestratorCount,
@@ -123,6 +127,44 @@ function loadSettings(): ClusterPanelSettings {
 
 function saveSettings(s: ClusterPanelSettings) {
   try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); } catch { /* ignore */ }
+}
+
+function mapTrustLevelToPlanTrustMode(
+  trustLevel: ReturnType<typeof useToolTrustStore.getState>["trustLevel"],
+): "strict_manual" | "auto_review" | "full_auto" {
+  switch (trustLevel) {
+    case "always_ask":
+      return "strict_manual";
+    case "auto_approve":
+      return "full_auto";
+    default:
+      return "auto_review";
+  }
+}
+
+function clusterPlanRiskLabel(risk: ClusterPlanApprovalAssessment["risk"]): string {
+  switch (risk) {
+    case "safe":
+      return "安全";
+    case "low":
+      return "低风险";
+    case "medium":
+      return "中风险";
+    case "high":
+      return "高风险";
+    default:
+      return "不确定";
+  }
+}
+
+function mergeUniqueLines(lines: Array<string | undefined | null>): string[] {
+  const result: string[] = [];
+  for (const line of lines) {
+    const normalized = String(line ?? "").trim();
+    if (!normalized || result.includes(normalized)) continue;
+    result.push(normalized);
+  }
+  return result;
 }
 
 const STATUS_LABELS: Record<ClusterSessionStatus, string> = {
@@ -712,9 +754,49 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
   );
 
   const handlePlanApproval = useCallback(
-    (plan: ClusterPlan, sessionId: string) =>
-      openPlanApprovalDialog({ plan, sessionId }),
-    [openPlanApprovalDialog],
+    async (plan: ClusterPlan, sessionId: string) => {
+      const trustMode = mapTrustLevelToPlanTrustMode(useToolTrustStore.getState().trustLevel);
+      const assessment = assessClusterPlanApproval(plan, {
+        trustMode,
+        codingMode: effectiveCodingProfile.profile.codingMode,
+        largeProjectMode: effectiveCodingProfile.profile.largeProjectMode,
+        openClawMode: effectiveCodingProfile.profile.openClawMode,
+        autoReviewCodeSteps: autoReview || effectiveCodingProfile.profile.codingMode,
+      });
+
+      if (assessment.decision === "deny") {
+        toast("warning", assessment.reason);
+        return {
+          plan,
+          status: "rejected" as const,
+          reason: assessment.reason,
+        };
+      }
+
+      if (assessment.decision === "allow") {
+        return {
+          plan,
+          status: "approved" as const,
+          reason: assessment.reason,
+        };
+      }
+
+      return openPlanApprovalDialog({
+        plan,
+        sessionId,
+        presentation: {
+          kind: "plan",
+          title: assessment.risk === "high" ? "确认高风险执行计划" : "确认执行计划",
+          description: `${assessment.reason}（Enter 批准，Esc 拒绝）`,
+          riskLabel: `${clusterPlanRiskLabel(assessment.risk)} · 需人工确认`,
+          notes: mergeUniqueLines([
+            ...assessment.permissions,
+            ...assessment.notes,
+          ]),
+        },
+      });
+    },
+    [autoReview, effectiveCodingProfile.profile.codingMode, effectiveCodingProfile.profile.largeProjectMode, effectiveCodingProfile.profile.openClawMode, openPlanApprovalDialog, toast],
   );
 
   const handleRun = useCallback(async () => {
@@ -1005,7 +1087,7 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
               onChange={(e) => setHumanApproval(e.target.checked)}
               className="rounded border-[var(--color-border)]"
             />
-            <span>计划审批 (执行前人工确认)</span>
+            <span>风险复核（高风险才人工确认）</span>
           </label>
           <label className="flex items-center gap-2 text-xs cursor-pointer">
             <input

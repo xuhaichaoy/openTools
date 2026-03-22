@@ -1,8 +1,9 @@
 import { create } from "zustand";
+import type { RuntimeSessionCompactionPreview } from "./runtime-session-compaction";
 
 export type RuntimeSessionMode = "agent" | "cluster" | "ask" | "dialog" | "im_conversation";
 
-export interface RuntimeSessionRecord {
+export interface RuntimeSessionRecord extends RuntimeSessionCompactionPreview {
   key: string;
   mode: RuntimeSessionMode;
   sessionId: string;
@@ -23,7 +24,7 @@ interface RuntimeStateSnapshot {
 }
 
 interface RuntimeStateStore extends RuntimeStateSnapshot {
-  upsertSession: (input: {
+  upsertSession: (input: RuntimeSessionCompactionPreview & {
     mode: RuntimeSessionMode;
     sessionId: string;
     query: string;
@@ -38,7 +39,7 @@ interface RuntimeStateStore extends RuntimeStateSnapshot {
   patchSession: (
     mode: RuntimeSessionMode,
     sessionId: string,
-    patch: Partial<Pick<RuntimeSessionRecord, "query" | "displayLabel" | "displayDetail" | "workspaceRoot" | "waitingStage" | "status" | "updatedAt">>,
+    patch: Partial<Pick<RuntimeSessionRecord, "query" | "displayLabel" | "displayDetail" | "workspaceRoot" | "waitingStage" | "status" | "updatedAt"> & RuntimeSessionCompactionPreview>,
   ) => void;
   removeSession: (mode: RuntimeSessionMode, sessionId: string) => void;
   clearMode: (mode: RuntimeSessionMode) => void;
@@ -72,20 +73,89 @@ function isRuntimeSessionMode(value: unknown): value is RuntimeSessionMode {
     || value === "im_conversation";
 }
 
+function sanitizeStringList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const normalized = value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function applyRuntimeSessionCompactionPreview<T extends object>(
+  target: T,
+  source: Partial<RuntimeSessionCompactionPreview>,
+): T & RuntimeSessionCompactionPreview {
+  const next = target as T & RuntimeSessionCompactionPreview;
+
+  if ("roomCompactionSummaryPreview" in source) {
+    next.roomCompactionSummaryPreview = typeof source.roomCompactionSummaryPreview === "string"
+      ? source.roomCompactionSummaryPreview || undefined
+      : undefined;
+  }
+  if ("roomCompactionUpdatedAt" in source) {
+    next.roomCompactionUpdatedAt = typeof source.roomCompactionUpdatedAt === "number"
+      ? source.roomCompactionUpdatedAt
+      : undefined;
+  }
+  if ("roomCompactionMessageCount" in source) {
+    next.roomCompactionMessageCount = typeof source.roomCompactionMessageCount === "number"
+      ? source.roomCompactionMessageCount
+      : undefined;
+  }
+  if ("roomCompactionTaskCount" in source) {
+    next.roomCompactionTaskCount = typeof source.roomCompactionTaskCount === "number"
+      ? source.roomCompactionTaskCount
+      : undefined;
+  }
+  if ("roomCompactionArtifactCount" in source) {
+    next.roomCompactionArtifactCount = typeof source.roomCompactionArtifactCount === "number"
+      ? source.roomCompactionArtifactCount
+      : undefined;
+  }
+  if ("roomCompactionPreservedIdentifiers" in source) {
+    next.roomCompactionPreservedIdentifiers = sanitizeStringList(source.roomCompactionPreservedIdentifiers);
+  }
+
+  return next;
+}
+
+function sanitizeRuntimeSessionRecord(value: unknown): RuntimeSessionRecord | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const record = value as Partial<RuntimeSessionRecord>;
+  const sessionId = typeof record.sessionId === "string" ? record.sessionId.trim() : "";
+  const query = typeof record.query === "string" ? record.query.trim() : "";
+  if (!isRuntimeSessionMode(record.mode) || !sessionId || !query || typeof record.startedAt !== "number") {
+    return null;
+  }
+
+  return applyRuntimeSessionCompactionPreview({
+    key: `${record.mode}:${sessionId}`,
+    mode: record.mode,
+    sessionId,
+    query,
+    startedAt: record.startedAt,
+    updatedAt: typeof record.updatedAt === "number" ? record.updatedAt : record.startedAt,
+    status: typeof record.status === "string" && record.status.trim() ? record.status : "running",
+    ...(typeof record.displayLabel === "string" ? { displayLabel: record.displayLabel || undefined } : {}),
+    ...(typeof record.displayDetail === "string" ? { displayDetail: record.displayDetail || undefined } : {}),
+    ...(typeof record.workspaceRoot === "string" ? { workspaceRoot: record.workspaceRoot || undefined } : {}),
+    ...(typeof record.waitingStage === "string" ? { waitingStage: record.waitingStage || undefined } : {}),
+  }, record);
+}
+
 function sanitizeSnapshot(input: unknown): RuntimeStateSnapshot {
   if (!input || typeof input !== "object") {
     return buildEmptySnapshot();
   }
   const raw = input as Partial<RuntimeStateSnapshot>;
   const sessions = Object.fromEntries(
-    Object.entries(raw.sessions ?? {}).filter(([key, value]) => {
-      if (!key || !value || typeof value !== "object") return false;
-      const record = value as Partial<RuntimeSessionRecord>;
-      return isRuntimeSessionMode(record.mode)
-        && typeof record.sessionId === "string"
-        && typeof record.query === "string"
-        && typeof record.startedAt === "number";
-    }),
+    Object.values(raw.sessions ?? {})
+      .map((value) => sanitizeRuntimeSessionRecord(value))
+      .filter((record): record is RuntimeSessionRecord => record !== null)
+      .map((record) => [record.key, record] as const),
   ) as Record<string, RuntimeSessionRecord>;
 
   return {
@@ -136,6 +206,8 @@ function areRuntimeSessionRecordsEqual(
   right: RuntimeSessionRecord,
   options?: { ignoreUpdatedAt?: boolean },
 ): boolean {
+  const leftIdentifiers = left.roomCompactionPreservedIdentifiers ?? [];
+  const rightIdentifiers = right.roomCompactionPreservedIdentifiers ?? [];
   return left.key === right.key
     && left.mode === right.mode
     && left.sessionId === right.sessionId
@@ -146,6 +218,13 @@ function areRuntimeSessionRecordsEqual(
     && left.workspaceRoot === right.workspaceRoot
     && left.waitingStage === right.waitingStage
     && left.status === right.status
+    && left.roomCompactionSummaryPreview === right.roomCompactionSummaryPreview
+    && left.roomCompactionUpdatedAt === right.roomCompactionUpdatedAt
+    && left.roomCompactionMessageCount === right.roomCompactionMessageCount
+    && left.roomCompactionTaskCount === right.roomCompactionTaskCount
+    && left.roomCompactionArtifactCount === right.roomCompactionArtifactCount
+    && leftIdentifiers.length === rightIdentifiers.length
+    && leftIdentifiers.every((item, index) => item === rightIdentifiers[index])
     && (options?.ignoreUpdatedAt ? true : left.updatedAt === right.updatedAt);
 }
 
@@ -183,7 +262,7 @@ export const useRuntimeStateStore = create<RuntimeStateStore>((set, get) => ({
 
     set((state) => {
       const existing = state.sessions[key];
-      const nextRecord: RuntimeSessionRecord = existing
+      const nextRecord = applyRuntimeSessionCompactionPreview(existing
         ? {
             ...existing,
             query,
@@ -194,7 +273,9 @@ export const useRuntimeStateStore = create<RuntimeStateStore>((set, get) => ({
               ? { displayDetail: input.displayDetail || undefined }
               : {}),
             updatedAt: now,
-            ...(input.workspaceRoot ? { workspaceRoot: input.workspaceRoot } : {}),
+            ...(typeof input.workspaceRoot === "string"
+              ? { workspaceRoot: input.workspaceRoot || undefined }
+              : {}),
             ...(typeof input.waitingStage === "string"
               ? { waitingStage: input.waitingStage || undefined }
               : {}),
@@ -212,7 +293,7 @@ export const useRuntimeStateStore = create<RuntimeStateStore>((set, get) => ({
             ...(input.workspaceRoot ? { workspaceRoot: input.workspaceRoot } : {}),
             ...(input.waitingStage ? { waitingStage: input.waitingStage } : {}),
             status: input.status ?? "running",
-          };
+          }, input);
       const foregroundSessionId = state.foregroundSessionIds[input.mode] ?? "";
       if (
         existing
@@ -251,7 +332,7 @@ export const useRuntimeStateStore = create<RuntimeStateStore>((set, get) => ({
     set((state) => {
       const existing = state.sessions[key];
       if (!existing) return state;
-      const nextRecord: RuntimeSessionRecord = {
+      const nextRecord = applyRuntimeSessionCompactionPreview({
         ...existing,
         ...(typeof patch.query === "string" ? { query: patch.query } : {}),
         ...(typeof patch.displayLabel === "string"
@@ -268,7 +349,7 @@ export const useRuntimeStateStore = create<RuntimeStateStore>((set, get) => ({
           : {}),
         ...(typeof patch.status === "string" ? { status: patch.status } : {}),
         updatedAt: patch.updatedAt ?? Date.now(),
-      };
+      }, patch);
       if (areRuntimeSessionRecordsEqual(existing, nextRecord, { ignoreUpdatedAt: true })) {
         return state;
       }

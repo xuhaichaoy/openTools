@@ -150,10 +150,11 @@ describe("PromptBuildMiddleware", () => {
     await new PromptBuildMiddleware().apply(ctx);
 
     expect(ctx.rolePrompt).toContain("## 当前执行契约");
-    expect(ctx.rolePrompt).toContain("独立审查 -> Reviewer");
+    expect(ctx.rolePrompt).toContain("已批准建议委派 1 条，可按需参考和复用。");
     expect(ctx.rolePrompt).toContain("已批准建议委派只是许可与建议");
     expect(ctx.rolePrompt).toContain("当你的下一步明确依赖子任务结果时");
     expect(ctx.rolePrompt).not.toContain("务必立刻调用 `wait_for_spawned_tasks`");
     expect(ctx.rolePrompt).not.toContain("请**必须调用 `wait_for_spawned_tasks`");
+    expect(ctx.rolePrompt).not.toContain("独立审查 -> Reviewer");
   });
 });

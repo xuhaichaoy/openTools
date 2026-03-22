@@ -120,10 +120,6 @@ fn set_tray_attention_count(app: tauri::AppHandle, count: u32) -> Result<(), Str
     Ok(())
 }
 
-fn is_subpath_of(path: &std::path::Path, root: &std::path::Path) -> bool {
-    path.starts_with(root)
-}
-
 /// 构建 URI scheme 错误响应，避免到处写 unwrap
 fn http_error_response(status: u16, body: &[u8]) -> tauri::http::Response<Vec<u8>> {
     tauri::http::Response::builder()
@@ -136,51 +132,6 @@ fn http_error_response(status: u16, body: &[u8]) -> tauri::http::Response<Vec<u8
                 .body(b"Internal Error".to_vec())
                 .expect("fallback response must succeed")
         })
-}
-
-fn allowed_mtplugin_roots(app: &tauri::AppHandle) -> Vec<PathBuf> {
-    let mut roots: Vec<PathBuf> = Vec::new();
-
-    // 1) 打包资源中的 plugins 目录
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        roots.push(resource_dir.join("plugins"));
-    }
-    // 2) 开发目录中的 plugins 目录
-    if let Ok(cwd) = std::env::current_dir() {
-        roots.push(cwd.join("plugins"));
-    }
-    // 3) 开发者插件目录（来自 plugin-settings.json 的 devDirs）
-    {
-        use tauri_plugin_store::StoreExt;
-        if let Ok(store) = app.store("plugin-settings.json") {
-            if let Some(dirs) = store.get("devDirs") {
-                if let Some(arr) = dirs.as_array() {
-                    for v in arr {
-                        if let Some(s) = v.as_str() {
-                            roots.push(PathBuf::from(s));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    // 4) 临时文件目录（插件中转图片等）
-    roots.push(std::env::temp_dir());
-    // 5) 官方市场插件目录（AppData/plugins/official）
-    if let Ok(app_data_dir) = app.path().app_data_dir() {
-        roots.push(app_data_dir.join("plugins").join("official"));
-    }
-
-    // 只保留可规范化的目录，避免无效路径干扰判断
-    roots
-        .into_iter()
-        .filter_map(|p| p.canonicalize().ok())
-        .collect()
-}
-
-fn is_allowed_mtplugin_path(app: &tauri::AppHandle, canonical: &std::path::Path) -> bool {
-    let roots = allowed_mtplugin_roots(app);
-    roots.iter().any(|root| is_subpath_of(canonical, root))
 }
 
 /// 显示窗口的统一帮助函数：显示 → 聚焦，并临时抑制失焦隐藏
@@ -239,7 +190,7 @@ fn place_main_window_top_center(window: &tauri::WebviewWindow) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(
             tauri_plugin_log::Builder::default()
                 .level(log::LevelFilter::Info)
@@ -294,7 +245,8 @@ pub fn run() {
                 return http_error_response(404, b"Not Found");
             }
             // 仅允许访问白名单根目录，避免任意文件读取
-            if !is_allowed_mtplugin_path(&app.app_handle(), &canonical) {
+            if !commands::plugin::lifecycle::is_allowed_mtplugin_path(&app.app_handle(), &canonical)
+            {
                 return http_error_response(403, b"Forbidden: path not allowed");
             }
             // 仅允许读取文件，不允许目录
@@ -302,8 +254,50 @@ pub fn run() {
                 return http_error_response(403, b"Forbidden: file only");
             }
 
+            let cache_info = commands::plugin::lifecycle::get_mtplugin_resource_cache_info(
+                &app.app_handle(),
+                &canonical,
+            );
+            if let Some(info) = &cache_info {
+                let headers = request.headers();
+                let etag_matches = info.etag.as_ref().is_some_and(|etag| {
+                    headers
+                        .get("if-none-match")
+                        .and_then(|v| v.to_str().ok())
+                        .map(|v| v.trim() == etag)
+                        .unwrap_or(false)
+                });
+                let modified_matches = info.last_modified.as_ref().is_some_and(|last_modified| {
+                    headers
+                        .get("if-modified-since")
+                        .and_then(|v| v.to_str().ok())
+                        .map(|v| v.trim() == last_modified)
+                        .unwrap_or(false)
+                });
+                if !info.is_temporary && (etag_matches || modified_matches) {
+                    let cache_control = if info.is_dev {
+                        "no-cache, must-revalidate"
+                    } else {
+                        "public, max-age=3600, must-revalidate"
+                    };
+                    let mut builder = tauri::http::Response::builder()
+                        .status(304)
+                        .header("Access-Control-Allow-Origin", "*")
+                        .header("Cache-Control", cache_control);
+                    if let Some(etag) = &info.etag {
+                        builder = builder.header("ETag", etag);
+                    }
+                    if let Some(last_modified) = &info.last_modified {
+                        builder = builder.header("Last-Modified", last_modified);
+                    }
+                    return builder
+                        .body(Vec::new())
+                        .unwrap_or_else(|_| http_error_response(500, b"Response build error"));
+                }
+            }
+
             let content = std::fs::read(&canonical).unwrap_or_default();
-            let mime = match file_path.extension().and_then(|e| e.to_str()) {
+            let mime = match canonical.extension().and_then(|e| e.to_str()) {
                 Some("html") | Some("htm") => "text/html; charset=utf-8",
                 Some("js") | Some("mjs") => "application/javascript; charset=utf-8",
                 Some("css") => "text/css; charset=utf-8",
@@ -321,13 +315,34 @@ pub fn run() {
                 _ => "application/octet-stream",
             };
 
-            tauri::http::Response::builder()
+            let mut builder = tauri::http::Response::builder()
                 .status(200)
                 .header("Content-Type", mime)
-                .header("Access-Control-Allow-Origin", "*")
-                // 禁止缓存（截图文件每次都不同，防止 webview 显示旧图）
-                .header("Cache-Control", "no-store, no-cache, must-revalidate")
-                .header("Pragma", "no-cache")
+                .header("Access-Control-Allow-Origin", "*");
+
+            match cache_info {
+                Some(info) if !info.is_temporary => {
+                    let cache_control = if info.is_dev {
+                        "no-cache, must-revalidate"
+                    } else {
+                        "public, max-age=3600, must-revalidate"
+                    };
+                    builder = builder.header("Cache-Control", cache_control);
+                    if let Some(etag) = info.etag {
+                        builder = builder.header("ETag", etag);
+                    }
+                    if let Some(last_modified) = info.last_modified {
+                        builder = builder.header("Last-Modified", last_modified);
+                    }
+                }
+                _ => {
+                    builder = builder
+                        .header("Cache-Control", "no-store, no-cache, must-revalidate")
+                        .header("Pragma", "no-cache");
+                }
+            }
+
+            builder
                 .body(content)
                 .unwrap_or_else(|_| http_error_response(500, b"Response build error"))
         })
@@ -597,8 +612,17 @@ pub fn run() {
             commands::clipboard::start_clipboard_watcher(app.handle());
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app_handle, event| {
+        if matches!(
+            event,
+            tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }
+        ) {
+            commands::clipboard::flush_clipboard_history(app_handle);
+        }
+    });
 }
 
 // ── Setup 子函数 ──

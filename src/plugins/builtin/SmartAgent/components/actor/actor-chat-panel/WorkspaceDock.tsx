@@ -75,6 +75,89 @@ function compactLongText(text: string | undefined, maxLength = 260): string {
   return `${normalized.slice(0, Math.max(1, maxLength - 1)).trimEnd()}…`;
 }
 
+type ContextOverviewCard = {
+  label: string;
+  value: string;
+  detail: string;
+  toneClassName?: string;
+};
+
+function buildContextOverviewCards(
+  snapshot: DialogContextSnapshot | null,
+): ContextOverviewCard[] {
+  if (!snapshot) {
+    return [
+      {
+        label: "主入口",
+        value: "主 Agent",
+        detail: "新输入默认先交给主 Agent，再决定是否继续派工。",
+        toneClassName: "text-[var(--color-accent)]",
+      },
+      {
+        label: "待处理交互",
+        value: "0",
+        detail: "当前没有待回复或待确认交互。",
+      },
+      {
+        label: "后台线程",
+        value: "0",
+        detail: "当前没有保留中的后台线程。",
+      },
+      {
+        label: "记忆回补",
+        value: "0",
+        detail: "如果命中长期记忆或轨迹回补，会在这里说明。",
+      },
+    ];
+  }
+
+  const recalledCount = snapshot.memoryHitCount + snapshot.transcriptRecallHitCount;
+  const focusedValue = snapshot.focusedSessionLabel ? "聚焦线程" : "主 Agent";
+  const focusedDetail = snapshot.focusedSessionLabel
+    ? `新输入会优先接到 ${snapshot.focusedSessionLabel}`
+    : "新输入默认仍先交给主 Agent 处理";
+  const interactionDetail = snapshot.pendingInteractionCount > 0
+    ? snapshot.pendingApprovalCount > 0
+      ? `其中 ${snapshot.pendingApprovalCount} 条需要确认，会优先阻塞新的自由输入`
+      : "当前优先处理待回复交互，再接新的自由输入"
+    : "当前没有待回复或待确认交互";
+  const sessionDetail = snapshot.openSessionCount > 0
+    ? `${snapshot.openSessionCount} 个后台线程仍可复用，但默认不要求你先看子线程`
+    : "当前没有保留中的后台线程";
+  const recallDetail = recalledCount > 0
+    ? `本轮会自动回补 ${recalledCount} 条长期记忆/历史轨迹`
+    : snapshot.memoryRecallAttempted || snapshot.transcriptRecallAttempted
+      ? "系统已经检索过记忆与轨迹，但本轮没有额外命中"
+      : "如果命中长期记忆或轨迹回补，会在这里说明";
+
+  return [
+    {
+      label: "主入口",
+      value: focusedValue,
+      detail: focusedDetail,
+      toneClassName: "text-[var(--color-accent)]",
+    },
+    {
+      label: "待处理交互",
+      value: String(snapshot.pendingInteractionCount),
+      detail: interactionDetail,
+      toneClassName: snapshot.pendingInteractionCount > 0 ? "text-amber-700" : "text-[var(--color-text)]",
+    },
+    {
+      label: "后台线程",
+      value: String(snapshot.openSessionCount),
+      detail: sessionDetail,
+      toneClassName: snapshot.openSessionCount > 0 ? "text-sky-700" : "text-[var(--color-text)]",
+    },
+    {
+      label: "记忆回补",
+      value: String(recalledCount),
+      detail: recallDetail,
+      toneClassName: recalledCount > 0 ? "text-emerald-700" : "text-[var(--color-text)]",
+    },
+  ];
+}
+
 function buildContinuationItems(
   snapshot: DialogContextSnapshot | null,
 ): string[] {
@@ -110,6 +193,37 @@ function buildContinuationItems(
   return items.length > 0
     ? items
     : ["当前会沿用最近房间消息、主 Agent 的当前任务，以及共享工作集继续执行。"];
+}
+
+function buildMemoryCarryItems(
+  snapshot: DialogContextSnapshot | null,
+): string[] {
+  if (!snapshot) {
+    return ["如果本轮命中长期记忆、会话轨迹或跨模式接力上下文，会在这里说明自动回补了什么。"];
+  }
+
+  const items = [
+    snapshot.sourceHandoffSummary
+      ? `当前还带着跨模式接力上下文：${snapshot.sourceHandoffSummary}`
+      : "",
+    snapshot.memoryHitCount > 0
+      ? `长期记忆会回补 ${snapshot.memoryHitCount} 条${snapshot.memoryPreview.length > 0 ? `：${snapshot.memoryPreview.join("；")}` : ""}`
+      : snapshot.memoryRecallAttempted
+        ? "长期记忆已经检索过，但本轮没有额外命中"
+        : "",
+    snapshot.transcriptRecallHitCount > 0
+      ? `会话轨迹会回补 ${snapshot.transcriptRecallHitCount} 条${snapshot.transcriptPreview.length > 0 ? `：${snapshot.transcriptPreview.join("；")}` : ""}`
+      : snapshot.transcriptRecallAttempted
+        ? "会话轨迹已经检索过，但本轮没有额外命中"
+        : "",
+    snapshot.roomCompactionMemoryConfirmedCount > 0 || snapshot.roomCompactionMemoryQueuedCount > 0
+      ? `房间压缩产物已沉淀为记忆：确认 ${snapshot.roomCompactionMemoryConfirmedCount} 条，候选 ${snapshot.roomCompactionMemoryQueuedCount} 条`
+      : "",
+  ].filter(Boolean);
+
+  return items.length > 0
+    ? items
+    : ["当前没有额外的记忆或轨迹回补，但系统会继续在后续轮次自动检索。"];
 }
 
 function buildCompactionItems(
@@ -382,7 +496,14 @@ export function DialogWorkspaceDock({
   dialogContextSummary: DialogContextSummary | null;
   requirePlanApproval: boolean;
   onTogglePlanApproval: (value: boolean) => void;
-  lastPlanReview: { status: "approved" | "rejected"; timestamp: number; plan: ClusterPlan } | null;
+  lastPlanReview: {
+    status: "approved" | "rejected";
+    timestamp: number;
+    plan?: ClusterPlan;
+    source: "human" | "auto_review" | "policy";
+    risk?: "safe" | "low" | "medium" | "high" | "unknown";
+    reason?: string;
+  } | null;
   graphAvailable: boolean;
   onOpenGraph: (() => void) | null;
 }) {
@@ -442,12 +563,14 @@ export function DialogWorkspaceDock({
           const checkpoint = delegation.runId ? taskCheckpointByRunId.get(delegation.runId) ?? null : null;
           const targetActorId = task?.targetActorId ?? childSession?.targetActorId ?? delegation.targetActorId;
           const targetName = actorById.get(targetActorId)?.roleName ?? targetActorId;
-          const summary = checkpoint?.summary
+          const summary = delegation.statusSummary
+            || checkpoint?.summary
             || childSession?.lastResultSummary
             || task?.label
             || task?.task
             || `${delegation.label} 尚未派发`;
-          const updatedAt = childSession?.updatedAt
+          const updatedAt = delegation.updatedAt
+            ?? childSession?.updatedAt
             ?? task?.lastActiveAt
             ?? task?.completedAt
             ?? task?.spawnedAt
@@ -458,6 +581,10 @@ export function DialogWorkspaceDock({
             targetName,
             label: delegation.label,
             summary,
+            nextStepHint: delegation.nextStepHint
+              || childSession?.nextStepHint
+              || checkpoint?.nextStep
+              || null,
             updatedAt,
             statusMeta: getContractDelegationStatusMeta(delegation.state),
             task,
@@ -477,6 +604,7 @@ export function DialogWorkspaceDock({
         targetName: actorById.get(task.targetActorId)?.roleName ?? task.targetActorId,
         label: task.label ?? task.task,
         summary: checkpoint?.summary || childSession?.lastResultSummary || task.task,
+        nextStepHint: childSession?.nextStepHint || checkpoint?.nextStep || null,
         updatedAt: childSession?.updatedAt ?? task.lastActiveAt ?? task.completedAt ?? task.spawnedAt,
         statusMeta: getChildSessionStatusMeta(childSession?.status ?? task.status),
         task,
@@ -491,6 +619,14 @@ export function DialogWorkspaceDock({
   );
   const continuationItems = useMemo(
     () => buildContinuationItems(contextSnapshot),
+    [contextSnapshot],
+  );
+  const contextOverviewCards = useMemo(
+    () => buildContextOverviewCards(contextSnapshot),
+    [contextSnapshot],
+  );
+  const memoryCarryItems = useMemo(
+    () => buildMemoryCarryItems(contextSnapshot),
     [contextSnapshot],
   );
   const compactionItems = useMemo(
@@ -608,7 +744,7 @@ export function DialogWorkspaceDock({
       label: "上下文",
       icon: Brain,
       count: contextBreakdown.totalSharedTokens + contextBreakdown.totalRuntimeTokens,
-      description: "查看共享工作集、专属预算和运行现场的 token 估算",
+      description: "查看续跑上下文、房间压缩保留和记忆回补，再下钻到成本估算",
     },
     {
       id: "plan",
@@ -936,6 +1072,7 @@ export function DialogWorkspaceDock({
                                 : row.childSession?.lastError
                                   ? row.childSession.lastError
                                   : null;
+                        const detail = row.nextStepHint ?? note;
 
                         return (
                           <div
@@ -994,9 +1131,9 @@ export function DialogWorkspaceDock({
                               </div>
                             </button>
 
-                            {note && (
+                            {detail && (
                               <div className="mt-2 text-[10px] leading-relaxed text-[var(--color-text-tertiary)]">
-                                {note}
+                                {detail}
                               </div>
                             )}
 
@@ -1053,6 +1190,30 @@ export function DialogWorkspaceDock({
                     </div>
                   </div>
 
+                  <div className="rounded-xl border border-[var(--color-border)]/80 bg-[var(--color-bg)] px-3 py-3">
+                    <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
+                      执行概览
+                    </div>
+                    <div className="mt-2 grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+                      {contextOverviewCards.map((card) => (
+                        <div
+                          key={card.label}
+                          className="rounded-xl border border-[var(--color-border)]/70 bg-[var(--color-bg-secondary)]/65 px-3 py-2.5"
+                        >
+                          <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                            {card.label}
+                          </div>
+                          <div className={`mt-1 text-[18px] font-semibold ${card.toneClassName ?? "text-[var(--color-text)]"}`}>
+                            {card.value}
+                          </div>
+                          <div className="mt-1 text-[11px] leading-relaxed text-[var(--color-text-secondary)]">
+                            {card.detail}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
                   <div className="grid gap-2.5 md:grid-cols-2">
                     <div className="rounded-xl border border-sky-500/15 bg-sky-500/5 px-3 py-3">
                       <div className="text-[10px] uppercase tracking-[0.12em] text-sky-700">本轮会沿用什么</div>
@@ -1073,6 +1234,17 @@ export function DialogWorkspaceDock({
                           </div>
                         ))}
                       </div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-violet-500/15 bg-violet-500/5 px-3 py-3">
+                    <div className="text-[10px] uppercase tracking-[0.12em] text-violet-700">记忆如何回补</div>
+                    <div className="mt-2 space-y-1.5">
+                      {memoryCarryItems.map((item) => (
+                        <div key={item} className="text-[11px] leading-relaxed text-[var(--color-text-secondary)]">
+                          {item}
+                        </div>
+                      ))}
                     </div>
                   </div>
 
@@ -1171,6 +1343,15 @@ export function DialogWorkspaceDock({
                     </div>
                   )}
 
+                  <div className="rounded-xl border border-[var(--color-border)]/80 bg-[var(--color-bg)] px-3 py-3">
+                    <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
+                      续跑细项清单
+                    </div>
+                    <div className="mt-2 text-[11px] leading-relaxed text-[var(--color-text-secondary)]">
+                      下面这部分是系统实际会带着继续执行的清单，用来解释“会沿用什么”，不是调试日志。
+                    </div>
+                  </div>
+
                   {hasDialogContextSnapshotContent(contextSnapshot) && (
                     <div className="rounded-xl border border-[var(--color-border)]/80 bg-[var(--color-bg)] px-3 py-3">
                       <div className="flex flex-wrap items-center gap-2">
@@ -1198,7 +1379,10 @@ export function DialogWorkspaceDock({
 
                   <div className="rounded-xl border border-[var(--color-border)]/80 bg-[var(--color-bg)] px-3 py-3">
                     <div className="mb-2 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
-                      成本观察
+                      成本观察（调试）
+                    </div>
+                    <div className="mb-2 text-[11px] leading-relaxed text-[var(--color-text-secondary)]">
+                      这一段主要给调试和预算判断使用，所以放在最后，避免整个上下文页看起来像纯 token 诊断面板。
                     </div>
                     <div className="grid gap-2 md:grid-cols-3">
                       <div className="rounded-lg bg-[var(--color-bg-secondary)]/70 px-3 py-2">
@@ -1389,7 +1573,9 @@ export function DialogWorkspaceDock({
                           ? "bg-emerald-500/10 text-emerald-600"
                           : "bg-red-500/10 text-red-600"
                       }`}>
-                        最近一次{lastPlanReview.status === "approved" ? "已批准" : "已拒绝"} · {formatShortTime(lastPlanReview.timestamp)}
+                        最近一次{lastPlanReview.status === "approved"
+                          ? (lastPlanReview.source === "human" ? "人工批准" : "自动通过")
+                          : (lastPlanReview.source === "policy" ? "策略拦截" : "已拒绝")} · {formatShortTime(lastPlanReview.timestamp)}
                       </span>
                     )}
                   </div>

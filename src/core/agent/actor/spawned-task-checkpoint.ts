@@ -5,6 +5,10 @@ import {
 } from "@/core/ai/ai-center-handoff";
 import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
 import { inferCodingExecutionProfile } from "@/core/agent/coding-profile";
+import type {
+  CollaborationChildSession,
+  CollaborationContractDelegation,
+} from "@/core/collaboration/types";
 import type { AICenterHandoff } from "@/store/app-store";
 import { getSpawnedTaskRoleBoundaryMeta } from "./spawned-task-role-boundary";
 import type { TodoItem } from "./middlewares";
@@ -46,6 +50,16 @@ export interface SpawnedTaskCheckpoint {
   updatedAt: number;
 }
 
+type SpawnedTaskProjectedChildSession = Pick<
+  CollaborationChildSession,
+  "label" | "statusSummary" | "nextStepHint"
+>;
+
+type SpawnedTaskProjectedDelegation = Pick<
+  CollaborationContractDelegation,
+  "label" | "statusSummary" | "nextStepHint"
+>;
+
 function uniqueStrings(values: readonly string[], limit = 8): string[] {
   const seen = new Set<string>();
   const result: string[] = [];
@@ -57,6 +71,14 @@ function uniqueStrings(values: readonly string[], limit = 8): string[] {
     if (result.length >= limit) break;
   }
   return result;
+}
+
+function pickFirstMeaningfulString(...values: Array<string | null | undefined>): string | undefined {
+  for (const value of values) {
+    const normalized = typeof value === "string" ? value.trim() : "";
+    if (normalized) return normalized;
+  }
+  return undefined;
 }
 
 function getDialogKindLabel(kind?: DialogMessage["kind"]): string | undefined {
@@ -287,9 +309,21 @@ export function buildDialogSpawnedTaskHandoff(params: {
   dialogHistory?: readonly DialogMessage[];
   artifacts?: readonly DialogArtifactRecord[];
   actorNameById?: ReadonlyMap<string, string>;
+  projectedChildSession?: SpawnedTaskProjectedChildSession;
+  projectedDelegation?: SpawnedTaskProjectedDelegation;
   sourceSessionId?: string;
 }): AICenterHandoff | null {
-  const { task, targetActor, actorTodos, dialogHistory, artifacts, actorNameById, sourceSessionId } = params;
+  const {
+    task,
+    targetActor,
+    actorTodos,
+    dialogHistory,
+    artifacts,
+    actorNameById,
+    projectedChildSession,
+    projectedDelegation,
+    sourceSessionId,
+  } = params;
   if (!task) return null;
 
   const checkpoint = buildSpawnedTaskCheckpoint({
@@ -320,15 +354,31 @@ export function buildDialogSpawnedTaskHandoff(params: {
   const visualAttachmentPaths = pickVisualAttachmentPaths(artifactPaths, 8) ?? [];
   const actorName = actorNameById?.get(task.targetActorId) ?? targetActor?.roleName ?? task.targetActorId;
   const roleBoundaryMeta = getSpawnedTaskRoleBoundaryMeta(task.roleBoundary);
+  const handoffLabel = pickFirstMeaningfulString(
+    projectedChildSession?.label,
+    projectedDelegation?.label,
+    task.label,
+    task.task,
+  ) ?? "未命名子任务";
+  const statusSummary = pickFirstMeaningfulString(
+    projectedChildSession?.statusSummary,
+    projectedDelegation?.statusSummary,
+    checkpoint?.summary,
+  );
+  const nextStepHint = pickFirstMeaningfulString(
+    projectedChildSession?.nextStepHint,
+    projectedDelegation?.nextStepHint,
+    checkpoint?.nextStep,
+  );
 
   const intro = [
-    `请接力继续推进 Dialog 子任务：${summarizeAISessionRuntimeText(task.label ?? task.task, 80) || "未命名子任务"}`,
+    `请接力继续推进 Dialog 子任务：${summarizeAISessionRuntimeText(handoffLabel, 80) || "未命名子任务"}`,
     "",
     `原始任务：${task.task}`,
     `当前职责：${roleBoundaryMeta.label}`,
     checkpoint ? `当前阶段：${checkpoint.stageLabel}` : "",
-    checkpoint?.summary ? `当前进展：${checkpoint.summary}` : "",
-    checkpoint?.nextStep ? `建议下一步：${checkpoint.nextStep}` : "",
+    statusSummary ? `当前进展：${statusSummary}` : "",
+    nextStepHint ? `建议下一步：${nextStepHint}` : "",
     transcriptLines.length > 0 ? `最近子会话记录：\n${transcriptLines.join("\n")}` : "",
   ].filter(Boolean).join("\n");
 
@@ -340,24 +390,25 @@ export function buildDialogSpawnedTaskHandoff(params: {
   return normalizeAICenterHandoff({
     query: intro,
     title: `${actorName} 子任务接力`,
-    goal: checkpoint?.nextStep
-      || summarizeAISessionRuntimeText(task.label ?? task.task, 100)
+    goal: nextStepHint
+      || summarizeAISessionRuntimeText(handoffLabel, 100)
       || "继续推进当前子任务",
     intent: inferredCoding.profile.codingMode ? "coding" : "delivery",
-    keyPoints: [
+    keyPoints: uniqueStrings([
       `职责边界：${roleBoundaryMeta.label}`,
       checkpoint ? `当前阶段：${checkpoint.stageLabel}` : "",
+      statusSummary ? `当前概况：${statusSummary}` : "",
       checkpoint?.activeTodoCount ? `${checkpoint.activeTodoCount} 个活跃待办` : "",
       visualAttachmentPaths.length ? `${visualAttachmentPaths.length} 张视觉参考图` : "",
       checkpoint?.relatedArtifactPaths.length ? `${checkpoint.relatedArtifactPaths.length} 个相关文件` : "",
       task.mode === "session" && task.sessionOpen ? "原始子会话仍可继续交互" : "",
-    ].filter(Boolean),
-    nextSteps: [
-      checkpoint?.nextStep || "",
+    ].filter(Boolean)),
+    nextSteps: uniqueStrings([
+      nextStepHint || "",
       checkpoint?.activeTodoCount ? "先检查活跃待办，再继续实施或验证" : "",
       visualAttachmentPaths.length ? "先查看已带入的视觉参考图，再继续实现或分析" : "",
       checkpoint?.relatedArtifactPaths.length ? "先阅读相关文件与最近产物，再决定下一步改动" : "",
-    ].filter(Boolean),
+    ].filter(Boolean)),
     contextSections: [
       visualAttachmentPaths.length
         ? { title: "视觉参考", items: [`已带入 ${visualAttachmentPaths.length} 张当前相关图片`] }
@@ -381,7 +432,7 @@ export function buildDialogSpawnedTaskHandoff(params: {
     ...(sourceSessionId ? { sourceSessionId } : {}),
     sourceLabel: `Dialog 子任务 · ${actorName} · ${roleBoundaryMeta.shortLabel}`,
     summary: checkpoint
-      ? `从 Dialog 子任务接力 · ${roleBoundaryMeta.label} · ${checkpoint.stageLabel}${checkpoint.activeTodoCount ? ` · ${checkpoint.activeTodoCount} 个活跃待办` : ""}`
+      ? `从 Dialog 子任务接力 · ${roleBoundaryMeta.label} · ${checkpoint.stageLabel}${statusSummary ? ` · ${summarizeAISessionRuntimeText(statusSummary, 36)}` : ""}${checkpoint.activeTodoCount ? ` · ${checkpoint.activeTodoCount} 个活跃待办` : ""}`
       : "从 Dialog 子任务接力",
   });
 }

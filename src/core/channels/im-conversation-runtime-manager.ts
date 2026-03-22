@@ -3,23 +3,41 @@ import {
   buildDefaultDialogActorConfig,
   spawnDefaultDialogActors,
 } from "@/core/agent/actor/default-dialog-actors";
+import { ensureDialogRoomCompaction } from "@/core/agent/actor/dialog-context-pressure";
 import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
 import {
   registerRuntimeAbortHandler,
   unregisterRuntimeAbortHandler,
   useRuntimeStateStore,
 } from "@/core/agent/context-runtime/runtime-state";
+import { buildRuntimeSessionCompactionPreview } from "@/core/agent/context-runtime/runtime-session-compaction";
+import { useToolTrustStore } from "@/store/command-allowlist-store";
 import { CollaborationSessionController } from "@/core/collaboration/session-controller";
+import { assessExecutionContractApproval } from "@/core/collaboration/contract-approval";
+import { cloneCollaborationSnapshotForPersistence } from "@/core/collaboration/persistence";
+import {
+  buildActorRosterHash,
+  buildInputHash,
+  buildOpenExecutionContractDraft,
+  cloneExecutionContract,
+  doesExecutionContractMatchActorRoster,
+  sealExecutionContract,
+} from "@/core/collaboration/execution-contract";
 import { createLogger } from "@/core/logger";
 import {
   useIMConversationRuntimeStore,
+  type IMConversationCompactionPreview,
   type IMConversationRuntimeStatus,
   type IMConversationSessionPreview,
   type IMConversationSnapshot,
   type IMConversationTopicSnapshot,
 } from "@/store/im-conversation-runtime-store";
 import type { DialogMessage } from "@/core/agent/actor/types";
-import type { CollaborationSessionSnapshot } from "@/core/collaboration/types";
+import type {
+  CollaborationSessionSnapshot,
+  ExecutionContract,
+  ExecutionContractDraft,
+} from "@/core/collaboration/types";
 import type { IMConversationProgressEvent } from "./channel-progress-emitter";
 import type { ChannelIncomingMessage, ChannelType } from "./types";
 import {
@@ -38,8 +56,8 @@ import {
 import { resolveChannelOutgoingMedia } from "./channel-outbound-media";
 
 const log = createLogger("IMConversationRuntime");
-const MAX_PREVIEW_MESSAGES = 120;
-const MAX_PERSISTED_DIALOG_MESSAGES = 200;
+const MAX_PERSISTED_ACTOR_SESSION_HISTORY = 24;
+const IM_RUNTIME_IDLE_COMPACTION_DELAY_MS = 1_500;
 
 interface PendingIMMessage {
   messageId: string;
@@ -52,6 +70,10 @@ interface PendingIMMessage {
   displayDetail: string;
   images?: string[];
   attachments?: ChannelIncomingMessage["attachments"];
+  approvalState?: "awaiting_user" | "approved_ready";
+  approvalInteractionId?: string;
+  approvalMessageId?: string;
+  approvalContract?: ExecutionContract;
 }
 
 interface RuntimeActivitySnapshot {
@@ -59,6 +81,13 @@ interface RuntimeActivitySnapshot {
   pendingReplies: number;
   runningTasks: number;
   activeActors: number;
+}
+
+interface RuntimeApprovalPreview {
+  approvalStatus?: "none" | "awaiting_user" | "approved" | "rejected";
+  approvalSummary?: string;
+  approvalRiskLabel?: string;
+  pendingApprovalReason?: string;
 }
 
 interface IMConversationRuntime {
@@ -77,6 +106,8 @@ interface IMConversationRuntime {
   inFlight: boolean;
   pumping: boolean;
   settleTimer: ReturnType<typeof setTimeout> | null;
+  idleCompactionTimer: ReturnType<typeof setTimeout> | null;
+  idleCompactionScheduleKey: string | null;
   forwardedInteractionMessageIds: Set<string>;
   forwardedResultMessageIds: Set<string>;
   unsubscribe: () => void;
@@ -190,7 +221,93 @@ function clonePendingIMMessage(message?: PendingIMMessage): PendingIMMessage | u
     ...message,
     ...(message.images ? { images: [...message.images] } : {}),
     ...(message.attachments ? { attachments: message.attachments.map((item) => ({ ...item })) } : {}),
+    ...(message.approvalContract ? { approvalContract: cloneExecutionContract(message.approvalContract) } : {}),
   };
+}
+
+function mapTrustLevelToContractTrustMode(
+  trustLevel: ReturnType<typeof useToolTrustStore.getState>["trustLevel"],
+): "strict_manual" | "auto_review" | "full_auto" {
+  switch (trustLevel) {
+    case "always_ask":
+      return "strict_manual";
+    case "auto_approve":
+      return "full_auto";
+    default:
+      return "auto_review";
+  }
+}
+
+function contractRiskLabel(risk: ReturnType<typeof assessExecutionContractApproval>["risk"]): string {
+  switch (risk) {
+    case "safe":
+      return "安全";
+    case "low":
+      return "低风险";
+    case "medium":
+      return "中风险";
+    case "high":
+      return "高风险";
+    default:
+      return "不确定";
+  }
+}
+
+function mergeUniqueLines(lines: Array<string | undefined | null>): string[] {
+  const result: string[] = [];
+  for (const line of lines) {
+    const normalized = String(line ?? "").trim();
+    if (!normalized || result.includes(normalized)) continue;
+    result.push(normalized);
+  }
+  return result;
+}
+
+function clipPreviewText(value: string | undefined | null, maxLength = 120): string | undefined {
+  const normalized = String(value ?? "").trim().replace(/\s+/g, " ");
+  if (!normalized) return undefined;
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function parseContractApprovalReply(content: string): "allow" | "deny" | "unknown" {
+  const normalized = String(content ?? "").trim().toLowerCase();
+  if (!normalized) return "unknown";
+  if (/^(拒绝|拒绝执行|reject|deny|不允许|不要|不行|取消|停止|no|n)$/i.test(normalized)) {
+    return "deny";
+  }
+  if (/^(允许|允许执行|allow|approve|同意|可以|确认|继续|好的|ok|yes|y)$/i.test(normalized)) {
+    return "allow";
+  }
+  if (/(拒绝|deny|reject|取消|停止|不要|不允许)/i.test(normalized)) {
+    return "deny";
+  }
+  if (/(允许|allow|approve|同意|可以|确认|继续)/i.test(normalized)) {
+    return "allow";
+  }
+  return "unknown";
+}
+
+function buildIMRuntimeIdleCompactionScheduleKey(params: {
+  runtimeKey: string;
+  dialogHistoryCount: number;
+  artifactCount: number;
+  spawnedTaskCount: number;
+  queuedMessageCount: number;
+  pendingInteractionCount: number;
+  contractState: string | null;
+  dialogRoomCompactionUpdatedAt?: number | null;
+}): string {
+  return [
+    params.runtimeKey,
+    params.dialogHistoryCount,
+    params.artifactCount,
+    params.spawnedTaskCount,
+    params.queuedMessageCount,
+    params.pendingInteractionCount,
+    params.contractState ?? "",
+    params.dialogRoomCompactionUpdatedAt ?? 0,
+  ].join("::");
 }
 
 export class IMConversationRuntimeManager {
@@ -238,9 +355,10 @@ export class IMConversationRuntimeManager {
     runtime.conversationType = params.msg.conversationType;
     runtime.updatedAt = Date.now();
     this.clearSettledRefresh(runtime);
+    this.clearIdleCompaction(runtime, { clearScheduleKey: true });
 
     if (this.shouldDispatchImmediately(runtime)) {
-      this.dispatch(runtime, pending);
+      await this.dispatch(runtime, pending);
       return {
         handled: false,
         queued: false,
@@ -286,7 +404,7 @@ export class IMConversationRuntimeManager {
 
   dispose(): void {
     for (const runtime of [...this.runtimes.values()]) {
-      this.disposeRuntime(runtime);
+      this.disposeRuntime(runtime, { syncPersistence: false });
     }
     this.runtimes.clear();
     this.conversations.clear();
@@ -419,6 +537,7 @@ export class IMConversationRuntimeManager {
     }
 
     runtime.updatedAt = Date.now();
+    this.clearIdleCompaction(runtime, { clearScheduleKey: true });
     runtime.system.publishSystemNotice(normalizedText, { from: "scheduler" });
     this.refreshRuntime(runtime);
     this.scheduleSettledRefresh(runtime);
@@ -473,6 +592,9 @@ export class IMConversationRuntimeManager {
     if (restoredDialogHistory?.length) {
       system.restoreDialogHistory(restoredDialogHistory.map((message) => cloneDialogMessage(message)));
     }
+    if (restored?.dialogRoomCompaction) {
+      system.setDialogRoomCompaction(restored.dialogRoomCompaction);
+    }
     const controller = new CollaborationSessionController(system, {
       surface: "im_conversation",
       actorRosterProvider: () => system.getAll().map((actor) => ({
@@ -508,6 +630,8 @@ export class IMConversationRuntimeManager {
       inFlight: false,
       pumping: false,
       settleTimer: null,
+      idleCompactionTimer: null,
+      idleCompactionScheduleKey: null,
       forwardedInteractionMessageIds: new Set<string>(),
       forwardedResultMessageIds: new Set<string>(),
       unsubscribe: () => {},
@@ -676,6 +800,301 @@ export class IMConversationRuntimeManager {
     return runtime.controller.snapshot();
   }
 
+  private buildContractApprovalActors(runtime: IMConversationRuntime) {
+    return runtime.system.getAll().map((actor) => ({
+      id: actor.id,
+      roleName: actor.role.name,
+      executionPolicy: actor.executionPolicy,
+    }));
+  }
+
+  private buildContractActorRoster(runtime: IMConversationRuntime) {
+    return runtime.system.getAll().map((actor) => ({
+      actorId: actor.id,
+      roleName: actor.role.name,
+      capabilities: actor.capabilities?.tags,
+      executionPolicy: actor.executionPolicy,
+      workspace: actor.workspace,
+    }));
+  }
+
+  private buildIMExecutionContractDraft(
+    runtime: IMConversationRuntime,
+    pending: PendingIMMessage,
+    snapshot: CollaborationSessionSnapshot,
+  ): ExecutionContractDraft {
+    const actors = runtime.system.getAll();
+    const actorIds = actors.map((actor) => actor.id);
+    const coordinatorId = runtime.system.getCoordinatorId() ?? actors[0]?.id;
+    const baseDraft = buildOpenExecutionContractDraft({
+      surface: "im_conversation",
+      executionStrategy:
+        snapshot.activeContract?.state === "sealed" || snapshot.activeContract?.state === "active"
+          ? snapshot.activeContract.executionStrategy
+          : "coordinator",
+      actorIds,
+      coordinatorActorId: coordinatorId,
+      summary: pending.briefContent || pending.text.slice(0, 140),
+    });
+    const actorRoster = this.buildContractActorRoster(runtime);
+    const input = {
+      content: pending.text,
+      briefContent: pending.briefContent,
+      ...(pending.images?.length ? { images: pending.images } : {}),
+    };
+    const coordinatorPolicy = actors.find((actor) => actor.id === coordinatorId)?.executionPolicy;
+    const accessMode = coordinatorPolicy?.accessMode ?? "read_only";
+
+    return {
+      ...baseDraft,
+      summary: pending.briefContent || pending.text.slice(0, 140),
+      input,
+      actorRoster,
+      inputHash: buildInputHash(input),
+      actorRosterHash: buildActorRosterHash(actorRoster),
+      executionPolicy: {
+        accessMode,
+        approvalMode: accessMode === "full_access" ? "strict" : "normal",
+      },
+    };
+  }
+
+  private buildExternalContractApprovalPrompt(params: {
+    runtime: IMConversationRuntime;
+    pending: PendingIMMessage;
+    contract: ExecutionContract;
+    assessment: ReturnType<typeof assessExecutionContractApproval>;
+    clarifyOnly?: boolean;
+  }): string {
+    if (params.clarifyOnly) {
+      return [
+        "请确认是否允许本轮协作继续执行。",
+        "请直接回复“允许”或“拒绝”。",
+      ].join("\n\n");
+    }
+
+    const lines = mergeUniqueLines([
+      `风险级别：${contractRiskLabel(params.assessment.risk)}`,
+      params.assessment.reason,
+      ...params.assessment.permissions,
+      ...params.assessment.notes,
+    ]);
+
+    return [
+      `当前消息准备进入协作执行：${params.pending.briefContent || params.pending.text.slice(0, 80)}`,
+      lines.join("\n"),
+      "请直接回复“允许”或“拒绝”。",
+    ].join("\n\n");
+  }
+
+  private buildRuntimeApprovalPreview(
+    runtime: IMConversationRuntime,
+    snapshot: CollaborationSessionSnapshot,
+  ): RuntimeApprovalPreview {
+    const pendingApproval = snapshot.pendingInteractions.find(
+      (interaction) => interaction.status === "pending" && interaction.type === "approval",
+    );
+    if (!pendingApproval) {
+      return {
+        approvalStatus: "none",
+      };
+    }
+
+    const queuedApprovalMessage = this.findQueuedApprovalMessage(
+      runtime,
+      pendingApproval.messageId,
+      pendingApproval.id,
+    );
+    if (queuedApprovalMessage?.approvalContract) {
+      const assessment = assessExecutionContractApproval(
+        queuedApprovalMessage.approvalContract,
+        this.buildContractApprovalActors(runtime),
+        {
+          trustMode: mapTrustLevelToContractTrustMode(useToolTrustStore.getState().trustLevel),
+        },
+      );
+      return {
+        approvalStatus: "awaiting_user",
+        approvalSummary: `待确认任务：${clipPreviewText(
+          queuedApprovalMessage.approvalContract.summary
+            || queuedApprovalMessage.briefContent
+            || queuedApprovalMessage.text,
+          96,
+        )}`,
+        approvalRiskLabel: contractRiskLabel(assessment.risk),
+        pendingApprovalReason: clipPreviewText(assessment.reason, 140),
+      };
+    }
+
+    const approvalRequest = pendingApproval.approvalRequest
+      ?? this.getLatestDialogMessage(runtime, pendingApproval.messageId)?.approvalRequest;
+    if (approvalRequest) {
+      const approvalSummary = clipPreviewText(
+        approvalRequest.title || approvalRequest.summary,
+        96,
+      );
+      const pendingApprovalReason = clipPreviewText(
+        mergeUniqueLines([
+          approvalRequest.summary !== approvalRequest.title ? approvalRequest.summary : undefined,
+          approvalRequest.riskDescription,
+        ]).join(" · "),
+        140,
+      );
+      return {
+        approvalStatus: "awaiting_user",
+        approvalSummary: approvalSummary || "当前操作等待确认",
+        ...(pendingApprovalReason ? { pendingApprovalReason } : {}),
+      };
+    }
+
+    return {
+      approvalStatus: "awaiting_user",
+      approvalSummary: clipPreviewText(
+        `待确认：${this.getLatestDialogMessage(runtime, pendingApproval.messageId)?.content || pendingApproval.question}`,
+        96,
+      ) || "当前操作等待确认",
+    };
+  }
+
+  private buildRuntimeCompactionPreview(runtime: IMConversationRuntime): IMConversationCompactionPreview {
+    return {
+      ...buildRuntimeSessionCompactionPreview(runtime.system.getDialogRoomCompaction()),
+    };
+  }
+
+  private findQueuedApprovalMessage(
+    runtime: IMConversationRuntime,
+    interactionMessageId?: string | null,
+    interactionId?: string | null,
+  ): PendingIMMessage | null {
+    return runtime.queue.find((item) => {
+      if (item.approvalState !== "awaiting_user") return false;
+      if (interactionMessageId && item.approvalMessageId === interactionMessageId) return true;
+      if (interactionId && item.approvalInteractionId === interactionId) return true;
+      return false;
+    }) ?? null;
+  }
+
+  private removeQueuedApprovalMessage(runtime: IMConversationRuntime, target: PendingIMMessage): void {
+    runtime.queue = runtime.queue.filter((item) => item !== target);
+  }
+
+  private requestExternalContractApproval(params: {
+    runtime: IMConversationRuntime;
+    pending: PendingIMMessage;
+    contract: ExecutionContract;
+    assessment: ReturnType<typeof assessExecutionContractApproval>;
+    reuseQueuedMessage?: PendingIMMessage | null;
+    clarifyOnly?: boolean;
+  }): void {
+    const { runtime, pending, contract, assessment } = params;
+    const coordinatorId = runtime.system.getCoordinatorId() ?? runtime.system.getAll()[0]?.id;
+    if (!coordinatorId) {
+      void this.options.onReply({
+        channelId: runtime.channelId,
+        conversationId: runtime.conversationId,
+        text: "当前 IM 会话没有可用协调者，无法继续发起协作确认。",
+        messageId: pending.messageId,
+      }).catch((error) => {
+        log.warn("Failed to notify missing coordinator for IM approval", error);
+      });
+      return;
+    }
+
+    let queued = params.reuseQueuedMessage ?? null;
+    if (!queued) {
+      queued = {
+        ...clonePendingIMMessage(pending)!,
+        approvalState: "awaiting_user",
+        approvalContract: cloneExecutionContract(contract),
+      };
+      runtime.queue.unshift(queued);
+    } else {
+      queued.approvalState = "awaiting_user";
+      queued.approvalContract = cloneExecutionContract(contract);
+    }
+
+    const beforeHistoryLength = runtime.system.getDialogHistory().length;
+    void runtime.system.askUserInChat(
+      coordinatorId,
+      this.buildExternalContractApprovalPrompt({
+        runtime,
+        pending,
+        contract,
+        assessment,
+        ...(params.clarifyOnly ? { clarifyOnly: true } : {}),
+      }),
+      {
+        timeoutMs: 300_000,
+        interactionType: "approval",
+        options: ["允许", "拒绝"],
+      },
+    ).then((result) => {
+      if (result.status === "timed_out" && queued?.approvalState === "awaiting_user") {
+        this.removeQueuedApprovalMessage(runtime, queued);
+        void this.options.onReply({
+          channelId: runtime.channelId,
+          conversationId: runtime.conversationId,
+          text: "这次确认已超时，本轮协作未继续执行。",
+          messageId: pending.messageId,
+        }).catch((error) => {
+          log.warn("Failed to notify IM approval timeout", error);
+        });
+        this.refreshRuntime(runtime);
+      }
+    }).catch((error) => {
+      log.warn("Failed to request IM contract approval", error);
+    });
+
+    const approvalMessage = runtime.system.getDialogHistory()[beforeHistoryLength];
+    if (queued && approvalMessage?.interactionType === "approval") {
+      queued.approvalInteractionId = approvalMessage.interactionId;
+      queued.approvalMessageId = approvalMessage.id;
+    }
+    runtime.lastInput = pending;
+    runtime.inFlight = false;
+    runtime.status = "waiting";
+    this.syncRuntimeState(runtime, undefined, this.getCollaborationSnapshot(runtime));
+  }
+
+  private continueApprovedQueuedMessage(runtime: IMConversationRuntime, queued: PendingIMMessage): void {
+    const contract = queued.approvalContract ? cloneExecutionContract(queued.approvalContract) : null;
+    this.removeQueuedApprovalMessage(runtime, queued);
+    const dispatchable: PendingIMMessage = {
+      ...queued,
+      approvalState: "approved_ready",
+      approvalInteractionId: undefined,
+      approvalMessageId: undefined,
+      approvalContract: contract ?? undefined,
+    };
+    void this.dispatch(runtime, dispatchable);
+  }
+
+  private cleanupStaleApprovalQueue(
+    runtime: IMConversationRuntime,
+    snapshot: CollaborationSessionSnapshot,
+  ): void {
+    const hasPendingApproval = snapshot.pendingInteractions.some((interaction) => interaction.type === "approval");
+    const pendingApprovalKeys = new Set(
+      snapshot.pendingInteractions
+        .filter((interaction) => interaction.type === "approval")
+        .flatMap((interaction) => [interaction.id, interaction.messageId]),
+    );
+    runtime.queue = runtime.queue.filter((item) => {
+      if (item.approvalState !== "awaiting_user") return true;
+      if (!item.approvalInteractionId && !item.approvalMessageId) {
+        return hasPendingApproval;
+      }
+      if (
+        (item.approvalInteractionId && pendingApprovalKeys.has(item.approvalInteractionId))
+        || (item.approvalMessageId && pendingApprovalKeys.has(item.approvalMessageId))
+      ) {
+        return true;
+      }
+      return false;
+    });
+  }
+
   private shouldDispatchImmediately(runtime: IMConversationRuntime): boolean {
     const activity = this.inspectRuntime(runtime);
     if (activity.pendingApprovals > 0 || activity.pendingReplies > 0) {
@@ -684,10 +1103,8 @@ export class IMConversationRuntimeManager {
     return !runtime.inFlight && activity.runningTasks === 0 && activity.activeActors === 0;
   }
 
-  private dispatch(runtime: IMConversationRuntime, pending: PendingIMMessage): void {
-    runtime.lastInput = pending;
-    runtime.updatedAt = Date.now();
-    const snapshot = this.getCollaborationSnapshot(runtime);
+  private async dispatch(runtime: IMConversationRuntime, pending: PendingIMMessage): Promise<void> {
+    let snapshot = this.getCollaborationSnapshot(runtime);
     if (snapshot.pendingInteractions.length > 1) {
       runtime.queue = [pending, ...runtime.queue];
       runtime.inFlight = false;
@@ -702,6 +1119,117 @@ export class IMConversationRuntimeManager {
       });
       this.syncRuntimeState(runtime, this.inspectRuntime(runtime, snapshot), snapshot);
       return;
+    }
+
+    runtime.lastInput = pending;
+    runtime.updatedAt = Date.now();
+
+    if (snapshot.pendingInteractions.length === 0) {
+      await this.ensureIMRuntimeDialogRoomCompaction(runtime);
+      snapshot = this.getCollaborationSnapshot(runtime);
+    }
+
+    const singlePendingInteraction = snapshot.pendingInteractions.length === 1
+      ? snapshot.pendingInteractions[0]
+      : null;
+    const queuedApprovalMessage = singlePendingInteraction?.type === "approval"
+      ? this.findQueuedApprovalMessage(
+          runtime,
+          singlePendingInteraction.messageId,
+          singlePendingInteraction.id,
+        )
+      : null;
+
+    if (singlePendingInteraction?.type === "approval" && queuedApprovalMessage) {
+      runtime.controller.dispatchUserInput({
+        content: pending.text,
+        briefContent: pending.briefContent,
+        displayText: pending.briefContent,
+        images: pending.images,
+        externalChannelType: pending.channelType,
+        externalChannelId: runtime.channelId,
+        externalConversationId: runtime.conversationId,
+        externalConversationType: pending.conversationType,
+        externalSessionId: runtime.system.sessionId,
+        runtimeDisplayLabel: pending.displayLabel,
+        runtimeDisplayDetail: pending.displayDetail,
+      }, {
+        allowQueue: false,
+        forceAsNewMessage: false,
+        selectedPendingMessageId: singlePendingInteraction.messageId,
+      });
+
+      const decision = parseContractApprovalReply(pending.text);
+      if (decision === "allow") {
+        this.continueApprovedQueuedMessage(runtime, queuedApprovalMessage);
+      } else if (decision === "deny") {
+        this.removeQueuedApprovalMessage(runtime, queuedApprovalMessage);
+        runtime.inFlight = false;
+      } else {
+        this.requestExternalContractApproval({
+          runtime,
+          pending: queuedApprovalMessage,
+          contract: queuedApprovalMessage.approvalContract ?? sealExecutionContract(
+            this.buildIMExecutionContractDraft(runtime, queuedApprovalMessage, this.getCollaborationSnapshot(runtime)),
+            { approvedAt: Date.now() },
+          ),
+          assessment: assessExecutionContractApproval(
+            this.buildIMExecutionContractDraft(runtime, queuedApprovalMessage, this.getCollaborationSnapshot(runtime)),
+            this.buildContractApprovalActors(runtime),
+            {
+              trustMode: mapTrustLevelToContractTrustMode(useToolTrustStore.getState().trustLevel),
+            },
+          ),
+          reuseQueuedMessage: queuedApprovalMessage,
+          clarifyOnly: true,
+        });
+      }
+      this.syncRuntimeState(runtime, undefined, this.getCollaborationSnapshot(runtime));
+      return;
+    }
+    let dispatchContract: ExecutionContract | null = pending.approvalContract
+      ? cloneExecutionContract(pending.approvalContract)
+      : null;
+    if (!dispatchContract && snapshot.pendingInteractions.length === 0) {
+      const actorRoster = this.buildContractActorRoster(runtime);
+      const activeContract = snapshot.activeContract;
+      const canReuseActiveContract = activeContract
+        && (activeContract.state === "sealed" || activeContract.state === "active")
+        && doesExecutionContractMatchActorRoster(activeContract, actorRoster);
+      if (!canReuseActiveContract) {
+        const draft = this.buildIMExecutionContractDraft(runtime, pending, snapshot);
+        const assessment = assessExecutionContractApproval(
+          draft,
+          this.buildContractApprovalActors(runtime),
+          {
+            trustMode: mapTrustLevelToContractTrustMode(useToolTrustStore.getState().trustLevel),
+          },
+        );
+        if (assessment.decision === "deny") {
+          runtime.inFlight = false;
+          runtime.status = "waiting";
+          void this.options.onReply({
+            channelId: runtime.channelId,
+            conversationId: runtime.conversationId,
+            text: assessment.reason,
+            messageId: pending.messageId,
+          }).catch((error) => {
+            log.warn("Failed to notify IM contract denial", error);
+          });
+          this.syncRuntimeState(runtime, undefined, snapshot);
+          return;
+        }
+        if (assessment.decision === "ask") {
+          this.requestExternalContractApproval({
+            runtime,
+            pending,
+            contract: sealExecutionContract(draft, { approvedAt: Date.now() }),
+            assessment,
+          });
+          return;
+        }
+        dispatchContract = sealExecutionContract(draft, { approvedAt: Date.now() });
+      }
     }
 
     runtime.inFlight = true;
@@ -719,6 +1247,7 @@ export class IMConversationRuntimeManager {
       runtimeDisplayLabel: pending.displayLabel,
       runtimeDisplayDetail: pending.displayDetail,
     }, {
+      ...(dispatchContract ? { contract: dispatchContract } : {}),
       allowQueue: false,
       forceAsNewMessage: snapshot.pendingInteractions.length === 0,
     });
@@ -731,6 +1260,24 @@ export class IMConversationRuntimeManager {
       kind: "accepted",
     });
     this.syncRuntimeState(runtime, undefined, this.getCollaborationSnapshot(runtime));
+  }
+
+  private async ensureIMRuntimeDialogRoomCompaction(
+    runtime: IMConversationRuntime,
+  ): Promise<void> {
+    try {
+      const ensured = await ensureDialogRoomCompaction(runtime.system);
+      if (!ensured?.changed) return;
+      log.info("Auto-compacted IM runtime context before dispatch", {
+        conversationId: runtime.conversationId,
+        topicId: runtime.topicId,
+        compactedMessageCount: ensured.state.compactedMessageCount,
+        compactedSpawnedTaskCount: ensured.state.compactedSpawnedTaskCount,
+        compactedArtifactCount: ensured.state.compactedArtifactCount,
+      });
+    } catch (error) {
+      log.warn("Failed to auto-compact IM runtime context", error);
+    }
   }
 
   private inspectRuntime(
@@ -754,7 +1301,9 @@ export class IMConversationRuntimeManager {
 
   private refreshRuntime(runtime: IMConversationRuntime): void {
     const snapshot = this.getCollaborationSnapshot(runtime);
+    this.cleanupStaleApprovalQueue(runtime, snapshot);
     const activity = this.inspectRuntime(runtime, snapshot);
+    let shouldScheduleIdleCompaction = false;
     if (activity.pendingApprovals > 0 || activity.pendingReplies > 0) {
       runtime.status = "waiting";
       this.emitProgress({
@@ -786,10 +1335,16 @@ export class IMConversationRuntimeManager {
     } else {
       runtime.status = "idle";
       runtime.inFlight = false;
+      shouldScheduleIdleCompaction = true;
     }
 
     runtime.updatedAt = Date.now();
     this.syncRuntimeState(runtime, activity, snapshot);
+    if (shouldScheduleIdleCompaction) {
+      this.scheduleIdleCompaction(runtime, snapshot, activity);
+    } else {
+      this.clearIdleCompaction(runtime, { clearScheduleKey: true });
+    }
 
     if (
       !runtime.pumping
@@ -801,8 +1356,13 @@ export class IMConversationRuntimeManager {
     ) {
       runtime.pumping = true;
       const next = runtime.queue.shift();
-      if (next) {
-        this.dispatch(runtime, next);
+      if (next && next.approvalState !== "awaiting_user") {
+        void this.dispatch(runtime, next).finally(() => {
+          runtime.pumping = false;
+          this.syncRuntimeState(runtime, undefined, this.getCollaborationSnapshot(runtime));
+          this.scheduleSettledRefresh(runtime);
+        });
+        return;
       }
       runtime.pumping = false;
       this.syncRuntimeState(runtime, undefined, this.getCollaborationSnapshot(runtime));
@@ -823,6 +1383,104 @@ export class IMConversationRuntimeManager {
     if (!runtime.settleTimer) return;
     clearTimeout(runtime.settleTimer);
     runtime.settleTimer = null;
+  }
+
+  private scheduleIdleCompaction(
+    runtime: IMConversationRuntime,
+    snapshot = this.getCollaborationSnapshot(runtime),
+    activity = this.inspectRuntime(runtime, snapshot),
+    delayMs = IM_RUNTIME_IDLE_COMPACTION_DELAY_MS,
+  ): void {
+    if (
+      runtime.inFlight
+      || runtime.pumping
+      || runtime.queue.length > 0
+      || activity.pendingApprovals > 0
+      || activity.pendingReplies > 0
+      || activity.runningTasks > 0
+      || activity.activeActors > 0
+      || snapshot.presentationState.status === "processing"
+    ) {
+      this.clearIdleCompaction(runtime, { clearScheduleKey: true });
+      return;
+    }
+
+    const scheduleKey = buildIMRuntimeIdleCompactionScheduleKey({
+      runtimeKey: runtime.key,
+      dialogHistoryCount: snapshot.dialogMessages.length,
+      artifactCount: runtime.system.getArtifactRecordsSnapshot().length,
+      spawnedTaskCount: runtime.system.getSpawnedTasksSnapshot().length,
+      queuedMessageCount: runtime.queue.length + snapshot.queuedFollowUps.length,
+      pendingInteractionCount: snapshot.pendingInteractions.length,
+      contractState: snapshot.presentationState.contractState,
+      dialogRoomCompactionUpdatedAt: runtime.system.getDialogRoomCompaction()?.updatedAt ?? null,
+    });
+    if (runtime.idleCompactionScheduleKey === scheduleKey) {
+      return;
+    }
+
+    this.clearIdleCompaction(runtime);
+    runtime.idleCompactionScheduleKey = scheduleKey;
+    runtime.idleCompactionTimer = setTimeout(() => {
+      runtime.idleCompactionTimer = null;
+      void this.runIdleCompaction(runtime, scheduleKey);
+    }, delayMs);
+  }
+
+  private clearIdleCompaction(
+    runtime: IMConversationRuntime,
+    options?: { clearScheduleKey?: boolean },
+  ): void {
+    if (runtime.idleCompactionTimer) {
+      clearTimeout(runtime.idleCompactionTimer);
+      runtime.idleCompactionTimer = null;
+    }
+    if (options?.clearScheduleKey) {
+      runtime.idleCompactionScheduleKey = null;
+    }
+  }
+
+  private async runIdleCompaction(
+    runtime: IMConversationRuntime,
+    scheduleKey: string,
+  ): Promise<void> {
+    if (!this.runtimes.has(runtime.key) || runtime.idleCompactionScheduleKey !== scheduleKey) {
+      return;
+    }
+
+    const snapshot = this.getCollaborationSnapshot(runtime);
+    const activity = this.inspectRuntime(runtime, snapshot);
+    if (
+      runtime.inFlight
+      || runtime.pumping
+      || runtime.queue.length > 0
+      || activity.pendingApprovals > 0
+      || activity.pendingReplies > 0
+      || activity.runningTasks > 0
+      || activity.activeActors > 0
+      || snapshot.presentationState.status === "processing"
+    ) {
+      this.clearIdleCompaction(runtime, { clearScheduleKey: true });
+      return;
+    }
+
+    await this.ensureIMRuntimeDialogRoomCompaction(runtime);
+    if (!this.runtimes.has(runtime.key)) {
+      return;
+    }
+
+    const latestScheduleKey = buildIMRuntimeIdleCompactionScheduleKey({
+      runtimeKey: runtime.key,
+      dialogHistoryCount: runtime.system.getDialogHistory().length,
+      artifactCount: runtime.system.getArtifactRecordsSnapshot().length,
+      spawnedTaskCount: runtime.system.getSpawnedTasksSnapshot().length,
+      queuedMessageCount: runtime.queue.length + this.getCollaborationSnapshot(runtime).queuedFollowUps.length,
+      pendingInteractionCount: runtime.system.getPendingUserInteractions().length,
+      contractState: this.getCollaborationSnapshot(runtime).presentationState.contractState,
+      dialogRoomCompactionUpdatedAt: runtime.system.getDialogRoomCompaction()?.updatedAt ?? null,
+    });
+    runtime.idleCompactionScheduleKey = latestScheduleKey;
+    this.refreshRuntime(runtime);
   }
 
   private syncRuntimeState(
@@ -897,12 +1555,17 @@ export class IMConversationRuntimeManager {
       updatedAt: runtime.updatedAt,
       waitingStage,
       status,
+      ...this.buildRuntimeCompactionPreview(runtime),
     });
     this.syncConversationSnapshots();
   }
 
-  private disposeRuntime(runtime: IMConversationRuntime): void {
+  private disposeRuntime(
+    runtime: IMConversationRuntime,
+    options?: { syncPersistence?: boolean },
+  ): void {
     this.clearSettledRefresh(runtime);
+    this.clearIdleCompaction(runtime, { clearScheduleKey: true });
     this.options.onFinalized?.({
       channelId: runtime.channelId,
       conversationId: runtime.conversationId,
@@ -915,7 +1578,9 @@ export class IMConversationRuntimeManager {
     runtime.controller.dispose();
     runtime.system.killAll();
     this.runtimes.delete(runtime.key);
-    this.syncConversationSnapshots();
+    if (options?.syncPersistence !== false) {
+      this.syncConversationSnapshots();
+    }
   }
 
   private buildConversationKey(channelId: string, conversationId: string): string {
@@ -1164,6 +1829,8 @@ export class IMConversationRuntimeManager {
 
   private buildPersistedRuntimeRecord(runtime: IMConversationRuntime): PersistedIMRuntimeRecord {
     const collaborationSnapshot = runtime.controller.snapshot();
+    const persistedCollaborationSnapshot = cloneCollaborationSnapshotForPersistence(collaborationSnapshot);
+    persistedCollaborationSnapshot.dialogMessages = [];
     return {
       key: runtime.key,
       channelId: runtime.channelId,
@@ -1180,8 +1847,10 @@ export class IMConversationRuntimeManager {
           }
         : {}),
       dialogHistory: collaborationSnapshot.dialogMessages
-        .slice(-MAX_PERSISTED_DIALOG_MESSAGES)
         .map((message) => cloneDialogMessage(message)),
+      ...(runtime.system.getDialogRoomCompaction()
+        ? { dialogRoomCompaction: runtime.system.getDialogRoomCompaction() ?? undefined }
+        : {}),
       actorConfigs: runtime.system.getAll().map((actor) => ({
         id: actor.id,
         roleName: actor.role.name,
@@ -1196,16 +1865,17 @@ export class IMConversationRuntimeManager {
         ...(typeof actor.contextTokens === "number" ? { contextTokens: actor.contextTokens } : {}),
         ...(actor.thinkingLevel ? { thinkingLevel: actor.thinkingLevel } : {}),
         ...(actor.middlewareOverrides ? { middlewareOverrides: actor.middlewareOverrides } : {}),
-        sessionHistory: actor.getSessionHistory(),
+        sessionHistory: actor.getSessionHistory().slice(-MAX_PERSISTED_ACTOR_SESSION_HISTORY),
       })),
-      collaborationSnapshot,
+      collaborationSnapshot: persistedCollaborationSnapshot,
     };
   }
 
   private buildSessionPreview(runtime: IMConversationRuntime): IMConversationSessionPreview {
     const collaborationSnapshot = runtime.controller.snapshot();
+    const approvalPreview = this.buildRuntimeApprovalPreview(runtime, collaborationSnapshot);
+    const compactionPreview = this.buildRuntimeCompactionPreview(runtime);
     const dialogHistory = collaborationSnapshot.dialogMessages
-      .slice(-MAX_PREVIEW_MESSAGES)
       .map((message) => cloneDialogMessage(message));
     const actors = runtime.system.getAll().map((actor) => ({
       id: actor.id,
@@ -1233,6 +1903,8 @@ export class IMConversationRuntimeManager {
       childSessionsPreview: collaborationSnapshot.presentationState.childSessionsPreview.map((item) => ({ ...item })),
       queuedFollowUpCount: collaborationSnapshot.presentationState.queuedFollowUpCount,
       contractState: collaborationSnapshot.presentationState.contractState,
+      ...approvalPreview,
+      ...compactionPreview,
       startedAt: runtime.lastInput?.timestamp ?? runtime.updatedAt,
       updatedAt: runtime.updatedAt,
       lastInputText: runtime.lastInput?.text,
@@ -1258,31 +1930,46 @@ export class IMConversationRuntimeManager {
     }
 
     const activeTopicId = state?.activeTopicId ?? runtimes[0]?.topicId ?? "default";
-    const activeRuntime = runtimes.find((runtime) => runtime.topicId === activeTopicId) ?? null;
-    const latestRuntime = activeRuntime ?? runtimes[0] ?? null;
+    const runtimeViews = runtimes.map((runtime) => {
+      const snapshot = runtime.controller.snapshot();
+      return {
+        runtime,
+        snapshot,
+        approvalPreview: this.buildRuntimeApprovalPreview(runtime, snapshot),
+        compactionPreview: this.buildRuntimeCompactionPreview(runtime),
+      };
+    });
+    const activeRuntimeView = runtimeViews.find((item) => item.runtime.topicId === activeTopicId) ?? null;
+    const latestRuntimeView = activeRuntimeView ?? runtimeViews[0] ?? null;
+    const activeRuntime = activeRuntimeView?.runtime ?? null;
+    const latestRuntime = latestRuntimeView?.runtime ?? null;
     const channelType = latestRuntime?.channelType ?? state?.channelType;
     if (!channelType) {
       return null;
     }
 
     const conversationType = latestRuntime?.conversationType ?? state?.conversationType ?? "private";
-    const activeCollaborationSnapshot = activeRuntime ? activeRuntime.controller.snapshot() : null;
+    const activeCollaborationSnapshot = activeRuntimeView?.snapshot ?? null;
     const displayLabel = activeRuntime?.lastInput?.displayLabel
       ?? latestRuntime?.lastInput?.displayLabel
       ?? getChannelDisplayLabel(channelType);
     const displayDetail = activeRuntime?.lastInput?.displayDetail
       ?? latestRuntime?.lastInput?.displayDetail
       ?? getConversationDisplayDetail(channelType, conversationType);
-    const topics: IMConversationTopicSnapshot[] = runtimes
-      .map((runtime) => ({
+    const activeApprovalPreview = activeRuntimeView?.approvalPreview ?? {};
+    const activeCompactionPreview = activeRuntimeView?.compactionPreview ?? {};
+    const topics: IMConversationTopicSnapshot[] = runtimeViews
+      .map(({ runtime, snapshot, approvalPreview, compactionPreview }) => ({
         runtimeKey: runtime.key,
         topicId: runtime.topicId,
         sessionId: runtime.system.sessionId,
         status: runtime.status,
         queueLength: runtime.queue.length,
-        pendingInteractionCount: runtime.controller.snapshot().presentationState.pendingInteractionCount,
-        queuedFollowUpCount: runtime.controller.snapshot().presentationState.queuedFollowUpCount,
-        contractState: runtime.controller.snapshot().presentationState.contractState,
+        pendingInteractionCount: snapshot.presentationState.pendingInteractionCount,
+        queuedFollowUpCount: snapshot.presentationState.queuedFollowUpCount,
+        contractState: snapshot.presentationState.contractState,
+        ...approvalPreview,
+        ...compactionPreview,
         updatedAt: runtime.updatedAt,
         startedAt: runtime.lastInput?.timestamp ?? runtime.updatedAt,
         lastInputText: runtime.lastInput?.text,
@@ -1316,6 +2003,8 @@ export class IMConversationRuntimeManager {
       childSessionsPreview: activeCollaborationSnapshot?.presentationState.childSessionsPreview.map((item) => ({ ...item })) ?? [],
       queuedFollowUpCount: activeCollaborationSnapshot?.presentationState.queuedFollowUpCount ?? 0,
       contractState: activeCollaborationSnapshot?.presentationState.contractState ?? null,
+      ...activeApprovalPreview,
+      ...activeCompactionPreview,
       backgroundTopicCount: topics.filter((topic) => topic.topicId !== activeTopicId).length,
       topics,
     };

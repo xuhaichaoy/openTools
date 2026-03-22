@@ -143,4 +143,40 @@ describe("spawned-task-checkpoint", () => {
     expect(handoff?.keyPoints).toContain("职责边界：验证回归");
     expect(handoff?.summary).toContain("验证中");
   });
+
+  it("prefers projected collaboration summary and next step when handing off", () => {
+    const handoff = buildDialogSpawnedTaskHandoff({
+      task: TASK,
+      targetActor: {
+        roleName: "Specialist",
+        sessionHistory: SESSION_HISTORY,
+      },
+      actorTodos: TODOS,
+      dialogHistory: DIALOG_HISTORY,
+      artifacts: ARTIFACTS,
+      actorNameById: new Map([
+        ["specialist", "Specialist"],
+        ["coordinator", "Coordinator"],
+      ]),
+      projectedChildSession: {
+        label: "首页异常修复线程",
+        statusSummary: "主 Agent 正等待这个线程回流最终验证结论",
+        nextStepHint: "先整理验证结论并回传主 Agent，再决定是否继续修改",
+      },
+      projectedDelegation: {
+        label: "修复首页异常委派",
+        statusSummary: "delegation summary should not win",
+        nextStepHint: "delegation hint should not win",
+      },
+    });
+
+    expect(handoff).not.toBeNull();
+    expect(handoff?.query).toContain("请接力继续推进 Dialog 子任务：首页异常修复线程");
+    expect(handoff?.query).toContain("当前进展：主 Agent 正等待这个线程回流最终验证结论");
+    expect(handoff?.query).toContain("建议下一步：先整理验证结论并回传主 Agent，再决定是否继续修改");
+    expect(handoff?.goal).toBe("先整理验证结论并回传主 Agent，再决定是否继续修改");
+    expect(handoff?.keyPoints).toContain("当前概况：主 Agent 正等待这个线程回流最终验证结论");
+    expect(handoff?.nextSteps?.[0]).toBe("先整理验证结论并回传主 Agent，再决定是否继续修改");
+    expect(handoff?.summary).toContain("主 Agent 正等待这个线程回流最终验证结论");
+  });
 });

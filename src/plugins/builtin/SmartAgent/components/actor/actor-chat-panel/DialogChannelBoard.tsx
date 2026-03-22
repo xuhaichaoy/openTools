@@ -1,4 +1,4 @@
-import React, { useMemo } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Users } from "lucide-react";
 
 import {
@@ -10,9 +10,12 @@ import type { SavedChannelEntry } from "@/core/channels";
 import type { DialogMessage } from "@/core/agent/actor/types";
 import type {
   IMConversationRuntimeStatus,
+  IMConversationApprovalPreview,
+  IMConversationCompactionPreview,
   IMConversationSessionPreview,
   IMConversationSnapshot,
 } from "@/store/im-conversation-runtime-store";
+import type { CollaborationChildSessionPreview } from "@/core/collaboration/types";
 
 export type DialogSessionViewKey = "local" | "dingtalk" | "feishu";
 
@@ -72,6 +75,8 @@ const CHANNEL_GROUP_META: Record<"dingtalk" | "feishu", { label: string; detail:
   },
 };
 
+const CHANNEL_MESSAGE_WINDOW_SIZE = 100;
+
 export function formatSessionStripTime(timestamp: number): string {
   if (!timestamp) return "--";
   return new Date(timestamp).toLocaleTimeString("zh-CN", {
@@ -113,7 +118,71 @@ export function getDialogChannelConnectionLabel(
   }
 }
 
-function getIMRuntimeStatusLabel(status: IMConversationRuntimeStatus): string {
+function hasPendingApprovalPreview(
+  item?: IMConversationApprovalPreview | IMConversationSessionPreview | IMConversationSnapshot | null,
+): boolean {
+  return item?.approvalStatus === "awaiting_user"
+    || Boolean(item?.approvalSummary || item?.pendingApprovalReason);
+}
+
+function getApprovalHeadline(
+  item?: IMConversationApprovalPreview | IMConversationSessionPreview | IMConversationSnapshot | null,
+): string | null {
+  if (!hasPendingApprovalPreview(item)) return null;
+  return item?.approvalRiskLabel
+    ? `等待确认 · ${item.approvalRiskLabel}`
+    : "等待确认";
+}
+
+function hasCompactionPreview(
+  item?: IMConversationCompactionPreview | IMConversationSessionPreview | IMConversationSnapshot | null,
+): boolean {
+  return Boolean(
+    item?.roomCompactionSummaryPreview
+    || (item?.roomCompactionMessageCount ?? 0) > 0
+    || (item?.roomCompactionTaskCount ?? 0) > 0
+    || (item?.roomCompactionArtifactCount ?? 0) > 0,
+  );
+}
+
+function buildCompactionHeadline(
+  item?: IMConversationCompactionPreview | IMConversationSessionPreview | IMConversationSnapshot | null,
+): string | null {
+  if (!hasCompactionPreview(item)) return null;
+  const parts: string[] = [];
+  if ((item?.roomCompactionMessageCount ?? 0) > 0) {
+    parts.push(`消息 ${item?.roomCompactionMessageCount ?? 0}`);
+  }
+  if ((item?.roomCompactionTaskCount ?? 0) > 0) {
+    parts.push(`线程 ${item?.roomCompactionTaskCount ?? 0}`);
+  }
+  if ((item?.roomCompactionArtifactCount ?? 0) > 0) {
+    parts.push(`产物 ${item?.roomCompactionArtifactCount ?? 0}`);
+  }
+  return parts.length > 0
+    ? `上下文已整理 · ${parts.join(" · ")}`
+    : "上下文已整理";
+}
+
+function buildCompactionDetail(
+  item?: IMConversationCompactionPreview | IMConversationSessionPreview | IMConversationSnapshot | null,
+): string | null {
+  const summary = item?.roomCompactionSummaryPreview?.trim();
+  if (summary) return summary;
+  const identifiers = item?.roomCompactionPreservedIdentifiers?.slice(0, 3) ?? [];
+  if (identifiers.length > 0) {
+    return `保留 ${identifiers.join("、")}`;
+  }
+  return null;
+}
+
+function getIMRuntimeStatusLabel(
+  status: IMConversationRuntimeStatus,
+  options?: { hasPendingApproval?: boolean },
+): string {
+  if (options?.hasPendingApproval) {
+    return "等待确认";
+  }
   switch (status) {
     case "running":
       return "处理中";
@@ -176,6 +245,21 @@ function buildCollaborationMetaPills(params: {
   return pills;
 }
 
+export function getPrimaryChildSessionPreview(
+  previews?: readonly CollaborationChildSessionPreview[] | null,
+): CollaborationChildSessionPreview | null {
+  if (!previews?.length) return null;
+  return previews.find((preview) => preview.statusSummary || preview.nextStepHint) ?? previews[0] ?? null;
+}
+
+export function buildChildSessionPreviewText(
+  previews?: readonly CollaborationChildSessionPreview[] | null,
+): string | null {
+  const preview = getPrimaryChildSessionPreview(previews);
+  if (!preview) return null;
+  return preview.statusSummary || preview.nextStepHint || preview.label || null;
+}
+
 export function inferIMChannelType(params: {
   preview?: IMConversationSessionPreview | null;
   runtimeRecord?: RuntimeSessionRecord | null;
@@ -226,7 +310,9 @@ export function buildDialogChannelGroups(params: {
     if (activeSessionId && activeSessionId === currentRoomSessionId) continue;
     const statusLabel = runtimeRecord
       ? getRuntimeIndicatorStatus(runtimeRecord)
-      : getIMRuntimeStatusLabel(conversation.activeStatus);
+      : getIMRuntimeStatusLabel(conversation.activeStatus, {
+          hasPendingApproval: hasPendingApprovalPreview(conversation),
+        });
     const detailParts = [conversation.displayDetail];
     if (conversation.conversationType === "group") {
       detailParts.push("群聊");
@@ -286,6 +372,21 @@ export function buildDialogChannelGroups(params: {
         activeSessionId: runtimeRecord.sessionId,
         activeStatus: preview?.status ?? "running",
         activeQueueLength: preview?.queueLength ?? 0,
+        executionStrategy: preview?.executionStrategy ?? null,
+        pendingInteractionCount: preview?.pendingInteractionCount ?? 0,
+        childSessionsPreview: preview?.childSessionsPreview ?? [],
+        queuedFollowUpCount: preview?.queuedFollowUpCount ?? 0,
+        contractState: preview?.contractState ?? null,
+        approvalStatus: preview?.approvalStatus,
+        approvalSummary: preview?.approvalSummary,
+        approvalRiskLabel: preview?.approvalRiskLabel,
+        pendingApprovalReason: preview?.pendingApprovalReason,
+        roomCompactionSummaryPreview: preview?.roomCompactionSummaryPreview,
+        roomCompactionUpdatedAt: preview?.roomCompactionUpdatedAt,
+        roomCompactionMessageCount: preview?.roomCompactionMessageCount,
+        roomCompactionTaskCount: preview?.roomCompactionTaskCount,
+        roomCompactionArtifactCount: preview?.roomCompactionArtifactCount,
+        roomCompactionPreservedIdentifiers: preview?.roomCompactionPreservedIdentifiers,
         backgroundTopicCount: 0,
         topics: preview
           ? [{
@@ -294,6 +395,19 @@ export function buildDialogChannelGroups(params: {
               sessionId: preview.sessionId,
               status: preview.status,
               queueLength: preview.queueLength,
+              pendingInteractionCount: preview.pendingInteractionCount,
+              queuedFollowUpCount: preview.queuedFollowUpCount,
+              contractState: preview.contractState ?? null,
+              approvalStatus: preview.approvalStatus,
+              approvalSummary: preview.approvalSummary,
+              approvalRiskLabel: preview.approvalRiskLabel,
+              pendingApprovalReason: preview.pendingApprovalReason,
+              roomCompactionSummaryPreview: preview.roomCompactionSummaryPreview,
+              roomCompactionUpdatedAt: preview.roomCompactionUpdatedAt,
+              roomCompactionMessageCount: preview.roomCompactionMessageCount,
+              roomCompactionTaskCount: preview.roomCompactionTaskCount,
+              roomCompactionArtifactCount: preview.roomCompactionArtifactCount,
+              roomCompactionPreservedIdentifiers: preview.roomCompactionPreservedIdentifiers,
               updatedAt: preview.updatedAt,
               startedAt: preview.startedAt,
               lastInputText: preview.lastInputText,
@@ -341,6 +455,7 @@ function RuntimeSessionPreview({
     isUser: boolean;
   }) => React.ReactNode;
 }) {
+  const [visibleMessageCount, setVisibleMessageCount] = useState(CHANNEL_MESSAGE_WINDOW_SIZE);
   const actorById = useMemo(
     () => new Map(preview.actors.map((actor) => [actor.id, actor] as const)),
     [preview.actors],
@@ -349,6 +464,22 @@ function RuntimeSessionPreview({
     () => new Map(preview.actors.map((actor, index) => [actor.id, index] as const)),
     [preview.actors],
   );
+  const primaryChildSessionPreview = useMemo(
+    () => getPrimaryChildSessionPreview(preview.childSessionsPreview),
+    [preview.childSessionsPreview],
+  );
+  const compactionHeadline = useMemo(() => buildCompactionHeadline(preview), [preview]);
+  const compactionDetail = useMemo(() => buildCompactionDetail(preview), [preview]);
+  const visibleDialogHistory = useMemo(() => {
+    if (preview.dialogHistory.length <= visibleMessageCount) {
+      return preview.dialogHistory;
+    }
+    return preview.dialogHistory.slice(-visibleMessageCount);
+  }, [preview.dialogHistory, visibleMessageCount]);
+
+  useEffect(() => {
+    setVisibleMessageCount(CHANNEL_MESSAGE_WINDOW_SIZE);
+  }, [preview.sessionId, preview.dialogHistory.length]);
 
   return (
     <div className={compact ? "flex min-h-0 flex-1 flex-col gap-2.5" : "space-y-3"}>
@@ -365,7 +496,9 @@ function RuntimeSessionPreview({
                   只读预览
                 </span>
                 <span className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
-                  {getIMRuntimeStatusLabel(preview.status)}
+                  {getIMRuntimeStatusLabel(preview.status, {
+                    hasPendingApproval: hasPendingApprovalPreview(preview),
+                  })}
                 </span>
               </div>
               <div className="mt-1 text-[11px] text-[var(--color-text-secondary)]">
@@ -409,13 +542,83 @@ function RuntimeSessionPreview({
         </div>
       )}
 
+      {hasPendingApprovalPreview(preview) && (
+        <div className="rounded-2xl border border-amber-500/20 bg-amber-500/8 px-3 py-2 text-[11px] text-amber-900">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="rounded-full border border-amber-500/25 bg-white/75 px-2 py-0.5 text-[10px] font-medium text-amber-800">
+              {getApprovalHeadline(preview)}
+            </span>
+          </div>
+          {preview.approvalSummary && (
+            <div className="mt-1 leading-relaxed">{preview.approvalSummary}</div>
+          )}
+          {preview.pendingApprovalReason && preview.pendingApprovalReason !== preview.approvalSummary && (
+            <div className="mt-1 text-[10px] leading-relaxed text-amber-800/85">
+              {preview.pendingApprovalReason}
+            </div>
+          )}
+        </div>
+      )}
+      {compactionHeadline && (
+        <div className="rounded-2xl border border-emerald-500/18 bg-emerald-500/8 px-3 py-2 text-[11px] text-emerald-900">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="rounded-full border border-emerald-500/20 bg-white/80 px-2 py-0.5 text-[10px] font-medium text-emerald-800">
+              {compactionHeadline}
+            </span>
+            {preview.roomCompactionUpdatedAt ? (
+              <span className="text-[10px] text-emerald-800/75">
+                {formatSessionStripTime(preview.roomCompactionUpdatedAt)}
+              </span>
+            ) : null}
+          </div>
+          {compactionDetail && (
+            <div className="mt-1 leading-relaxed">{compactionDetail}</div>
+          )}
+        </div>
+      )}
+      {primaryChildSessionPreview && (
+        <div className="rounded-2xl border border-sky-500/15 bg-white/75 px-3 py-2 text-[11px] text-[var(--color-text)]">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="rounded-full border border-sky-500/20 bg-sky-500/8 px-2 py-0.5 text-[10px] font-medium text-sky-700">
+              后台线程
+            </span>
+            <span className="text-[10px] font-medium text-[var(--color-text-secondary)]">
+              {primaryChildSessionPreview.label}
+            </span>
+          </div>
+          {primaryChildSessionPreview.statusSummary && (
+            <div className="mt-1 leading-relaxed">
+              {primaryChildSessionPreview.statusSummary}
+            </div>
+          )}
+          {primaryChildSessionPreview.nextStepHint && (
+            <div className="mt-1 text-[10px] leading-relaxed text-[var(--color-text-secondary)]">
+              下一步：{primaryChildSessionPreview.nextStepHint}
+            </div>
+          )}
+        </div>
+      )}
+
       {preview.dialogHistory.length === 0 ? (
         <div className={`rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-secondary)]/20 text-center text-[12px] text-[var(--color-text-secondary)] ${compact ? "flex min-h-[220px] flex-1 items-center justify-center px-3.5 py-3.5" : "px-4 py-4"}`}>
           这个 IM 会话还没有可展示的 Dialog 内容。
         </div>
       ) : (
         <div className={compact ? "min-h-0 flex-1 space-y-2 overflow-y-auto pr-1" : "space-y-3"}>
-          {preview.dialogHistory.map((msg) => {
+          {preview.dialogHistory.length > visibleDialogHistory.length && (
+            <button
+              onClick={() => {
+                setVisibleMessageCount((current) => Math.min(
+                  preview.dialogHistory.length,
+                  current + CHANNEL_MESSAGE_WINDOW_SIZE,
+                ));
+              }}
+              className="w-full rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)]/80 px-3 py-2 text-[11px] text-[var(--color-text-secondary)] transition-colors hover:border-sky-500/20 hover:text-[var(--color-text)]"
+            >
+              加载更早的 {preview.dialogHistory.length - visibleDialogHistory.length} 条消息
+            </button>
+          )}
+          {visibleDialogHistory.map((msg) => {
             const isUser = msg.from === "user";
             const actorIdx = actorIdToIndex.get(msg.from) ?? 0;
             const actor = actorById.get(msg.from);
@@ -689,6 +892,24 @@ export function ChannelSessionBoard({
               const topicHint = conversation.backgroundTopicCount > 0
                 ? ` · ${conversation.backgroundTopicCount} 个后台话题`
                 : "";
+              const approvalHeadline = getApprovalHeadline(
+                conversation.preview ?? conversation.conversation,
+              );
+              const approvalText = conversation.preview?.approvalSummary
+                ?? conversation.conversation.approvalSummary
+                ?? conversation.preview?.pendingApprovalReason
+                ?? conversation.conversation.pendingApprovalReason
+                ?? "";
+              const childSessionPreviewText = buildChildSessionPreviewText(
+                conversation.preview?.childSessionsPreview
+                  ?? conversation.conversation.childSessionsPreview,
+              );
+              const compactionHeadline = buildCompactionHeadline(
+                conversation.preview ?? conversation.conversation,
+              );
+              const compactionDetail = buildCompactionDetail(
+                conversation.preview ?? conversation.conversation,
+              );
               return (
                 <button
                   key={conversation.key}
@@ -716,6 +937,24 @@ export function ChannelSessionBoard({
                         <span>·</span>
                         <span>{formatSessionStripTime(conversation.updatedAt)}</span>
                       </div>
+                      {approvalHeadline && (
+                        <div className="mt-1.5 rounded-[14px] border border-amber-500/20 bg-amber-500/8 px-2 py-1 text-[9px] leading-relaxed text-amber-800">
+                          <span className="font-medium">{approvalHeadline}</span>
+                          {approvalText ? <span className="ml-1">{approvalText}</span> : null}
+                        </div>
+                      )}
+                      {childSessionPreviewText && (
+                        <div className="mt-1.5 rounded-[14px] border border-sky-500/15 bg-sky-500/6 px-2 py-1 text-[9px] leading-relaxed text-sky-900">
+                          <span className="font-medium">后台线程：</span>
+                          <span>{childSessionPreviewText}</span>
+                        </div>
+                      )}
+                      {compactionHeadline && (
+                        <div className="mt-1.5 rounded-[14px] border border-emerald-500/15 bg-emerald-500/7 px-2 py-1 text-[9px] leading-relaxed text-emerald-900">
+                          <span className="font-medium">{compactionHeadline}</span>
+                          {compactionDetail ? <span className="ml-1">{compactionDetail}</span> : null}
+                        </div>
+                      )}
                       {buildCollaborationMetaPills({
                         executionStrategy: conversation.conversation.executionStrategy,
                         pendingInteractionCount: conversation.conversation.pendingInteractionCount,

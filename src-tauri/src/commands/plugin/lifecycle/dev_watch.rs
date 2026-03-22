@@ -1,16 +1,19 @@
-use std::collections::{HashMap, HashSet};
+use notify::{recommended_watcher, RecursiveMode, Watcher};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Mutex;
-use std::time::UNIX_EPOCH;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::commands::plugin::api_bridge::plugin_open;
 use crate::commands::plugin::types::{
-    PluginCache, PluginDevState, PluginDevTraceItem, PluginDevWatchStatus, PluginDevWatcherRuntime,
-    PluginManifest,
+    PluginDevState, PluginDevTraceItem, PluginDevWatchStatus, PluginDevWatcherRuntime,
+    PluginInfo, PluginManifest,
 };
 
-use super::get_cached_plugins;
+use super::{get_cached_plugins, get_plugin_dev_dirs, invalidate_plugin_runtime, refresh_plugin_cache};
+
+const DEV_WATCH_DEBOUNCE_MS: u64 = 200;
 
 fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -20,58 +23,9 @@ fn normalize_path(path: &str) -> String {
     path.replace('\\', "/")
 }
 
-fn modified_ms(path: &Path) -> Option<u128> {
-    let metadata = std::fs::metadata(path).ok()?;
-    let modified = metadata.modified().ok()?;
-    let duration = modified.duration_since(UNIX_EPOCH).ok()?;
-    Some(duration.as_millis())
-}
-
-fn collect_file_snapshot(paths: &[PathBuf]) -> HashMap<String, u128> {
-    fn collect_one(path: &Path, snapshot: &mut HashMap<String, u128>) {
-        if !path.exists() {
-            return;
-        }
-        if path.is_file() {
-            if let Some(ms) = modified_ms(path) {
-                let key = path
-                    .canonicalize()
-                    .unwrap_or_else(|_| path.to_path_buf())
-                    .to_string_lossy()
-                    .to_string();
-                snapshot.insert(normalize_path(&key), ms);
-            }
-            return;
-        }
-        if let Ok(entries) = std::fs::read_dir(path) {
-            for entry in entries.flatten() {
-                collect_one(&entry.path(), snapshot);
-            }
-        }
-    }
-
-    let mut snapshot = HashMap::new();
-    for root in paths {
-        collect_one(root, &mut snapshot);
-    }
-    snapshot
-}
-
-fn diff_snapshots(prev: &HashMap<String, u128>, next: &HashMap<String, u128>) -> Vec<String> {
-    let mut changed = Vec::new();
-    for (path, modified) in next {
-        if prev.get(path) != Some(modified) {
-            changed.push(path.clone());
-        }
-    }
-    for path in prev.keys() {
-        if !next.contains_key(path) {
-            changed.push(path.clone());
-        }
-    }
-    changed.sort();
-    changed.dedup();
-    changed
+fn normalize_fs_path(path: &Path) -> String {
+    let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    normalize_path(&resolved.to_string_lossy())
 }
 
 fn validate_manifest_file(path: &str) -> Option<String> {
@@ -103,11 +57,10 @@ fn path_is_within(path: &str, root: &str) -> bool {
 }
 
 fn resolve_changed_plugin_ids(
-    app: &AppHandle,
+    plugins: &[PluginInfo],
     changed_paths: &[String],
     plugin_filter: &Option<String>,
 ) -> HashSet<String> {
-    let plugins = get_cached_plugins(app);
     let mut changed_ids = HashSet::new();
 
     for plugin in plugins {
@@ -188,17 +141,107 @@ fn stop_dev_watcher(app: &AppHandle) -> PluginDevWatchStatus {
     set_watch_status(app, |_| {})
 }
 
+fn emit_watch_error(app: &AppHandle, plugin_id: &Option<String>, error: String) {
+    let status = set_watch_status(app, |status| {
+        status.last_error = Some(error.clone());
+        status.last_changed_at = Some(now_rfc3339());
+    });
+    let _ = app.emit("plugin-dev:watch-status", &status);
+    let _ = app.emit(
+        "plugin-dev:reload-error",
+        serde_json::json!({
+            "pluginId": plugin_id,
+            "errors": [{
+                "path": null,
+                "error": error,
+            }],
+        }),
+    );
+}
+
+async fn process_changed_paths(
+    app: &AppHandle,
+    changed_paths: Vec<String>,
+    plugin_filter: &Option<String>,
+) {
+    if changed_paths.is_empty() {
+        return;
+    }
+
+    let parse_errors: Vec<serde_json::Value> = changed_paths
+        .iter()
+        .filter_map(|path| {
+            validate_manifest_file(path).map(|err| {
+                serde_json::json!({
+                    "path": path,
+                    "error": err,
+                })
+            })
+        })
+        .collect();
+
+    if !parse_errors.is_empty() {
+        let status = set_watch_status(app, |status| {
+            status.last_error = Some("插件清单解析失败，已保持当前运行版本".to_string());
+            status.last_changed_at = Some(now_rfc3339());
+        });
+        let _ = app.emit("plugin-dev:watch-status", &status);
+        let _ = app.emit(
+            "plugin-dev:reload-error",
+            serde_json::json!({
+                "pluginId": plugin_filter,
+                "errors": parse_errors,
+            }),
+        );
+        return;
+    }
+
+    let previous_plugins = get_cached_plugins(app);
+    let previous_changed_ids =
+        resolve_changed_plugin_ids(&previous_plugins, &changed_paths, plugin_filter);
+    invalidate_plugin_runtime(app);
+    let refreshed_plugins = refresh_plugin_cache(app);
+    let mut changed_ids = previous_changed_ids;
+    changed_ids.extend(resolve_changed_plugin_ids(
+        &refreshed_plugins,
+        &changed_paths,
+        plugin_filter,
+    ));
+    if changed_ids.is_empty() {
+        return;
+    }
+
+    let status = set_watch_status(app, |status| {
+        status.changed_count += changed_paths.len() as u64;
+        status.last_changed_at = Some(now_rfc3339());
+        status.last_error = None;
+    });
+    let _ = app.emit("plugin-dev:watch-status", &status);
+    let changed_ids_vec: Vec<String> = changed_ids.iter().cloned().collect();
+    let _ = app.emit(
+        "plugin-dev:file-changed",
+        serde_json::json!({
+            "pluginIds": changed_ids_vec,
+            "paths": changed_paths,
+            "at": now_rfc3339(),
+        }),
+    );
+
+    for id in changed_ids {
+        reload_plugin_windows(app.clone(), &id).await;
+    }
+}
+
 pub(super) async fn plugin_dev_watch_start(
     app: AppHandle,
     dir_paths: Vec<String>,
     plugin_id: Option<String>,
 ) -> Result<PluginDevWatchStatus, String> {
     let _ = stop_dev_watcher(&app);
+    let _ = get_cached_plugins(&app);
 
     let mut watch_dirs: Vec<String> = if dir_paths.is_empty() {
-        let cache = app.state::<Mutex<PluginCache>>();
-        let cache = cache.lock().map_err(|e| format!("Lock poisoned: {}", e))?;
-        cache.dev_dirs.iter().cloned().collect()
+        get_plugin_dev_dirs(&app)
     } else {
         dir_paths
     };
@@ -218,10 +261,25 @@ pub(super) async fn plugin_dev_watch_start(
         return Err("监听目录不存在".to_string());
     }
 
+    let (event_tx, mut event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<notify::Result<notify::Event>>();
+    let mut watcher = recommended_watcher(move |result| {
+        let _ = event_tx.send(result);
+    })
+    .map_err(|e| format!("创建文件监听失败: {}", e))?;
+
+    for path in &watch_paths {
+        watcher
+            .watch(path, RecursiveMode::Recursive)
+            .map_err(|e| format!("监听目录失败 ({}): {}", path.display(), e))?;
+    }
+
     let status = set_watch_status(&app, |status| {
         status.running = true;
         status.watched_dirs = watch_dirs.clone();
         status.plugin_id = plugin_id.clone();
+        status.changed_count = 0;
+        status.last_changed_at = None;
         status.last_error = None;
     });
     let _ = app.emit("plugin-dev:watch-status", &status);
@@ -229,74 +287,44 @@ pub(super) async fn plugin_dev_watch_start(
     let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
     let app_handle = app.clone();
     let plugin_filter = plugin_id.clone();
-    let initial_snapshot = collect_file_snapshot(&watch_paths);
 
     let task = tauri::async_runtime::spawn(async move {
-        let mut previous = initial_snapshot;
+        let _watcher = watcher;
+        let mut pending_paths = HashSet::<String>::new();
+        let mut debounce: Option<Pin<Box<tokio::time::Sleep>>> = None;
+
         loop {
             tokio::select! {
                 _ = &mut stop_rx => {
                     break;
                 }
-                _ = tokio::time::sleep(std::time::Duration::from_millis(400)) => {
-                    let current = collect_file_snapshot(&watch_paths);
-                    let changed_paths = diff_snapshots(&previous, &current);
-                    previous = current;
-
-                    if changed_paths.is_empty() {
-                        continue;
+                maybe_event = event_rx.recv() => {
+                    match maybe_event {
+                        Some(Ok(event)) => {
+                            for path in event.paths {
+                                pending_paths.insert(normalize_fs_path(&path));
+                            }
+                            if !pending_paths.is_empty() {
+                                debounce = Some(Box::pin(tokio::time::sleep(std::time::Duration::from_millis(
+                                    DEV_WATCH_DEBOUNCE_MS,
+                                ))));
+                            }
+                        }
+                        Some(Err(err)) => {
+                            emit_watch_error(&app_handle, &plugin_filter, format!("文件监听失败: {}", err));
+                        }
+                        None => break,
                     }
-
-                    let parse_errors: Vec<serde_json::Value> = changed_paths
-                        .iter()
-                        .filter_map(|path| validate_manifest_file(path).map(|err| {
-                            serde_json::json!({
-                                "path": path,
-                                "error": err,
-                            })
-                        }))
-                        .collect();
-
-                    if !parse_errors.is_empty() {
-                        let status = set_watch_status(&app_handle, |status| {
-                            status.last_error = Some("插件清单解析失败，已保持当前运行版本".to_string());
-                            status.last_changed_at = Some(now_rfc3339());
-                        });
-                        let _ = app_handle.emit("plugin-dev:watch-status", &status);
-                        let _ = app_handle.emit(
-                            "plugin-dev:reload-error",
-                            serde_json::json!({
-                                "pluginId": plugin_filter,
-                                "errors": parse_errors,
-                            }),
-                        );
-                        continue;
+                }
+                _ = async {
+                    if let Some(timer) = &mut debounce {
+                        timer.as_mut().await;
                     }
-
-                    let changed_ids = resolve_changed_plugin_ids(&app_handle, &changed_paths, &plugin_filter);
-                    if changed_ids.is_empty() {
-                        continue;
-                    }
-
-                    let status = set_watch_status(&app_handle, |status| {
-                        status.changed_count += changed_paths.len() as u64;
-                        status.last_changed_at = Some(now_rfc3339());
-                        status.last_error = None;
-                    });
-                    let _ = app_handle.emit("plugin-dev:watch-status", &status);
-                    let changed_ids_vec: Vec<String> = changed_ids.iter().cloned().collect();
-                    let _ = app_handle.emit(
-                        "plugin-dev:file-changed",
-                        serde_json::json!({
-                            "pluginIds": changed_ids_vec,
-                            "paths": changed_paths,
-                            "at": now_rfc3339(),
-                        }),
-                    );
-
-                    for id in changed_ids {
-                        reload_plugin_windows(app_handle.clone(), &id).await;
-                    }
+                }, if debounce.is_some() => {
+                    let mut changed_paths: Vec<String> = pending_paths.drain().collect();
+                    changed_paths.sort();
+                    debounce = None;
+                    process_changed_paths(&app_handle, changed_paths, &plugin_filter).await;
                 }
             }
         }

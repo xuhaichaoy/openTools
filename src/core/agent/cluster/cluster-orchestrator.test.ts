@@ -218,4 +218,34 @@ describe("ClusterOrchestrator", () => {
     expect(chatCall.messages[2].content).toContain("代码已修改");
     expect(answer).toBe("最终汇总结果");
   });
+
+  it("uses approval rejection reason in final answer", async () => {
+    const orchestrator = new ClusterOrchestrator({
+      workspaceRoot: "/repo",
+      onPlanApproval: async (request) => ({
+        ...request,
+        status: "rejected",
+        reason: "计划包含高影响步骤，已被策略拒绝。",
+      }),
+    }) as any;
+
+    orchestrator.planPhase = vi.fn(async () => ({
+      id: "plan-approval",
+      mode: "parallel_split",
+      steps: [
+        {
+          id: "s1",
+          role: "Researcher",
+          task: "分析当前实现",
+          dependencies: [],
+        },
+      ],
+      sharedContext: {},
+    }));
+
+    const result = await orchestrator.execute("分析当前实现");
+
+    expect(result.finalAnswer).toBe("计划包含高影响步骤，已被策略拒绝。");
+    expect(result.agentInstances).toEqual([]);
+  });
 });

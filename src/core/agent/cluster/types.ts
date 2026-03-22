@@ -205,4 +205,5 @@ export interface PlanApprovalRequest {
   plan: ClusterPlan;
   status: PlanApprovalStatus;
   modifiedPlan?: ClusterPlan;
+  reason?: string;
 }
