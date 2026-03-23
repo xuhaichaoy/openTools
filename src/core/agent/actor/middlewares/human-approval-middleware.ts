@@ -12,7 +12,8 @@
 
 import type { ActorMiddleware, ActorRunContext } from "../actor-middleware";
 import type { ApprovalDecisionOption, ApprovalRequest, ApprovalRequestDetail } from "../types";
-import { assessToolApproval, normalizeExecutionPolicy } from "../tool-approval-policy";
+import { normalizeExecutionPolicyWithMiddlewareCompat } from "../execution-policy";
+import { assessToolApproval } from "../tool-approval-policy";
 
 export type ApprovalPolicy = "always-allow" | "ask-every-time" | "deny";
 
@@ -469,9 +470,10 @@ export class HumanApprovalMiddleware implements ActorMiddleware {
   async apply(ctx: ActorRunContext): Promise<void> {
     if (!ctx.actorSystem) return;
 
-    const executionPolicy = normalizeExecutionPolicy(ctx.executionPolicy, {
-      approvalLevel: ctx.middlewareOverrides?.approvalLevel,
-    });
+    const executionPolicy = normalizeExecutionPolicyWithMiddlewareCompat(
+      ctx.executionPolicy,
+      ctx.middlewareOverrides,
+    );
     if (executionPolicy.approvalMode === "off") return;
 
     const actorSystem = ctx.actorSystem;
@@ -518,7 +520,6 @@ export class HumanApprovalMiddleware implements ActorMiddleware {
 
           const approvalAssessment = assessToolApproval(tool.name, params, {
             executionPolicy,
-            approvalMode: executionPolicy.approvalMode,
             workspace: ctx.workspace,
           });
           if (approvalAssessment.decision === "deny") {
@@ -530,7 +531,11 @@ export class HumanApprovalMiddleware implements ActorMiddleware {
 
           // Use confirmDangerousAction callback if available (for dialog/popup mode)
           if (ctx.confirmDangerousAction) {
-            const approved = await ctx.confirmDangerousAction(tool.name, params);
+            const approved = await ctx.confirmDangerousAction(tool.name, params, {
+              actorId,
+              executionPolicy,
+              workspace: ctx.workspace,
+            });
             if (!approved) {
               return { error: `用户拒绝了 ${tool.name} 的执行请求` };
             }

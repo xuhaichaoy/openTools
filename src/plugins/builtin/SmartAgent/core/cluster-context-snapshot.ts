@@ -1,13 +1,7 @@
 import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
+import { formatAICenterModeLabel } from "@/core/ai/ai-center-mode-meta";
 import type { ClusterMode, ClusterSessionStatus } from "@/core/agent/cluster/types";
 import type { AICenterHandoff } from "@/store/app-store";
-
-const MODE_LABELS: Record<NonNullable<AICenterHandoff["sourceMode"]>, string> = {
-  ask: "Ask",
-  agent: "Agent",
-  cluster: "Cluster",
-  dialog: "Dialog",
-};
 
 const CLUSTER_MODE_LABELS: Record<ClusterMode, string> = {
   parallel_split: "并行分治",
@@ -76,7 +70,7 @@ export function buildClusterSourceModeLabel(
   handoff?: AICenterHandoff | null,
 ): string | undefined {
   if (!handoff?.sourceMode) return undefined;
-  return `${MODE_LABELS[handoff.sourceMode]} 模式`;
+  return `${formatAICenterModeLabel(handoff.sourceMode)} 模式`;
 }
 
 export function buildClusterSourceHandoffSummary(

@@ -40,3 +40,51 @@ describe("AgentActor askUser image replies", () => {
     expect(inbox[0]?.content).toContain("ask_user 图片补充");
   });
 });
+
+describe("AgentActor updateConfig", () => {
+  it("promotes legacy middleware approval compatibility into first-class executionPolicy", () => {
+    const actor = new AgentActor({
+      id: "reviewer",
+      role: { ...DIALOG_FULL_ROLE, name: "Reviewer" },
+      middlewareOverrides: { approvalLevel: "strict" },
+    });
+
+    expect(actor.executionPolicy).toEqual({
+      accessMode: "auto",
+      approvalMode: "strict",
+    });
+    expect(actor.normalizedExecutionPolicy).toEqual({
+      accessMode: "auto",
+      approvalMode: "strict",
+    });
+  });
+
+  it("can clear workspace and policy fields when patch explicitly provides undefined", () => {
+    const actor = new AgentActor({
+      id: "editor",
+      role: { ...DIALOG_FULL_ROLE, name: "Editor" },
+      workspace: "/tmp/demo",
+      toolPolicy: { deny: ["run_shell_command"] },
+      executionPolicy: { accessMode: "full_access", approvalMode: "permissive" },
+      middlewareOverrides: { approvalLevel: "permissive", disable: ["Clarification"] },
+      thinkingLevel: "high",
+      capabilities: { tags: ["code_write"] },
+    });
+
+    actor.updateConfig({
+      workspace: undefined,
+      toolPolicy: undefined,
+      executionPolicy: undefined,
+      middlewareOverrides: undefined,
+      thinkingLevel: undefined,
+      capabilities: undefined,
+    });
+
+    expect(actor.workspace).toBeUndefined();
+    expect(actor.toolPolicyConfig).toBeUndefined();
+    expect(actor.executionPolicy).toBeUndefined();
+    expect(actor.middlewareOverrides).toBeUndefined();
+    expect(actor.thinkingLevel).toBeUndefined();
+    expect(actor.capabilities).toBeUndefined();
+  });
+});

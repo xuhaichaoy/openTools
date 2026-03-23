@@ -1,7 +1,11 @@
 import { DIALOG_FULL_ROLE } from "./agent-actor";
 import type { ActorSystem } from "./actor-system";
 import type { ChannelType } from "@/core/channels/types";
-import type { ActorConfig, ExecutionPolicy, MiddlewareOverrides, ToolPolicy } from "./types";
+import type { ActorConfig } from "./types";
+import {
+  buildMiddlewareOverridesForExecutionPolicy,
+  getDefaultDialogActorPolicyProfile,
+} from "./execution-policy";
 
 function makeId(): string {
   return Math.random().toString(36).substring(2, 8);
@@ -38,6 +42,11 @@ export function buildDefaultDialogActorConfig(
   options?: DefaultDialogActorSpawnOptions,
 ): Pick<ActorConfig, "role" | "toolPolicy" | "executionPolicy" | "middlewareOverrides"> {
   const isExternalIM = options?.mode === "external_im";
+  const policyProfile = isExternalIM
+    ? getDefaultDialogActorPolicyProfile("external_im")
+    : roleName === "Lead"
+      ? getDefaultDialogActorPolicyProfile("lead")
+      : getDefaultDialogActorPolicyProfile("support");
   const role = isExternalIM
     ? {
         ...DIALOG_FULL_ROLE,
@@ -49,25 +58,14 @@ export function buildDefaultDialogActorConfig(
       }
     : { ...DIALOG_FULL_ROLE, name: roleName };
 
-  const toolPolicy: ToolPolicy | undefined = isExternalIM
-    ? { deny: ["ask_user"] }
-    : undefined;
-  const executionPolicy: ExecutionPolicy = isExternalIM
-    ? { accessMode: "read_only", approvalMode: "off" }
-    : roleName === "Lead"
-      ? { accessMode: "auto", approvalMode: "permissive" }
-      : { accessMode: "auto", approvalMode: "normal" };
-  const middlewareOverrides: MiddlewareOverrides = isExternalIM
-    ? { approvalLevel: executionPolicy.approvalMode, disable: ["Clarification"] }
-    : roleName === "Lead"
-      ? { approvalLevel: executionPolicy.approvalMode }
-      : {};
-
   return {
     role,
-    toolPolicy,
-    executionPolicy,
-    middlewareOverrides,
+    ...(policyProfile.toolPolicy ? { toolPolicy: policyProfile.toolPolicy } : {}),
+    executionPolicy: policyProfile.executionPolicy,
+    middlewareOverrides: buildMiddlewareOverridesForExecutionPolicy(
+      policyProfile.executionPolicy,
+      policyProfile.middlewareOverrides,
+    ),
   };
 }
 

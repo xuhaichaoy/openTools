@@ -3,8 +3,23 @@ import type {
   ApprovalLevel,
   ApprovalMode,
   ExecutionPolicy,
-  ToolPolicy,
 } from "./types";
+import {
+  DEFAULT_ACCESS_MODE,
+  DEFAULT_APPROVAL_MODE,
+  deriveToolPolicyForAccessMode,
+  normalizeExecutionPolicy,
+  resolveExecutionPolicyInheritance,
+  type NormalizedExecutionPolicy,
+} from "./execution-policy";
+export {
+  DEFAULT_ACCESS_MODE,
+  DEFAULT_APPROVAL_MODE,
+  deriveToolPolicyForAccessMode,
+  normalizeExecutionPolicy,
+  resolveExecutionPolicyInheritance,
+};
+export type { NormalizedExecutionPolicy } from "./execution-policy";
 
 export type ToolApprovalTrustMode = "strict_manual" | "auto_review" | "full_auto";
 export type ToolApprovalDecision = "allow" | "ask" | "deny";
@@ -20,37 +35,15 @@ export interface ToolApprovalAssessment {
 
 export interface AssessToolApprovalOptions {
   trustMode?: ToolApprovalTrustMode;
+  /** @deprecated 兼容旧入口，优先传 executionPolicy。 */
   approvalLevel?: ApprovalLevel;
+  /** @deprecated 兼容旧入口，优先传 executionPolicy。 */
   approvalMode?: ApprovalMode;
+  /** @deprecated 兼容旧入口，优先传 executionPolicy。 */
   accessMode?: AccessMode;
   executionPolicy?: ExecutionPolicy;
   workspace?: string;
 }
-
-export interface NormalizedExecutionPolicy {
-  accessMode: AccessMode;
-  approvalMode: ApprovalMode;
-}
-
-export const DEFAULT_ACCESS_MODE: AccessMode = "auto";
-export const DEFAULT_APPROVAL_MODE: ApprovalMode = "normal";
-
-const ACCESS_MODE_PRIORITY: AccessMode[] = ["read_only", "auto", "full_access"];
-const APPROVAL_MODE_PRIORITY: ApprovalMode[] = ["strict", "normal", "permissive", "off"];
-
-const READ_ONLY_ACCESS_POLICY: ToolPolicy = {
-  deny: [
-    "write_file",
-    "str_replace_edit",
-    "json_edit",
-    "delete_file",
-    "run_shell_command",
-    "persistent_shell",
-    "native_*",
-    "database_execute",
-    "ssh_*",
-  ],
-};
 
 const SAFE_TOOLS = new Set([
   "read_file",
@@ -352,83 +345,6 @@ function riskRank(risk: ToolApprovalRisk): number {
   }
 }
 
-function accessModeRank(mode: AccessMode): number {
-  const index = ACCESS_MODE_PRIORITY.indexOf(mode);
-  return index >= 0 ? index : ACCESS_MODE_PRIORITY.indexOf(DEFAULT_ACCESS_MODE);
-}
-
-function approvalModeRank(mode: ApprovalMode): number {
-  const index = APPROVAL_MODE_PRIORITY.indexOf(mode);
-  return index >= 0 ? index : APPROVAL_MODE_PRIORITY.indexOf(DEFAULT_APPROVAL_MODE);
-}
-
-export function clampAccessMode(
-  ...modes: Array<AccessMode | undefined>
-): AccessMode {
-  const normalized = modes.filter((mode): mode is AccessMode => Boolean(mode));
-  if (normalized.length === 0) return DEFAULT_ACCESS_MODE;
-  return normalized.reduce((mostRestrictive, current) => (
-    accessModeRank(current) < accessModeRank(mostRestrictive) ? current : mostRestrictive
-  ));
-}
-
-export function clampApprovalMode(
-  ...modes: Array<ApprovalMode | undefined>
-): ApprovalMode {
-  const normalized = modes.filter((mode): mode is ApprovalMode => Boolean(mode));
-  if (normalized.length === 0) return DEFAULT_APPROVAL_MODE;
-  return normalized.reduce((mostRestrictive, current) => (
-    approvalModeRank(current) < approvalModeRank(mostRestrictive) ? current : mostRestrictive
-  ));
-}
-
-export function normalizeExecutionPolicy(
-  policy?: ExecutionPolicy | null,
-  legacy?: { approvalLevel?: ApprovalLevel | null; accessMode?: AccessMode | null },
-): NormalizedExecutionPolicy {
-  return {
-    accessMode: policy?.accessMode ?? legacy?.accessMode ?? DEFAULT_ACCESS_MODE,
-    approvalMode: policy?.approvalMode ?? legacy?.approvalLevel ?? DEFAULT_APPROVAL_MODE,
-  };
-}
-
-export function resolveExecutionPolicyInheritance(params: {
-  parentPolicy?: ExecutionPolicy | null;
-  boundaryPolicy?: ExecutionPolicy | null;
-  overridePolicy?: ExecutionPolicy | null;
-  parentApprovalLevel?: ApprovalLevel | null;
-  overrideApprovalLevel?: ApprovalLevel | null;
-}): NormalizedExecutionPolicy {
-  const parent = normalizeExecutionPolicy(params.parentPolicy, {
-    approvalLevel: params.parentApprovalLevel,
-  });
-  return {
-    accessMode: clampAccessMode(
-      parent.accessMode,
-      params.boundaryPolicy?.accessMode,
-      params.overridePolicy?.accessMode,
-    ),
-    approvalMode: clampApprovalMode(
-      parent.approvalMode,
-      params.boundaryPolicy?.approvalMode,
-      params.overridePolicy?.approvalMode ?? params.overrideApprovalLevel ?? undefined,
-    ),
-  };
-}
-
-export function deriveToolPolicyForAccessMode(
-  accessMode?: AccessMode,
-): ToolPolicy | undefined {
-  switch (accessMode ?? DEFAULT_ACCESS_MODE) {
-    case "read_only":
-      return {
-        deny: [...(READ_ONLY_ACCESS_POLICY.deny ?? [])],
-      };
-    default:
-      return undefined;
-  }
-}
-
 function isToolDeniedByReadOnlyAccess(
   toolName: string,
 ): string | null {
@@ -508,12 +424,15 @@ export function assessToolApproval(
   params: Record<string, unknown>,
   options: AssessToolApprovalOptions = {},
 ): ToolApprovalAssessment {
-  const executionPolicy = normalizeExecutionPolicy(options.executionPolicy, {
-    approvalLevel: options.approvalMode ?? options.approvalLevel,
+  const executionPolicy = normalizeExecutionPolicy({
+    accessMode: options.executionPolicy?.accessMode ?? options.accessMode,
+    approvalMode: options.executionPolicy?.approvalMode ?? options.approvalMode,
+  }, {
+    approvalLevel: options.approvalLevel,
     accessMode: options.accessMode,
   });
   const trustMode = options.trustMode ?? "auto_review";
-  const approvalLevel = executionPolicy.approvalMode;
+  const approvalMode = executionPolicy.approvalMode;
 
   const accessDeniedReason = executionPolicy.accessMode === "read_only"
     ? isToolDeniedByReadOnlyAccess(toolName)
@@ -527,7 +446,7 @@ export function assessToolApproval(
     };
   }
 
-  if (trustMode === "full_auto" || approvalLevel === "off") {
+  if (trustMode === "full_auto" || approvalMode === "off") {
     return {
       decision: "allow",
       risk: "safe",
@@ -537,7 +456,7 @@ export function assessToolApproval(
   }
 
   const assessment = assessByToolName(toolName, params, options.workspace);
-  const effectiveThreshold = Math.min(trustThreshold(trustMode), approvalThreshold(approvalLevel));
+  const effectiveThreshold = Math.min(trustThreshold(trustMode), approvalThreshold(approvalMode));
 
   if (assessment.risk === "safe") {
     return {

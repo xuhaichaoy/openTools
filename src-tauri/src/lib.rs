@@ -218,6 +218,7 @@ pub fn run() {
         .manage(commands::mcp::McpServerManager::new())
         .manage(commands::ssh::SshManager::new())
         .manage(commands::database::DatabaseManager::new())
+        .manage(commands::data_export::DataExportManager::new())
         .manage(commands::ding::DingManager::new())
         .manage(commands::dingtalk_stream::DingTalkStreamManager::new())
         .manage(commands::feishu_ws::FeishuWsManager::new())
@@ -569,6 +570,8 @@ pub fn run() {
             commands::database::db_describe_table,
             commands::database::db_save_connections,
             commands::database::db_load_connections,
+            commands::data_export::data_export_preview,
+            commands::data_export::data_export_confirm_csv_export,
             // ── Native Apps ──
             commands::native_apps::native_calendar_list,
             commands::native_apps::native_calendar_create_event,

@@ -273,6 +273,7 @@ export type AccessMode = "read_only" | "auto" | "full_access";
 
 /** HumanApproval 策略级别 */
 export type ApprovalMode = "strict" | "normal" | "permissive" | "off";
+/** @deprecated 兼容旧命名，新的主路径统一使用 ApprovalMode。 */
 export type ApprovalLevel = ApprovalMode;
 
 /** 统一执行策略：对齐 access mode + approval mode 控制面。 */
@@ -285,7 +286,7 @@ export interface ExecutionPolicy {
 export interface MiddlewareOverrides {
   /** 禁用的中间件名称列表 */
   disable?: string[];
-  /** HumanApproval 策略级别（覆盖默认） */
+  /** @deprecated 仅作为 executionPolicy.approvalMode 的兼容镜像保留。 */
   approvalLevel?: ApprovalLevel;
 }
 
@@ -315,8 +316,8 @@ export interface ActorConfig {
   capabilities?: AgentCapabilities;
   /**
    * 中间件链覆盖配置。
-   * 支持禁用特定中间件或调整 HumanApproval 策略。
-   * 例如 Agent Shell 模式设置 approvalLevel: "off" 跳过所有审批。
+   * 主路径仅建议用它关闭特定中间件；审批语义请优先写入 executionPolicy。
+   * approvalLevel 仍保留为兼容镜像，避免旧快照和旧 UI 失效。
    */
   middlewareOverrides?: MiddlewareOverrides;
 }

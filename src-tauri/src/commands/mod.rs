@@ -4,6 +4,7 @@ pub mod ai;
 pub mod ckg;
 pub mod clipboard;
 pub mod collection;
+pub mod data_export;
 pub mod data_forge;
 pub mod database;
 pub mod ding;

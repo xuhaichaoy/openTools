@@ -4,6 +4,11 @@ import type {
   ThinkingLevel,
   ToolPolicy,
 } from "./types";
+import {
+  buildMiddlewareOverridesForExecutionPolicy,
+  compactMiddlewareOverridesForPersistence,
+  normalizeExecutionPolicyWithMiddlewareCompat,
+} from "./execution-policy";
 
 export type DialogRoutingMode = "coordinator" | "smart" | "broadcast";
 
@@ -59,13 +64,69 @@ const CODER_EXECUTION_POLICY: ExecutionPolicy = {
   approvalMode: "normal",
 };
 
-const SAFE_APPROVALS: MiddlewareOverrides = {
-  approvalLevel: "permissive",
-};
+function cloneToolPolicy(toolPolicy?: ToolPolicy): ToolPolicy | undefined {
+  if (!toolPolicy) return undefined;
+  return {
+    ...(toolPolicy.allow ? { allow: [...toolPolicy.allow] } : {}),
+    ...(toolPolicy.deny ? { deny: [...toolPolicy.deny] } : {}),
+  };
+}
 
-const NORMAL_APPROVALS: MiddlewareOverrides = {
-  approvalLevel: "normal",
-};
+function cloneMiddlewareOverrides(
+  middlewareOverrides?: MiddlewareOverrides,
+): MiddlewareOverrides | undefined {
+  if (!middlewareOverrides) return undefined;
+  return {
+    ...(middlewareOverrides.disable ? { disable: [...middlewareOverrides.disable] } : {}),
+    ...(middlewareOverrides.approvalLevel ? { approvalLevel: middlewareOverrides.approvalLevel } : {}),
+  };
+}
+
+function compactDialogPresetParticipantForStorage(
+  participant: DialogPresetParticipant,
+): DialogPresetParticipant {
+  const middlewareOverrides = compactMiddlewareOverridesForPersistence(participant.middlewareOverrides);
+  return {
+    ...participant,
+    middlewareOverrides,
+  };
+}
+
+function compactDialogPresetForStorage(preset: DialogPreset): DialogPreset {
+  return {
+    ...preset,
+    participants: preset.participants.map((participant) => compactDialogPresetParticipantForStorage(participant)),
+  };
+}
+
+export function normalizeDialogPresetParticipant(
+  participant: DialogPresetParticipant,
+): DialogPresetParticipant {
+  const executionPolicy = normalizeExecutionPolicyWithMiddlewareCompat(
+    participant.executionPolicy,
+    participant.middlewareOverrides,
+  );
+  const middlewareOverrides = buildMiddlewareOverridesForExecutionPolicy(
+    executionPolicy,
+    compactMiddlewareOverridesForPersistence(cloneMiddlewareOverrides(participant.middlewareOverrides)),
+  );
+  return {
+    ...participant,
+    ...(participant.suggestedCapabilities
+      ? { suggestedCapabilities: [...participant.suggestedCapabilities] }
+      : {}),
+    ...(participant.toolPolicy ? { toolPolicy: cloneToolPolicy(participant.toolPolicy) } : {}),
+    executionPolicy,
+    middlewareOverrides,
+  };
+}
+
+export function normalizeDialogPreset(preset: DialogPreset): DialogPreset {
+  return {
+    ...preset,
+    participants: preset.participants.map((participant) => normalizeDialogPresetParticipant(participant)),
+  };
+}
 
 // ── Preset: Code Review Discussion ──
 
@@ -75,7 +136,6 @@ const CODE_REVIEW_PARTICIPANTS: DialogPresetParticipant[] = [
     suggestedCapabilities: ["coordinator", "code_review", "code_analysis"],
     toolPolicy: READ_ONLY_POLICY,
     executionPolicy: READ_ONLY_EXECUTION_POLICY,
-    middlewareOverrides: SAFE_APPROVALS,
     contextTokens: 12000,
     thinkingLevel: "medium",
     systemPromptOverride: `你是一位严谨的代码审查专家，担任此次 Review 的协调者。
@@ -92,7 +152,6 @@ const CODE_REVIEW_PARTICIPANTS: DialogPresetParticipant[] = [
     suggestedCapabilities: ["code_write", "code_analysis"],
     toolPolicy: CODER_POLICY,
     executionPolicy: CODER_EXECUTION_POLICY,
-    middlewareOverrides: NORMAL_APPROVALS,
     contextTokens: 12000,
     thinkingLevel: "medium",
     systemPromptOverride: `你是一位资深开发者。
@@ -112,7 +171,6 @@ const ARCHITECTURE_REVIEW_PARTICIPANTS: DialogPresetParticipant[] = [
     suggestedCapabilities: ["coordinator", "architecture"],
     toolPolicy: READ_ONLY_POLICY,
     executionPolicy: READ_ONLY_EXECUTION_POLICY,
-    middlewareOverrides: SAFE_APPROVALS,
     contextTokens: 14000,
     thinkingLevel: "high",
     systemPromptOverride: `你是一位软件架构师，担任此次评审的协调者。
@@ -129,7 +187,6 @@ const ARCHITECTURE_REVIEW_PARTICIPANTS: DialogPresetParticipant[] = [
     suggestedCapabilities: ["security"],
     toolPolicy: READ_ONLY_POLICY,
     executionPolicy: READ_ONLY_EXECUTION_POLICY,
-    middlewareOverrides: SAFE_APPROVALS,
     contextTokens: 10000,
     systemPromptOverride: `你是一位安全专家。
 
@@ -143,7 +200,6 @@ const ARCHITECTURE_REVIEW_PARTICIPANTS: DialogPresetParticipant[] = [
     suggestedCapabilities: ["performance"],
     toolPolicy: READ_ONLY_POLICY,
     executionPolicy: READ_ONLY_EXECUTION_POLICY,
-    middlewareOverrides: SAFE_APPROVALS,
     contextTokens: 10000,
     systemPromptOverride: `你是一位性能工程师。
 
@@ -162,7 +218,6 @@ const BRAINSTORMING_PARTICIPANTS: DialogPresetParticipant[] = [
     suggestedCapabilities: ["coordinator", "creative"],
     toolPolicy: READ_ONLY_POLICY,
     executionPolicy: READ_ONLY_EXECUTION_POLICY,
-    middlewareOverrides: SAFE_APPROVALS,
     thinkingLevel: "high",
     systemPromptOverride: `你是一位富有创造力的思考者，担任此次头脑风暴的协调者。
 
@@ -178,7 +233,6 @@ const BRAINSTORMING_PARTICIPANTS: DialogPresetParticipant[] = [
     suggestedCapabilities: ["creative", "code_analysis"],
     toolPolicy: READ_ONLY_POLICY,
     executionPolicy: READ_ONLY_EXECUTION_POLICY,
-    middlewareOverrides: SAFE_APPROVALS,
     thinkingLevel: "medium",
     systemPromptOverride: `你是一位"魔鬼代言人"。
 
@@ -192,7 +246,6 @@ const BRAINSTORMING_PARTICIPANTS: DialogPresetParticipant[] = [
     suggestedCapabilities: ["synthesis"],
     toolPolicy: READ_ONLY_POLICY,
     executionPolicy: READ_ONLY_EXECUTION_POLICY,
-    middlewareOverrides: SAFE_APPROVALS,
     contextTokens: 12000,
     systemPromptOverride: `你是一位综合分析者。
 
@@ -210,7 +263,6 @@ const DEBUG_SESSION_PARTICIPANTS: DialogPresetParticipant[] = [
     suggestedCapabilities: ["coordinator", "debugging", "code_analysis"],
     toolPolicy: READ_ONLY_POLICY,
     executionPolicy: READ_ONLY_EXECUTION_POLICY,
-    middlewareOverrides: SAFE_APPROVALS,
     contextTokens: 12000,
     thinkingLevel: "high",
     systemPromptOverride: `你是一位调试专家，担任此次调试的协调者。
@@ -227,7 +279,6 @@ const DEBUG_SESSION_PARTICIPANTS: DialogPresetParticipant[] = [
     suggestedCapabilities: ["code_write", "testing"],
     toolPolicy: CODER_POLICY,
     executionPolicy: CODER_EXECUTION_POLICY,
-    middlewareOverrides: NORMAL_APPROVALS,
     timeoutSeconds: 600,
     contextTokens: 12000,
     systemPromptOverride: `你是一位修复专家。
@@ -240,7 +291,7 @@ const DEBUG_SESSION_PARTICIPANTS: DialogPresetParticipant[] = [
 
 // ── Export ──
 
-export const DIALOG_PRESETS: DialogPreset[] = [
+const RAW_DIALOG_PRESETS: DialogPreset[] = [
   {
     id: "code_review",
     name: "Code Review 讨论",
@@ -278,6 +329,8 @@ export const DIALOG_PRESETS: DialogPreset[] = [
   },
 ];
 
+export const DIALOG_PRESETS: DialogPreset[] = RAW_DIALOG_PRESETS.map((preset) => normalizeDialogPreset(preset));
+
 export function getDialogPreset(id: string): DialogPreset | undefined {
   return DIALOG_PRESETS.find((p) => p.id === id);
 }
@@ -290,7 +343,7 @@ export function loadCustomPresets(): DialogPreset[] {
   try {
     const stored = localStorage.getItem(CUSTOM_PRESETS_KEY);
     if (!stored) return [];
-    return JSON.parse(stored) as DialogPreset[];
+    return (JSON.parse(stored) as DialogPreset[]).map((preset) => normalizeDialogPreset(preset));
   } catch {
     return [];
   }
@@ -299,10 +352,12 @@ export function loadCustomPresets(): DialogPreset[] {
 export function saveCustomPreset(preset: DialogPreset): void {
   const existing = loadCustomPresets();
   const idx = existing.findIndex((p) => p.id === preset.id);
+  const normalizedPreset = normalizeDialogPreset(preset);
+  const compactedPreset = compactDialogPresetForStorage(normalizedPreset);
   if (idx >= 0) {
-    existing[idx] = preset;
+    existing[idx] = compactedPreset;
   } else {
-    existing.push(preset);
+    existing.push(compactedPreset);
   }
   localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(existing));
 }
@@ -314,16 +369,20 @@ export function deleteCustomPreset(id: string): void {
 }
 
 export function exportCustomPresets(): string {
-  return JSON.stringify(loadCustomPresets(), null, 2);
+  return JSON.stringify(
+    loadCustomPresets().map((preset) => compactDialogPresetForStorage(preset)),
+    null,
+    2,
+  );
 }
 
 export function importCustomPresets(json: string): DialogPreset[] {
   try {
-    const imported = JSON.parse(json) as DialogPreset[];
+    const imported = (JSON.parse(json) as DialogPreset[]).map((preset) => normalizeDialogPreset(preset));
     const existing = loadCustomPresets();
     const existingIds = new Set(existing.map((p) => p.id));
     const newPresets = imported.filter((p) => !existingIds.has(p.id));
-    const merged = [...existing, ...newPresets];
+    const merged = [...existing, ...newPresets].map((preset) => compactDialogPresetForStorage(preset));
     localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(merged));
     return newPresets;
   } catch {

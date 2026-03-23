@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import type {
-  DialogExecutionPlan,
   DialogMessage,
   PendingInteraction,
   SpawnedTaskRecord,
@@ -11,13 +10,11 @@ import {
   buildInputHash,
   cloneExecutionContract,
   sealExecutionContract,
-  toDialogExecutionPlan,
 } from "./execution-contract";
 import { CollaborationSessionController } from "./session-controller";
 
 class FakeSystem {
   public readonly sent: Array<{ kind: string; target?: string; content: string }> = [];
-  public dialogPlan: DialogExecutionPlan | null = null;
   public activeContract: ExecutionContract | null = null;
   public pendingInteractions: PendingInteraction[] = [];
   public spawnedTasks: SpawnedTaskRecord[] = [];
@@ -44,10 +41,6 @@ class FakeSystem {
     return this.activeContract ? cloneExecutionContract(this.activeContract) : null;
   }
 
-  getDialogExecutionPlan(): DialogExecutionPlan | null {
-    return this.dialogPlan ? { ...this.dialogPlan } : null;
-  }
-
   getDialogMessagesSnapshot(): DialogMessage[] {
     return this.dialogMessages.map((message) => ({ ...message }));
   }
@@ -65,18 +58,6 @@ class FakeSystem {
 
   clearExecutionContract(): void {
     this.activeContract = null;
-  }
-
-  armDialogExecutionPlan(plan: DialogExecutionPlan): void {
-    this.dialogPlan = { ...plan };
-  }
-
-  restoreDialogExecutionPlan(plan: DialogExecutionPlan): void {
-    this.dialogPlan = { ...plan };
-  }
-
-  clearDialogExecutionPlan(): void {
-    this.dialogPlan = null;
   }
 
   send(from: string, to: string, content: string): DialogMessage {
@@ -283,18 +264,16 @@ describe("session-controller", () => {
     controller.applyExecutionContract(contract);
 
     expect(system.activeContract?.contractId).toBe("contract-runtime-only");
-    expect(system.dialogPlan).toBeNull();
     expect(controller.snapshot().activeContract?.contractId).toBe("contract-runtime-only");
   });
 
-  it("only falls back to the legacy dialog plan when restoring an old snapshot without a contract", () => {
+  it("restores from the live runtime contract when a sanitized snapshot lacks one", () => {
     const system = new FakeSystem();
-    const legacyContract = sealExecutionContract(createDraft(), {
-      contractId: "contract-legacy-restore",
+    system.activeContract = sealExecutionContract(createDraft(), {
+      contractId: "contract-live-restore",
       approvedAt: 10,
       state: "active",
     });
-    system.dialogPlan = toDialogExecutionPlan(legacyContract);
 
     const controller = new CollaborationSessionController(system, {
       surface: "local_dialog",
@@ -326,8 +305,8 @@ describe("session-controller", () => {
       updatedAt: 1,
     });
 
-    expect(snapshot.activeContract?.contractId).toBe("contract-legacy-restore");
-    expect(system.activeContract?.contractId).toBe("contract-legacy-restore");
+    expect(snapshot.activeContract?.contractId).toBe("contract-live-restore");
+    expect(system.activeContract?.contractId).toBe("contract-live-restore");
   });
 
   it("marks queued follow-up as needing reapproval when roster changes", () => {

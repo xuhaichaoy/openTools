@@ -5,7 +5,12 @@ import {
   type ToolApprovalAssessment,
   type ToolApprovalTrustMode,
 } from "@/core/agent/actor/tool-approval-policy";
-import type { ApprovalLevel } from "@/core/agent/actor/types";
+import type {
+  AccessMode,
+  ApprovalLevel,
+  ApprovalMode,
+  ExecutionPolicy,
+} from "@/core/agent/actor/types";
 
 const PERSIST_KEY = "mtools-tool-trust-level";
 
@@ -57,19 +62,27 @@ function mapTrustLevelToMode(level: TrustLevel): ToolApprovalTrustMode {
 const DECISION_CACHE_TTL_MS = 10_000;
 const sessionDecisionCache = new Map<string, { confirmed: boolean; expiresAt: number }>();
 
+export interface ToolTrustAssessmentOptions {
+  executionPolicy?: ExecutionPolicy;
+  approvalMode?: ApprovalMode;
+  approvalLevel?: ApprovalLevel;
+  accessMode?: AccessMode;
+  workspace?: string;
+}
+
 interface ToolTrustState {
   trustLevel: TrustLevel;
   setTrustLevel: (level: TrustLevel) => void;
   assess: (
     toolName: string,
     params?: Record<string, unknown>,
-    options?: { approvalLevel?: ApprovalLevel; workspace?: string },
+    options?: ToolTrustAssessmentOptions,
   ) => ToolApprovalAssessment;
   /** 给定工具名，是否需要弹出确认对话框 */
   shouldConfirm: (
     toolName: string,
     params?: Record<string, unknown>,
-    options?: { approvalLevel?: ApprovalLevel; workspace?: string },
+    options?: ToolTrustAssessmentOptions,
   ) => boolean;
   getCachedDecision: (toolName: string, params?: Record<string, unknown>) => boolean | null;
   rememberDecision: (toolName: string, params: Record<string, unknown> | undefined, confirmed: boolean) => void;
@@ -89,8 +102,7 @@ export const useToolTrustStore = create<ToolTrustState>((set, get) => ({
     const { trustLevel } = get();
     return assessToolApproval(toolName, params, {
       trustMode: mapTrustLevelToMode(trustLevel),
-      approvalLevel: options?.approvalLevel,
-      workspace: options?.workspace,
+      ...options,
     });
   },
 

@@ -16,7 +16,7 @@ import type {
   AIToolDefinition,
   AIToolCall,
 } from "@/core/plugin-system/plugin-interface";
-import type { ThinkingLevel } from "@/core/agent/actor/types";
+import type { ExecutionPolicy, ThinkingLevel } from "@/core/agent/actor/types";
 import { inferCodingExecutionProfile } from "@/core/agent/coding-profile";
 import type { PluginAction } from "@/core/plugin-system/plugin-interface";
 import { applyContextBudget, type PromptSection } from "@/core/agent/context-budget";
@@ -88,6 +88,7 @@ export interface AgentConfig {
   confirmDangerousAction?: (
     toolName: string,
     params: Record<string, unknown>,
+    context?: DangerousActionConfirmationContext,
   ) => Promise<boolean>;
   /** 被视为危险操作的工具名称模式（包含即匹配） */
   dangerousToolPatterns?: string[];
@@ -125,6 +126,12 @@ export interface AgentConfig {
   inboxDrain?: () => { id: string; from: string; content: string; expectReply?: boolean; replyTo?: string; images?: string[] }[];
   /** 对话历史上下文：作为多轮 messages 注入（system 之后、当前 query 之前），用于 Actor 会话连续性 */
   contextMessages?: Array<{ role: "user" | "assistant"; content: string }>;
+}
+
+export interface DangerousActionConfirmationContext {
+  actorId?: string;
+  executionPolicy?: ExecutionPolicy;
+  workspace?: string;
 }
 
 type IterationStopReason =

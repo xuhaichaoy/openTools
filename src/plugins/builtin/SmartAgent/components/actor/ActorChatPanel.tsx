@@ -102,7 +102,10 @@ import {
 } from "@/core/agent/actor/dialog-presets";
 import { buildDialogContextSummary } from "@/core/agent/actor/dialog-session-summary";
 import type { TodoItem } from "@/core/agent/actor/middlewares";
-import type { AgentStep } from "@/plugins/builtin/SmartAgent/core/react-agent";
+import type {
+  AgentStep,
+  DangerousActionConfirmationContext,
+} from "@/plugins/builtin/SmartAgent/core/react-agent";
 import type { ClusterPlan } from "@/core/agent/cluster/types";
 import {
   useInputAttachments,
@@ -866,7 +869,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     () => actors.map((actor) => ({
       id: actor.id,
       roleName: actor.roleName,
-      executionPolicy: actor.executionPolicy,
+      executionPolicy: actor.normalizedExecutionPolicy,
     })),
     [actors],
   );
@@ -879,14 +882,19 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   );
   const runningActors = useMemo(() => actors.filter((a) => a.status === "running"), [actors]);
   const confirmDangerousAction = useCallback(
-    (toolName: string, params: Record<string, unknown>): Promise<boolean> => {
+    (
+      toolName: string,
+      params: Record<string, unknown>,
+      context?: DangerousActionConfirmationContext,
+    ): Promise<boolean> => {
       const toolTrust = useToolTrustStore.getState();
       const cachedDecision = toolTrust.getCachedDecision(toolName, params);
       if (cachedDecision !== null) {
         return Promise.resolve(cachedDecision);
       }
       const assessment = toolTrust.assess(toolName, params, {
-        workspace: dialogMemoryWorkspaceId,
+        executionPolicy: context?.executionPolicy,
+        workspace: context?.workspace ?? dialogMemoryWorkspaceId,
       });
       if (assessment.decision !== "ask") {
         toolTrust.rememberDecision(toolName, params, true);
@@ -1604,6 +1612,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       capabilities: draft.capabilities,
       workspace: draft.workspace,
       toolPolicy: draft.toolPolicy,
+      executionPolicy: draft.executionPolicy,
       middlewareOverrides: draft.middlewareOverrides,
       thinkingLevel: draft.thinkingLevel,
     });
@@ -1686,7 +1695,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
         systemPromptOverride: a.systemPromptOverride || a.currentTask?.query,
         workspace: a.workspace,
         toolPolicy: a.toolPolicy,
-        executionPolicy: a.executionPolicy,
+        executionPolicy: a.normalizedExecutionPolicy,
         middlewareOverrides: a.middlewareOverrides,
         timeoutSeconds: a.timeoutSeconds,
         contextTokens: a.contextTokens,

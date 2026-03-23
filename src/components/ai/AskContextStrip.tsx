@@ -1,4 +1,5 @@
 import React from "react";
+import { getDefaultRuntimeSessionLabel } from "@/core/ai/ai-product-modes";
 import {
   buildAskContextNarrative,
   hasAskContextSnapshotContent,
@@ -19,7 +20,7 @@ export function AskContextStrip({ snapshot }: AskContextStripProps) {
           当前上下文
         </span>
         <span className="rounded-full border border-[var(--color-border)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
-          Ask 对话
+          {getDefaultRuntimeSessionLabel("ask")}
         </span>
         {snapshot?.workspaceRoot && (
           <span

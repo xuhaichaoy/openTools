@@ -48,6 +48,11 @@ import {
 import { buildDialogContextSummary } from "@/core/agent/actor/dialog-session-summary";
 import { buildSpawnedTaskCheckpoint } from "@/core/agent/actor/spawned-task-checkpoint";
 import { resolvePersistedDialogActorMaxIterations } from "@/core/agent/actor/dialog-actor-persistence";
+import { buildExecutionContractFromLegacyDialogExecutionPlan } from "@/core/agent/actor/dialog-execution-plan-compat";
+import {
+  compactMiddlewareOverridesForPersistence,
+  type NormalizedExecutionPolicy,
+} from "@/core/agent/actor/execution-policy";
 import {
   buildDialogContextSnapshot,
   cloneDialogContextSnapshot,
@@ -69,7 +74,6 @@ import {
   createEmptyCollaborationSnapshot,
 } from "@/core/collaboration/persistence";
 import {
-  buildExecutionContractFromDialogPlan,
   cloneExecutionContract,
   sealExecutionContract,
 } from "@/core/collaboration/execution-contract";
@@ -145,6 +149,7 @@ interface PersistedSession {
   focusedSpawnedSessionRunId?: string | null;
   coordinatorActorId?: string | null;
   executionContract?: ExecutionContract | null;
+  /** @deprecated 仅用于旧快照恢复兼容，新的持久化仅保存 executionContract。 */
   dialogExecutionPlan?: DialogExecutionPlan | null;
   approvalCache?: Record<string, "always-allow" | "ask-every-time" | "deny">;
   sourceHandoff?: AICenterHandoff | null;
@@ -302,12 +307,12 @@ function buildSessionSnapshot(
       systemPrompt: a.getSystemPromptOverride(),
       capabilities: a.capabilities,
       toolPolicy: a.toolPolicyConfig,
-      executionPolicy: a.executionPolicy,
+      executionPolicy: a.normalizedExecutionPolicy,
       workspace: a.workspace,
       timeoutSeconds: a.timeoutSeconds,
       contextTokens: a.contextTokens,
       thinkingLevel: a.thinkingLevel,
-      middlewareOverrides: a.middlewareOverrides,
+      middlewareOverrides: compactMiddlewareOverridesForPersistence(a.middlewareOverrides),
       sessionHistory: a.getSessionHistory(),
     })),
     actorTodos: Object.fromEntries(
@@ -351,10 +356,9 @@ function buildCollaborationActorRoster(actors: readonly ActorSnapshot[]): Collab
     id: actor.id,
     roleName: actor.roleName,
     capabilities: actor.capabilities,
-    executionPolicy: actor.executionPolicy,
+    executionPolicy: actor.normalizedExecutionPolicy,
     workspace: actor.workspace,
     toolPolicy: actor.toolPolicy,
-    executionPolicy: actor.executionPolicy,
     thinkingLevel: actor.thinkingLevel,
     middlewareOverrides: actor.middlewareOverrides,
   }));
@@ -389,28 +393,32 @@ function mapCollaborationQueuedFollowUps(
   }));
 }
 
+function buildPersistedExecutionContract(params: {
+  persisted: PersistedSession;
+}): ExecutionContract | null {
+  const { persisted } = params;
+  if (persisted.executionContract) {
+    return cloneExecutionContract(persisted.executionContract);
+  }
+  if (!persisted.dialogExecutionPlan) {
+    return null;
+  }
+  return buildExecutionContractFromLegacyDialogExecutionPlan({
+    surface: "local_dialog",
+    plan: persisted.dialogExecutionPlan,
+  }).contract;
+}
+
 function buildLegacyCollaborationSnapshot(
   system: ActorSystem,
   persisted: PersistedSession,
 ): CollaborationSessionSnapshot {
   const base = createEmptyCollaborationSnapshot("local_dialog");
-  const actorRoster = buildCollaborationActorRoster(system.getAll().map(snapshotActor));
-  const legacyContract = !persisted.executionContract && persisted.dialogExecutionPlan
-    ? buildExecutionContractFromDialogPlan({
-        surface: "local_dialog",
-        plan: persisted.dialogExecutionPlan,
-        actorRoster,
-        input: { content: persisted.dialogExecutionPlan.summary ?? "" },
-      })
-    : null;
+  const legacyContract = buildPersistedExecutionContract({ persisted });
 
   return {
     ...base,
-    activeContract: persisted.executionContract
-      ? cloneExecutionContract(persisted.executionContract)
-      : legacyContract
-        ? cloneExecutionContract(legacyContract)
-        : null,
+    activeContract: legacyContract ? cloneExecutionContract(legacyContract) : null,
     queuedFollowUps: (persisted.queuedFollowUps ?? []).map((item) => ({
       id: item.id,
       displayText: item.displayText,
@@ -422,8 +430,8 @@ function buildLegacyCollaborationSnapshot(
       createdAt: item.createdAt,
       executionStrategy: item.routingMode,
       policy: "queue",
-      contract: null,
-      contractStatus: "missing",
+      contract: legacyContract ? cloneExecutionContract(legacyContract) : null,
+      contractStatus: legacyContract ? "ready" : "missing",
     })),
     focusedChildSessionId: persisted.focusedSpawnedSessionRunId ?? null,
     dialogMessages: persisted.dialogHistory.map((message) => ({ ...message })),
@@ -1215,7 +1223,7 @@ async function saveSessionSnapshot(system: ActorSystem): Promise<void> {
       systemPrompt: actor.systemPrompt,
       capabilities: actor.capabilities,
       toolPolicy: actor.toolPolicy,
-      executionPolicy: actor.executionPolicy,
+      executionPolicy: actor.normalizedExecutionPolicy,
       workspace: actor.workspace,
       thinkingLevel: actor.thinkingLevel,
       middlewareOverrides: actor.middlewareOverrides,
@@ -1265,15 +1273,13 @@ function restoreSnapshot(system: ActorSystem, persisted: PersistedSession): void
   if (persisted.coordinatorActorId && system.get(persisted.coordinatorActorId)) {
     system.setCoordinator(persisted.coordinatorActorId);
   }
-  if (!persisted.collaborationSnapshot && persisted.executionContract) {
-    system.restoreExecutionContract(persisted.executionContract);
-  } else if (!persisted.collaborationSnapshot && persisted.dialogExecutionPlan) {
-    system.restoreExecutionContract(buildExecutionContractFromDialogPlan({
-      surface: "local_dialog",
-      plan: persisted.dialogExecutionPlan,
-      actorRoster: buildCollaborationActorRoster(system.getAll().map(snapshotActor)),
-      input: { content: persisted.dialogExecutionPlan.summary ?? "" },
-    }));
+  const restoredContract = !persisted.collaborationSnapshot
+    ? buildPersistedExecutionContract({
+        persisted,
+      })
+    : null;
+  if (restoredContract) {
+    system.restoreExecutionContract(restoredContract);
   }
   restoreSessionApprovals(persisted.approvalCache);
   if (persisted.artifacts?.length) {
@@ -1349,6 +1355,7 @@ export interface ActorSnapshot {
   systemPromptOverride?: string;
   toolPolicy?: ToolPolicy;
   executionPolicy?: ExecutionPolicy;
+  normalizedExecutionPolicy: NormalizedExecutionPolicy;
   workspace?: string;
   timeoutSeconds?: number;
   contextTokens?: number;
@@ -1496,6 +1503,7 @@ function snapshotActor(actor: AgentActor): ActorSnapshot {
     systemPromptOverride: actor.getSystemPromptOverride(),
     toolPolicy: actor.toolPolicyConfig,
     executionPolicy: actor.executionPolicy,
+    normalizedExecutionPolicy: actor.normalizedExecutionPolicy,
     workspace: actor.workspace,
     timeoutSeconds: actor.timeoutSeconds,
     contextTokens: actor.contextTokens,

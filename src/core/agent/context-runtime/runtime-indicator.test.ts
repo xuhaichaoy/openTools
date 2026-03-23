@@ -96,7 +96,7 @@ describe("runtime-indicator", () => {
   });
 
   it("returns mode presentation metadata", () => {
-    expect(getRuntimeIndicatorMeta("ask").label).toBe("Ask 对话");
+    expect(getRuntimeIndicatorMeta("ask").label).toBe("Explore 对话");
     expect(getRuntimeIndicatorMeta("cluster").color).toBe("var(--color-accent)");
   });
 });

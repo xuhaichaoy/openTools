@@ -1,4 +1,7 @@
 import type { AICenterMode, AICenterSourceRef } from "@/store/app-store";
+import {
+  getDefaultRuntimeSessionLabel,
+} from "./ai-product-modes";
 
 export type AISessionRuntimeKind =
   | "conversation"
@@ -77,18 +80,7 @@ export function getAISessionRuntimeKind(mode: AICenterMode): AISessionRuntimeKin
 }
 
 export function getAISessionRuntimeFallbackTitle(mode: AICenterMode): string {
-  switch (mode) {
-    case "ask":
-      return "Ask 对话";
-    case "agent":
-      return "Agent 任务";
-    case "cluster":
-      return "Cluster 会话";
-    case "dialog":
-      return "Dialog 房间";
-    default:
-      return "AI 会话";
-  }
+  return getDefaultRuntimeSessionLabel(mode);
 }
 
 export function resolveAISessionRuntimeSourceId(

@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { ActorConfig, ExecutionPolicy, ToolPolicy } from "./types";
+import type { ExecutionContract } from "@/core/collaboration/types";
 
 vi.mock("./actor-transcript", () => ({
   appendDialogMessageSync: vi.fn(),
@@ -198,6 +199,32 @@ function buildActorConfig(
   };
 }
 
+function buildExecutionContract(
+  overrides: Partial<ExecutionContract> = {},
+): ExecutionContract {
+  return {
+    contractId: overrides.contractId ?? "contract-1",
+    surface: overrides.surface ?? "local_dialog",
+    executionStrategy: overrides.executionStrategy ?? "coordinator",
+    summary: overrides.summary ?? "Coordinator 协调 Specialist",
+    coordinatorActorId: overrides.coordinatorActorId ?? "coordinator",
+    inputHash: overrides.inputHash ?? "input-hash",
+    actorRosterHash: overrides.actorRosterHash ?? "roster-hash",
+    initialRecipientActorIds: overrides.initialRecipientActorIds ?? ["coordinator"],
+    participantActorIds: overrides.participantActorIds ?? ["coordinator", "specialist"],
+    allowedMessagePairs: overrides.allowedMessagePairs ?? [
+      { fromActorId: "coordinator", toActorId: "specialist" },
+      { fromActorId: "specialist", toActorId: "coordinator" },
+    ],
+    allowedSpawnPairs: overrides.allowedSpawnPairs ?? [
+      { fromActorId: "coordinator", toActorId: "specialist" },
+    ],
+    plannedDelegations: overrides.plannedDelegations ?? [],
+    approvedAt: overrides.approvedAt ?? 1,
+    state: overrides.state ?? "sealed",
+  };
+}
+
 describe("ActorSystem.broadcastAndResolve", () => {
   it("queues a new user message to the fallback coordinator when all actors are awaiting reply", () => {
     const system = new ActorSystem();
@@ -230,31 +257,18 @@ describe("ActorSystem.broadcastAndResolve", () => {
       lastAssignedQuery?: string;
     };
 
-    system.armDialogExecutionPlan({
-      id: "plan-1",
-      routingMode: "coordinator",
-      summary: "Coordinator 协调 Specialist",
+    system.armExecutionContract(buildExecutionContract({
+      contractId: "contract-bootstrap-free",
       approvedAt: Date.now(),
-      initialRecipientActorIds: ["coordinator"],
-      participantActorIds: ["coordinator", "specialist"],
-      coordinatorActorId: "coordinator",
-      allowedMessagePairs: [
-        { fromActorId: "coordinator", toActorId: "specialist" },
-        { fromActorId: "specialist", toActorId: "coordinator" },
-      ],
-      allowedSpawnPairs: [
-        { fromActorId: "coordinator", toActorId: "specialist" },
-      ],
-      plannedSpawns: [
+      plannedDelegations: [
         {
-          id: "spawn-1",
+          id: "delegation-1",
           targetActorId: "specialist",
           task: "从验证视角补充实现风险与测试建议。",
           label: "验证支援",
         },
       ],
-      state: "armed",
-    });
+    }));
 
     const msg = system.broadcastAndResolve("user", "请继续完善这个实现");
 
@@ -466,18 +480,15 @@ describe("ActorSystem.spawnTask", () => {
     const system = new ActorSystem();
     system.spawn(buildActorConfig("coordinator", "Coordinator"));
 
-    system.armDialogExecutionPlan({
-      id: "plan-dynamic-1",
-      routingMode: "coordinator",
+    system.armExecutionContract(buildExecutionContract({
+      contractId: "contract-dynamic-1",
       summary: "Coordinator 可创建临时子 Agent",
       approvedAt: Date.now(),
       initialRecipientActorIds: ["coordinator"],
       participantActorIds: ["coordinator"],
-      coordinatorActorId: "coordinator",
       allowedMessagePairs: [],
       allowedSpawnPairs: [],
-      state: "armed",
-    });
+    }));
 
     const record = system.spawnTask("coordinator", "Independent Reviewer", "独立审查这次 patch 的回归风险", {
       createIfMissing: true,
@@ -495,12 +506,12 @@ describe("ActorSystem.spawnTask", () => {
     expect(child?.role.name).toBe("Independent Reviewer");
     expect(child?.persistent).toBe(false);
     expect(record.roleBoundary).toBe("reviewer");
-    expect(system.getDialogExecutionPlan()?.participantActorIds).toContain(record.targetActorId);
-    expect(system.getDialogExecutionPlan()?.allowedSpawnPairs).toContainEqual({
+    expect(system.getActiveExecutionContract()?.participantActorIds).toContain(record.targetActorId);
+    expect(system.getActiveExecutionContract()?.allowedSpawnPairs).toContainEqual({
       fromActorId: "coordinator",
       toActorId: record.targetActorId,
     });
-    expect(system.getDialogExecutionPlan()?.allowedMessagePairs).toContainEqual({
+    expect(system.getActiveExecutionContract()?.allowedMessagePairs).toContainEqual({
       fromActorId: record.targetActorId,
       toActorId: "coordinator",
     });
@@ -544,35 +555,22 @@ describe("ActorSystem.spawnTask", () => {
     expect(system.snapshot().executionContract?.participantActorIds).toContain(record.targetActorId);
   });
 
-  it("keeps the derived legacy dialog plan view in sync when participants are removed", () => {
+  it("keeps the active contract graph in sync when participants are removed", () => {
     const system = new ActorSystem();
     system.spawn(buildActorConfig("coordinator", "Coordinator"));
     system.spawn(buildActorConfig("specialist", "Specialist"));
 
-    system.armDialogExecutionPlan({
-      id: "plan-remove-specialist",
-      routingMode: "coordinator",
-      summary: "Coordinator 协调 Specialist",
+    system.armExecutionContract(buildExecutionContract({
+      contractId: "contract-remove-specialist",
       approvedAt: Date.now(),
-      initialRecipientActorIds: ["coordinator"],
-      participantActorIds: ["coordinator", "specialist"],
-      coordinatorActorId: "coordinator",
-      allowedMessagePairs: [
-        { fromActorId: "coordinator", toActorId: "specialist" },
-        { fromActorId: "specialist", toActorId: "coordinator" },
-      ],
-      allowedSpawnPairs: [
-        { fromActorId: "coordinator", toActorId: "specialist" },
-      ],
-      plannedSpawns: [
+      plannedDelegations: [
         {
           id: "delegation-remove-1",
           targetActorId: "specialist",
           task: "补充验证",
         },
       ],
-      state: "armed",
-    });
+    }));
 
     system.kill("specialist");
 
@@ -582,30 +580,21 @@ describe("ActorSystem.spawnTask", () => {
       allowedSpawnPairs: [],
       plannedDelegations: [],
     });
-    expect(system.getDialogExecutionPlan()).toMatchObject({
-      participantActorIds: ["coordinator"],
-      allowedMessagePairs: [],
-      allowedSpawnPairs: [],
-      plannedSpawns: [],
-    });
   });
 
   it("rejects nested child-agent creation so only the top-level coordinator can keep delegating", () => {
     const system = new ActorSystem();
     system.spawn(buildActorConfig("coordinator", "Coordinator"));
 
-    system.armDialogExecutionPlan({
-      id: "plan-dynamic-2",
-      routingMode: "coordinator",
+    system.armExecutionContract(buildExecutionContract({
+      contractId: "contract-dynamic-2",
       summary: "Coordinator -> Fixer -> Tester",
       approvedAt: Date.now(),
       initialRecipientActorIds: ["coordinator"],
       participantActorIds: ["coordinator"],
-      coordinatorActorId: "coordinator",
       allowedMessagePairs: [],
       allowedSpawnPairs: [],
-      state: "armed",
-    });
+    }));
 
     const fixer = system.spawnTask("coordinator", "Fixer", "先修复问题", {
       createIfMissing: true,
@@ -689,18 +678,15 @@ describe("ActorSystem.spawnTask", () => {
     const system = new ActorSystem();
     system.spawn(buildActorConfig("coordinator", "Coordinator"));
 
-    system.armDialogExecutionPlan({
-      id: "plan-dynamic-reviewer",
-      routingMode: "coordinator",
+    system.armExecutionContract(buildExecutionContract({
+      contractId: "contract-dynamic-reviewer",
       summary: "Coordinator 可创建审查子 Agent",
       approvedAt: Date.now(),
       initialRecipientActorIds: ["coordinator"],
       participantActorIds: ["coordinator"],
-      coordinatorActorId: "coordinator",
       allowedMessagePairs: [],
       allowedSpawnPairs: [],
-      state: "armed",
-    });
+    }));
 
     const record = system.spawnTask("coordinator", "Independent Reviewer", "独立审查这次 patch", {
       createIfMissing: true,
@@ -732,18 +718,15 @@ describe("ActorSystem.spawnTask", () => {
     const system = new ActorSystem();
     system.spawn(buildActorConfig("coordinator", "Coordinator"));
 
-    system.armDialogExecutionPlan({
-      id: "plan-dynamic-validator",
-      routingMode: "coordinator",
+    system.armExecutionContract(buildExecutionContract({
+      contractId: "contract-dynamic-validator",
       summary: "Coordinator 可创建验证子 Agent",
       approvedAt: Date.now(),
       initialRecipientActorIds: ["coordinator"],
       participantActorIds: ["coordinator"],
-      coordinatorActorId: "coordinator",
       allowedMessagePairs: [],
       allowedSpawnPairs: [],
-      state: "armed",
-    });
+    }));
 
     const record = system.spawnTask("coordinator", "QA Validator", "做回归验证", {
       createIfMissing: true,
@@ -779,18 +762,15 @@ describe("ActorSystem.spawnTask", () => {
       },
     }));
 
-    system.armDialogExecutionPlan({
-      id: "plan-dynamic-executor",
-      routingMode: "coordinator",
+    system.armExecutionContract(buildExecutionContract({
+      contractId: "contract-dynamic-executor",
       summary: "Coordinator 可创建执行子 Agent",
       approvedAt: Date.now(),
       initialRecipientActorIds: ["coordinator"],
       participantActorIds: ["coordinator"],
-      coordinatorActorId: "coordinator",
       allowedMessagePairs: [],
       allowedSpawnPairs: [],
-      state: "armed",
-    });
+    }));
 
     const record = system.spawnTask("coordinator", "Fixer", "修复这个问题", {
       createIfMissing: true,
@@ -828,18 +808,15 @@ describe("ActorSystem.spawnTask", () => {
     const system = new ActorSystem();
     system.spawn(buildActorConfig("coordinator", "Coordinator"));
 
-    system.armDialogExecutionPlan({
-      id: "plan-dynamic-explicit-boundary",
-      routingMode: "coordinator",
+    system.armExecutionContract(buildExecutionContract({
+      contractId: "contract-dynamic-explicit-boundary",
       summary: "Coordinator 显式指定子 Agent 边界",
       approvedAt: Date.now(),
       initialRecipientActorIds: ["coordinator"],
       participantActorIds: ["coordinator"],
-      coordinatorActorId: "coordinator",
       allowedMessagePairs: [],
       allowedSpawnPairs: [],
-      state: "armed",
-    });
+    }));
 
     const record = system.spawnTask("coordinator", "Fixer", "先做验证回归", {
       createIfMissing: true,
@@ -874,24 +851,13 @@ describe("ActorSystem.spawnTask", () => {
       lastAssignedQuery?: string;
     };
 
-    system.armDialogExecutionPlan({
-      id: "plan-boundary-sync",
-      routingMode: "coordinator",
+    system.restoreExecutionContract(buildExecutionContract({
+      contractId: "contract-boundary-sync",
       summary: "Coordinator 协调 Specialist 做验证",
       approvedAt: Date.now(),
-      initialRecipientActorIds: ["coordinator"],
-      participantActorIds: ["coordinator", "specialist"],
-      coordinatorActorId: "coordinator",
-      allowedMessagePairs: [
-        { fromActorId: "coordinator", toActorId: "specialist" },
-        { fromActorId: "specialist", toActorId: "coordinator" },
-      ],
-      allowedSpawnPairs: [
-        { fromActorId: "coordinator", toActorId: "specialist" },
-      ],
-      plannedSpawns: [
+      plannedDelegations: [
         {
-          id: "spawn-1",
+          id: "delegation-1",
           targetActorId: "specialist",
           task: "从验证视角补充实现风险与测试建议。",
           label: "验证支援",
@@ -900,7 +866,7 @@ describe("ActorSystem.spawnTask", () => {
         },
       ],
       state: "active",
-    });
+    }));
 
     const record = system.spawnTask("coordinator", "specialist", "补充验证结论", {
       cleanup: "keep",
@@ -909,8 +875,8 @@ describe("ActorSystem.spawnTask", () => {
     expect("error" in record).toBe(false);
     if ("error" in record) return;
 
-    expect(record.contractId).toBe("plan-boundary-sync");
-    expect(record.plannedDelegationId).toBe("spawn-1");
+    expect(record.contractId).toBe("contract-boundary-sync");
+    expect(record.plannedDelegationId).toBe("delegation-1");
     expect(record.dispatchSource).toBe("contract_suggestion");
     expect(record.roleBoundary).toBe("validator");
     expect(record.label).toBe("验证支援");
@@ -979,9 +945,9 @@ describe("ActorSystem.send", () => {
       lastAssignedQuery?: string;
     };
 
-    system.armDialogExecutionPlan({
-      id: "plan-smart-1",
-      routingMode: "smart",
+    system.armExecutionContract(buildExecutionContract({
+      contractId: "contract-smart-1",
+      executionStrategy: "smart",
       summary: "Reviewer 主接手并协调 Fixer",
       approvedAt: Date.now(),
       initialRecipientActorIds: ["reviewer"],
@@ -994,16 +960,15 @@ describe("ActorSystem.send", () => {
       allowedSpawnPairs: [
         { fromActorId: "reviewer", toActorId: "fixer" },
       ],
-      plannedSpawns: [
+      plannedDelegations: [
         {
-          id: "spawn-1",
+          id: "delegation-1",
           targetActorId: "fixer",
           task: "给出最小修复方案与验证建议。",
           label: "修复支援",
         },
       ],
-      state: "armed",
-    });
+    }));
 
     system.send("user", "reviewer", "帮我 review 这次改动");
 

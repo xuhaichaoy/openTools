@@ -2,7 +2,7 @@ import type { AgentTool, AgentStep } from "@/plugins/builtin/SmartAgent/core/rea
 import type { AgentRole } from "@/core/agent/cluster/types";
 import type { ActorSystem } from "./actor-system";
 import type { ExecutionPolicy, InboxMessage, ToolPolicy, MiddlewareOverrides } from "./types";
-import type { AskUserCallback } from "./agent-actor";
+import type { AskUserCallback, ConfirmDangerousAction } from "./agent-actor";
 
 /**
  * ActorRunContext — shared mutable context flowing through the middleware chain.
@@ -27,7 +27,7 @@ export interface ActorRunContext {
   readonly executionPolicy?: ExecutionPolicy;
   readonly actorSystem?: ActorSystem;
   readonly askUser?: AskUserCallback;
-  readonly confirmDangerousAction?: (toolName: string, params: Record<string, unknown>) => Promise<boolean>;
+  readonly confirmDangerousAction?: ConfirmDangerousAction;
   readonly extraTools: AgentTool[];
   /** Per-actor middleware override config */
   readonly middlewareOverrides?: MiddlewareOverrides;

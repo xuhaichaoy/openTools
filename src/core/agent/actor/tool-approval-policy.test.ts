@@ -73,6 +73,17 @@ describe("tool-approval-policy", () => {
     expect(assessment.risk).toBe("medium");
   });
 
+  it("treats approvalMode as the first-class fallback before legacy approvalLevel", () => {
+    const assessment = assessToolApproval("run_shell_command", {
+      command: "npm test -- --runInBand",
+    }, {
+      approvalMode: "strict",
+    });
+
+    expect(assessment.decision).toBe("ask");
+    expect(assessment.risk).toBe("medium");
+  });
+
   it("denies mutating tools under read-only access mode before human approval", () => {
     const assessment = assessToolApproval("write_file", {
       path: "/Users/haichao/Desktop/work/51ToolBox/src/demo.ts",

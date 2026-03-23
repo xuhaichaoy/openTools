@@ -1,16 +1,15 @@
 import type { DialogDispatchPlanBundle } from "@/core/agent/actor/dialog-dispatch-plan";
 import type {
-  DialogExecutionPlan,
-  DialogExecutionPlannedSpawn,
   MiddlewareOverrides,
   SpawnedTaskRoleBoundary,
   ToolPolicy,
 } from "@/core/agent/actor/types";
 import {
+  buildMiddlewareOverridesForExecutionPolicy,
   deriveToolPolicyForAccessMode,
   normalizeExecutionPolicy,
   resolveExecutionPolicyInheritance,
-} from "@/core/agent/actor/tool-approval-policy";
+} from "@/core/agent/actor/execution-policy";
 import type {
   CollaborationActorPair,
   CollaborationActorRosterEntry,
@@ -18,6 +17,7 @@ import type {
   CollaborationChildExecutionSettingsInput,
   CollaborationInputDescriptor,
   CollaborationPlannedDelegation,
+  LegacyCompatibleDialogPlan,
   CollaborationRosterActor,
   CollaborationSurface,
   ExecutionContract,
@@ -77,10 +77,8 @@ function mergeMiddlewareOverrides(
 ): MiddlewareOverrides | undefined {
   if (!base && !override) return undefined;
   const disable = [...new Set([...(base?.disable ?? []), ...(override?.disable ?? [])])];
-  const approvalLevel = override?.approvalLevel ?? base?.approvalLevel;
   return {
     ...(disable.length > 0 ? { disable } : {}),
-    ...(approvalLevel ? { approvalLevel } : {}),
   };
 }
 
@@ -96,7 +94,7 @@ function normalizeExecutionStrategy(strategy: string): ExecutionStrategy {
   }
 }
 
-function normalizeContractState(state: DialogExecutionPlan["state"]): ExecutionContractState {
+function normalizeContractState(state: LegacyCompatibleDialogPlan["state"]): ExecutionContractState {
   switch (state) {
     case "armed":
       return "sealed";
@@ -168,7 +166,7 @@ function normalizeInputDescriptor(
 }
 
 function normalizePlannedDelegation(
-  spawn: DialogExecutionPlannedSpawn | CollaborationPlannedDelegation,
+  spawn: CollaborationPlannedDelegation,
 ): CollaborationPlannedDelegation | null {
   const id = spawn.id.trim();
   const targetActorId = spawn.targetActorId.trim();
@@ -191,7 +189,7 @@ function normalizePlannedDelegation(
 }
 
 function normalizePlannedDelegations(
-  spawns: readonly (DialogExecutionPlannedSpawn | CollaborationPlannedDelegation)[] | undefined,
+  spawns: readonly CollaborationPlannedDelegation[] | undefined,
 ): CollaborationPlannedDelegation[] {
   return (spawns ?? [])
     .map((spawn) => normalizePlannedDelegation(spawn))
@@ -350,12 +348,10 @@ export function resolveChildExecutionSettings(
     params.parentMiddlewareOverrides,
     params.overrideMiddlewareOverrides,
   );
-  const nextMiddlewareOverrides: MiddlewareOverrides | undefined = middlewareOverrides
-    ? {
-        ...middlewareOverrides,
-        approvalLevel: executionPolicy.approvalMode,
-      }
-    : { approvalLevel: executionPolicy.approvalMode };
+  const nextMiddlewareOverrides: MiddlewareOverrides | undefined = buildMiddlewareOverridesForExecutionPolicy(
+    executionPolicy,
+    middlewareOverrides,
+  );
 
   return {
     toolPolicy,
@@ -438,7 +434,7 @@ export const doesExecutionContractMatchRoster = doesExecutionContractMatchActorR
 
 export function buildExecutionContractFromDialogPlan(params: {
   surface: CollaborationSurface;
-  plan: DialogExecutionPlan;
+  plan: LegacyCompatibleDialogPlan;
   actorRoster?: readonly RosterHashInput[];
   input?: CollaborationInputDescriptor | string;
 }): ExecutionContract {
@@ -466,7 +462,7 @@ export function buildExecutionContractFromDialogPlan(params: {
 }
 
 export function buildExecutionContractDraftFromLegacyPlan(
-  plan: DialogExecutionPlan,
+  plan: LegacyCompatibleDialogPlan,
   surface: CollaborationSurface,
   actorRoster?: readonly RosterHashInput[],
   input?: CollaborationInputDescriptor | string,
@@ -507,8 +503,8 @@ export function markExecutionContractState(
   };
 }
 
-export function toDialogExecutionPlan(contract: ExecutionContract): DialogExecutionPlan {
-  const mapState = (): DialogExecutionPlan["state"] => {
+export function toDialogExecutionPlan(contract: ExecutionContract): LegacyCompatibleDialogPlan {
+  const mapState = (): LegacyCompatibleDialogPlan["state"] => {
     switch (contract.state) {
       case "sealed":
         return "armed";

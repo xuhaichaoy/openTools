@@ -31,6 +31,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { createLogger } from "@/core/logger";
 import type { IMConversationSnapshot } from "@/store/im-conversation-runtime-store";
 import type { AgentScheduledTask } from "@/core/ai/types";
+import type { IMDataExportRuntimeManager } from "@/core/data-export/im-data-export-runtime-manager";
 
 const log = createLogger("ChannelManager");
 
@@ -65,6 +66,8 @@ export class ChannelManager {
   private _globalHandlers: MessageHandler[] = [];
   private _actorSystemUnsubscribe: (() => void) | null = null;
   private _conversationRuntimeManager: IMConversationRuntimeManager | null = null;
+  private _dataExportRuntimeManager: IMDataExportRuntimeManager | null = null;
+  private _dataExportRuntimeManagerPromise: Promise<IMDataExportRuntimeManager> | null = null;
   private _progressEmitter: ChannelProgressEmitter | null = null;
   private _callbackListenerUnlisten: UnlistenFn | null = null;
   private _callbackListenerPromise: Promise<UnlistenFn> | null = null;
@@ -112,6 +115,7 @@ export class ChannelManager {
     this._actorSystemUnsubscribe?.();
     this._progressEmitter?.dispose();
     this._conversationRuntimeManager?.dispose();
+    this._dataExportRuntimeManager?.dispose();
     this._progressEmitter = new ChannelProgressEmitter({
       sendProgress: async (params: { channelId: string; conversationId: string; message: string }) => {
         const { channelId, conversationId, message } = params;
@@ -158,7 +162,6 @@ export class ChannelManager {
         this._progressEmitter?.clear(channelId, conversationId, topicId);
       },
     });
-
     const unsub = this.onMessage(async (msg) => {
       const sourceChannelId = this._findChannelIdForMessage(msg);
       if (!sourceChannelId) {
@@ -168,6 +171,16 @@ export class ChannelManager {
       const sourceChannelType = this.channels.get(sourceChannelId)?.config.type;
       if (!sourceChannelType) {
         log.warn(`Channel ${sourceChannelId} has no runtime config for IM message`);
+        return;
+      }
+
+      const exportManager = await this._getDataExportRuntimeManager();
+      const exportResult = await exportManager.handleIncoming({
+        channelId: sourceChannelId,
+        channelType: sourceChannelType,
+        msg,
+      });
+      if (exportResult.handled) {
         return;
       }
 
@@ -190,6 +203,9 @@ export class ChannelManager {
       this._progressEmitter = null;
       this._conversationRuntimeManager?.dispose();
       this._conversationRuntimeManager = null;
+      this._dataExportRuntimeManager?.dispose();
+      this._dataExportRuntimeManager = null;
+      this._dataExportRuntimeManagerPromise = null;
     };
 
     // 定期清理过期路由条目
@@ -205,6 +221,41 @@ export class ChannelManager {
 
   private _buildConversationRouteKey(channelId: string, conversationId: string): string {
     return `${channelId.trim()}::${conversationId.trim()}`;
+  }
+
+  private async _getDataExportRuntimeManager(): Promise<IMDataExportRuntimeManager> {
+    if (this._dataExportRuntimeManager) {
+      return this._dataExportRuntimeManager;
+    }
+    if (!this._dataExportRuntimeManagerPromise) {
+      this._dataExportRuntimeManagerPromise = import("@/core/data-export/im-data-export-runtime-manager")
+        .then(({ IMDataExportRuntimeManager: Manager }) => {
+          const manager = new Manager({
+            onReply: async (params) => {
+              const { channelId, conversationId, text, messageId, attachments } = params;
+              const route = this._getConversationRoute(channelId, conversationId);
+              if (route) {
+                await this._sendReplyWithMediaThroughRoute(
+                  conversationId,
+                  route,
+                  text,
+                  messageId,
+                  undefined,
+                  undefined,
+                  undefined,
+                  attachments,
+                );
+              }
+            },
+          });
+          this._dataExportRuntimeManager = manager;
+          return manager;
+        })
+        .finally(() => {
+          this._dataExportRuntimeManagerPromise = null;
+        });
+    }
+    return this._dataExportRuntimeManagerPromise;
   }
 
   private _getConversationRoute(channelId: string, conversationId: string): ConversationRoute | null {
@@ -379,6 +430,7 @@ export class ChannelManager {
 
     if (options?.clearConversations) {
       this._conversationRuntimeManager?.disposeChannel(id);
+      this._dataExportRuntimeManager?.disposeChannel(id);
     }
     for (const [key, route] of this._conversationRoutes) {
       if (route.channelId === id) {
@@ -443,12 +495,16 @@ export class ChannelManager {
 
   clearConversation(channelId: string, conversationId: string): number {
     const removedConversationIds = this._conversationRuntimeManager?.clearConversation(channelId, conversationId) ?? [];
+    this._dataExportRuntimeManager?.clearConversation(channelId, conversationId);
     this._clearConversationRoutes(channelId, removedConversationIds);
     return removedConversationIds.length;
   }
 
   clearChannelConversations(channelId: string, options?: { keepConversationId?: string | null }): number {
     const removedConversationIds = this._conversationRuntimeManager?.clearChannelConversations(channelId, options) ?? [];
+    for (const conversationId of removedConversationIds) {
+      this._dataExportRuntimeManager?.clearConversation(channelId, conversationId);
+    }
     this._clearConversationRoutes(channelId, removedConversationIds);
     return removedConversationIds.length;
   }
@@ -535,6 +591,8 @@ export class ChannelManager {
     this._progressEmitter = null;
     this._conversationRuntimeManager?.dispose();
     this._conversationRuntimeManager = null;
+    this._dataExportRuntimeManager?.dispose();
+    this._dataExportRuntimeManager = null;
     for (const [id] of this.channels) {
       await this.unregister(id);
     }

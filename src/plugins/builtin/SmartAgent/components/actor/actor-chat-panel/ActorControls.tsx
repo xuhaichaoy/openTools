@@ -12,10 +12,20 @@ import {
 
 import { primeTeamModelCache } from "@/core/ai/router";
 import { api } from "@/core/api/client";
+import {
+  ACCESS_MODE_OPTIONS,
+  APPROVAL_MODE_OPTIONS,
+  buildMiddlewareOverridesForExecutionPolicy,
+  DEFAULT_ACCESS_MODE,
+  DEFAULT_APPROVAL_MODE,
+  summarizeExecutionPolicy,
+} from "@/core/agent/actor/execution-policy";
 import type {
+  AccessMode,
   AgentCapability,
   AgentCapabilities,
-  ApprovalLevel,
+  ApprovalMode,
+  ExecutionPolicy,
   MiddlewareOverrides,
   ThinkingLevel,
   ToolPolicy,
@@ -71,7 +81,6 @@ const ALL_CAPABILITIES: { value: AgentCapability; label: string }[] = [
 ];
 
 const AGENT_CAPABILITY_SET = new Set<AgentCapability>(ALL_CAPABILITIES.map((cap) => cap.value));
-const APPROVAL_LEVELS: ApprovalLevel[] = ["normal", "permissive", "strict", "off"];
 const THINKING_LEVELS: ThinkingLevel[] = ["adaptive", "minimal", "low", "medium", "high", "xhigh", "off"];
 
 export type ModelOption = {
@@ -86,6 +95,7 @@ export type AddActorDraft = {
   capabilities?: AgentCapabilities;
   workspace?: string;
   toolPolicy?: ToolPolicy;
+  executionPolicy?: ExecutionPolicy;
   middlewareOverrides?: MiddlewareOverrides;
   thinkingLevel?: ThinkingLevel;
 };
@@ -102,12 +112,17 @@ function summarizeToolPolicy(policy?: ToolPolicy): string {
   return parts.length > 0 ? parts.join(" · ") : "全工具";
 }
 
-function summarizeMiddleware(middleware?: MiddlewareOverrides): string {
-  if (!middleware) return "默认审批";
-  const parts: string[] = [];
-  if (middleware.approvalLevel) parts.push(`审批 ${middleware.approvalLevel}`);
-  if (middleware.disable?.length) parts.push(`关闭 ${middleware.disable.join(", ")}`);
-  return parts.length > 0 ? parts.join(" · ") : "默认审批";
+function summarizeMiddleware(middleware?: MiddlewareOverrides): string | null {
+  if (!middleware?.disable?.length) return null;
+  return `关闭 ${middleware.disable.join(", ")}`;
+}
+
+function parseCommaSeparatedInput(value: string): string[] {
+  return value.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function formatCommaSeparatedInput(values?: string[]): string {
+  return values?.join(", ") ?? "";
 }
 
 function CapabilityBadges({ tags }: { tags?: AgentCapability[] }) {
@@ -284,6 +299,7 @@ export function LiveActorRow({
     workspace?: string;
     thinkingLevel?: ThinkingLevel;
     toolPolicy?: ToolPolicy;
+    executionPolicy?: ExecutionPolicy;
     middlewareOverrides?: MiddlewareOverrides;
     capabilities?: AgentCapabilities;
   }) => void;
@@ -291,12 +307,25 @@ export function LiveActorRow({
 }) {
   const color = getActorColor(index);
   const isRunning = actor.status === "running";
+  const executionPolicySummary = summarizeExecutionPolicy(actor.normalizedExecutionPolicy);
+  const middlewareSummary = summarizeMiddleware(actor.middlewareOverrides);
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState(actor.roleName);
   const [editModel, setEditModel] = useState(actor.modelOverride || "");
   const [editWorkspace, setEditWorkspace] = useState(actor.workspace || "");
   const [editThinking, setEditThinking] = useState<ThinkingLevel>(actor.thinkingLevel || "adaptive");
   const [editCaps, setEditCaps] = useState<AgentCapability[]>(actor.capabilities?.tags ?? []);
+  const [editAccessMode, setEditAccessMode] = useState<AccessMode>(
+    actor.normalizedExecutionPolicy.accessMode,
+  );
+  const [editApprovalMode, setEditApprovalMode] = useState<ApprovalMode>(
+    actor.normalizedExecutionPolicy.approvalMode,
+  );
+  const [editToolAllow, setEditToolAllow] = useState(formatCommaSeparatedInput(actor.toolPolicy?.allow));
+  const [editToolDeny, setEditToolDeny] = useState(formatCommaSeparatedInput(actor.toolPolicy?.deny));
+  const [editDisabledMiddlewares, setEditDisabledMiddlewares] = useState(
+    formatCommaSeparatedInput(actor.middlewareOverrides?.disable),
+  );
   const [showCapMenu, setShowCapMenu] = useState(false);
 
   const handleOpenEdit = () => {
@@ -306,15 +335,38 @@ export function LiveActorRow({
     setEditWorkspace(actor.workspace || "");
     setEditThinking(actor.thinkingLevel || "adaptive");
     setEditCaps(actor.capabilities?.tags ?? []);
+    setEditAccessMode(actor.normalizedExecutionPolicy.accessMode);
+    setEditApprovalMode(actor.normalizedExecutionPolicy.approvalMode);
+    setEditToolAllow(formatCommaSeparatedInput(actor.toolPolicy?.allow));
+    setEditToolDeny(formatCommaSeparatedInput(actor.toolPolicy?.deny));
+    setEditDisabledMiddlewares(formatCommaSeparatedInput(actor.middlewareOverrides?.disable));
     setEditing(true);
   };
 
   const handleSave = () => {
+    const allow = parseCommaSeparatedInput(editToolAllow);
+    const deny = parseCommaSeparatedInput(editToolDeny);
+    const disabled = parseCommaSeparatedInput(editDisabledMiddlewares);
+    const executionPolicy: ExecutionPolicy = {
+      accessMode: editAccessMode,
+      approvalMode: editApprovalMode,
+    };
     onUpdate({
       name: editName.trim() || undefined,
       modelOverride: editModel,
       workspace: editWorkspace.trim() || undefined,
       thinkingLevel: editThinking !== "adaptive" ? editThinking : undefined,
+      toolPolicy: allow.length > 0 || deny.length > 0
+        ? {
+            allow: allow.length > 0 ? allow : undefined,
+            deny: deny.length > 0 ? deny : undefined,
+          }
+        : undefined,
+      executionPolicy,
+      middlewareOverrides: buildMiddlewareOverridesForExecutionPolicy(
+        executionPolicy,
+        disabled.length > 0 ? { disable: disabled } : undefined,
+      ),
       capabilities: editCaps.length > 0 ? { tags: editCaps } : undefined,
     });
     setEditing(false);
@@ -394,8 +446,13 @@ export function LiveActorRow({
           {summarizeToolPolicy(actor.toolPolicy)}
         </span>
         <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg)]/80 text-[var(--color-text-secondary)]">
-          {summarizeMiddleware(actor.middlewareOverrides)}
+          {executionPolicySummary}
         </span>
+        {middlewareSummary && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg)]/80 text-[var(--color-text-secondary)]">
+            {middlewareSummary}
+          </span>
+        )}
         {actor.workspace && (
           <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg)]/80 text-[var(--color-text-secondary)]">
             工作区 {actor.workspace}
@@ -476,6 +533,46 @@ export function LiveActorRow({
                 </div>
               )}
             </div>
+            <select
+              value={editAccessMode}
+              onChange={(event) => setEditAccessMode(event.target.value as AccessMode)}
+              className="text-[10px] px-1.5 py-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)]"
+            >
+              {ACCESS_MODE_OPTIONS.map((mode) => (
+                <option key={mode.value} value={mode.value}>访问 {mode.label}</option>
+              ))}
+            </select>
+            <select
+              value={editApprovalMode}
+              onChange={(event) => setEditApprovalMode(event.target.value as ApprovalMode)}
+              className="text-[10px] px-1.5 py-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)]"
+            >
+              {APPROVAL_MODE_OPTIONS.map((mode) => (
+                <option key={mode.value} value={mode.value}>审批 {mode.label}</option>
+              ))}
+            </select>
+          </div>
+          <div className="grid gap-1.5 md:grid-cols-2">
+            <input
+              value={editToolAllow}
+              onChange={(event) => setEditToolAllow(event.target.value)}
+              placeholder="允许工具，逗号分隔"
+              className="text-[10px] px-2 py-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)]"
+            />
+            <input
+              value={editToolDeny}
+              onChange={(event) => setEditToolDeny(event.target.value)}
+              placeholder="禁止工具，逗号分隔"
+              className="text-[10px] px-2 py-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)]"
+            />
+            <input
+              value={editDisabledMiddlewares}
+              onChange={(event) => setEditDisabledMiddlewares(event.target.value)}
+              placeholder="关闭中间件，逗号分隔"
+              className="text-[10px] px-2 py-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] md:col-span-2"
+            />
+          </div>
+          <div className="flex items-center gap-1.5">
             <div className="flex-1" />
             <button
               onClick={() => setEditing(false)}
@@ -521,7 +618,8 @@ export function AddAgentForm({
   const [workspace, setWorkspace] = useState("");
   const [toolAllow, setToolAllow] = useState("");
   const [toolDeny, setToolDeny] = useState("");
-  const [approvalLevel, setApprovalLevel] = useState<ApprovalLevel>("normal");
+  const [accessMode, setAccessMode] = useState<AccessMode>(DEFAULT_ACCESS_MODE);
+  const [approvalMode, setApprovalMode] = useState<ApprovalMode>(DEFAULT_APPROVAL_MODE);
   const [disabledMiddlewares, setDisabledMiddlewares] = useState("");
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>("adaptive");
 
@@ -537,9 +635,13 @@ export function AddAgentForm({
     }
 
     const capabilities = selectedCaps.length > 0 ? { tags: selectedCaps } : undefined;
-    const allow = toolAllow.split(",").map((item) => item.trim()).filter(Boolean);
-    const deny = toolDeny.split(",").map((item) => item.trim()).filter(Boolean);
-    const disabled = disabledMiddlewares.split(",").map((item) => item.trim()).filter(Boolean);
+    const allow = parseCommaSeparatedInput(toolAllow);
+    const deny = parseCommaSeparatedInput(toolDeny);
+    const disabled = parseCommaSeparatedInput(disabledMiddlewares);
+    const executionPolicy: ExecutionPolicy = {
+      accessMode,
+      approvalMode,
+    };
     onAdd({
       name: agentName,
       model,
@@ -551,12 +653,11 @@ export function AddAgentForm({
             deny: deny.length > 0 ? deny : undefined,
           }
         : undefined,
-      middlewareOverrides: approvalLevel !== "normal" || disabled.length > 0
-        ? {
-            approvalLevel,
-            disable: disabled.length > 0 ? disabled : undefined,
-          }
-        : undefined,
+      executionPolicy,
+      middlewareOverrides: buildMiddlewareOverridesForExecutionPolicy(
+        executionPolicy,
+        disabled.length > 0 ? { disable: disabled } : undefined,
+      ),
       thinkingLevel: thinkingLevel !== "adaptive" ? thinkingLevel : undefined,
     });
     setName("");
@@ -565,7 +666,8 @@ export function AddAgentForm({
     setWorkspace("");
     setToolAllow("");
     setToolDeny("");
-    setApprovalLevel("normal");
+    setAccessMode(DEFAULT_ACCESS_MODE);
+    setApprovalMode(DEFAULT_APPROVAL_MODE);
     setDisabledMiddlewares("");
     setThinkingLevel("adaptive");
   };
@@ -650,12 +752,21 @@ export function AddAgentForm({
             className="text-[10px] px-2 py-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)]"
           />
           <select
-            value={approvalLevel}
-            onChange={(event) => setApprovalLevel(event.target.value as ApprovalLevel)}
+            value={accessMode}
+            onChange={(event) => setAccessMode(event.target.value as AccessMode)}
             className="text-[10px] px-2 py-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)]"
           >
-            {APPROVAL_LEVELS.map((level) => (
-              <option key={level} value={level}>审批 {level}</option>
+            {ACCESS_MODE_OPTIONS.map((mode) => (
+              <option key={mode.value} value={mode.value}>访问 {mode.label}</option>
+            ))}
+          </select>
+          <select
+            value={approvalMode}
+            onChange={(event) => setApprovalMode(event.target.value as ApprovalMode)}
+            className="text-[10px] px-2 py-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)]"
+          >
+            {APPROVAL_MODE_OPTIONS.map((mode) => (
+              <option key={mode.value} value={mode.value}>审批 {mode.label}</option>
             ))}
           </select>
           <input

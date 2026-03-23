@@ -1,4 +1,5 @@
 import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
+import { getDefaultRuntimeSessionLabel } from "@/core/ai/ai-product-modes";
 import { buildRuntimeSessionCompactionHint } from "./runtime-session-compaction";
 import type { RuntimeSessionMode, RuntimeSessionRecord } from "./runtime-state";
 
@@ -9,23 +10,23 @@ export interface RuntimeIndicatorMeta {
 
 const MODE_META: Record<RuntimeSessionMode, RuntimeIndicatorMeta> = {
   ask: {
-    label: "Ask 对话",
+    label: getDefaultRuntimeSessionLabel("ask"),
     color: "#f59e0b",
   },
   agent: {
-    label: "Agent 任务",
+    label: getDefaultRuntimeSessionLabel("agent"),
     color: "#22c55e",
   },
   cluster: {
-    label: "集群任务",
+    label: getDefaultRuntimeSessionLabel("cluster"),
     color: "var(--color-accent)",
   },
   dialog: {
-    label: "Dialog 房间",
+    label: getDefaultRuntimeSessionLabel("dialog"),
     color: "#3b82f6",
   },
   im_conversation: {
-    label: "IM 会话",
+    label: getDefaultRuntimeSessionLabel("im_conversation"),
     color: "#0ea5e9",
   },
 };

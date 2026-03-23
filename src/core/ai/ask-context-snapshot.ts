@@ -1,13 +1,8 @@
 import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
+import { formatAICenterModeLabel } from "@/core/ai/ai-center-mode-meta";
+import { getDefaultRuntimeSessionLabel } from "@/core/ai/ai-product-modes";
 import type { ChatMessage } from "@/core/ai/types";
 import type { AICenterHandoff } from "@/store/app-store";
-
-const MODE_LABELS: Record<NonNullable<AICenterHandoff["sourceMode"]>, string> = {
-  ask: "Ask",
-  agent: "Agent",
-  cluster: "Cluster",
-  dialog: "Dialog",
-};
 
 export interface AskContextSnapshot {
   generatedAt: number;
@@ -46,7 +41,7 @@ export function buildAskSourceModeLabel(
   handoff?: AICenterHandoff | null,
 ): string | undefined {
   if (!handoff?.sourceMode) return undefined;
-  return `${MODE_LABELS[handoff.sourceMode]} 模式`;
+  return `${formatAICenterModeLabel(handoff.sourceMode)} 模式`;
 }
 
 function buildAskSourceHandoffSummary(
@@ -193,7 +188,7 @@ export function buildAskContextNarrative(
     );
   }
   if (snapshot.messageCount > 0) {
-    parts.push(`当前 Ask 对话里已有 ${snapshot.messageCount} 条消息可继续参考`);
+    parts.push(`当前 ${getDefaultRuntimeSessionLabel("ask")}里已有 ${snapshot.messageCount} 条消息可继续参考`);
   }
   if (snapshot.recalledMemoryCount > 0) {
     parts.push(`最近一轮回答已引用 ${snapshot.recalledMemoryCount} 条长期记忆`);
@@ -217,7 +212,7 @@ export function buildAskContextNarrative(
   }
 
   if (parts.length === 0) {
-    return "当前会基于 Ask 最近对话继续回答。";
+    return `当前会基于${getDefaultRuntimeSessionLabel("ask")}继续回答。`;
   }
 
   return `${parts.join("；")}。`;

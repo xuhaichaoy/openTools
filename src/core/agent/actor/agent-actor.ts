@@ -3,6 +3,7 @@ import {
   ReActAgent,
   type AgentTool,
   type AgentStep,
+  type DangerousActionConfirmationContext,
 } from "@/plugins/builtin/SmartAgent/core/react-agent";
 import { applyIncomingAgentStep } from "@/plugins/builtin/SmartAgent/core/agent-task-state";
 import {
@@ -27,6 +28,12 @@ import { appendToolCallSync as appendToolCall, appendToolResultSync as appendToo
 import type { ActorRunContext } from "./actor-middleware";
 import { runMiddlewareChain } from "./actor-middleware";
 import { isLegacySingleDefaultDialogLead } from "./dialog-actor-persistence";
+import {
+  compactMiddlewareOverridesForPersistence,
+  normalizeExecutionPolicyWithMiddlewareCompat,
+  synchronizeExecutionPolicyCompat,
+  type NormalizedExecutionPolicy,
+} from "./execution-policy";
 import { resolveActorEffectiveMaxIterations } from "./iteration-budget";
 import { ClarificationInterrupt, createDefaultMiddlewares } from "./middlewares";
 import type {
@@ -72,7 +79,11 @@ const actorErrorLog = (name: string, ...args: unknown[]) => {
 
 type ActorEventHandler = (event: ActorEvent) => void;
 export type AskUserCallback = (questions: AskUserQuestion[]) => Promise<AskUserAnswers>;
-type ConfirmDangerousAction = (toolName: string, params: Record<string, unknown>) => Promise<boolean>;
+export type ConfirmDangerousAction = (
+  toolName: string,
+  params: Record<string, unknown>,
+  context?: DangerousActionConfirmationContext,
+) => Promise<boolean>;
 
 const ARTIFACT_TOOL_NAMES = new Set(["write_file", "str_replace_edit", "json_edit"]);
 const INTERIM_SYNTHESIS_PATTERNS = [
@@ -269,8 +280,12 @@ export class AgentActor {
     this._workspace = config.workspace;
     this._contextTokens = config.contextTokens;
     this._thinkingLevel = config.thinkingLevel;
-    this._executionPolicy = config.executionPolicy;
-    this._middlewareOverrides = config.middlewareOverrides;
+    const compatState = synchronizeExecutionPolicyCompat({
+      executionPolicy: config.executionPolicy,
+      middlewareOverrides: config.middlewareOverrides,
+    });
+    this._executionPolicy = compatState.executionPolicy;
+    this._middlewareOverrides = compatState.middlewareOverrides;
     this.confirmDangerousAction = opts?.confirmDangerousAction;
     this.actorSystem = opts?.actorSystem;
 
@@ -415,6 +430,13 @@ export class AgentActor {
     };
   }
 
+  get normalizedExecutionPolicy(): NormalizedExecutionPolicy {
+    return normalizeExecutionPolicyWithMiddlewareCompat(
+      this._executionPolicy,
+      this._middlewareOverrides,
+    );
+  }
+
   get middlewareOverrides(): MiddlewareOverrides | undefined {
     if (!this._middlewareOverrides) return undefined;
     return {
@@ -442,14 +464,26 @@ export class AgentActor {
     capabilities?: AgentCapabilities;
   }): void {
     if (this._status !== "idle") throw new Error("Cannot update config while running");
-    if (patch.name !== undefined) this.role.name = patch.name;
-    if (patch.modelOverride !== undefined) this.modelOverride = patch.modelOverride || undefined;
-    if (patch.workspace !== undefined) this._workspace = patch.workspace || undefined;
-    if (patch.thinkingLevel !== undefined) this._thinkingLevel = patch.thinkingLevel;
-    if (patch.toolPolicy !== undefined) this.toolPolicy = patch.toolPolicy;
-    if (patch.executionPolicy !== undefined) this._executionPolicy = patch.executionPolicy;
-    if (patch.middlewareOverrides !== undefined) this._middlewareOverrides = patch.middlewareOverrides;
-    if (patch.capabilities !== undefined) this._capabilities = patch.capabilities;
+    if ("name" in patch && patch.name !== undefined) this.role.name = patch.name;
+    if ("modelOverride" in patch) this.modelOverride = patch.modelOverride || undefined;
+    if ("workspace" in patch) this._workspace = patch.workspace || undefined;
+    if ("thinkingLevel" in patch) this._thinkingLevel = patch.thinkingLevel;
+    if ("toolPolicy" in patch) this.toolPolicy = patch.toolPolicy;
+    if ("executionPolicy" in patch || "middlewareOverrides" in patch) {
+      const compatState = synchronizeExecutionPolicyCompat({
+        executionPolicy: "executionPolicy" in patch
+          ? patch.executionPolicy
+          : this._executionPolicy,
+        middlewareOverrides: "middlewareOverrides" in patch
+          ? patch.middlewareOverrides
+          : ("executionPolicy" in patch
+            ? compactMiddlewareOverridesForPersistence(this._middlewareOverrides)
+            : this._middlewareOverrides),
+      });
+      this._executionPolicy = compatState.executionPolicy;
+      this._middlewareOverrides = compatState.middlewareOverrides;
+    }
+    if ("capabilities" in patch) this._capabilities = patch.capabilities;
   }
 
   get lastMemoryRecallAttempted(): boolean {

@@ -47,7 +47,7 @@ describe("buildAskContextSnapshot", () => {
     });
 
     expect(snapshot.workspaceRoot).toBe("/tmp/project");
-    expect(snapshot.sourceModeLabel).toBe("Cluster 模式");
+    expect(snapshot.sourceModeLabel).toBe("Plan 模式");
     expect(snapshot.messageCount).toBe(2);
     expect(snapshot.attachmentCount).toBe(1);
     expect(snapshot.contextBlockCount).toBe(1);

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useAIStore } from "@/store/ai-store";
 import { useAppStore, type AICenterMode } from "@/store/app-store";
 import { buildAICenterModelScope } from "@/core/ai/ai-center-model-scope";
+import { AI_CENTER_MODE_META } from "@/core/ai/ai-center-mode-meta";
 import {
   deleteMemory,
   listMemoryCandidates,
@@ -235,8 +236,8 @@ export function AIModelTab() {
       </div>
 
       <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2.5 text-[10px] text-[var(--color-text-secondary)]">
-        管理中心负责维护模型池与全局执行基座；AI 助手顶部模型选择会按 Ask / Agent / Cluster / Dialog 分别记住默认模型，不会覆盖这里的能力开关。
-        <ScopePills items={["Ask 默认", "Agent 默认", "Cluster 默认", "Dialog 默认"]} />
+        管理中心负责维护模型池与全局执行基座；AI 助手顶部模型选择会按 Explore / Build / Plan / Dialog 分别记住默认模型，不会覆盖这里的能力开关。
+        <ScopePills items={AI_CENTER_MODES.map((mode) => `${AI_CENTER_MODE_META[mode].label} 默认`)} />
       </div>
 
       <div className="grid grid-cols-4 gap-2">

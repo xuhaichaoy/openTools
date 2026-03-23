@@ -81,7 +81,7 @@ describe("buildDialogContextSnapshot", () => {
     });
 
     expect(snapshot.workspaceRoot).toBe("/tmp/project");
-    expect(snapshot.sourceModeLabel).toBe("Agent 模式");
+    expect(snapshot.sourceModeLabel).toBe("Build 模式");
     expect(snapshot.summarizedMessageCount).toBe(18);
     expect(snapshot.roomCompactionMessageCount).toBe(12);
     expect(snapshot.roomCompactionTaskCount).toBe(2);

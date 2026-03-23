@@ -1,4 +1,9 @@
-import { AgentActor, DIALOG_FULL_ROLE, type AskUserCallback } from "./agent-actor";
+import {
+  AgentActor,
+  DIALOG_FULL_ROLE,
+  type AskUserCallback,
+  type ConfirmDangerousAction,
+} from "./agent-actor";
 import { isLikelyVisualAttachmentPath } from "@/core/ai/ai-center-handoff";
 import type {
   ApprovalRequest,
@@ -40,12 +45,17 @@ import {
   validateSpawnedTaskResult,
 } from "./spawned-task-result-validator";
 import {
-  buildExecutionContractFromDialogPlan,
   cloneExecutionContract,
   resolveChildExecutionSettings,
-  toDialogExecutionPlan,
 } from "@/core/collaboration/execution-contract";
 import type { ExecutionContract } from "@/core/collaboration/types";
+import {
+  buildExecutionContractFromLegacyDialogExecutionPlan,
+  buildLegacyDialogExecutionPlanFromContract,
+  cloneLegacyDialogExecutionPlan,
+  type LegacyDialogExecutionPlanRuntimeState,
+} from "./dialog-execution-plan-compat";
+import { getRoleBoundaryPolicyProfile } from "./execution-policy";
 
 const generateId = (): string => {
   // 使用更安全的随机 ID 生成
@@ -68,53 +78,6 @@ const USER_SHAREABLE_ARTIFACT_DIR_PATTERNS = [
   /^\/tmp(?:\/|$)/i,
   /^\/var\/folders(?:\/|$)/i,
 ] as const;
-
-const READ_ONLY_CHILD_POLICY: ToolPolicy = {
-  deny: [
-    "spawn_task",
-    "write_file",
-    "str_replace_edit",
-    "json_edit",
-    "delete_file",
-    "run_shell_command",
-    "persistent_shell",
-    "native_*",
-    "database_execute",
-    "ssh_*",
-  ],
-};
-
-const VALIDATION_CHILD_POLICY: ToolPolicy = {
-  deny: [
-    "spawn_task",
-    "write_file",
-    "str_replace_edit",
-    "json_edit",
-    "delete_file",
-    "native_*",
-    "database_execute",
-    "ssh_*",
-  ],
-};
-
-const EXECUTOR_CHILD_POLICY: ToolPolicy = {
-  deny: ["spawn_task", "delete_file", "native_*", "ssh_*"],
-};
-
-const GENERAL_CHILD_POLICY: ToolPolicy = {
-  deny: [
-    "spawn_task",
-    "write_file",
-    "str_replace_edit",
-    "json_edit",
-    "delete_file",
-    "run_shell_command",
-    "persistent_shell",
-    "native_*",
-    "database_execute",
-    "ssh_*",
-  ],
-};
 
 // 错误分类：对标 OpenClaw announce 机制
 const TRANSIENT_ERROR_PATTERNS = [
@@ -155,15 +118,13 @@ type EphemeralChildRoleBoundary = {
 };
 
 function buildEphemeralChildBoundary(role: SpawnedTaskRoleBoundary): EphemeralChildRoleBoundary {
+  const profile = getRoleBoundaryPolicyProfile(role);
   switch (role) {
     case "reviewer":
       return {
         role,
-        toolPolicy: READ_ONLY_CHILD_POLICY,
-        executionPolicy: {
-          accessMode: "read_only",
-          approvalMode: "strict",
-        },
+        toolPolicy: profile.toolPolicy,
+        executionPolicy: profile.executionPolicy,
         systemPromptAppend: [
           "你当前是独立审查子 Agent。",
           "默认不要修改文件、不要运行写操作、不要直接接管实现任务。",
@@ -173,11 +134,8 @@ function buildEphemeralChildBoundary(role: SpawnedTaskRoleBoundary): EphemeralCh
     case "validator":
       return {
         role,
-        toolPolicy: VALIDATION_CHILD_POLICY,
-        executionPolicy: {
-          accessMode: "auto",
-          approvalMode: "normal",
-        },
+        toolPolicy: profile.toolPolicy,
+        executionPolicy: profile.executionPolicy,
         systemPromptAppend: [
           "你当前是验证子 Agent。",
           "默认不要修改代码；重点做复现、测试、验收和回归检查。",
@@ -187,11 +145,8 @@ function buildEphemeralChildBoundary(role: SpawnedTaskRoleBoundary): EphemeralCh
     case "executor":
       return {
         role,
-        toolPolicy: EXECUTOR_CHILD_POLICY,
-        executionPolicy: {
-          accessMode: "full_access",
-          approvalMode: "normal",
-        },
+        toolPolicy: profile.toolPolicy,
+        executionPolicy: profile.executionPolicy,
         systemPromptAppend: [
           "你当前是执行子 Agent。",
           "聚焦实现、修复或探索，不要抢协调权。",
@@ -201,11 +156,8 @@ function buildEphemeralChildBoundary(role: SpawnedTaskRoleBoundary): EphemeralCh
     default:
       return {
         role: "general",
-        toolPolicy: GENERAL_CHILD_POLICY,
-        executionPolicy: {
-          accessMode: "read_only",
-          approvalMode: "strict",
-        },
+        toolPolicy: profile.toolPolicy,
+        executionPolicy: profile.executionPolicy,
         systemPromptAppend: [
           "你当前是通用支援子 Agent。",
           "聚焦补充分析、资料整理和局部线索确认，默认不要修改文件或继续派发新的子任务。",
@@ -519,7 +471,6 @@ const log = (..._args: unknown[]) => undefined;
 const logWarn = (...args: unknown[]) => console.warn(LOG_PREFIX, ...args);
 
 type SystemEventHandler = (event: ActorEvent | DialogMessage) => void;
-type ConfirmDangerousAction = (toolName: string, params: Record<string, unknown>) => Promise<boolean>;
 
 // ── Hook System (对标 OpenClaw subagent hooks) ──
 
@@ -630,11 +581,6 @@ export const MODIFY_HOOKS: ModifyHookType[] = ["beforeSpawn", "beforeKill"];
 export interface ActorSystemOptions {
   askUser?: AskUserCallback;
   confirmDangerousAction?: ConfirmDangerousAction;
-}
-
-interface LegacyDialogExecutionPlanRuntimeState {
-  activatedAt?: number;
-  sourceMessageId?: string;
 }
 
 /**
@@ -765,7 +711,7 @@ export class ActorSystem {
       }
     }
     this.actors.delete(actorId);
-    this.removeActorFromDialogExecutionPlan(actorId);
+    this.removeActorFromExecutionContract(actorId);
     if (this.coordinatorActorId === actorId) {
       this.coordinatorActorId = this.getFirstActor()?.id ?? null;
     }
@@ -844,7 +790,7 @@ export class ActorSystem {
     return undefined;
   }
 
-  private getDialogPlanCoordinator(filter?: (a: AgentActor) => boolean): AgentActor | undefined {
+  private getExecutionContractCoordinator(filter?: (a: AgentActor) => boolean): AgentActor | undefined {
     const coordinatorId = this.activeExecutionContract?.coordinatorActorId;
     if (!coordinatorId) return undefined;
     const coordinator = this.actors.get(coordinatorId);
@@ -855,7 +801,7 @@ export class ActorSystem {
   }
 
   getCoordinator(filter?: (a: AgentActor) => boolean): AgentActor | undefined {
-    const planCoordinator = this.getDialogPlanCoordinator(filter);
+    const planCoordinator = this.getExecutionContractCoordinator(filter);
     if (planCoordinator) {
       return planCoordinator;
     }
@@ -896,20 +842,6 @@ export class ActorSystem {
     this.syncTranscriptActors();
   }
 
-  private cloneLegacyDialogExecutionPlan(
-    plan?: DialogExecutionPlan | null,
-  ): DialogExecutionPlan | null {
-    if (!plan) return null;
-    return {
-      ...plan,
-      initialRecipientActorIds: [...plan.initialRecipientActorIds],
-      participantActorIds: [...plan.participantActorIds],
-      allowedMessagePairs: plan.allowedMessagePairs.map((edge) => ({ ...edge })),
-      allowedSpawnPairs: plan.allowedSpawnPairs.map((edge) => ({ ...edge })),
-      plannedSpawns: plan.plannedSpawns?.map((spawn) => ({ ...spawn })),
-    };
-  }
-
   private getExecutionContractSurface(): ExecutionContract["surface"] {
     return this.activeExecutionContract?.surface ?? "local_dialog";
   }
@@ -928,21 +860,6 @@ export class ActorSystem {
       : null;
   }
 
-  private buildLegacyDialogExecutionPlanFromContract(
-    contract: ExecutionContract,
-  ): DialogExecutionPlan {
-    const runtimeState = this.legacyDialogExecutionPlanRuntimeState;
-    return this.normalizeDialogExecutionPlan({
-      ...toDialogExecutionPlan(contract),
-      ...(runtimeState
-        ? {
-            activatedAt: runtimeState.activatedAt,
-            sourceMessageId: runtimeState.sourceMessageId,
-          }
-        : {}),
-    }, { preserveRuntimeState: true });
-  }
-
   getActiveExecutionContract(): ExecutionContract | null {
     return this.activeExecutionContract ? cloneExecutionContract(this.activeExecutionContract) : null;
   }
@@ -954,7 +871,10 @@ export class ActorSystem {
   getDialogExecutionPlan(): DialogExecutionPlan | null {
     const contract = this.activeExecutionContract;
     if (contract) {
-      return this.cloneLegacyDialogExecutionPlan(this.buildLegacyDialogExecutionPlanFromContract(contract));
+      return cloneLegacyDialogExecutionPlan(buildLegacyDialogExecutionPlanFromContract(contract, {
+        runtimeState: this.legacyDialogExecutionPlanRuntimeState,
+        hasActor: (actorId) => this.actors.has(actorId),
+      }));
     }
     return null;
   }
@@ -965,36 +885,6 @@ export class ActorSystem {
 
   setDialogRoomCompaction(state: DialogRoomCompactionState | null): void {
     this.dialogRoomCompaction = cloneDialogRoomCompaction(state);
-  }
-
-  private normalizeDialogExecutionPlan(
-    plan: DialogExecutionPlan,
-    opts?: { preserveRuntimeState?: boolean },
-  ): DialogExecutionPlan {
-    const dedupe = (values: string[]) => [...new Set(values.filter(Boolean))];
-    const preserveRuntimeState = opts?.preserveRuntimeState ?? false;
-
-    return {
-      ...plan,
-      approvedAt: plan.approvedAt || Date.now(),
-      initialRecipientActorIds: dedupe(plan.initialRecipientActorIds),
-      participantActorIds: dedupe(plan.participantActorIds),
-      coordinatorActorId: plan.coordinatorActorId && this.actors.has(plan.coordinatorActorId)
-        ? plan.coordinatorActorId
-        : undefined,
-      allowedMessagePairs: plan.allowedMessagePairs
-        .filter((edge) => edge.fromActorId && edge.toActorId)
-        .map((edge) => ({ ...edge })),
-      allowedSpawnPairs: plan.allowedSpawnPairs
-        .filter((edge) => edge.fromActorId && edge.toActorId)
-        .map((edge) => ({ ...edge })),
-      plannedSpawns: plan.plannedSpawns
-        ?.filter((spawn) => spawn.targetActorId && spawn.task.trim())
-        .map((spawn) => ({ ...spawn, task: spawn.task.trim() })),
-      state: preserveRuntimeState ? plan.state : "armed",
-      activatedAt: preserveRuntimeState ? plan.activatedAt : undefined,
-      sourceMessageId: preserveRuntimeState ? plan.sourceMessageId : undefined,
-    };
   }
 
   private dedupeActorPairs(
@@ -1012,11 +902,11 @@ export class ActorSystem {
     return result;
   }
 
-  private attachDynamicActorToDialogPlan(parentActorId: string, childActorId: string): void {
+  private attachDynamicActorToExecutionContract(parentActorId: string, childActorId: string): void {
     const contract = this.activeExecutionContract;
     if (!contract) return;
     if (!contract.participantActorIds.includes(parentActorId)) {
-      throw new Error(`[dialog_plan] ${parentActorId} 不在已批准协作范围内，不能创建新的子 Agent`);
+      throw new Error(`[execution_contract] ${parentActorId} 不在已批准协作范围内，不能创建新的子 Agent`);
     }
     this.activeExecutionContract = {
       ...cloneExecutionContract(contract),
@@ -1033,7 +923,7 @@ export class ActorSystem {
     };
   }
 
-  private removeActorFromDialogExecutionPlan(actorId: string): void {
+  private removeActorFromExecutionContract(actorId: string): void {
     const contract = this.activeExecutionContract;
     if (!contract) return;
     this.activeExecutionContract = {
@@ -1133,13 +1023,13 @@ export class ActorSystem {
       });
 
       try {
-        this.attachDynamicActorToDialogPlan(spawnerActorId, actor.id);
+        this.attachDynamicActorToExecutionContract(spawnerActorId, actor.id);
       } catch (error) {
         this.kill(actor.id);
         return { error: error instanceof Error ? error.message : String(error) };
       }
 
-      log(`[dialog_plan] spawned ephemeral child agent ${actor.role.name} for ${spawner.role.name}`);
+      log(`[execution_contract] spawned ephemeral child agent ${actor.role.name} for ${spawner.role.name}`);
       return actor;
     } catch (error) {
       return { error: error instanceof Error ? error.message : String(error) };
@@ -1173,34 +1063,42 @@ export class ActorSystem {
     this.legacyDialogExecutionPlanRuntimeState = null;
   }
 
+  /**
+   * @deprecated 仅用于旧测试与兼容迁移入口。
+   * 新运行态应统一调用 `armExecutionContract()`。
+   */
   armDialogExecutionPlan(plan: DialogExecutionPlan): void {
-    const normalizedPlan = this.normalizeDialogExecutionPlan(plan);
-    this.setLegacyDialogExecutionPlanRuntimeState(null);
-    this.activeExecutionContract = buildExecutionContractFromDialogPlan({
+    const { contract } = buildExecutionContractFromLegacyDialogExecutionPlan({
       surface: this.getExecutionContractSurface(),
-      plan: normalizedPlan,
+      plan,
+      hasActor: (actorId) => this.actors.has(actorId),
     });
-    log(`armDialogExecutionPlan: ${plan.summary}`);
+    this.armExecutionContract(contract);
   }
 
+  /**
+   * @deprecated 仅用于旧快照恢复与兼容迁移入口。
+   * 新运行态应统一调用 `restoreExecutionContract()`。
+   */
   restoreDialogExecutionPlan(plan: DialogExecutionPlan): void {
-    const normalizedPlan = this.normalizeDialogExecutionPlan(plan, { preserveRuntimeState: true });
-    this.setLegacyDialogExecutionPlanRuntimeState({
-      activatedAt: normalizedPlan.activatedAt,
-      sourceMessageId: normalizedPlan.sourceMessageId,
-    });
-    this.activeExecutionContract = buildExecutionContractFromDialogPlan({
+    const { contract, runtimeState } = buildExecutionContractFromLegacyDialogExecutionPlan({
       surface: this.getExecutionContractSurface(),
-      plan: normalizedPlan,
+      plan,
+      hasActor: (actorId) => this.actors.has(actorId),
     });
-    log(`restoreDialogExecutionPlan: ${plan.summary}`);
+    this.restoreExecutionContract(contract);
+    this.setLegacyDialogExecutionPlanRuntimeState(runtimeState);
   }
 
+  /**
+   * @deprecated 仅用于兼容旧调用方。
+   * 新运行态应统一调用 `clearExecutionContract()`。
+   */
   clearDialogExecutionPlan(): void {
     this.clearExecutionContract();
   }
 
-  private activateDialogExecutionPlan(sourceMessageId: string): boolean {
+  private activateExecutionContract(sourceMessageId: string): boolean {
     const contract = this.activeExecutionContract;
     if (!contract || contract.state !== "sealed") return false;
     const activatedAt = Date.now();
@@ -1209,11 +1107,11 @@ export class ActorSystem {
       state: "active",
     };
     this.setLegacyDialogExecutionPlanRuntimeState({ activatedAt, sourceMessageId });
-    log(`activateDialogExecutionPlan: sourceMessageId=${sourceMessageId}`);
+    log(`activateExecutionContract: sourceMessageId=${sourceMessageId}`);
     return true;
   }
 
-  private tryFinalizeDialogExecutionPlan(): void {
+  private tryFinalizeExecutionContract(): void {
     const contract = this.activeExecutionContract;
     if (!contract || contract.state !== "active") return;
 
@@ -1235,8 +1133,9 @@ export class ActorSystem {
       ...cloneExecutionContract(contract),
       state: newState,
     };
-    log(`tryFinalizeDialogExecutionPlan: contract → ${newState}`);
+    log(`tryFinalizeExecutionContract: contract → ${newState}`);
     this.emitEvent({
+      // Keep the legacy event name for compatibility with existing listeners.
       type: "dialog_plan_finalized",
       actorId: this.coordinatorActorId ?? "",
       timestamp: Date.now(),
@@ -1246,13 +1145,13 @@ export class ActorSystem {
 
   private _sessionStallTimer: ReturnType<typeof setTimeout> | null = null;
 
-  private checkSessionProgress(): void {
+  private scheduleExecutionContractProgressCheck(): void {
     if (this._sessionStallTimer) {
       clearTimeout(this._sessionStallTimer);
       this._sessionStallTimer = null;
     }
-    const plan = this.ensureRuntimeExecutionContract();
-    if (!plan || plan.state !== "active") return;
+    const contract = this.ensureRuntimeExecutionContract();
+    if (!contract || contract.state !== "active") return;
 
     this._sessionStallTimer = setTimeout(() => {
       this._sessionStallTimer = null;
@@ -1263,12 +1162,12 @@ export class ActorSystem {
       if (busyActors.length > 0) return;
 
       if (this.ensureRuntimeExecutionContract()?.state === "active") {
-        log("checkSessionProgress: session stall detected");
+        log("scheduleExecutionContractProgressCheck: session stall detected");
         this.emitEvent({
           type: "session_stalled",
           actorId: this.coordinatorActorId ?? "",
           timestamp: Date.now(),
-          detail: { planSummary: plan.summary },
+          detail: { planSummary: contract.summary },
         });
       }
     }, 30_000);
@@ -1297,22 +1196,22 @@ export class ActorSystem {
     );
   }
 
-  private isDialogPlanEdgeAllowed(
-    pairs: DialogExecutionPlan["allowedMessagePairs"] | DialogExecutionPlan["allowedSpawnPairs"],
+  private isExecutionContractEdgeAllowed(
+    pairs: ExecutionContract["allowedMessagePairs"] | ExecutionContract["allowedSpawnPairs"],
     fromActorId: string,
     toActorId: string,
   ): boolean {
     return pairs.some((edge) => edge.fromActorId === fromActorId && edge.toActorId === toActorId);
   }
 
-  private assertUserDispatchMatchesPlan(
+  private assertUserDispatchMatchesContract(
     recipientActorIds: string[],
     mode: "send" | "broadcast" | "broadcastAndResolve",
   ): void {
-    const plan = this.ensureRuntimeExecutionContract();
-    if (!plan) return;
+    const contract = this.ensureRuntimeExecutionContract();
+    if (!contract) return;
 
-    const expected = new Set(plan.initialRecipientActorIds);
+    const expected = new Set(contract.initialRecipientActorIds);
     const actual = new Set(recipientActorIds);
     const matches = expected.size === actual.size && [...expected].every((id) => actual.has(id));
 
@@ -1320,34 +1219,34 @@ export class ActorSystem {
       const expectedLabel = [...expected].join(", ") || "none";
       const actualLabel = [...actual].join(", ") || "none";
       throw new Error(
-        `[dialog_plan] ${mode} 目标不在已批准计划内（expected=${expectedLabel}, actual=${actualLabel}）`,
+        `[execution_contract] ${mode} 目标不在已批准计划内（expected=${expectedLabel}, actual=${actualLabel}）`,
       );
     }
   }
 
   private assertActorMessageAllowed(fromActorId: string, toActorId: string): void {
-    const plan = this.ensureRuntimeExecutionContract();
-    if (!plan) return;
+    const contract = this.ensureRuntimeExecutionContract();
+    if (!contract) return;
 
-    if (!plan.participantActorIds.includes(fromActorId) || !plan.participantActorIds.includes(toActorId)) {
-      throw new Error(`[dialog_plan] ${fromActorId} 或 ${toActorId} 不在已批准协作范围内`);
+    if (!contract.participantActorIds.includes(fromActorId) || !contract.participantActorIds.includes(toActorId)) {
+      throw new Error(`[execution_contract] ${fromActorId} 或 ${toActorId} 不在已批准协作范围内`);
     }
 
-    if (!this.isDialogPlanEdgeAllowed(plan.allowedMessagePairs, fromActorId, toActorId)) {
-      throw new Error(`[dialog_plan] ${fromActorId} -> ${toActorId} 的消息未在已批准计划中`);
+    if (!this.isExecutionContractEdgeAllowed(contract.allowedMessagePairs, fromActorId, toActorId)) {
+      throw new Error(`[execution_contract] ${fromActorId} -> ${toActorId} 的消息未在已批准计划中`);
     }
   }
 
   private assertActorSpawnAllowed(spawnerActorId: string, targetActorId: string): void {
-    const plan = this.ensureRuntimeExecutionContract();
-    if (!plan) return;
+    const contract = this.ensureRuntimeExecutionContract();
+    if (!contract) return;
 
-    if (!plan.participantActorIds.includes(spawnerActorId) || !plan.participantActorIds.includes(targetActorId)) {
-      throw new Error(`[dialog_plan] ${spawnerActorId} 或 ${targetActorId} 不在已批准协作范围内`);
+    if (!contract.participantActorIds.includes(spawnerActorId) || !contract.participantActorIds.includes(targetActorId)) {
+      throw new Error(`[execution_contract] ${spawnerActorId} 或 ${targetActorId} 不在已批准协作范围内`);
     }
 
-    if (!this.isDialogPlanEdgeAllowed(plan.allowedSpawnPairs, spawnerActorId, targetActorId)) {
-      throw new Error(`[dialog_plan] ${spawnerActorId} -> ${targetActorId} 的 spawn_task 未在已批准计划中`);
+    if (!this.isExecutionContractEdgeAllowed(contract.allowedSpawnPairs, spawnerActorId, targetActorId)) {
+      throw new Error(`[execution_contract] ${spawnerActorId} -> ${targetActorId} 的 spawn_task 未在已批准计划中`);
     }
   }
 
@@ -1444,7 +1343,7 @@ export class ActorSystem {
     if (!target) throw new Error(`Actor ${to} not found`);
 
     if (!opts?.bypassPlanCheck && from === "user") {
-      this.assertUserDispatchMatchesPlan([to], "send");
+      this.assertUserDispatchMatchesContract([to], "send");
     } else if (!opts?.bypassPlanCheck) {
       this.assertActorMessageAllowed(from, to);
     }
@@ -1471,7 +1370,7 @@ export class ActorSystem {
 
     target.receive(msg);
     if (from === "user" && !opts?.bypassPlanCheck) {
-      this.activateDialogExecutionPlan(msg.id);
+      this.activateExecutionContract(msg.id);
     }
     this.dialogHistory.push(msg);
     appendDialogMessage(this.sessionId, msg);
@@ -1510,7 +1409,7 @@ export class ActorSystem {
       .map((actor) => actor.id);
 
     if (from === "user") {
-      this.assertUserDispatchMatchesPlan(recipientIds, "broadcast");
+      this.assertUserDispatchMatchesContract(recipientIds, "broadcast");
     } else {
       for (const recipientId of recipientIds) {
         this.assertActorMessageAllowed(from, recipientId);
@@ -1533,7 +1432,7 @@ export class ActorSystem {
     appendDialogMessage(this.sessionId, msg);
     this.emitEvent(msg);
     if (from === "user") {
-      this.activateDialogExecutionPlan(msg.id);
+      this.activateExecutionContract(msg.id);
     }
 
     for (const actor of this.actors.values()) {
@@ -1577,7 +1476,7 @@ export class ActorSystem {
       ? [...this.pendingInteractions.entries()].filter(([, p]) => p.status === "pending")
       : [];
     if (from === "user" && planRecipientIds) {
-      this.assertUserDispatchMatchesPlan(planRecipientIds, "broadcastAndResolve");
+      this.assertUserDispatchMatchesContract(planRecipientIds, "broadcastAndResolve");
     }
 
     const msg: DialogMessage = {
@@ -1655,7 +1554,7 @@ export class ActorSystem {
           }
         }
       }
-      this.activateDialogExecutionPlan(msg.id);
+      this.activateExecutionContract(msg.id);
     } else {
       const recipientIds = [...this.actors.values()]
         .filter((actor) => actor.id !== from)
@@ -1786,7 +1685,7 @@ export class ActorSystem {
       plannedDelegationId: requestedDelegationId,
     });
     if (requestedDelegationId && !plannedSpawn) {
-      return { error: `[dialog_plan] 未找到已批准的建议委派 ${requestedDelegationId}` };
+      return { error: `[execution_contract] 未找到已批准的建议委派 ${requestedDelegationId}` };
     }
     if (!resolvedTargetActorId) {
       resolvedTargetActorId = plannedSpawn?.targetActorId?.trim() ?? "";
@@ -2191,8 +2090,8 @@ export class ActorSystem {
         log(`spawnTask cleanup skipped: ${targetName} is persistent (runId=${runId})`);
       }
 
-      this.tryFinalizeDialogExecutionPlan();
-      this.checkSessionProgress();
+      this.tryFinalizeExecutionContract();
+      this.scheduleExecutionContractProgressCheck();
     });
 
     return record;
@@ -2263,8 +2162,8 @@ export class ActorSystem {
     this.abortSpawnedTaskRecord(record, {
       error: opts?.error ?? "子会话已由用户终止",
     });
-    this.tryFinalizeDialogExecutionPlan();
-    this.checkSessionProgress();
+    this.tryFinalizeExecutionContract();
+    this.scheduleExecutionContractProgressCheck();
   }
 
   continueSpawnedSession(

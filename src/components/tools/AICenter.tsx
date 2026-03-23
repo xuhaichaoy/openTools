@@ -164,7 +164,7 @@ export function AICenter({
   const compactMetaCopy = mode === "ask"
     ? {
       detail: "提问 / 读图 / 轻工具",
-      model: "Ask 默认",
+      model: `${AI_CENTER_MODE_META.ask.label} 默认`,
       skill: "自动激活",
     }
     : mode === "dialog"
@@ -204,8 +204,8 @@ export function AICenter({
 
         {/* 三模式切换 */}
         <div className="flex items-center bg-[var(--color-bg-secondary)] rounded-lg p-0.5 border border-[var(--color-border)]">
-          {modeBtn("ask", <MessageCircle className="w-3 h-3" />, "Ask")}
-          {modeBtn("agent", <Bot className="w-3 h-3" />, "Agent")}
+          {modeBtn("ask", <MessageCircle className="w-3 h-3" />, AI_CENTER_MODE_META.ask.label)}
+          {modeBtn("agent", <Bot className="w-3 h-3" />, AI_CENTER_MODE_META.agent.label)}
           {modeBtn(
             "cluster",
             <div className="relative">
@@ -214,9 +214,9 @@ export function AICenter({
                 <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 bg-cyan-500 rounded-full animate-pulse" />
               )}
             </div>,
-            "Cluster",
+            AI_CENTER_MODE_META.cluster.label,
           )}
-          {modeBtn("dialog", <Users className="w-3 h-3" />, "Dialog")}
+          {modeBtn("dialog", <Users className="w-3 h-3" />, AI_CENTER_MODE_META.dialog.label)}
         </div>
 
         <div className="w-px h-4 bg-[var(--color-border)] mx-0.5" />

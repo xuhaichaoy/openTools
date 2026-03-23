@@ -38,7 +38,7 @@ describe("buildClusterContextSnapshot", () => {
 
     expect(snapshot.workspaceRoot).toBe("/tmp/project");
     expect(snapshot.modeLabel).toBe("并行分治");
-    expect(snapshot.sourceModeLabel).toBe("Agent 模式");
+    expect(snapshot.sourceModeLabel).toBe("Build 模式");
     expect(snapshot.planStepCount).toBe(4);
     expect(snapshot.completedInstanceCount).toBe(3);
     expect(snapshot.reportPreview).toContain("已完成首页布局");

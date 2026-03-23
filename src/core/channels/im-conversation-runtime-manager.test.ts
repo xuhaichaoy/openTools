@@ -350,6 +350,11 @@ describe("IMConversationRuntimeManager persistence", () => {
       conversationId: "conv-approval-1",
       text: expect.stringContaining("请直接回复“允许”或“拒绝”"),
     }));
+    expect(
+      onReply.mock.calls.filter(
+        ([payload]) => String(payload?.text ?? "").includes("请直接回复“允许”或“拒绝”"),
+      ),
+    ).toHaveLength(1);
     expect(previewBefore?.pendingInteractionCount).toBe(1);
     expect(previewBefore?.queueLength).toBe(1);
     expect(previewBefore?.contractState ?? null).toBeNull();
@@ -357,6 +362,12 @@ describe("IMConversationRuntimeManager persistence", () => {
     expect(previewBefore?.approvalSummary).toContain("待确认任务");
     expect(previewBefore?.approvalRiskLabel).toBeTruthy();
     expect(previewBefore?.pendingApprovalReason).toBeTruthy();
+    const approvalMessage = previewBefore?.dialogHistory.find((message) => message.interactionType === "approval");
+    expect(approvalMessage?.approvalRequest?.toolName).toBe("execution_contract");
+    expect(approvalMessage?.approvalRequest?.previewLabel).toBe("协作契约");
+    expect(approvalMessage?.approvalRequest?.riskDescription).toContain("风险");
+    expect(approvalMessage?.approvalRequest?.decisionOptions?.map((item) => item.label)).toEqual(["允许", "拒绝"]);
+    expect(approvalMessage?.approvalRequest?.details?.some((detail) => detail.label === "风险级别")).toBe(true);
 
     await manager.handleIncoming({
       channelId: "ch-approval",

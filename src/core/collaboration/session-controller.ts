@@ -1,5 +1,4 @@
 import type {
-  DialogExecutionPlan,
   DialogMessage,
   PendingInteraction,
   SessionUploadRecord,
@@ -10,7 +9,6 @@ import {
   buildCollaborationContractDelegations,
 } from "./child-session";
 import {
-  buildExecutionContractFromDialogPlan,
   cloneExecutionContract,
   doesExecutionContractMatchActorRoster,
 } from "./execution-contract";
@@ -155,7 +153,6 @@ export interface CollaborationSessionControllerSystemAdapter {
   getFocusedSpawnedSessionRunId?(): string | null;
   focusSpawnedSession?(runId: string | null): void;
   getActiveExecutionContract?(): ExecutionContract | null;
-  getDialogExecutionPlan?(): DialogExecutionPlan | null;
   armExecutionContract?(contract: ExecutionContract): void;
   restoreExecutionContract?(contract: ExecutionContract): void;
   clearExecutionContract?(): void;
@@ -266,7 +263,7 @@ export class CollaborationSessionController {
     const sanitized = sanitizeCollaborationSnapshot(snapshot, this.surface);
     this.activeContract = sanitized.activeContract
       ? cloneExecutionContract(sanitized.activeContract)
-      : this.restoreCompatActiveContract();
+      : this.restoreLiveActiveContract();
     this.queuedFollowUps = sanitized.queuedFollowUps.map((item) => cloneQueuedFollowUp(item));
     this.focusedChildSessionId = sanitized.focusedChildSessionId;
     if (this.activeContract) {
@@ -668,27 +665,11 @@ export class CollaborationSessionController {
     return this.activeContract?.state ?? "sealed";
   }
 
-  private restoreCompatActiveContract(): ExecutionContract | null {
+  private restoreLiveActiveContract(): ExecutionContract | null {
     const liveContract = this.system.getActiveExecutionContract?.() ?? null;
     if (liveContract) {
       return cloneExecutionContract(liveContract);
     }
-    // Legacy fallback: only used when restoring old snapshots that never saved a contract.
-    const dialogPlan = this.system.getDialogExecutionPlan?.() ?? null;
-    if (!dialogPlan) return null;
-    const contract = buildExecutionContractFromDialogPlan({
-      surface: this.surface,
-      plan: dialogPlan as Parameters<typeof buildExecutionContractFromDialogPlan>[0]["plan"],
-      actorRoster: this.actorRosterProvider?.(),
-    });
-    contract.state =
-      dialogPlan.state === "armed"
-        ? "sealed"
-        : dialogPlan.state === "active"
-          ? "active"
-          : dialogPlan.state === "failed"
-            ? "failed"
-            : "completed";
-    return contract;
+    return null;
   }
 }

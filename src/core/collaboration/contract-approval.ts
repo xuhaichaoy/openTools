@@ -1,10 +1,11 @@
 import {
+  getRoleBoundaryPolicyProfile,
   normalizeExecutionPolicy,
   type ToolApprovalDecision,
   type ToolApprovalLayer,
   type ToolApprovalRisk,
   type ToolApprovalTrustMode,
-} from "@/core/agent/actor/tool-approval-policy";
+} from "@/core/agent/actor/execution-policy";
 import type { ExecutionPolicy, SpawnedTaskRoleBoundary } from "@/core/agent/actor/types";
 import { getExecutionStrategyLabel } from "./presentation";
 import type { ExecutionContract, ExecutionContractDraft } from "./types";
@@ -37,13 +38,6 @@ export interface ExecutionContractApprovalAssessment {
 export interface AssessExecutionContractApprovalOptions {
   trustMode?: ToolApprovalTrustMode;
 }
-
-const BOUNDARY_POLICY_BY_ROLE: Record<SpawnedTaskRoleBoundary, ExecutionPolicy> = {
-  reviewer: { accessMode: "read_only", approvalMode: "strict" },
-  validator: { accessMode: "auto", approvalMode: "normal" },
-  executor: { accessMode: "full_access", approvalMode: "normal" },
-  general: { accessMode: "read_only", approvalMode: "strict" },
-};
 
 function riskRank(risk: ToolApprovalRisk): number {
   switch (risk) {
@@ -128,7 +122,7 @@ function labelDelegationTarget(
 }
 
 function boundaryPolicy(boundary?: SpawnedTaskRoleBoundary): ReturnType<typeof normalizeExecutionPolicy> {
-  return normalizeExecutionPolicy(BOUNDARY_POLICY_BY_ROLE[boundary ?? "general"]);
+  return getRoleBoundaryPolicyProfile(boundary ?? "general").executionPolicy;
 }
 
 export function assessExecutionContractApproval(

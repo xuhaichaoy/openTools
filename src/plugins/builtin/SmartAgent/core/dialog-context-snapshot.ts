@@ -1,4 +1,5 @@
 import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
+import { formatAICenterModeLabel } from "@/core/ai/ai-center-mode-meta";
 import type {
   DialogArtifactRecord,
   DialogContextSummary,
@@ -8,13 +9,6 @@ import type {
   SpawnedTaskRecord,
 } from "@/core/agent/actor/types";
 import type { AICenterHandoff } from "@/store/app-store";
-
-const MODE_LABELS: Record<NonNullable<AICenterHandoff["sourceMode"]>, string> = {
-  ask: "Ask",
-  agent: "Agent",
-  cluster: "Cluster",
-  dialog: "Dialog",
-};
 
 export interface DialogContextSnapshot {
   generatedAt: number;
@@ -77,7 +71,7 @@ export function buildDialogSourceModeLabel(
   handoff?: AICenterHandoff | null,
 ): string | undefined {
   if (!handoff?.sourceMode) return undefined;
-  return `${MODE_LABELS[handoff.sourceMode]} 模式`;
+  return `${formatAICenterModeLabel(handoff.sourceMode)} 模式`;
 }
 
 export function buildDialogSourceHandoffSummary(

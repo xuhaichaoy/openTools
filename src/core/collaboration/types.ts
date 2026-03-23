@@ -1,8 +1,6 @@
 import type {
   AgentCapability,
   ApprovalMode,
-  DialogExecutionPlan,
-  DialogExecutionPlanEdge,
   DialogMessage,
   ExecutionPolicy,
   MiddlewareOverrides,
@@ -24,6 +22,9 @@ export interface CollaborationActorPair {
   fromActorId: string;
   toActorId: string;
 }
+
+export type LegacyCompatibleDialogRoutingMode = ExecutionStrategy;
+export type LegacyCompatibleDialogPlanState = "armed" | "active" | "completed" | "failed";
 
 export interface CollaborationActorRosterEntry {
   actorId: string;
@@ -273,12 +274,16 @@ export interface CollaborationDispatchResult {
 
 export interface LegacyCompatibleDialogPlan {
   id: string;
-  routingMode: DialogExecutionPlan["routingMode"];
+  routingMode: LegacyCompatibleDialogRoutingMode;
   summary: string;
   approvedAt: number;
   initialRecipientActorIds: string[];
   participantActorIds: string[];
   coordinatorActorId?: string;
-  allowedMessagePairs: DialogExecutionPlanEdge[];
-  allowedSpawnPairs: DialogExecutionPlanEdge[];
+  allowedMessagePairs: CollaborationActorPair[];
+  allowedSpawnPairs: CollaborationActorPair[];
+  plannedSpawns?: CollaborationPlannedDelegation[];
+  state: LegacyCompatibleDialogPlanState;
+  activatedAt?: number;
+  sourceMessageId?: string;
 }

@@ -22,7 +22,7 @@ describe("ai-session-runtime helpers", () => {
     expect(getAISessionRuntimeKind("cluster")).toBe("workflow_session");
     expect(getAISessionRuntimeKind("dialog")).toBe("collaboration_room");
 
-    expect(getAISessionRuntimeFallbackTitle("ask")).toBe("Ask 对话");
+    expect(getAISessionRuntimeFallbackTitle("ask")).toBe("Explore 对话");
     expect(getAISessionRuntimeFallbackTitle("dialog")).toBe("Dialog 房间");
   });
 

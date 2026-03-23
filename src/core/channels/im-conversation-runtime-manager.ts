@@ -3,6 +3,7 @@ import {
   buildDefaultDialogActorConfig,
   spawnDefaultDialogActors,
 } from "@/core/agent/actor/default-dialog-actors";
+import { deriveIMConversationExecutionPolicy } from "@/core/agent/actor/execution-policy";
 import { ensureDialogRoomCompaction } from "@/core/agent/actor/dialog-context-pressure";
 import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
 import {
@@ -23,6 +24,7 @@ import {
   doesExecutionContractMatchActorRoster,
   sealExecutionContract,
 } from "@/core/collaboration/execution-contract";
+import { buildExecutionContractPresentationText } from "@/core/collaboration/presentation";
 import { createLogger } from "@/core/logger";
 import {
   useIMConversationRuntimeStore,
@@ -32,7 +34,7 @@ import {
   type IMConversationSnapshot,
   type IMConversationTopicSnapshot,
 } from "@/store/im-conversation-runtime-store";
-import type { DialogMessage } from "@/core/agent/actor/types";
+import type { ApprovalRequest, DialogMessage } from "@/core/agent/actor/types";
 import type {
   CollaborationSessionSnapshot,
   ExecutionContract,
@@ -268,6 +270,17 @@ function clipPreviewText(value: string | undefined | null, maxLength = 120): str
   if (!normalized) return undefined;
   if (normalized.length <= maxLength) return normalized;
   return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function clipMultilinePreview(value: string, maxLines = 8, maxChars = 800): string {
+  const normalized = value.trim();
+  if (!normalized) return "";
+  const lines = normalized.split(/\r?\n/).slice(0, maxLines);
+  const clipped = lines.join("\n");
+  if (clipped.length <= maxChars && lines.length === normalized.split(/\r?\n/).length) {
+    return clipped;
+  }
+  return `${clipped.slice(0, maxChars).trimEnd()}\n…`;
 }
 
 function parseContractApprovalReply(content: string): "allow" | "deny" | "unknown" {
@@ -843,7 +856,7 @@ export class IMConversationRuntimeManager {
       ...(pending.images?.length ? { images: pending.images } : {}),
     };
     const coordinatorPolicy = actors.find((actor) => actor.id === coordinatorId)?.executionPolicy;
-    const accessMode = coordinatorPolicy?.accessMode ?? "read_only";
+    const executionPolicy = deriveIMConversationExecutionPolicy(coordinatorPolicy);
 
     return {
       ...baseDraft,
@@ -852,10 +865,7 @@ export class IMConversationRuntimeManager {
       actorRoster,
       inputHash: buildInputHash(input),
       actorRosterHash: buildActorRosterHash(actorRoster),
-      executionPolicy: {
-        accessMode,
-        approvalMode: accessMode === "full_access" ? "strict" : "normal",
-      },
+      executionPolicy,
     };
   }
 
@@ -887,6 +897,49 @@ export class IMConversationRuntimeManager {
     ].join("\n\n");
   }
 
+  private buildExternalContractApprovalRequest(params: {
+    pending: PendingIMMessage;
+    contract: ExecutionContract;
+    assessment: ReturnType<typeof assessExecutionContractApproval>;
+    clarifyOnly?: boolean;
+  }): ApprovalRequest {
+    const contractPreview = clipMultilinePreview(buildExecutionContractPresentationText(params.contract));
+    const detailLines = [
+      ...params.assessment.permissions.map((value) => ({ label: "权限", value })),
+      ...params.assessment.notes.map((value) => ({ label: "说明", value })),
+    ].slice(0, 8);
+
+    return {
+      toolName: "execution_contract",
+      title: params.clarifyOnly ? "请确认是否继续本轮协作" : "请确认是否允许本轮协作执行",
+      summary: clipPreviewText(
+        `当前消息准备进入协作执行：${params.pending.briefContent || params.pending.text.slice(0, 80)}`,
+        160,
+      ) ?? "当前消息准备进入协作执行",
+      riskDescription: `${contractRiskLabel(params.assessment.risk)} · ${params.assessment.reason}`,
+      preview: contractPreview || undefined,
+      fullContent: buildExecutionContractPresentationText(params.contract),
+      previewLabel: "协作契约",
+      previewLanguage: "markdown",
+      details: [
+        { label: "风险级别", value: contractRiskLabel(params.assessment.risk) },
+        ...detailLines,
+      ],
+      decisionOptions: [
+        {
+          label: "允许",
+          policy: "ask-every-time",
+          description: "批准本轮协作继续执行",
+        },
+        {
+          label: "拒绝",
+          policy: "deny",
+          description: "停止本轮协作，不继续执行",
+        },
+      ],
+    };
+  }
+
   private buildRuntimeApprovalPreview(
     runtime: IMConversationRuntime,
     snapshot: CollaborationSessionSnapshot,
@@ -905,6 +958,33 @@ export class IMConversationRuntimeManager {
       pendingApproval.messageId,
       pendingApproval.id,
     );
+    const approvalRequest = pendingApproval.approvalRequest
+      ?? this.getLatestDialogMessage(runtime, pendingApproval.messageId)?.approvalRequest;
+    if (approvalRequest && queuedApprovalMessage?.approvalContract) {
+      const assessment = assessExecutionContractApproval(
+        queuedApprovalMessage.approvalContract,
+        this.buildContractApprovalActors(runtime),
+        {
+          trustMode: mapTrustLevelToContractTrustMode(useToolTrustStore.getState().trustLevel),
+        },
+      );
+      return {
+        approvalStatus: "awaiting_user",
+        approvalSummary: `待确认任务：${clipPreviewText(
+          approvalRequest.summary || approvalRequest.title,
+          96,
+        ) || "当前操作等待确认"}`,
+        approvalRiskLabel: contractRiskLabel(assessment.risk),
+        pendingApprovalReason: clipPreviewText(
+          mergeUniqueLines([
+            approvalRequest.riskDescription,
+            assessment.reason,
+          ]).join(" · "),
+          140,
+        ),
+      };
+    }
+
     if (queuedApprovalMessage?.approvalContract) {
       const assessment = assessExecutionContractApproval(
         queuedApprovalMessage.approvalContract,
@@ -926,8 +1006,6 @@ export class IMConversationRuntimeManager {
       };
     }
 
-    const approvalRequest = pendingApproval.approvalRequest
-      ?? this.getLatestDialogMessage(runtime, pendingApproval.messageId)?.approvalRequest;
     if (approvalRequest) {
       const approvalSummary = clipPreviewText(
         approvalRequest.title || approvalRequest.summary,
@@ -1014,6 +1092,13 @@ export class IMConversationRuntimeManager {
       queued.approvalContract = cloneExecutionContract(contract);
     }
 
+    const approvalRequest = this.buildExternalContractApprovalRequest({
+      pending,
+      contract,
+      assessment,
+      ...(params.clarifyOnly ? { clarifyOnly: true } : {}),
+    });
+
     const beforeHistoryLength = runtime.system.getDialogHistory().length;
     void runtime.system.askUserInChat(
       coordinatorId,
@@ -1027,7 +1112,8 @@ export class IMConversationRuntimeManager {
       {
         timeoutMs: 300_000,
         interactionType: "approval",
-        options: ["允许", "拒绝"],
+        options: approvalRequest.decisionOptions?.map((option) => option.label) ?? ["允许", "拒绝"],
+        approvalRequest,
       },
     ).then((result) => {
       if (result.status === "timed_out" && queued?.approvalState === "awaiting_user") {
@@ -2070,6 +2156,31 @@ export class IMConversationRuntimeManager {
     message: DialogMessage,
   ): string | null {
     const actorName = runtime.system.get(message.from)?.role.name ?? "助手";
+    const approval = message.approvalRequest;
+    if (message.interactionType === "approval" && approval) {
+      const detailLines = [
+        approval.summary !== approval.title ? approval.summary : undefined,
+        approval.riskDescription ? `风险：${approval.riskDescription}` : undefined,
+        ...(approval.targetPath ? [`目标：${approval.targetPath}`] : []),
+        ...(approval.details ?? []).map((detail) => `${detail.label}：${detail.value}`),
+      ]
+        .map((line) => String(line ?? "").trim())
+        .filter(Boolean);
+      const options = (
+        approval.decisionOptions?.map((item) => item.label.trim()).filter(Boolean)
+        ?? message.options?.map((item) => item.trim()).filter(Boolean)
+        ?? []
+      );
+
+      return [
+        `来自 ${actorName}：`,
+        approval.title || "当前操作等待确认",
+        ...(detailLines.length ? [detailLines.join("\n")] : []),
+        ...(options.length ? [`可直接回复：${options.join(" / ")}`] : []),
+        "请直接回复“允许”或“拒绝”，也可以补充说明。",
+      ].join("\n\n");
+    }
+
     const content = String(message.content || "").trim();
     if (!content) return null;
 
