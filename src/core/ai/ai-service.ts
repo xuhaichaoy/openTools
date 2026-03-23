@@ -6,6 +6,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { useAppStore, type AICenterMode } from "@/store/app-store";
 import { useAIStore } from "@/store/ai-store";
+import { normalizeAIProductMode } from "@/core/ai/ai-mode-types";
 import { resolveAIConfig } from './resolved-ai-config'
 import type {
   AIConfig,
@@ -43,7 +44,7 @@ export async function quickChat(
     queueAssistantMemoryCandidates,
   } = await import('./assistant-memory')
 
-  const mode = options?.mode ?? "ask"
+  const mode = normalizeAIProductMode(options?.mode)
   const config = resolveAIConfig({
     baseConfig: options?.config ?? useAIStore.getState().config,
     ownKeys: useAIStore.getState().ownKeys,

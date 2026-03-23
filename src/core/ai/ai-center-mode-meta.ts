@@ -1,4 +1,6 @@
-import type { AICenterMode, AICenterSourceRef } from "@/store/app-store";
+import type { AICenterSourceRef } from "@/store/app-store";
+import type { HumanSelectableAIProductMode } from "@/core/ai/ai-mode-types";
+import { normalizeHumanSelectableAIProductMode } from "@/core/ai/ai-mode-types";
 import {
   formatAICenterProductLabel,
   getAICenterProductModeDefinition,
@@ -14,7 +16,7 @@ export interface AICenterModeMeta {
   skillScope: string;
 }
 
-function buildModeMeta(mode: AICenterMode): AICenterModeMeta {
+function buildModeMeta(mode: HumanSelectableAIProductMode): AICenterModeMeta {
   const definition = getAICenterProductModeDefinition(mode);
   return {
     label: definition.label,
@@ -27,18 +29,21 @@ function buildModeMeta(mode: AICenterMode): AICenterModeMeta {
   };
 }
 
-export const AI_CENTER_MODE_META: Record<AICenterMode, AICenterModeMeta> = {
-  ask: buildModeMeta("ask"),
-  agent: buildModeMeta("agent"),
-  cluster: buildModeMeta("cluster"),
+export const AI_CENTER_MODE_META: Record<HumanSelectableAIProductMode, AICenterModeMeta> = {
+  explore: buildModeMeta("explore"),
+  build: buildModeMeta("build"),
+  plan: buildModeMeta("plan"),
+  review: buildModeMeta("review"),
   dialog: buildModeMeta("dialog"),
 };
 
-export function formatAICenterModeLabel(mode?: AICenterMode | null): string {
+export function formatAICenterModeLabel(mode?: HumanSelectableAIProductMode | null | string): string {
   return formatAICenterProductLabel(mode);
 }
 
 export function describeAICenterSource(source?: Partial<AICenterSourceRef> | null): string {
   if (!source?.sourceMode) return "外部上下文";
-  return source.sourceLabel?.trim() || formatAICenterModeLabel(source.sourceMode);
+  return source.sourceLabel?.trim() || formatAICenterModeLabel(
+    normalizeHumanSelectableAIProductMode(source.sourceMode),
+  );
 }

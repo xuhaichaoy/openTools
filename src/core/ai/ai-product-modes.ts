@@ -1,13 +1,13 @@
-import type { RuntimeSessionMode } from "@/core/agent/context-runtime/runtime-state";
-import type { AICenterMode } from "@/store/app-store";
-
-export type AIProductMode =
-  | "explore"
-  | "build"
-  | "plan"
-  | "review"
-  | "dialog"
-  | "im_conversation";
+import type {
+  AICenterCompatibleMode,
+  AIProductMode,
+  HumanSelectableAIProductMode,
+  RuntimeSessionMode,
+} from "@/core/ai/ai-mode-types";
+import {
+  getAIProductModeForRuntimeMode,
+  normalizeAIProductMode,
+} from "@/core/ai/ai-mode-types";
 
 export type AIProductModeAvailability = "available" | "staged" | "runtime_only";
 
@@ -16,7 +16,7 @@ export interface AIProductModeDefinition {
   label: string;
   availability: AIProductModeAvailability;
   runtimeMode: RuntimeSessionMode;
-  aiCenterMode?: AICenterMode;
+  aiCenterMode?: HumanSelectableAIProductMode;
   boundaryHeadline: string;
   boundaryDetail: string;
   modelScopeShort: string;
@@ -32,7 +32,7 @@ export const AI_PRODUCT_MODE_DEFINITIONS: Record<AIProductMode, AIProductModeDef
     label: "Explore",
     availability: "available",
     runtimeMode: "ask",
-    aiCenterMode: "ask",
+    aiCenterMode: "explore",
     boundaryHeadline: "快速检索、提问与轻量交互",
     boundaryDetail: "适合快速提问、读图和轻工具检索；需要持续执行时转 Build。",
     modelScopeShort: "Explore 默认模型",
@@ -46,7 +46,7 @@ export const AI_PRODUCT_MODE_DEFINITIONS: Record<AIProductMode, AIProductModeDef
     label: "Build",
     availability: "available",
     runtimeMode: "agent",
-    aiCenterMode: "agent",
+    aiCenterMode: "build",
     boundaryHeadline: "单 Agent 持续执行与落地",
     boundaryDetail: "适合读代码、改文件、跑命令和验证结果的完整落地链路。",
     modelScopeShort: "Build 默认模型",
@@ -60,7 +60,7 @@ export const AI_PRODUCT_MODE_DEFINITIONS: Record<AIProductMode, AIProductModeDef
     label: "Plan",
     availability: "available",
     runtimeMode: "cluster",
-    aiCenterMode: "cluster",
+    aiCenterMode: "plan",
     boundaryHeadline: "先拆解，再并行规划与推进",
     boundaryDetail: "适合复杂任务拆解、分工分析和汇总；后续会继续向更纯粹的规划入口收敛。",
     modelScopeShort: "Plan 默认模型",
@@ -74,7 +74,7 @@ export const AI_PRODUCT_MODE_DEFINITIONS: Record<AIProductMode, AIProductModeDef
     label: "Review",
     availability: "staged",
     runtimeMode: "dialog",
-    aiCenterMode: "dialog",
+    aiCenterMode: "review",
     boundaryHeadline: "只读审查与风险归纳",
     boundaryDetail: "对齐 Claude Code / Codex 的 review 语义，后续会成为独立入口。",
     modelScopeShort: "Review 默认模型",
@@ -112,51 +112,31 @@ export const AI_PRODUCT_MODE_DEFINITIONS: Record<AIProductMode, AIProductModeDef
   },
 };
 
-export const AI_CENTER_PRODUCT_MODE_MAP: Record<AICenterMode, AIProductMode> = {
-  ask: "explore",
-  agent: "build",
-  cluster: "plan",
-  dialog: "dialog",
-};
-
 export function getAIProductModeDefinition(mode: AIProductMode): AIProductModeDefinition {
   return AI_PRODUCT_MODE_DEFINITIONS[mode];
 }
 
-export function getAICenterProductMode(mode: AICenterMode): AIProductMode {
-  return AI_CENTER_PRODUCT_MODE_MAP[mode];
+export function getAICenterProductMode(mode: AICenterCompatibleMode): AIProductMode {
+  return normalizeAIProductMode(mode);
 }
 
-export function getAICenterProductModeDefinition(mode: AICenterMode): AIProductModeDefinition {
+export function getAICenterProductModeDefinition(mode: AICenterCompatibleMode): AIProductModeDefinition {
   return getAIProductModeDefinition(getAICenterProductMode(mode));
 }
 
-export function getRuntimeProductMode(mode: RuntimeSessionMode): AIProductMode {
-  switch (mode) {
-    case "ask":
-      return "explore";
-    case "agent":
-      return "build";
-    case "cluster":
-      return "plan";
-    case "dialog":
-      return "dialog";
-    case "im_conversation":
-      return "im_conversation";
-    default:
-      return "explore";
-  }
+export function getRuntimeProductMode(mode: RuntimeSessionMode | AIProductMode): AIProductMode {
+  return getAIProductModeForRuntimeMode(mode);
 }
 
-export function getRuntimeProductModeDefinition(mode: RuntimeSessionMode): AIProductModeDefinition {
+export function getRuntimeProductModeDefinition(mode: RuntimeSessionMode | AIProductMode): AIProductModeDefinition {
   return getAIProductModeDefinition(getRuntimeProductMode(mode));
 }
 
-export function formatAICenterProductLabel(mode?: AICenterMode | null): string {
+export function formatAICenterProductLabel(mode?: AICenterCompatibleMode | null): string {
   if (!mode) return "AI";
   return getAICenterProductModeDefinition(mode).label;
 }
 
-export function getDefaultRuntimeSessionLabel(mode: RuntimeSessionMode): string {
+export function getDefaultRuntimeSessionLabel(mode: RuntimeSessionMode | AIProductMode): string {
   return getRuntimeProductModeDefinition(mode).runtimeLabel;
 }

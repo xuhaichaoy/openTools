@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useState } from "react";
 import {
   Users,
   Plus,
   ArrowLeft,
   Cpu,
+  Database,
   FolderOpen,
   BarChart3,
   Loader2,
@@ -12,10 +13,16 @@ import { api } from "@/core/api/client";
 import { handleError } from "@/core/errors";
 import { getTeamSyncPolicy, type SyncStatus } from "@/core/sync/policy";
 import { useAuthStore } from "@/store/auth-store";
+import { useTeamStore } from "@/store/team-store";
 import { TeamMembersSection, type TeamMember } from "./TeamMembersSection";
 import { TeamAIConfigSection } from "./TeamAIConfigSection";
 import { TeamResourcesSection } from "./TeamResourcesSection";
 import { TeamUsageSection } from "./TeamUsageSection";
+
+const TeamDataExportSection = lazy(async () => {
+  const mod = await import("./TeamDataExportSection");
+  return { default: mod.TeamDataExportSection };
+});
 
 export interface Team {
   id: string;
@@ -104,6 +111,7 @@ export function TeamTabContainer() {
   >(null);
 
   const { isLoggedIn } = useAuthStore();
+  const setActiveTeam = useTeamStore((state) => state.setActiveTeam);
 
   useEffect(() => {
     if (!isLoggedIn) {
@@ -146,8 +154,9 @@ export function TeamTabContainer() {
     }
   }, []);
 
-  const handleViewTeam = async (team: Team) => {
+  const handleViewTeam = useCallback(async (team: Team) => {
     setSelectedTeam(team);
+    setActiveTeam(team.id);
     setSelectedTeamSyncStatus(getFallbackSyncStatus(team));
     setSelectedTeamDaysToExpire(deriveDaysToExpire(team.subscription_expires_at));
     setSelectedTeamSyncStopAt(team.subscription_expires_at ?? null);
@@ -161,7 +170,7 @@ export function TeamTabContainer() {
     } catch (err) {
       handleError(err, { context: "获取团队同步状态", silent: true });
     }
-  };
+  }, [fetchMembers, setActiveTeam]);
 
   if (!isLoggedIn) {
     return (
@@ -330,7 +339,7 @@ function TeamDetail({
   onMembersChange: () => void;
 }) {
   const [teamSection, setTeamSection] = useState<
-    "members" | "ai-config" | "resources" | "usage"
+    "members" | "ai-config" | "data-export" | "resources" | "usage"
   >("members");
   const { user } = useAuthStore();
   const teamActive = syncStatus !== "expired";
@@ -398,6 +407,7 @@ function TeamDetail({
         {[
           { id: "members" as const, icon: Users, label: "成员", requiresActive: false },
           { id: "ai-config" as const, icon: Cpu, label: "AI 配置", requiresActive: true },
+          { id: "data-export" as const, icon: Database, label: "数据导出", requiresActive: true },
           { id: "resources" as const, icon: FolderOpen, label: "共享资源", requiresActive: true },
           { id: "usage" as const, icon: BarChart3, label: "用量统计", requiresActive: true },
         ].map((tab) => (
@@ -449,6 +459,22 @@ function TeamDetail({
           isOwnerOrAdmin={!!isOwnerOrAdmin}
           teamActive={teamActive}
         />
+      )}
+
+      {effectiveTeamSection === "data-export" && (
+        <Suspense
+          fallback={
+            <div className="flex items-center justify-center py-12">
+              <Loader2 className="w-5 h-5 animate-spin text-[#F28F36]" />
+            </div>
+          }
+        >
+          <TeamDataExportSection
+            teamId={team.id}
+            isOwnerOrAdmin={!!isOwnerOrAdmin}
+            teamActive={teamActive}
+          />
+        </Suspense>
       )}
 
       {effectiveTeamSection === "usage" && (

@@ -2,6 +2,14 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { tauriPersistStorage } from '@/core/storage'
 import type { AICenterModelScope } from '@/core/ai/ai-center-model-scope'
+import type {
+  AIProductMode,
+  AICenterCompatibleMode,
+} from '@/core/ai/ai-mode-types'
+import {
+  normalizeAIProductMode,
+  normalizeHumanSelectableAIProductMode,
+} from '@/core/ai/ai-mode-types'
 import {
   MAIN_VIEW_ID,
   createRootViewStack,
@@ -15,15 +23,19 @@ import {
 export type AppMode = 'search' | 'ai'
 
 const MAX_RECENT_TOOLS = 20
+const APP_STORE_SCHEMA_VERSION = 2
 
-export type AIInitialMode = 'ask' | 'agent' | 'cluster' | 'dialog'
-export type AICenterMode = 'ask' | 'agent' | 'cluster' | 'dialog'
+export type {
+  AIProductMode,
+  AICenterCompatibleMode as AICenterMode,
+  AIInitialMode,
+} from '@/core/ai/ai-mode-types'
 
-export type AICenterModelScopeMap = Partial<Record<AICenterMode, AICenterModelScope>>
+export type AICenterModelScopeMap = Partial<Record<AIProductMode, AICenterModelScope>>
 
 export interface AICenterSourceRef {
   /** 来源模式标识，用于跨模式会话追溯 */
-  sourceMode: AICenterMode
+  sourceMode: AICenterCompatibleMode
   /** 来源会话/对话 ID，用于跨模式加载历史 */
   sourceSessionId?: string
   /** 对来源的用户可读说明，如“Ask 对话”“Cluster 报告” */
@@ -73,7 +85,7 @@ export interface AICenterHandoff extends Partial<AICenterSourceRef> {
 export type AgentHandoff = AICenterHandoff
 
 export interface PendingAICenterHandoff {
-  mode: AICenterMode
+  mode: AIProductMode
   payload: AICenterHandoff
   createdAt: number
 }
@@ -92,9 +104,9 @@ export interface AppState {
   /** 最近使用的工具 viewId 列表（最新在前） */
   recentTools: string[]
   /** AI 助手打开时的初始模式（一次性消费：读取后自动重置为 ask） */
-  aiInitialMode: AIInitialMode
+  aiInitialMode: AIProductMode
   /** AI 助手当前选中的 tab 模式（跨组件生命周期持久） */
-  aiCenterMode: AICenterMode
+  aiCenterMode: AIProductMode
   /** 待处理的嵌入打开请求（一次性消费） */
   pendingEmbed: EmbedRequest | null
   /** 待处理的视图导航请求（一次性消费） */
@@ -114,11 +126,11 @@ export interface AppState {
   /** 记录一次工具使用 */
   addRecentTool: (viewId: string) => void
   /** 设置 AI 打开时的初始模式 */
-  setAiInitialMode: (mode: AIInitialMode) => void
+  setAiInitialMode: (mode: AICenterCompatibleMode) => void
   /** 消费 aiInitialMode（读取并重置为 ask） */
-  consumeAiInitialMode: () => AIInitialMode
+  consumeAiInitialMode: () => AIProductMode
   /** 设置 AI 助手当前 tab 模式 */
-  setAiCenterMode: (mode: AICenterMode) => void
+  setAiCenterMode: (mode: AICenterCompatibleMode) => void
   /** 请求在主窗口中嵌入打开外部插件 */
   requestEmbed: (req: EmbedRequest) => void
   /** 消费嵌入请求 */
@@ -132,7 +144,7 @@ export interface AppState {
   /** 消费并清空 pendingAICenterHandoff，返回当前值 */
   consumePendingAICenterHandoff: () => PendingAICenterHandoff | null
   /** 记住某个模式的模型选择 */
-  setAICenterModelScope: (mode: AICenterMode, scope: AICenterModelScope) => void
+  setAICenterModelScope: (mode: AICenterCompatibleMode, scope: AICenterModelScope) => void
   /** 仅重置搜索态，不修改视图栈 */
   resetSearchState: () => void
   reset: () => void
@@ -152,6 +164,20 @@ export interface AppState {
   resetToMain: () => void
 }
 
+function normalizeAICenterModelScopes(
+  input: unknown,
+): AICenterModelScopeMap {
+  if (!input || typeof input !== 'object') return {}
+  const scopes: AICenterModelScopeMap = {}
+  for (const [key, value] of Object.entries(input as Record<string, AICenterModelScope>)) {
+    const normalizedKey = normalizeAIProductMode(key as AICenterCompatibleMode)
+    if (!scopes[normalizedKey]) {
+      scopes[normalizedKey] = value
+    }
+  }
+  return scopes
+}
+
 export const useAppStore = create<AppState>()(
   persist(
     (set, get) => ({
@@ -160,8 +186,8 @@ export const useAppStore = create<AppState>()(
       selectedIndex: 0,
       windowExpanded: false,
       recentTools: [] as string[],
-      aiInitialMode: 'ask' as AIInitialMode,
-      aiCenterMode: 'ask' as AICenterMode,
+      aiInitialMode: 'explore' as AIProductMode,
+      aiCenterMode: 'explore' as AIProductMode,
       pendingEmbed: null as EmbedRequest | null,
       pendingNavigate: null as string | null,
       pendingAICenterHandoff: null as PendingAICenterHandoff | null,
@@ -184,13 +210,13 @@ export const useAppStore = create<AppState>()(
           const updated = [viewId, ...filtered].slice(0, MAX_RECENT_TOOLS)
           return { recentTools: updated }
         }),
-      setAiInitialMode: (mode) => set({ aiInitialMode: mode }),
+      setAiInitialMode: (mode) => set({ aiInitialMode: normalizeHumanSelectableAIProductMode(mode) }),
       consumeAiInitialMode: () => {
         const current = get().aiInitialMode
-        if (current !== 'ask') set({ aiInitialMode: 'ask' })
+        if (current !== 'explore') set({ aiInitialMode: 'explore' })
         return current
       },
-      setAiCenterMode: (mode) => set({ aiCenterMode: mode }),
+      setAiCenterMode: (mode) => set({ aiCenterMode: normalizeHumanSelectableAIProductMode(mode) }),
       requestEmbed: (req) => set({ pendingEmbed: req }),
       consumeEmbed: () => {
         const current = get().pendingEmbed
@@ -213,7 +239,7 @@ export const useAppStore = create<AppState>()(
         set((state) => ({
           aiCenterModelScopes: {
             ...state.aiCenterModelScopes,
-            [mode]: scope,
+            [normalizeAIProductMode(mode)]: scope,
           },
         })),
       resetSearchState: () =>
@@ -244,7 +270,21 @@ export const useAppStore = create<AppState>()(
     }),
     {
       name: "mtools-app",
+      version: APP_STORE_SCHEMA_VERSION,
       storage: tauriPersistStorage("app-settings.json", "应用设置"),
+      migrate: (persistedState) => {
+        const state = (persistedState ?? {}) as Partial<AppState> & {
+          aiCenterMode?: AICenterCompatibleMode
+          aiInitialMode?: AICenterCompatibleMode
+          aiCenterModelScopes?: Record<string, AICenterModelScope>
+        }
+        return {
+          ...state,
+          aiInitialMode: normalizeHumanSelectableAIProductMode(state.aiInitialMode),
+          aiCenterMode: normalizeHumanSelectableAIProductMode(state.aiCenterMode),
+          aiCenterModelScopes: normalizeAICenterModelScopes(state.aiCenterModelScopes),
+        }
+      },
       partialize: (state) => ({
         recentTools: state.recentTools,
         aiCenterMode: state.aiCenterMode,

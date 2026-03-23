@@ -13,6 +13,10 @@ export interface DatabaseConfig {
   database?: string;
   file_path?: string;
   connection_string?: string;
+  export_enabled?: boolean;
+  export_alias?: string;
+  export_default_schema?: string;
+  max_export_rows?: number;
 }
 
 export interface QueryResult {

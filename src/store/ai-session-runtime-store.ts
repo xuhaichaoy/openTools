@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import {
   buildAISessionRuntimeId,
+  buildAISessionRuntimeIdentity,
   getAISessionRuntimeFallbackTitle,
   getAISessionRuntimeKind,
   resolveAISessionRuntimeSourceId,
@@ -10,16 +11,19 @@ import {
   type AISessionRuntimeUpsertInput,
 } from "@/core/ai/ai-session-runtime";
 import { tauriPersistStorage } from "@/core/storage";
-import type { AICenterMode, AICenterSourceRef } from "@/store/app-store";
+import type { AICenterCompatibleMode } from "@/core/ai/ai-mode-types";
+import { normalizeAIProductMode } from "@/core/ai/ai-mode-types";
+import type { AICenterSourceRef } from "@/store/app-store";
+import { useSessionControlPlaneStore } from "@/store/session-control-plane-store";
 
 interface AISessionRuntimeState {
   sessions: Record<string, AISessionRuntimeSession>;
   links: AISessionRuntimeLink[];
   ensureSession: (input: AISessionRuntimeUpsertInput) => AISessionRuntimeSession | null;
   syncSessions: (inputs: AISessionRuntimeUpsertInput[]) => void;
-  touchSession: (mode: AICenterMode, externalSessionId: string, updates?: Partial<Pick<AISessionRuntimeSession, "title" | "summary">>) => void;
+  touchSession: (mode: AICenterCompatibleMode, externalSessionId: string, updates?: Partial<Pick<AISessionRuntimeSession, "title" | "summary">>) => void;
   getSession: (id: string) => AISessionRuntimeSession | null;
-  getSessionByExternal: (mode: AICenterMode, externalSessionId: string) => AISessionRuntimeSession | null;
+  getSessionByExternal: (mode: AICenterCompatibleMode, externalSessionId: string) => AISessionRuntimeSession | null;
   getLineage: (id: string) => AISessionRuntimeSession[];
   clear: () => void;
 }
@@ -44,7 +48,7 @@ function mergeSourceRef(
 function chooseTitle(
   existing: string | undefined,
   incoming: string | undefined,
-  mode: AICenterMode,
+  mode: AICenterCompatibleMode,
 ): string {
   const next = incoming?.trim();
   if (next) return next;
@@ -63,7 +67,8 @@ export const useAISessionRuntimeStore = create<AISessionRuntimeState>()(
         const externalSessionId = input.externalSessionId.trim();
         if (!externalSessionId) return null;
 
-        const runtimeId = buildAISessionRuntimeId(input.mode, externalSessionId);
+        const normalizedMode = normalizeAIProductMode(input.mode);
+        const runtimeId = buildAISessionRuntimeId(normalizedMode, externalSessionId);
         const now = Date.now();
         let created: AISessionRuntimeSession | null = null;
 
@@ -76,17 +81,22 @@ export const useAISessionRuntimeStore = create<AISessionRuntimeState>()(
           ): AISessionRuntimeSession | undefined => {
             const sourceId = resolveAISessionRuntimeSourceId(source);
             if (!sourceId || !source?.sourceMode || !source.sourceSessionId) return undefined;
+            const sourceMode = normalizeAIProductMode(source.sourceMode);
 
             const existing = nextSessions[sourceId];
             if (existing) return existing;
 
             const placeholder: AISessionRuntimeSession = {
               id: sourceId,
-              mode: source.sourceMode,
-              kind: getAISessionRuntimeKind(source.sourceMode),
+              mode: sourceMode,
+              kind: getAISessionRuntimeKind(sourceMode),
               externalSessionId: source.sourceSessionId,
-              title: chooseTitle(undefined, source.sourceLabel, source.sourceMode),
+              title: chooseTitle(undefined, source.sourceLabel, sourceMode),
               rootId: sourceId,
+              identity: buildAISessionRuntimeIdentity({
+                mode: sourceMode,
+                externalSessionId: source.sourceSessionId,
+              }),
               summary: source.summary?.trim() || undefined,
               createdAt: now,
               updatedAt: now,
@@ -106,21 +116,30 @@ export const useAISessionRuntimeStore = create<AISessionRuntimeState>()(
           const base: AISessionRuntimeSession = existing
             ? {
                 ...existing,
+                mode: normalizedMode,
                 kind: input.kind ?? existing.kind,
-                title: chooseTitle(existing.title, input.title, input.mode),
+                title: chooseTitle(existing.title, input.title, normalizedMode),
                 summary: input.summary?.trim() || existing.summary,
                 updatedAt,
                 lastActiveAt: updatedAt,
                 placeholder: false,
+                identity: buildAISessionRuntimeIdentity({
+                  ...input,
+                  mode: normalizedMode,
+                }),
                 source: mergeSourceRef(existing.source, input.source),
               }
             : {
                 id: runtimeId,
-                mode: input.mode,
-                kind: input.kind ?? getAISessionRuntimeKind(input.mode),
+                mode: normalizedMode,
+                kind: input.kind ?? getAISessionRuntimeKind(normalizedMode),
                 externalSessionId,
-                title: chooseTitle(undefined, input.title, input.mode),
+                title: chooseTitle(undefined, input.title, normalizedMode),
                 rootId: runtimeId,
+                identity: buildAISessionRuntimeIdentity({
+                  ...input,
+                  mode: normalizedMode,
+                }),
                 summary: input.summary?.trim() || undefined,
                 createdAt,
                 updatedAt,
@@ -135,6 +154,30 @@ export const useAISessionRuntimeStore = create<AISessionRuntimeState>()(
           }
 
           nextSessions[runtimeId] = base;
+          void useSessionControlPlaneStore.getState().upsertSession({
+            identity: {
+              productMode: base.mode,
+              surface: base.identity?.surface ?? "ai_center",
+              sessionKey: base.externalSessionId,
+              sessionKind: base.identity?.sessionKind,
+              scope: base.identity?.scope,
+              workspaceId: base.identity?.workspaceId,
+              channelType: base.identity?.channelType,
+              accountId: base.identity?.accountId,
+              conversationId: base.identity?.conversationId,
+              topicId: base.identity?.topicId,
+              peerId: base.identity?.peerId,
+              parentSessionId: base.parentId ?? base.identity?.parentSessionId,
+              runtimeSessionId: base.identity?.runtimeSessionId,
+            },
+            title: base.title,
+            summary: base.summary,
+            source: base.source,
+            createdAt: base.createdAt,
+            updatedAt: updatedAt,
+            lastActiveAt: base.lastActiveAt,
+            placeholder: base.placeholder,
+          });
 
           if (sourceSession && sourceSession.id !== runtimeId) {
             const linkId = buildLinkId(sourceSession.id, runtimeId, linkType);
@@ -148,6 +191,13 @@ export const useAISessionRuntimeStore = create<AISessionRuntimeState>()(
                 note: `${sourceSession.mode} -> ${input.mode}`,
               });
             }
+            useSessionControlPlaneStore.getState().linkSessions({
+              fromId: sourceSession.identity?.id ?? sourceSession.id,
+              toId: base.identity?.id ?? runtimeId,
+              type: linkType,
+              createdAt: updatedAt,
+              note: `${sourceSession.mode} -> ${base.mode}`,
+            });
           }
 
           created = nextSessions[runtimeId];

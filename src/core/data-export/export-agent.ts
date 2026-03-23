@@ -3,6 +3,8 @@ import { getMToolsAI } from "@/core/ai/mtools-ai";
 import { getResolvedAIConfigForMode } from "@/core/ai/resolved-ai-config-store";
 import { buildAgentFCCompatibilityKey } from "@/core/agent/fc-compatibility";
 import { createLogger } from "@/core/logger";
+import { loadRuntimeExportCatalog } from "./runtime-catalog";
+import { listLocalExportDatasets } from "./dataset-registry";
 import {
   ReActAgent,
   type AgentTool,
@@ -10,6 +12,8 @@ import {
 import type {
   ExportAgentDecision,
   ExportSourceConfig,
+  RuntimeExportDatasetDefinition,
+  RuntimeExportSourceConfig,
   StructuredExportIntent,
 } from "./types";
 
@@ -63,6 +67,13 @@ function normalizeDecision(raw: unknown): ExportAgentDecision {
 
   const normalizedIntent: StructuredExportIntent = {
     sourceId,
+    ...(intent.sourceScope === "team" ? { sourceScope: "team" as const } : {}),
+    ...(typeof intent.teamId === "string" && intent.teamId.trim()
+      ? { teamId: intent.teamId.trim() }
+      : {}),
+    ...(typeof intent.datasetId === "string" && intent.datasetId.trim()
+      ? { datasetId: intent.datasetId.trim() }
+      : {}),
     entityName,
     ...(typeof intent.entityType === "string"
       ? { entityType: intent.entityType as StructuredExportIntent["entityType"] }
@@ -153,8 +164,11 @@ export async function ensureExportSourceConnected(source: ExportSourceConfig): P
   await invoke("db_connect", { config: source });
 }
 
-function createExportTools(sources: ExportSourceConfig[]): AgentTool[] {
-  const getSource = (sourceId: string): ExportSourceConfig => {
+function createExportTools(
+  sources: RuntimeExportSourceConfig[],
+  datasets: RuntimeExportDatasetDefinition[],
+): AgentTool[] {
+  const getSource = (sourceId: string): RuntimeExportSourceConfig => {
     const source = sources.find((item) => item.id === sourceId);
     if (!source) {
       throw new Error(`未知数据源: ${sourceId}`);
@@ -164,12 +178,66 @@ function createExportTools(sources: ExportSourceConfig[]): AgentTool[] {
 
   return [
     {
+      name: "list_export_datasets",
+      description: "列出已经整理好的本地导出数据集，优先使用这些数据集理解业务请求。",
+      readonly: true,
+      execute: async () => ({
+        datasets: datasets.map((dataset) => ({
+          id: dataset.id,
+          scope: dataset.scope,
+          ...(dataset.scope === "team" ? { teamId: dataset.teamId } : {}),
+          displayName: dataset.displayName,
+          description: dataset.description,
+          sourceId: dataset.sourceId,
+          entityName: dataset.entityName,
+          entityType: dataset.entityType,
+          schema: dataset.schema,
+          timeField: dataset.timeField,
+          defaultFields: dataset.defaultFields,
+          enabled: dataset.enabled,
+        })),
+      }),
+    },
+    {
+      name: "describe_export_dataset",
+      description: "查看一个本地导出数据集的字段、别名和底层映射。",
+      readonly: true,
+      parameters: {
+        dataset_id: { type: "string", description: "数据集 ID" },
+      },
+      execute: async (params) => {
+        const datasetId = String(params.dataset_id ?? "").trim();
+        if (!datasetId) return { error: "dataset_id 不能为空" };
+        const dataset = datasets.find((item) => item.id === datasetId);
+        if (!dataset) return { error: `未知数据集: ${datasetId}` };
+        return {
+          dataset: {
+            id: dataset.id,
+            scope: dataset.scope,
+            ...(dataset.scope === "team" ? { teamId: dataset.teamId } : {}),
+            displayName: dataset.displayName,
+            description: dataset.description,
+            sourceId: dataset.sourceId,
+            entityName: dataset.entityName,
+            entityType: dataset.entityType,
+            schema: dataset.schema,
+            timeField: dataset.timeField,
+            defaultFields: dataset.defaultFields,
+            fields: dataset.fields,
+          },
+        };
+      },
+    },
+    {
       name: "list_export_sources",
       description: "列出当前可用于自然语言导出的数据源。",
       readonly: true,
       execute: async () => ({
         sources: sources.map((source) => ({
           id: source.id,
+          scope: source.scope,
+          executionTarget: source.executionTarget,
+          ...(source.scope === "team" ? { teamId: source.teamId } : {}),
           name: source.name,
           dbType: source.db_type,
           alias: source.export_alias,
@@ -190,6 +258,9 @@ function createExportTools(sources: ExportSourceConfig[]): AgentTool[] {
         const sourceId = String(params.source_id ?? "").trim();
         if (!sourceId) return { error: "source_id 不能为空" };
         const source = getSource(sourceId);
+        if (source.scope === "team") {
+          return { error: "团队共享数据源不直接开放原始表结构浏览，请优先使用已发布数据集。" };
+        }
         await ensureExportSourceConnected(source);
         const schema = String(params.schema ?? "").trim();
         const tables = await invoke<TableInfo[]>("db_list_tables", {
@@ -214,6 +285,9 @@ function createExportTools(sources: ExportSourceConfig[]): AgentTool[] {
           return { error: "source_id 和 table 都不能为空" };
         }
         const source = getSource(sourceId);
+        if (source.scope === "team") {
+          return { error: "团队共享数据源不直接开放原始字段探查，请优先使用已发布数据集。" };
+        }
         await ensureExportSourceConnected(source);
         const columns = await invoke<ColumnInfo[]>("db_describe_table", {
           connId: sourceId,
@@ -227,36 +301,58 @@ function createExportTools(sources: ExportSourceConfig[]): AgentTool[] {
 
 function buildExportPrompt(params: {
   userInput: string;
-  sources: ExportSourceConfig[];
+  sources: RuntimeExportSourceConfig[];
+  datasets: RuntimeExportDatasetDefinition[];
   originalRequest?: string;
 }): string {
   const sourceSummary = params.sources
     .map((source) => {
       const parts = [
+        source.scope === "team" ? `[团队${source.teamId ? `:${source.teamId}` : ""}]` : "[个人]",
         source.name,
         source.export_alias ? `alias=${source.export_alias}` : "",
         source.database ? `database=${source.database}` : "",
         source.export_default_schema ? `defaultSchema=${source.export_default_schema}` : "",
+        source.executionTarget === "team_service" ? "execution=team_service" : "execution=local",
         `type=${source.db_type}`,
       ].filter(Boolean);
       return `- ${parts.join(", ")}`;
     })
     .join("\n");
+  const datasetSummary = params.datasets
+    .filter((dataset) => dataset.enabled !== false)
+    .map((dataset) => {
+      const defaultFields = dataset.defaultFields.length
+        ? `defaultFields=${dataset.defaultFields.join("|")}`
+        : "";
+      const fieldNames = dataset.fields
+        .filter((field) => field.enabled !== false)
+        .map((field) => field.name)
+        .slice(0, 8)
+        .join("|");
+      const scopeLabel = dataset.scope === "team" ? `[团队:${dataset.teamId}]` : "[个人]";
+      return `- ${scopeLabel} ${dataset.displayName} -> ${dataset.sourceId}:${dataset.schema ? `${dataset.schema}.` : ""}${dataset.entityName} (${dataset.entityType}) ${defaultFields} ${fieldNames ? `fields=${fieldNames}` : ""} ${dataset.description}`.trim();
+    })
+    .join("\n");
 
   return [
     "你是一个钉钉数据导出专员，只负责把自然语言请求整理成安全的导出意图。",
-    "你必须先通过工具查看可用数据源以及表结构，再决定导出意图；禁止臆造表名、字段名、schema。",
+    "你必须先通过工具查看可用数据源、已发布数据集和表结构，再决定导出意图；禁止臆造表名、字段名、schema。",
     "当前能力边界：",
     "- 只输出 CSV 导出意图。",
+    "- 优先使用已经整理好的数据集理解业务请求，尤其是团队已发布数据集。",
     "- 优先单表明细导出，不做复杂 join 规划。",
+    "- 团队共享数据源不允许直接浏览原始表结构时，只能基于已发布数据集做导出判断。",
     "- 如果信息不足，只提一个最关键的问题。",
     "- 如果请求明显超出当前已知 schema，请直接 reject。",
     "你的最终回答必须是严格 JSON，且只能是以下三种之一：",
     '{"kind":"clarify","question":"..."}',
     '{"kind":"reject","reason":"..."}',
-    '{"kind":"intent","summary":"...","intent":{"sourceId":"...","entityName":"...","entityType":"table|view|collection","schema":"...","fields":["..."],"filters":[{"field":"...","op":"eq|gt|gte|lt|lte|like|contains|in","value":"..."}],"sort":[{"field":"...","direction":"asc|desc"}],"limit":1000,"outputFormat":"csv"}}',
+    '{"kind":"intent","summary":"...","intent":{"sourceId":"...","sourceScope":"personal|team","teamId":"...","datasetId":"...","entityName":"...","entityType":"table|view|collection","schema":"...","fields":["..."],"filters":[{"field":"...","op":"eq|gt|gte|lt|lte|like|contains|in","value":"..."}],"sort":[{"field":"...","direction":"asc|desc"}],"limit":1000,"outputFormat":"csv"}}',
     "可用数据源：",
     sourceSummary || "- 无",
+    "可用数据集：",
+    datasetSummary || "- 无",
     params.originalRequest?.trim()
       ? `原始请求：${params.originalRequest.trim()}`
       : "",
@@ -270,11 +366,11 @@ export async function runExportAgent(params: {
   userInput: string;
   originalRequest?: string;
 }): Promise<ExportAgentDecision> {
-  const sources = await loadExportSources();
-  if (sources.length === 0) {
+  const { sources, datasets } = await loadRuntimeExportCatalog();
+  if (sources.length === 0 && datasets.length === 0) {
     return {
       kind: "reject",
-      reason: "当前还没有可用的数据源配置，请先在数据库客户端里配置一个可连接的数据源。",
+      reason: "当前还没有可用的数据源或已发布数据集，请先在数据库客户端配置个人数据源，或在团队里发布可导出的数据集。",
     };
   }
 
@@ -282,7 +378,7 @@ export async function runExportAgent(params: {
   const aiConfig = getResolvedAIConfigForMode("agent");
   const agent = new ReActAgent(
     ai,
-    createExportTools(sources),
+    createExportTools(sources, datasets),
     {
       maxIterations: 8,
       temperature: 0.1,
@@ -297,6 +393,7 @@ export async function runExportAgent(params: {
     buildExportPrompt({
       userInput: params.userInput,
       sources,
+      datasets,
       originalRequest: params.originalRequest,
     }),
   );

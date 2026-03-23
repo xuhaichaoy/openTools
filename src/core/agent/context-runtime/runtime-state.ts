@@ -1,11 +1,16 @@
 import { create } from "zustand";
 import type { RuntimeSessionCompactionPreview } from "./runtime-session-compaction";
+import type { AIProductMode, RuntimeSessionMode as CoreRuntimeSessionMode } from "@/core/ai/ai-mode-types";
+import { getAIProductModeForRuntimeMode } from "@/core/ai/ai-mode-types";
+import type { SessionIdentityInput } from "@/core/session-control-plane/types";
+import { useSessionControlPlaneStore } from "@/store/session-control-plane-store";
 
-export type RuntimeSessionMode = "agent" | "cluster" | "ask" | "dialog" | "im_conversation";
+export type RuntimeSessionMode = CoreRuntimeSessionMode;
 
 export interface RuntimeSessionRecord extends RuntimeSessionCompactionPreview {
   key: string;
   mode: RuntimeSessionMode;
+  productMode: AIProductMode;
   sessionId: string;
   query: string;
   displayLabel?: string;
@@ -15,6 +20,7 @@ export interface RuntimeSessionRecord extends RuntimeSessionCompactionPreview {
   workspaceRoot?: string;
   waitingStage?: string;
   status: string;
+  sessionIdentityId?: string;
 }
 
 interface RuntimeStateSnapshot {
@@ -26,6 +32,7 @@ interface RuntimeStateSnapshot {
 interface RuntimeStateStore extends RuntimeStateSnapshot {
   upsertSession: (input: RuntimeSessionCompactionPreview & {
     mode: RuntimeSessionMode;
+    productMode?: AIProductMode;
     sessionId: string;
     query: string;
     displayLabel?: string;
@@ -35,6 +42,7 @@ interface RuntimeStateStore extends RuntimeStateSnapshot {
     workspaceRoot?: string;
     waitingStage?: string;
     status?: string;
+    sessionIdentity?: SessionIdentityInput;
   }) => RuntimeSessionRecord | null;
   patchSession: (
     mode: RuntimeSessionMode,
@@ -130,10 +138,14 @@ function sanitizeRuntimeSessionRecord(value: unknown): RuntimeSessionRecord | nu
   if (!isRuntimeSessionMode(record.mode) || !sessionId || !query || typeof record.startedAt !== "number") {
     return null;
   }
+  const productMode = typeof record.productMode === "string"
+    ? getAIProductModeForRuntimeMode(record.productMode)
+    : getAIProductModeForRuntimeMode(record.mode);
 
   return applyRuntimeSessionCompactionPreview({
     key: `${record.mode}:${sessionId}`,
     mode: record.mode,
+    productMode,
     sessionId,
     query,
     startedAt: record.startedAt,
@@ -143,6 +155,7 @@ function sanitizeRuntimeSessionRecord(value: unknown): RuntimeSessionRecord | nu
     ...(typeof record.displayDetail === "string" ? { displayDetail: record.displayDetail || undefined } : {}),
     ...(typeof record.workspaceRoot === "string" ? { workspaceRoot: record.workspaceRoot || undefined } : {}),
     ...(typeof record.waitingStage === "string" ? { waitingStage: record.waitingStage || undefined } : {}),
+    ...(typeof record.sessionIdentityId === "string" ? { sessionIdentityId: record.sessionIdentityId || undefined } : {}),
   }, record);
 }
 
@@ -210,6 +223,7 @@ function areRuntimeSessionRecordsEqual(
   const rightIdentifiers = right.roomCompactionPreservedIdentifiers ?? [];
   return left.key === right.key
     && left.mode === right.mode
+    && left.productMode === right.productMode
     && left.sessionId === right.sessionId
     && left.query === right.query
     && left.displayLabel === right.displayLabel
@@ -218,6 +232,7 @@ function areRuntimeSessionRecordsEqual(
     && left.workspaceRoot === right.workspaceRoot
     && left.waitingStage === right.waitingStage
     && left.status === right.status
+    && left.sessionIdentityId === right.sessionIdentityId
     && left.roomCompactionSummaryPreview === right.roomCompactionSummaryPreview
     && left.roomCompactionUpdatedAt === right.roomCompactionUpdatedAt
     && left.roomCompactionMessageCount === right.roomCompactionMessageCount
@@ -258,6 +273,32 @@ export const useRuntimeStateStore = create<RuntimeStateStore>((set, get) => ({
     const now = input.updatedAt ?? Date.now();
     const startedAt = input.startedAt ?? now;
     const key = buildRuntimeSessionKey(input.mode, sessionId);
+    const productMode = input.productMode
+      ? getAIProductModeForRuntimeMode(input.productMode)
+      : getAIProductModeForRuntimeMode(input.mode);
+    const mirroredSession = useSessionControlPlaneStore.getState().upsertSession({
+      identity: {
+        productMode,
+        surface: input.sessionIdentity?.surface ?? (input.mode === "im_conversation" ? "im_conversation" : "runtime_state"),
+        sessionKey: input.sessionIdentity?.sessionKey ?? sessionId,
+        sessionKind: input.sessionIdentity?.sessionKind,
+        scope: input.sessionIdentity?.scope,
+        workspaceId: input.sessionIdentity?.workspaceId ?? input.workspaceRoot,
+        channelType: input.sessionIdentity?.channelType,
+        accountId: input.sessionIdentity?.accountId,
+        conversationId: input.sessionIdentity?.conversationId,
+        topicId: input.sessionIdentity?.topicId,
+        peerId: input.sessionIdentity?.peerId,
+        parentSessionId: input.sessionIdentity?.parentSessionId,
+        runtimeSessionId: input.sessionIdentity?.runtimeSessionId ?? sessionId,
+      },
+      title: input.displayLabel?.trim() || query,
+      summary: query,
+      status: input.status ?? "running",
+      createdAt: startedAt,
+      updatedAt: now,
+      lastActiveAt: now,
+    });
     let created: RuntimeSessionRecord | null = null;
 
     set((state) => {
@@ -265,6 +306,7 @@ export const useRuntimeStateStore = create<RuntimeStateStore>((set, get) => ({
       const nextRecord = applyRuntimeSessionCompactionPreview(existing
         ? {
             ...existing,
+            productMode,
             query,
             ...(typeof input.displayLabel === "string"
               ? { displayLabel: input.displayLabel || undefined }
@@ -280,10 +322,12 @@ export const useRuntimeStateStore = create<RuntimeStateStore>((set, get) => ({
               ? { waitingStage: input.waitingStage || undefined }
               : {}),
             status: input.status ?? existing.status,
+            ...(mirroredSession?.id ? { sessionIdentityId: mirroredSession.id } : {}),
           }
         : {
             key,
             mode: input.mode,
+            productMode,
             sessionId,
             query,
             ...(input.displayLabel ? { displayLabel: input.displayLabel } : {}),
@@ -293,6 +337,7 @@ export const useRuntimeStateStore = create<RuntimeStateStore>((set, get) => ({
             ...(input.workspaceRoot ? { workspaceRoot: input.workspaceRoot } : {}),
             ...(input.waitingStage ? { waitingStage: input.waitingStage } : {}),
             status: input.status ?? "running",
+            ...(mirroredSession?.id ? { sessionIdentityId: mirroredSession.id } : {}),
           }, input);
       const foregroundSessionId = state.foregroundSessionIds[input.mode] ?? "";
       if (
@@ -350,6 +395,21 @@ export const useRuntimeStateStore = create<RuntimeStateStore>((set, get) => ({
         ...(typeof patch.status === "string" ? { status: patch.status } : {}),
         updatedAt: patch.updatedAt ?? Date.now(),
       }, patch);
+      void useSessionControlPlaneStore.getState().upsertSession({
+        identity: {
+          productMode: existing.productMode,
+          surface: existing.mode === "im_conversation" ? "im_conversation" : "runtime_state",
+          sessionKey: existing.sessionId,
+          workspaceId: nextRecord.workspaceRoot,
+          runtimeSessionId: existing.sessionId,
+        },
+        title: nextRecord.displayLabel?.trim() || nextRecord.query,
+        summary: nextRecord.query,
+        status: nextRecord.status,
+        createdAt: nextRecord.startedAt,
+        updatedAt: nextRecord.updatedAt,
+        lastActiveAt: nextRecord.updatedAt,
+      });
       if (areRuntimeSessionRecordsEqual(existing, nextRecord, { ignoreUpdatedAt: true })) {
         return state;
       }

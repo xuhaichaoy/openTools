@@ -7,6 +7,7 @@ import type {
   SpawnedTaskRoleBoundary,
   ToolPolicy,
 } from "./types";
+import { resolveSurfaceExecutionPolicy } from "@/core/collaboration/surface-security-policy";
 
 export interface NormalizedExecutionPolicy {
   accessMode: AccessMode;
@@ -308,17 +309,13 @@ export function buildMiddlewareOverridesForExecutionPolicy(
 export function deriveIMConversationExecutionPolicy(
   coordinatorPolicy?: ExecutionPolicy | null,
 ): NormalizedExecutionPolicy {
-  const normalized = normalizeExecutionPolicy(coordinatorPolicy, {
-    accessMode: "read_only",
-    approvalLevel: "normal",
-  });
-  return {
-    accessMode: normalized.accessMode,
-    approvalMode: clampApprovalMode(
-      normalized.approvalMode,
-      normalized.accessMode === "full_access" ? "strict" : "normal",
-    ),
-  };
+  return normalizeExecutionPolicy(
+    resolveSurfaceExecutionPolicy({
+      surface: "im_conversation",
+      productMode: "im_conversation",
+      basePolicy: coordinatorPolicy,
+    }),
+  );
 }
 
 export function getRoleBoundaryPolicyProfile(
