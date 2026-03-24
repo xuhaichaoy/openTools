@@ -72,6 +72,113 @@ fn extract_openai_reasoning_text(delta: &serde_json::Value) -> Option<&str> {
         })
 }
 
+fn emit_openai_content_chunk(app: &AppHandle, conversation_id: &str, content: &str) {
+    let _ = app.emit(
+        "ai-stream-chunk",
+        serde_json::json!({
+            "conversation_id": conversation_id,
+            "content": content,
+        }),
+    );
+}
+
+fn emit_openai_reasoning_chunk(app: &AppHandle, conversation_id: &str, content: &str) {
+    let payload = serde_json::json!({
+        "conversation_id": conversation_id,
+        "content": content
+    });
+    let _ = app.emit("ai-stream-thinking", payload);
+}
+
+fn emit_openai_tool_args_chunk(app: &AppHandle, conversation_id: &str, content: &str) {
+    let payload = serde_json::json!({
+        "conversation_id": conversation_id,
+        "content": content
+    });
+    let _ = app.emit("ai-stream-tool-args", payload);
+}
+
+fn apply_openai_tool_calls_payload(
+    app: &AppHandle,
+    conversation_id: &str,
+    tool_calls: &[serde_json::Value],
+    pending_tool_calls: &mut Vec<ToolCall>,
+    tc_args_buffer: &mut HashMap<usize, String>,
+) -> bool {
+    let mut emitted = false;
+    for (fallback_index, tool_call) in tool_calls.iter().enumerate() {
+        let normalized = if tool_call.get("index").is_some() {
+            tool_call.clone()
+        } else {
+            serde_json::json!({
+                "index": tool_call["index"].as_u64().unwrap_or(fallback_index as u64),
+                "id": tool_call.get("id").cloned().unwrap_or(serde_json::Value::Null),
+                "function": tool_call.get("function").cloned().unwrap_or(serde_json::Value::Null),
+            })
+        };
+        if let Some(tool_call_delta) =
+            apply_openai_tool_call_delta(&normalized, pending_tool_calls, tc_args_buffer)
+        {
+            emitted = true;
+            if let Some(args) = &tool_call_delta.arguments_chunk {
+                emit_openai_tool_args_chunk(app, conversation_id, args);
+            }
+        }
+    }
+    emitted
+}
+
+fn emit_openai_choice_events(
+    app: &AppHandle,
+    conversation_id: &str,
+    choice: &serde_json::Value,
+    pending_tool_calls: &mut Vec<ToolCall>,
+    tc_args_buffer: &mut HashMap<usize, String>,
+) -> bool {
+    for payload in [choice.get("delta"), choice.get("message")] {
+        let Some(payload) = payload else {
+            continue;
+        };
+        if payload.is_null() {
+            continue;
+        }
+
+        let mut emitted = false;
+
+        if let Some(content) = payload
+            .get("content")
+            .and_then(value_as_nonempty_str)
+            .or_else(|| choice.get("text").and_then(value_as_nonempty_str))
+        {
+            emit_openai_content_chunk(app, conversation_id, content);
+            emitted = true;
+        }
+
+        if let Some(thinking_text) = extract_openai_reasoning_text(payload) {
+            emit_openai_reasoning_chunk(app, conversation_id, thinking_text);
+            emitted = true;
+        }
+
+        if let Some(tool_calls) = payload.get("tool_calls").and_then(|value| value.as_array()) {
+            if apply_openai_tool_calls_payload(
+                app,
+                conversation_id,
+                tool_calls,
+                pending_tool_calls,
+                tc_args_buffer,
+            ) {
+                emitted = true;
+            }
+        }
+
+        if emitted {
+            return true;
+        }
+    }
+
+    false
+}
+
 fn should_enable_kimi_reasoning(config: &AIConfig) -> bool {
     if !config.model.to_lowercase().contains("kimi") {
         return false;
@@ -420,69 +527,22 @@ async fn agent_stream_openai(
                     }
 
                     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data) {
-                        let delta = &parsed["choices"][0]["delta"];
-                        let mut emitted = false;
+                        let choice = &parsed["choices"][0];
+                        let emitted = emit_openai_choice_events(
+                            app,
+                            conversation_id,
+                            choice,
+                            &mut pending_tool_calls,
+                            &mut tc_args_buffer,
+                        );
 
-                        if let Some(content) = delta["content"].as_str() {
-                            let _ = app.emit(
-                                "ai-stream-chunk",
-                                serde_json::json!({
-                                    "conversation_id": conversation_id,
-                                    "content": content,
-                                }),
+                        if !emitted && chunk_count <= 3 {
+                            let preview: String = format!("{}", choice).chars().take(200).collect();
+                            log::info!(
+                                "[ai_agent_stream/openai] payload preview={} conv={}",
+                                preview,
+                                conversation_id
                             );
-                            emitted = true;
-                        }
-
-                        if let Some(thinking_text) = extract_openai_reasoning_text(delta) {
-                            let payload = serde_json::json!({
-                                "conversation_id": conversation_id,
-                                "content": thinking_text
-                            });
-                            let _ = app.emit("ai-stream-thinking", payload);
-                            emitted = true;
-                        }
-
-                        if let Some(tcs) = delta["tool_calls"].as_array() {
-                            for tc in tcs {
-                                let Some(tool_call_delta) = apply_openai_tool_call_delta(
-                                    tc,
-                                    &mut pending_tool_calls,
-                                    &mut tc_args_buffer,
-                                ) else {
-                                    continue;
-                                };
-                                emitted = true;
-                                if tool_call_delta.has_identity() {
-                                    log::info!(
-                                        "[ai_agent_stream/openai] tool_call chunk idx={} id={:?} name={:?} name_raw={:?} conv={}",
-                                        tool_call_delta.index,
-                                        tool_call_delta.id,
-                                        tool_call_delta.name,
-                                        tool_call_delta.raw_name,
-                                        conversation_id
-                                    );
-                                }
-                                if let Some(args) = &tool_call_delta.arguments_chunk {
-                                    let payload = serde_json::json!({
-                                        "conversation_id": conversation_id,
-                                        "content": args
-                                    });
-                                    let _ = app.emit("ai-stream-tool-args", payload);
-                                }
-                            }
-                        }
-
-                        if !emitted {
-                            if chunk_count <= 3 {
-                                let preview: String =
-                                    format!("{}", delta).chars().take(200).collect();
-                                log::info!(
-                                    "[ai_agent_stream/openai] delta preview={} conv={}",
-                                    preview,
-                                    conversation_id
-                                );
-                            }
                         }
                     }
                 }
@@ -507,6 +567,40 @@ async fn agent_stream_openai(
                 cancellation.clear(conversation_id);
                 emit_stream_error(app, conversation_id, &msg);
                 return Err(AppError::Custom(msg));
+            }
+        }
+    }
+
+    if !buffer.trim().is_empty() {
+        line_count += 1;
+        let line = buffer.trim().to_string();
+        let _ = app.emit(
+            "ai-stream-raw",
+            serde_json::json!({
+                "conversation_id": conversation_id,
+                "raw_line": line,
+            }),
+        );
+        if let Some((data, _)) = extract_sse_data_line(buffer.trim()) {
+            if data != "[DONE]" {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data) {
+                    let choice = &parsed["choices"][0];
+                    let emitted = emit_openai_choice_events(
+                        app,
+                        conversation_id,
+                        choice,
+                        &mut pending_tool_calls,
+                        &mut tc_args_buffer,
+                    );
+                    if !emitted {
+                        let preview: String = format!("{}", choice).chars().take(200).collect();
+                        log::info!(
+                            "[ai_agent_stream/openai] trailing payload preview={} conv={}",
+                            preview,
+                            conversation_id
+                        );
+                    }
+                }
             }
         }
     }

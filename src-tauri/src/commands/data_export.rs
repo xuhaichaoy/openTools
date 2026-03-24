@@ -209,7 +209,10 @@ fn quote_sql_alias(dialect: &str, alias: &str) -> Result<String, String> {
     if trimmed.is_empty() {
         return Err("Alias cannot be empty".to_string());
     }
-    if trimmed.chars().any(|ch| ch == '\0' || ch == '\r' || ch == '\n') {
+    if trimmed
+        .chars()
+        .any(|ch| ch == '\0' || ch == '\r' || ch == '\n')
+    {
         return Err(format!("Unsupported alias: {}", trimmed));
     }
     Ok(match dialect {

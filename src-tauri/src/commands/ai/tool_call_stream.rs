@@ -13,12 +13,6 @@ pub struct OpenAIToolCallDelta {
     pub arguments_chunk: Option<String>,
 }
 
-impl OpenAIToolCallDelta {
-    pub fn has_identity(&self) -> bool {
-        self.id.is_some() || self.name.is_some()
-    }
-}
-
 fn non_empty_str(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)

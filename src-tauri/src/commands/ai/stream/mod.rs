@@ -4,10 +4,25 @@ pub mod openai;
 use std::collections::HashSet;
 
 pub fn extract_sse_data_line(line: &str) -> Option<(&str, bool)> {
-    if let Some(data) = line.strip_prefix("data: ") {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(data) = trimmed.strip_prefix("data: ") {
         return Some((data, false));
     }
-    line.strip_prefix("data:").map(|data| (data, true))
+    if let Some(data) = trimmed.strip_prefix("data:") {
+        return Some((data, true));
+    }
+    if trimmed == "[DONE]" {
+        return Some((trimmed, true));
+    }
+    if matches!(trimmed.as_bytes().first(), Some(b'{') | Some(b'['))
+        && serde_json::from_str::<serde_json::Value>(trimmed).is_ok()
+    {
+        return Some((trimmed, true));
+    }
+    None
 }
 
 // ── 工具确认状态（用于危险工具执行前的用户确认） ──
@@ -135,6 +150,20 @@ mod tests {
     fn extract_sse_data_line_accepts_compact_prefix() {
         let (data, compat) = extract_sse_data_line("data:{\"ok\":true}").unwrap();
         assert_eq!(data, "{\"ok\":true}");
+        assert!(compat);
+    }
+
+    #[test]
+    fn extract_sse_data_line_accepts_raw_json_lines() {
+        let (data, compat) = extract_sse_data_line("{\"ok\":true}").unwrap();
+        assert_eq!(data, "{\"ok\":true}");
+        assert!(compat);
+    }
+
+    #[test]
+    fn extract_sse_data_line_accepts_raw_done_marker() {
+        let (data, compat) = extract_sse_data_line("[DONE]").unwrap();
+        assert_eq!(data, "[DONE]");
         assert!(compat);
     }
 }
