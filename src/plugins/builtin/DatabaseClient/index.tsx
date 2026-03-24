@@ -119,6 +119,13 @@ function getTableKey(table: Pick<TableInfo, "name" | "schema">): string {
   return table.schema ? `${table.schema}.${table.name}` : table.name;
 }
 
+function humanizeFieldName(value: string): string {
+  const trimmed = String(value ?? "").trim();
+  if (!trimmed) return "";
+  const normalized = trimmed.replace(/[_-]+/g, " ").replace(/\s+/g, " ");
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
 function isReadOnlyQuery(query: string): boolean {
   const normalized = query.trimStart().toLowerCase();
   return normalized.startsWith("select")
@@ -1106,7 +1113,7 @@ function DatasetDraftModal({
         aliases: (field.aliases ?? []).map((item) => item.trim()).filter(Boolean),
         description: field.description?.trim() || undefined,
       })),
-      relations: (value.relations ?? [])
+      relations: ((value.relations ?? [])
         .map((relation) => {
           const left = relation.on?.[0]?.left?.trim() || "";
           const right = relation.on?.[0]?.right?.trim() || "";
@@ -1131,7 +1138,7 @@ function DatasetDraftModal({
             enabled: relation.enabled !== false,
           };
         })
-        .filter((item): item is DatasetRelationDefinition => Boolean(item)),
+        .filter(Boolean) as DatasetRelationDefinition[]),
       defaultFields: value.defaultFields.filter((fieldName) =>
         value.fields.some((field) => field.name === fieldName && field.enabled !== false),
       ),

@@ -101,6 +101,19 @@ export class MCPAgentBridge implements AgentBridge {
     }
   }
 
+  private async sendNotification(method: string, params?: unknown): Promise<void> {
+    const message = JSON.stringify({
+      jsonrpc: "2.0",
+      method,
+      params: params ?? {},
+    });
+
+    await invoke("send_mcp_notification", {
+      serverId: this.serverId,
+      message,
+    });
+  }
+
   private async initialize(): Promise<void> {
     if (this.initialized) return;
 
@@ -113,7 +126,7 @@ export class MCPAgentBridge implements AgentBridge {
         version: "0.1.0",
       },
     });
-    await this.sendRpc("notifications/initialized");
+    await this.sendNotification("notifications/initialized", {});
     this.initialized = true;
   }
 

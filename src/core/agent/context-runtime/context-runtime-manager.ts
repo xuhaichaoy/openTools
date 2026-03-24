@@ -30,7 +30,7 @@ export async function buildAgentExecutionContextPlan(params: {
       || !!scope.attachmentPaths.length
       || !!scope.imagePaths.length
       || !!scope.handoffPaths.length
-      || !!scope.queryPathHints.length;
+      || !!scope.queryPathHints?.length;
     if (!hasExternalWorkspaceSignal) {
       scope = {
         ...scope,

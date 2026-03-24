@@ -1036,8 +1036,8 @@ export class IMConversationRuntimeManager {
     useSessionControlPlaneStore.getState().patchSessionContinuityState(controlPlaneSessionId, {
       source: "im_conversation",
       updatedAt: runtime.updatedAt,
-      executionStrategy: snapshot.presentationState.executionStrategy,
-      contractState: snapshot.presentationState.contractState,
+      executionStrategy: snapshot.presentationState.executionStrategy ?? undefined,
+      contractState: snapshot.presentationState.contractState ?? undefined,
       pendingInteractionCount: snapshot.presentationState.pendingInteractionCount,
       queuedFollowUpCount: snapshot.presentationState.queuedFollowUpCount,
       childSessionCount: snapshot.childSessions.length,
@@ -1952,7 +1952,9 @@ export class IMConversationRuntimeManager {
       ...(runtime.lastInput ? { lastInput: clonePendingIMMessage(runtime.lastInput) } : {}),
       ...(runtime.queue.length > 0
         ? {
-            queuedMessages: runtime.queue.map((message) => clonePendingIMMessage(message)),
+            queuedMessages: runtime.queue
+              .map((message) => clonePendingIMMessage(message))
+              .filter((message): message is NonNullable<typeof message> => Boolean(message)),
           }
         : {}),
       dialogHistory: collaborationSnapshot.dialogMessages

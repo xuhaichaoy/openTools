@@ -47,7 +47,9 @@ export function getAICenterModeMeta(
 }
 
 export function formatAICenterModeLabel(mode?: HumanSelectableAIProductMode | null | string): string {
-  return formatAICenterProductLabel(mode);
+  return formatAICenterProductLabel(
+    normalizeHumanSelectableAIProductMode(mode as AICenterCompatibleMode | null | undefined),
+  );
 }
 
 export function describeAICenterSource(source?: Partial<AICenterSourceRef> | null): string {

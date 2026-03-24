@@ -588,7 +588,9 @@ function buildDialogAgentHandoff(params: {
     artifacts,
     sessionUploads,
     spawnedTasks,
-    actorNameById,
+    actorNameById: new Map(
+      [...actorById.entries()].map(([actorId, actor]) => [actorId, actor.roleName] as const),
+    ),
     extraAttachmentPaths: recentMessages.flatMap((message) => message.images || []),
     maxArtifacts,
     maxSpawnedTasks,
@@ -1635,7 +1637,14 @@ export function ActorChatPanel({
   }, [pendingSteerSessionRunId, selectedPendingMessageId]);
   useEffect(() => {
     if (!pendingSteerSessionRunId) return;
-    if (pendingSteerSession && pendingSteerSession.mode === "session" && pendingSteerSession.focusable) return;
+    if (
+      pendingSteerSession
+      && pendingSteerSession.mode === "session"
+      && "focusable" in pendingSteerSession
+      && pendingSteerSession.focusable
+    ) {
+      return;
+    }
     setPendingSteerSessionRunId(null);
     setInput((current) => current.trimStart().startsWith("!steer ") ? "" : current);
     setInputNotice((current) => current ?? "目标子会话已不可继续，已退出 steer 模式。");
@@ -2258,8 +2267,7 @@ export function ActorChatPanel({
 
     let sealedContract = null;
     if (!willReplyToInteraction && !isSteerCommand) {
-      const planningRoutingMode: DialogRoutingMode =
-        routingMode === "direct" ? "coordinator" : routingMode;
+      const planningRoutingMode: DialogRoutingMode = routingMode;
       const planBundle = buildDialogDispatchPlanBundle({
         actors,
         routingMode: planningRoutingMode,

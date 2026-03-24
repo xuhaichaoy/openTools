@@ -142,6 +142,66 @@ describe("IMDataExportRuntimeManager explicit database mode", () => {
     expect(runExportAgent).toHaveBeenCalledTimes(1);
   });
 
+  it("passes the last protocol context into follow-up export queries", async () => {
+    const onReply = vi.fn().mockResolvedValue(undefined);
+    const manager = new IMDataExportRuntimeManager({ onReply });
+    vi.mocked(runExportAgent)
+      .mockResolvedValueOnce({
+        kind: "answer",
+        answer: "有，当前可读取的库 / schema 里包含 athena_user。",
+        protocolContext: {
+          action: "namespace_exists",
+          sourceId: "personal-mysql",
+          sourceScope: "personal",
+          namespace: "athena_user",
+        },
+      })
+      .mockResolvedValueOnce({
+        kind: "answer",
+        answer: "在 athena_user 里可读的表有 company、company_user。",
+        protocolContext: {
+          action: "list_tables",
+          sourceId: "personal-mysql",
+          sourceScope: "personal",
+          namespace: "athena_user",
+        },
+      });
+
+    await manager.handleIncoming({
+      channelId: "channel-1",
+      channelType: "dingtalk",
+      msg: makeMessage("数据库操作", { messageId: "msg-enter" }),
+    });
+
+    await manager.handleIncoming({
+      channelId: "channel-1",
+      channelType: "dingtalk",
+      msg: makeMessage("athena_user", { messageId: "msg-ns", timestamp: 1710000001000 }),
+    });
+
+    await manager.handleIncoming({
+      channelId: "channel-1",
+      channelType: "dingtalk",
+      msg: makeMessage("看一下这个库内可用的表", { messageId: "msg-tables", timestamp: 1710000002000 }),
+    });
+
+    expect(vi.mocked(runExportAgent)).toHaveBeenNthCalledWith(1, {
+      userInput: "athena_user",
+      originalRequest: undefined,
+      protocolContext: undefined,
+    });
+    expect(vi.mocked(runExportAgent)).toHaveBeenNthCalledWith(2, {
+      userInput: "看一下这个库内可用的表",
+      originalRequest: "athena_user",
+      protocolContext: {
+        action: "namespace_exists",
+        sourceId: "personal-mysql",
+        sourceScope: "personal",
+        namespace: "athena_user",
+      },
+    });
+  });
+
   it("does not hijack database-related natural language before entering the mode", async () => {
     const onReply = vi.fn().mockResolvedValue(undefined);
     const manager = new IMDataExportRuntimeManager({ onReply });

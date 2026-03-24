@@ -10,6 +10,7 @@ import { useSkillStore } from "@/store/skill-store";
 import type { AgentSkill, AgentSkillInput } from "@/core/agent/skills/types";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
+import { ClawHubSkillMarketplaceSection } from "./ClawHubSkillMarketplaceSection";
 
 // ── 主面板 ──
 
@@ -24,7 +25,8 @@ export function SkillsManager({ compact = false }: { compact?: boolean }) {
   }, [loaded, load]);
 
   const builtinSkills = skills.filter((s) => s.source === "builtin");
-  const userSkills = skills.filter((s) => s.source === "user");
+  const marketplaceSkills = skills.filter((s) => s.source === "marketplace");
+  const userSkills = skills.filter((s) => s.source === "user" || s.source === "skillmd");
 
   const handleCreate = useCallback(() => {
     setEditingSkill(null);
@@ -192,6 +194,8 @@ export function SkillsManager({ compact = false }: { compact?: boolean }) {
         支持导入 <code className="text-[9px]">.skill.json</code> 文件安装技能。
       </p>
 
+      <ClawHubSkillMarketplaceSection compact={compact} />
+
       {showForm && (
         <SkillForm
           editing={editingSkill}
@@ -214,6 +218,22 @@ export function SkillsManager({ compact = false }: { compact?: boolean }) {
           manualActiveIds={manualActiveIds}
           onToggleEnabled={toggleEnabled}
           onTogglePin={toggleManualActive}
+          compact={compact}
+        />
+      )}
+
+      {marketplaceSkills.length > 0 && (
+        <SkillGroup
+          label="技能中心"
+          skills={marketplaceSkills}
+          manualActiveIds={manualActiveIds}
+          onToggleEnabled={toggleEnabled}
+          onTogglePin={toggleManualActive}
+          onRemove={(id) => {
+            if (window.confirm("确定要移除这个技能中心技能吗？")) {
+              void remove(id);
+            }
+          }}
           compact={compact}
         />
       )}
@@ -326,6 +346,12 @@ function SkillCard({
         {skill.category && (
           <span className="text-[9px] px-1 py-px rounded bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]">
             {skill.category}
+          </span>
+        )}
+
+        {skill.source === "marketplace" && skill.marketplaceMeta?.provider && (
+          <span className="text-[9px] px-1 py-px rounded bg-purple-500/10 text-purple-500">
+            {skill.marketplaceMeta.provider}
           </span>
         )}
 

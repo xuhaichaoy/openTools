@@ -512,6 +512,7 @@ pub fn run() {
             commands::mcp::start_mcp_stdio_server,
             commands::mcp::stop_mcp_server,
             commands::mcp::send_mcp_message,
+            commands::mcp::send_mcp_notification,
             commands::mcp::mcp_send_sse_message,
             commands::mcp::mcp_save_config,
             commands::mcp::mcp_load_config,
@@ -576,6 +577,9 @@ pub fn run() {
             commands::database::db_load_connections,
             commands::data_export::data_export_preview,
             commands::data_export::data_export_confirm_csv_export,
+            commands::skill_marketplace::skill_marketplace_clawhub_status,
+            commands::skill_marketplace::skill_marketplace_clawhub_verify,
+            commands::skill_marketplace::skill_marketplace_clawhub_install,
             // ── Native Apps ──
             commands::native_apps::native_calendar_list,
             commands::native_apps::native_calendar_create_event,

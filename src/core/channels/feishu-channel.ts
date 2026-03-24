@@ -352,14 +352,18 @@ export class FeishuChannel implements IMChannel {
     // 如果包含图片，尝试获取 Base64 内容以供 AI 识别
     if (msg.images && msg.images.length > 0 && this._config?.appId && this._config?.appSecret) {
       try {
+        const config = this._config;
+        const appId = config?.appId?.trim();
+        const appSecret = config?.appSecret?.trim();
+        if (!appId || !appSecret) return;
         const unresolvedKeys = msg.images.filter(img => !img.startsWith("http") && !img.startsWith("data:"));
         if (unresolvedKeys.length > 0) {
           log.info("Resolving Feishu image keys to Base64", { count: unresolvedKeys.length });
           const base64List = await Promise.all(unresolvedKeys.map(async (key) => {
             try {
               return await invoke<string>("feishu_get_image_as_base64", {
-                appId: this._config!.appId.trim(),
-                appSecret: this._config!.appSecret.trim(),
+                appId,
+                appSecret,
                 baseUrl: this._getOpenBaseUrl(),
                 imageKey: key,
               });

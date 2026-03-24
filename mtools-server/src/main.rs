@@ -41,8 +41,9 @@ async fn main() -> anyhow::Result<()> {
     tokio::fs::create_dir_all(&avatar_dir).await?;
     tracing::info!("Upload directory ready: {}", config.upload_dir);
 
-    // 存量 API Key 加密迁移
+    // 存量敏感字段加密迁移
     migrate_plaintext_keys(&pool).await;
+    migrate_plaintext_skill_marketplace_tokens(&pool).await;
 
     // 创建应用状态
     let http_client = reqwest::Client::builder()
@@ -117,4 +118,54 @@ async fn migrate_plaintext_keys(pool: &PgPool) {
         }
     }
     tracing::info!("API key encryption migration complete");
+}
+
+/// Encrypt any plaintext marketplace tokens that lack the `enc:` prefix.
+async fn migrate_plaintext_skill_marketplace_tokens(pool: &PgPool) {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        id: uuid::Uuid,
+        api_token: String,
+    }
+
+    let rows: Vec<Row> = match sqlx::query_as::<_, Row>(
+        "SELECT id, api_token
+         FROM team_skill_marketplace_configs
+         WHERE api_token != '' AND api_token NOT LIKE 'enc:%'",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("Marketplace token migration query failed: {e}");
+            return;
+        }
+    };
+
+    if rows.is_empty() {
+        return;
+    }
+
+    tracing::info!("Encrypting {} plaintext marketplace token(s)…", rows.len());
+    for row in rows {
+        match mtools_server::crypto::encrypt(&row.api_token) {
+            Ok(encrypted) => {
+                let _ = sqlx::query(
+                    "UPDATE team_skill_marketplace_configs SET api_token = $1 WHERE id = $2",
+                )
+                .bind(&encrypted)
+                .bind(row.id)
+                .execute(pool)
+                .await;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to encrypt marketplace token for config {}: {e}",
+                    row.id
+                );
+            }
+        }
+    }
+    tracing::info!("Marketplace token encryption migration complete");
 }

@@ -28,10 +28,7 @@ services:
       retries: 5
 
   app:
-    image: mtools-server:latest
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ${APP_IMAGE:-mtools-server:latest}
     container_name: mtools-server
     restart: unless-stopped
     ports:
@@ -42,10 +39,9 @@ services:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/mtools
       REDIS_URL: redis://redis:6379
       UPLOAD_DIR: /data/uploads
-      OCR_MODEL_DIR: /data/ocr-models
+      OCR_MODEL_DIR: /app/ocr-models
     volumes:
       - uploads:/data/uploads
-      - ocr_models:/data/ocr-models
     depends_on:
       postgres:
         condition: service_healthy
@@ -56,4 +52,3 @@ volumes:
   pgdata:
   redisdata:
   uploads:
-  ocr_models:

@@ -1,5 +1,6 @@
 import type { DialogDispatchPlanBundle } from "@/core/agent/actor/dialog-dispatch-plan";
 import type {
+  AgentCapability,
   MiddlewareOverrides,
   SpawnedTaskRoleBoundary,
   ToolPolicy,
@@ -126,12 +127,12 @@ function normalizeActorPairs(pairs: readonly CollaborationActorPair[]): Collabor
 
 function normalizeCapabilities(
   capabilities: CollaborationActorRosterEntry["capabilities"] | CollaborationRosterActor["capabilities"],
-): string[] {
+): AgentCapability[] {
   if (!capabilities) return [];
   if (Array.isArray(capabilities)) {
-    return unique(capabilities).sort();
+    return unique(capabilities).sort() as AgentCapability[];
   }
-  return unique(capabilities.tags).sort();
+  return unique(capabilities.tags).sort() as AgentCapability[];
 }
 
 function normalizeRosterEntries(
@@ -182,7 +183,7 @@ function normalizePlannedDelegation(
     roleBoundary: spawn.roleBoundary as SpawnedTaskRoleBoundary | undefined,
     createIfMissing: spawn.createIfMissing,
     childDescription: spawn.childDescription?.trim() || undefined,
-    childCapabilities: unique(spawn.childCapabilities).sort(),
+    childCapabilities: unique(spawn.childCapabilities).sort() as AgentCapability[],
     childWorkspace: spawn.childWorkspace?.trim() || undefined,
     childMaxIterations: spawn.childMaxIterations,
   };
@@ -385,18 +386,28 @@ export function sealExecutionContract(
 ): ExecutionContract {
   const normalizedDraft = normalizeDraft(draft);
   const usingRuntimeInputs = Array.isArray(arg2);
-  const approvedAt = usingRuntimeInputs ? (arg4 ?? Date.now()) : (arg2?.approvedAt ?? Date.now());
+  const runtimeRoster: readonly RosterHashInput[] = Array.isArray(arg2)
+    ? arg2
+    : normalizedDraft.actorRoster;
+  const contractOptions = (
+    Array.isArray(arg2)
+      ? undefined
+      : arg2
+  ) as { contractId?: string; approvedAt?: number; state?: ExecutionContractState } | undefined;
+  const approvedAt = usingRuntimeInputs
+    ? (arg4 ?? Date.now())
+    : (contractOptions?.approvedAt ?? Date.now());
   const inputHash = usingRuntimeInputs
     ? buildInputHash(arg3 ?? normalizedDraft.input)
     : normalizedDraft.inputHash;
   const actorRosterHash = usingRuntimeInputs
-    ? buildActorRosterHash(arg2)
+    ? buildActorRosterHash(runtimeRoster)
     : normalizedDraft.actorRosterHash;
 
   return {
     contractId: usingRuntimeInputs
       ? createId("contract")
-      : (arg2?.contractId ?? createId("contract")),
+      : (contractOptions?.contractId ?? createId("contract")),
     surface: normalizedDraft.surface,
     executionStrategy: normalizedDraft.executionStrategy,
     ...(normalizedDraft.executionPolicy
@@ -419,7 +430,7 @@ export function sealExecutionContract(
         : {}),
     })),
     approvedAt,
-    state: usingRuntimeInputs ? "sealed" : (arg2?.state ?? "sealed"),
+    state: usingRuntimeInputs ? "sealed" : (contractOptions?.state ?? "sealed"),
   };
 }
 

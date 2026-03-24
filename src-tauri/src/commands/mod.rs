@@ -18,6 +18,7 @@ pub mod native_apps;
 pub mod ocr;
 pub mod plugin;
 pub mod rag;
+pub mod skill_marketplace;
 pub mod ssh;
 pub mod system;
 pub mod translate;

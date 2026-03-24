@@ -16,6 +16,7 @@ import {
 } from "@/plugins/builtin/SmartAgent/core/react-agent";
 import type {
   ExportAgentDecision,
+  ExportProtocolContext,
   ExportSourceConfig,
   RuntimeExportDatasetDefinition,
   RuntimeExportSourceConfig,
@@ -726,7 +727,7 @@ function cleanBusinessEntityKeyword(text: string): string | null {
 
 function extractCompanyKeyword(candidates: readonly (string | undefined)[]): string | null {
   for (const candidate of candidates) {
-    const cleaned = cleanBusinessEntityKeyword(candidate);
+    const cleaned = cleanBusinessEntityKeyword(candidate ?? "");
     if (cleaned) return cleaned;
   }
   return null;
@@ -1924,6 +1925,62 @@ function buildSourceLabel(source: RuntimeExportSourceConfig): string {
   return parts.join("，");
 }
 
+function buildDatasetLabel(dataset: RuntimeExportDatasetDefinition): string {
+  const scope = dataset.scope === "team" ? `团队:${dataset.teamId}` : "个人";
+  const entity = `${dataset.schema ? `${dataset.schema}.` : ""}${dataset.entityName}`;
+  return `${dataset.displayName}（${scope} / ${entity}）`;
+}
+
+function formatDatasetListAnswer(datasets: RuntimeExportDatasetDefinition[]): string {
+  const enabled = datasets.filter((dataset) => dataset.enabled !== false);
+  if (enabled.length === 0) {
+    return "当前没有可直接使用的已发布数据集。";
+  }
+  return [
+    `当前可用数据集共 ${enabled.length} 个。`,
+    ...enabled.slice(0, 20).map((dataset, index) => `${index + 1}. ${buildDatasetLabel(dataset)}`),
+  ].join("\n");
+}
+
+function buildDatasetInspectionAnswer(dataset: RuntimeExportDatasetDefinition): string {
+  const enabledFields = dataset.fields
+    .filter((field) => field.enabled !== false)
+    .map((field) => `${field.label || field.name}${field.dataType ? `（${field.dataType}）` : ""}`);
+  const relationNames = (dataset.relations ?? [])
+    .filter((relation) => relation.enabled !== false)
+    .map((relation) => relation.name);
+  return [
+    `已读取数据集 ${buildDatasetLabel(dataset)}。`,
+    dataset.description ? `说明：${dataset.description}` : "",
+    enabledFields.length ? `字段：${formatReadableList(enabledFields, 20)}` : "字段信息暂未配置。",
+    relationNames.length ? `可带出的关联：${formatReadableList(relationNames, 12)}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+function formatTableSearchAnswer(params: {
+  source: RuntimeExportSourceConfig;
+  namespace?: string;
+  keyword: string;
+  tables: TableSearchResult[];
+}): string {
+  const target = params.namespace
+    ? `${getNamespaceKind(params.source)} ${params.namespace}`
+    : "当前默认范围";
+  if (params.tables.length === 0) {
+    return `在 ${buildSourceLabel(params.source)} 的 ${target} 里，暂时没有找到和“${params.keyword}”相关的表。`;
+  }
+  return [
+    `在 ${buildSourceLabel(params.source)} 的 ${target} 里，找到 ${params.tables.length} 张和“${params.keyword}”相关的候选表。`,
+    ...params.tables.slice(0, 12).map((table, index) => {
+      const name = table.schema ? `${table.schema}.${table.name}` : table.name;
+      const matchedColumns = table.matched_columns?.length
+        ? `（命中字段：${formatReadableList(table.matched_columns, 6)}）`
+        : "";
+      return `${index + 1}. ${name}${matchedColumns}`;
+    }),
+  ].join("\n");
+}
+
 async function listReadableNamespacesForSource(
   source: RuntimeExportSourceConfig,
 ): Promise<{
@@ -1975,7 +2032,9 @@ async function listReadableNamespacesForSource(
 function buildDatabaseProtocolPrompt(params: {
   userInput: string;
   originalRequest?: string;
+  protocolContext?: ExportProtocolContext;
   sources: RuntimeExportSourceConfig[];
+  datasets: RuntimeExportDatasetDefinition[];
 }): string {
   const sourceSummary = params.sources
     .map((source) => {
@@ -1991,17 +2050,35 @@ function buildDatabaseProtocolPrompt(params: {
       ].filter(Boolean).join(", ");
     })
     .join("\n");
+  const datasetSummary = params.datasets
+    .filter((dataset) => dataset.enabled !== false)
+    .slice(0, 20)
+    .map((dataset) => [
+      `- id=${dataset.id}`,
+      `name=${dataset.displayName}`,
+      `scope=${dataset.scope}`,
+      `sourceId=${dataset.sourceId}`,
+      dataset.schema ? `schema=${dataset.schema}` : "",
+      `entity=${dataset.entityName}`,
+    ].filter(Boolean).join(", "))
+    .join("\n");
 
   return [
     "你是 IM 数据库模式的只读协议路由器。",
     "你的任务不是直接回答用户，而是为运行时选择下一步只读数据库动作。",
     "只输出严格 JSON，不要输出 markdown、解释、代码块或自然语言。",
     "协议版本固定为 dbproto/v1。",
-    "允许的 action 只有：delegate、list_namespaces、namespace_exists、list_tables、describe_table、sample_table。",
-    "当用户在问“有哪些库/schema”“有没有某个库/schema”“某个库里有哪些表”“这张表有哪些字段”“看一下样本数据”时，优先输出协议。",
+    "允许的 action 只有：delegate、list_namespaces、namespace_exists、list_tables、describe_table、sample_table、search_tables、list_datasets、describe_dataset。",
+    "当用户在问“有哪些库/schema”“有没有某个库/schema”“某个库里有哪些表”“这张表有哪些字段”“看一下样本数据”“找订单相关表”“有哪些可用数据集”“这个数据集字段是什么”时，优先输出协议。",
     "当用户是在查业务数据、导出数据、筛选企业/订单、需要联表、需要真正执行导出时，输出 delegate。",
     "不能为团队共享源选择原始 schema/table 浏览动作；这些动作只能针对 personal source。",
     "如果只有一个 personal source，可以省略 sourceId；如果有多个 personal source，尽量明确 sourceId。",
+    params.protocolContext?.namespace
+      ? `最近确认的上下文：sourceId=${params.protocolContext.sourceId ?? "(unknown)"}，namespace=${params.protocolContext.namespace}。当用户说“这个库 / 当前库 / 里面”时，优先理解为这里。`
+      : "",
+    params.protocolContext?.table
+      ? `最近确认的表上下文：table=${params.protocolContext.table}。当用户说“这个表 / 这张表 / 字段 / 样本数据”时，优先理解为这里。`
+      : "",
     "协议示例：",
     '{"version":"dbproto/v1","action":"delegate","reason":"需要进一步业务查询或导出"}',
     '{"version":"dbproto/v1","action":"list_namespaces","sourceId":"personal-mysql"}',
@@ -2009,13 +2086,184 @@ function buildDatabaseProtocolPrompt(params: {
     '{"version":"dbproto/v1","action":"list_tables","sourceId":"personal-mysql","namespace":"athena_user"}',
     '{"version":"dbproto/v1","action":"describe_table","sourceId":"personal-mysql","namespace":"athena_user","table":"company"}',
     '{"version":"dbproto/v1","action":"sample_table","sourceId":"personal-mysql","namespace":"athena_user","table":"company","limit":5}',
+    '{"version":"dbproto/v1","action":"search_tables","sourceId":"personal-mysql","namespace":"athena_user","keyword":"订单","limit":5}',
+    '{"version":"dbproto/v1","action":"list_datasets"}',
+    '{"version":"dbproto/v1","action":"describe_dataset","datasetId":"team:team-1:dataset:orders"}',
     "可用数据源：",
     sourceSummary || "- 无",
+    "可用数据集：",
+    datasetSummary || "- 无",
     params.originalRequest?.trim() ? `历史上下文：${params.originalRequest.trim()}` : "",
     `当前用户消息：${params.userInput.trim()}`,
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+function extractNamespaceFromQualifiedTable(table?: string | null): string | undefined {
+  const normalized = String(table ?? "").trim();
+  if (!normalized || !normalized.includes(".")) return undefined;
+  const namespace = normalized.split(".")[0]?.trim();
+  return namespace || undefined;
+}
+
+function resolveProtocolContextSource(
+  protocolContext: ExportProtocolContext | undefined,
+  sources: RuntimeExportSourceConfig[],
+): RuntimeExportSourceConfig | null {
+  const sourceId = String(protocolContext?.sourceId ?? "").trim();
+  if (!sourceId) return null;
+  const source = sources.find((item) => item.id === sourceId || item.originSourceId === sourceId);
+  if (!source || source.scope !== "personal") {
+    return null;
+  }
+  return source;
+}
+
+function isCurrentNamespaceTableListRequest(text: string): boolean {
+  const normalized = String(text ?? "").trim().toLowerCase();
+  if (!normalized) return false;
+  const hasTableSignal = /(?:表|table|tables|视图|view|collection)/u.test(normalized);
+  const hasCurrentScopeSignal = /(?:这个库|该库|当前库|库内|schema内|database内|这里|里面|里边|其中|当前这个库|当前这个schema|这个schema)/u.test(normalized);
+  const hasListSignal = /(?:看一下|看下|查看|列出|列一下|有哪些|有什么|可用|能用|给我看)/u.test(normalized);
+  return hasTableSignal && hasListSignal && hasCurrentScopeSignal;
+}
+
+function isCurrentTableDescribeRequest(text: string): boolean {
+  const normalized = String(text ?? "").trim().toLowerCase();
+  if (!normalized) return false;
+  return /(?:这个表|该表|这张表|当前表|这张数据表)/u.test(normalized)
+    && /(?:字段|结构|列|schema|columns?|column|describe|表结构)/u.test(normalized);
+}
+
+function isCurrentTableSampleRequest(text: string): boolean {
+  const normalized = String(text ?? "").trim().toLowerCase();
+  if (!normalized) return false;
+  return /(?:这个表|该表|这张表|当前表|这张数据表)/u.test(normalized)
+    && /(?:样本|示例|预览|看看数据|看数据|数据样例|sample|rows?)/u.test(normalized);
+}
+
+function isCurrentDatasetDescribeRequest(text: string): boolean {
+  const normalized = String(text ?? "").trim().toLowerCase();
+  if (!normalized) return false;
+  return /(?:这个数据集|该数据集|当前数据集|这个集合口径|这个导出口径)/u.test(normalized)
+    && /(?:字段|结构|详情|说明|看一下|看看|是什么)/u.test(normalized);
+}
+
+async function resolveProtocolContextFollowUpAnswer(params: {
+  userInput: string;
+  protocolContext?: ExportProtocolContext;
+  sources: RuntimeExportSourceConfig[];
+  datasets?: RuntimeExportDatasetDefinition[];
+}): Promise<ExportAgentDecision | null> {
+  const datasetId = String(params.protocolContext?.datasetId ?? "").trim();
+  if (datasetId && isCurrentDatasetDescribeRequest(params.userInput)) {
+    const dataset = params.datasets?.find((item) => item.id === datasetId);
+    if (dataset) {
+      return {
+        kind: "answer",
+        answer: buildDatasetInspectionAnswer(dataset),
+        protocolContext: {
+          action: "describe_dataset",
+          datasetId: dataset.id,
+          sourceId: dataset.sourceId,
+          sourceScope: dataset.scope,
+        },
+      };
+    }
+  }
+
+  const source = resolveProtocolContextSource(params.protocolContext, params.sources);
+  if (!source) return null;
+
+  const namespace = String(
+    params.protocolContext?.namespace
+      ?? extractNamespaceFromQualifiedTable(params.protocolContext?.table)
+      ?? "",
+  ).trim();
+  const table = String(params.protocolContext?.table ?? "").trim();
+
+  if (namespace && isCurrentNamespaceTableListRequest(params.userInput)) {
+    await ensureExportSourceConnected(source);
+    const tables = await invoke<TableInfo[]>("db_list_tables", {
+      connId: source.id,
+      schema: namespace,
+    });
+    return {
+      kind: "answer",
+      answer: formatTableListAnswer({
+        source,
+        namespace,
+        tables,
+      }),
+      protocolContext: {
+        action: "list_tables",
+        sourceId: source.id,
+        sourceScope: "personal",
+        namespace,
+      },
+    };
+  }
+
+  if (table && isCurrentTableDescribeRequest(params.userInput)) {
+    await ensureExportSourceConnected(source);
+    const columns = await invoke<ColumnInfo[]>("db_describe_table", {
+      connId: source.id,
+      table,
+    });
+    return {
+      kind: "answer",
+      answer: buildTableInspectionAnswer({
+        qualifiedName: table,
+        source,
+        columns,
+      }),
+      protocolContext: {
+        action: "describe_table",
+        sourceId: source.id,
+        sourceScope: "personal",
+        ...(namespace ? { namespace } : {}),
+        table,
+      },
+    };
+  }
+
+  if (table && isCurrentTableSampleRequest(params.userInput)) {
+    await ensureExportSourceConnected(source);
+    const [columns, sample] = await Promise.all([
+      invoke<ColumnInfo[]>("db_describe_table", {
+        connId: source.id,
+        table,
+      }),
+      invoke<SampleTableResult>("db_sample_table", {
+        connId: source.id,
+        table,
+        limit: 5,
+      }),
+    ]);
+    return {
+      kind: "answer",
+      answer: [
+        buildTableInspectionAnswer({
+          qualifiedName: table,
+          source,
+          columns,
+        }),
+        sample.rows.length > 0
+          ? ["样本数据：", ...formatSampleRows({ columns: sample.columns, rows: sample.rows, maxRows: 5 })].join("\n")
+          : "当前样本为空，可能是空表，或当前条件下没有可读数据。",
+      ].filter(Boolean).join("\n"),
+      protocolContext: {
+        action: "sample_table",
+        sourceId: source.id,
+        sourceScope: "personal",
+        ...(namespace ? { namespace } : {}),
+        table,
+      },
+    };
+  }
+
+  return null;
 }
 
 function getNamespaceKind(source: RuntimeExportSourceConfig): "database" | "schema" {
@@ -2126,10 +2374,46 @@ function resolveProtocolSource(params: {
 async function executeDatabaseProtocolDirective(params: {
   directive: DatabaseProtocolDirective;
   sources: RuntimeExportSourceConfig[];
+  datasets: RuntimeExportDatasetDefinition[];
 }): Promise<ExportAgentDecision | null> {
   const { directive } = params;
   if (directive.action === "delegate") {
     return null;
+  }
+
+  if (directive.action === "list_datasets") {
+    return {
+      kind: "answer",
+      answer: formatDatasetListAnswer(params.datasets),
+      protocolContext: {
+        action: "list_datasets",
+      },
+    };
+  }
+
+  if (directive.action === "describe_dataset") {
+    const datasetTarget = String(directive.datasetId ?? directive.target ?? "").trim();
+    const dataset = params.datasets.find((item) =>
+      item.id === datasetTarget
+      || item.displayName === datasetTarget
+      || item.entityName === datasetTarget,
+    );
+    if (!dataset) {
+      return {
+        kind: "clarify",
+        question: `我没有找到数据集 ${datasetTarget}。请先让我列出当前可用数据集，或者告诉我更准确的数据集名称。`,
+      };
+    }
+    return {
+      kind: "answer",
+      answer: buildDatasetInspectionAnswer(dataset),
+      protocolContext: {
+        action: "describe_dataset",
+        datasetId: dataset.id,
+        sourceId: dataset.sourceId,
+        sourceScope: dataset.scope,
+      },
+    };
   }
 
   if (directive.action === "list_namespaces" || directive.action === "namespace_exists") {
@@ -2155,6 +2439,13 @@ async function executeDatabaseProtocolDirective(params: {
             return `${index + 1}. ${buildSourceLabel(result.source)}：可读 ${result.namespaceKind} 有 ${formatReadableList(result.namespaces)}`;
           }).join("\n"),
         ].join("\n"),
+        protocolContext: resolved.sources?.length === 1
+          ? {
+              action: "list_namespaces",
+              sourceId: resolved.sources[0].id,
+              sourceScope: "personal",
+            }
+          : undefined,
       };
     }
 
@@ -2178,6 +2469,14 @@ async function executeDatabaseProtocolDirective(params: {
             `${item.index + 1}. ${buildSourceLabel(item.result.source)}：包含 ${item.result.namespaceKind} ${item.namespace}`,
           ).join("\n"),
         ].join("\n"),
+        protocolContext: matched.length === 1
+          ? {
+              action: "namespace_exists",
+              sourceId: matched[0].result.source.id,
+              sourceScope: "personal",
+              namespace: String(matched[0].namespace),
+            }
+          : undefined,
       };
     }
 
@@ -2217,6 +2516,50 @@ async function executeDatabaseProtocolDirective(params: {
         namespace: namespace || undefined,
         tables,
       }),
+      protocolContext: {
+        action: "list_tables",
+        sourceId: source.id,
+        sourceScope: "personal",
+        ...(namespace ? { namespace } : {}),
+      },
+    };
+  }
+
+  if (directive.action === "search_tables") {
+    const keyword = String(directive.keyword ?? "").trim();
+    const namespace = String(directive.namespace ?? "").trim();
+    if (source.db_type === "mysql" && !namespace && !source.database?.trim()) {
+      return {
+        kind: "clarify",
+        question: "当前这个 MySQL 数据源下有多个库，请先告诉我你想在哪个库里搜相关表，或者先让我列出可读库。",
+      };
+    }
+    const searchKeywords = expandBusinessSearchKeywords(keyword);
+    const searchResults = await Promise.all(
+      searchKeywords.map((searchKeyword) =>
+        invoke<TableSearchResult[]>("db_search_tables", {
+          connId: source.id,
+          keyword: searchKeyword,
+          schema: namespace || null,
+          limit: directive.limit ?? 8,
+        })),
+    );
+    const tables = mergeTableSearchResults(searchResults.flat()).slice(0, directive.limit ?? 8);
+    return {
+      kind: "answer",
+      answer: formatTableSearchAnswer({
+        source,
+        ...(namespace ? { namespace } : {}),
+        keyword,
+        tables,
+      }),
+      protocolContext: {
+        action: "search_tables",
+        sourceId: source.id,
+        sourceScope: "personal",
+        ...(namespace ? { namespace } : {}),
+        keyword,
+      },
     };
   }
 
@@ -2247,6 +2590,15 @@ async function executeDatabaseProtocolDirective(params: {
         source,
         columns,
       }),
+      protocolContext: {
+        action: "describe_table",
+        sourceId: source.id,
+        sourceScope: "personal",
+        ...(extractNamespaceFromQualifiedTable(qualifiedTable)
+          ? { namespace: extractNamespaceFromQualifiedTable(qualifiedTable) }
+          : {}),
+        table: qualifiedTable,
+      },
     };
   }
 
@@ -2275,6 +2627,15 @@ async function executeDatabaseProtocolDirective(params: {
           ? ["样本数据：", ...formatSampleRows({ columns: sample.columns, rows: sample.rows, maxRows: limit })].join("\n")
           : "当前样本为空，可能是空表，或当前条件下没有可读数据。",
       ].filter(Boolean).join("\n"),
+      protocolContext: {
+        action: "sample_table",
+        sourceId: source.id,
+        sourceScope: "personal",
+        ...(extractNamespaceFromQualifiedTable(qualifiedTable)
+          ? { namespace: extractNamespaceFromQualifiedTable(qualifiedTable) }
+          : {}),
+        table: qualifiedTable,
+      },
     };
   }
 
@@ -2284,7 +2645,9 @@ async function executeDatabaseProtocolDirective(params: {
 async function runDatabaseProtocolRouter(params: {
   userInput: string;
   originalRequest?: string;
+  protocolContext?: ExportProtocolContext;
   sources: RuntimeExportSourceConfig[];
+  datasets: RuntimeExportDatasetDefinition[];
 }): Promise<ExportAgentDecision | null> {
   const ai = getMToolsAI("agent");
   const result = await ai.chat({
@@ -2294,7 +2657,9 @@ async function runDatabaseProtocolRouter(params: {
         content: buildDatabaseProtocolPrompt({
           userInput: params.userInput,
           originalRequest: params.originalRequest,
+          protocolContext: params.protocolContext,
           sources: params.sources,
+          datasets: params.datasets,
         }),
       },
     ],
@@ -2318,6 +2683,7 @@ async function runDatabaseProtocolRouter(params: {
   return executeDatabaseProtocolDirective({
     directive,
     sources: params.sources,
+    datasets: params.datasets,
   });
 }
 
@@ -2326,7 +2692,18 @@ export async function resolveExportMetadataAnswer(params: {
   sources: RuntimeExportSourceConfig[];
   datasets: RuntimeExportDatasetDefinition[];
   originalRequest?: string;
+  protocolContext?: ExportProtocolContext;
 }): Promise<ExportAgentDecision | null> {
+  const protocolContextAnswer = await resolveProtocolContextFollowUpAnswer({
+    userInput: params.userInput,
+    protocolContext: params.protocolContext,
+    sources: params.sources,
+    datasets: params.datasets,
+  });
+  if (protocolContextAnswer) {
+    return protocolContextAnswer;
+  }
+
   const namespaceExistenceTarget = extractNamespaceExistenceTarget({
     userInput: params.userInput,
     originalRequest: params.originalRequest,
@@ -2818,12 +3195,14 @@ async function resolveRuleFallbackExportDecision(params: {
   sources: RuntimeExportSourceConfig[];
   datasets: RuntimeExportDatasetDefinition[];
   originalRequest?: string;
+  protocolContext?: ExportProtocolContext;
 }): Promise<ExportAgentDecision | null> {
   const metadataAnswer = await resolveExportMetadataAnswer({
     userInput: params.userInput,
     sources: params.sources,
     datasets: params.datasets,
     originalRequest: params.originalRequest,
+    protocolContext: params.protocolContext,
   });
   if (metadataAnswer) {
     log.info("Export request resolved by metadata fallback", {
@@ -2865,6 +3244,7 @@ async function resolveRuleFallbackExportDecision(params: {
 export async function runExportAgent(params: {
   userInput: string;
   originalRequest?: string;
+  protocolContext?: ExportProtocolContext;
 }): Promise<ExportAgentDecision> {
   const { sources, datasets } = await loadRuntimeExportCatalog();
   if (sources.length === 0 && datasets.length === 0) {
@@ -2878,7 +3258,9 @@ export async function runExportAgent(params: {
     const protocolDecision = await runDatabaseProtocolRouter({
       userInput: params.userInput,
       originalRequest: params.originalRequest,
+      protocolContext: params.protocolContext,
       sources,
+      datasets,
     });
     if (protocolDecision) {
       log.info("Export request resolved by dbproto router", {
@@ -2923,6 +3305,7 @@ export async function runExportAgent(params: {
     sources,
     datasets,
     originalRequest: params.originalRequest,
+    protocolContext: params.protocolContext,
   });
   if (fallbackDecision) {
     return fallbackDecision;

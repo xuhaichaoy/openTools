@@ -16,8 +16,10 @@ import {
   getManualActiveSkillIds,
   setManualActiveSkillIds,
   importSkillFromMd as importSkillFromMdPersist,
+  importMarketplaceSkillFromMd,
   exportSkillToMd,
 } from "@/core/agent/skills/skill-persistence";
+import type { SkillMarketplaceMeta } from "@/core/agent/skills/types";
 
 interface SkillStoreState {
   skills: AgentSkill[];
@@ -36,6 +38,10 @@ interface SkillStoreState {
   clearManualActive: () => void;
 
   importFromMd: (content: string) => Promise<AgentSkill | null>;
+  importMarketplaceFromMd: (params: {
+    content: string;
+    marketplaceMeta: SkillMarketplaceMeta;
+  }) => Promise<AgentSkill | null>;
   exportToMd: (id: string) => string | null;
 }
 
@@ -136,6 +142,15 @@ export const useSkillStore = create<SkillStoreState>((set, get) => ({
 
   importFromMd: async (content) => {
     const skill = await importSkillFromMdPersist(content);
+    if (skill) await get().reload();
+    return skill;
+  },
+
+  importMarketplaceFromMd: async ({ content, marketplaceMeta }) => {
+    const skill = await importMarketplaceSkillFromMd({
+      content,
+      marketplaceMeta,
+    });
     if (skill) await get().reload();
     return skill;
   },

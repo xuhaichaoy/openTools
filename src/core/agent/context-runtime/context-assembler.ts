@@ -101,7 +101,7 @@ export function buildCurrentTurnFileInsights(
 }
 
 function joinPromptBlocks(
-  blocks: readonly Array<string | null | undefined>,
+  blocks: ReadonlyArray<string | null | undefined>,
 ): string | undefined {
   const joined = blocks
     .filter((block): block is string => typeof block === "string" && block.trim().length > 0)

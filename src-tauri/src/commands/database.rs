@@ -6,12 +6,13 @@ use mongodb::{
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 use sqlx::{
-    mysql::{MySqlPool, MySqlPoolOptions, MySqlRow},
+    mysql::{MySqlConnectOptions, MySqlPool, MySqlPoolOptions, MySqlRow, MySqlSslMode},
     postgres::{PgPool, PgPoolOptions, PgRow},
     Column, Executor, Row, TypeInfo, ValueRef,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use tauri::{Manager, State};
 
@@ -277,6 +278,55 @@ fn build_connection_string(config: &DatabaseConfig) -> Result<String, String> {
             ))
         }
         other => Err(format!("Unsupported database type: {}", other)),
+    }
+}
+
+fn build_mysql_connect_options(
+    config: &DatabaseConfig,
+    ssl_mode: MySqlSslMode,
+) -> Result<MySqlConnectOptions, String> {
+    let connection_string = build_connection_string(config)?;
+    let options = MySqlConnectOptions::from_str(&connection_string)
+        .map_err(|e| format!("MySQL options parse failed: {}", e))?;
+    Ok(options.ssl_mode(ssl_mode))
+}
+
+fn should_retry_mysql_without_tls(error: &sqlx::Error) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("expected to read 4 bytes, got 0 bytes at eof")
+        || message.contains("unexpected eof")
+        || message.contains("connection reset by peer")
+}
+
+async fn connect_mysql_pool_with_fallback(
+    config: &DatabaseConfig,
+    max_connections: u32,
+    error_prefix: &str,
+) -> Result<MySqlPool, String> {
+    let preferred_options = build_mysql_connect_options(config, MySqlSslMode::Preferred)?;
+    match MySqlPoolOptions::new()
+        .max_connections(max_connections)
+        .connect_with(preferred_options)
+        .await
+    {
+        Ok(pool) => Ok(pool),
+        Err(primary_error) => {
+            if !should_retry_mysql_without_tls(&primary_error) {
+                return Err(format!("{}: {}", error_prefix, primary_error));
+            }
+
+            let disabled_options = build_mysql_connect_options(config, MySqlSslMode::Disabled)?;
+            MySqlPoolOptions::new()
+                .max_connections(max_connections)
+                .connect_with(disabled_options)
+                .await
+                .map_err(|secondary_error| {
+                    format!(
+                        "{}: {} (retry with ssl-mode=DISABLED also failed: {})",
+                        error_prefix, primary_error, secondary_error
+                    )
+                })
+        }
     }
 }
 
@@ -690,11 +740,7 @@ pub async fn db_connect(
             DbConnection::Postgres(pool)
         }
         "mysql" => {
-            let pool = MySqlPoolOptions::new()
-                .max_connections(5)
-                .connect(&build_connection_string(&config)?)
-                .await
-                .map_err(|e| format!("MySQL connect failed: {}", e))?;
+            let pool = connect_mysql_pool_with_fallback(&config, 5, "MySQL connect failed").await?;
             DbConnection::MySql(pool)
         }
         "mongodb" => {
@@ -760,11 +806,7 @@ pub async fn db_test_connection(config: DatabaseConfig) -> Result<bool, String> 
             Ok(true)
         }
         "mysql" => {
-            let pool = MySqlPoolOptions::new()
-                .max_connections(1)
-                .connect(&build_connection_string(&config)?)
-                .await
-                .map_err(|e| format!("MySQL test failed: {}", e))?;
+            let pool = connect_mysql_pool_with_fallback(&config, 1, "MySQL test failed").await?;
             sqlx::query("SELECT 1")
                 .execute(&pool)
                 .await

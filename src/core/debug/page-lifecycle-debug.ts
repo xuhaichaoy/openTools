@@ -1,11 +1,12 @@
 import { createLogger } from "@/core/logger";
 
 const log = createLogger("PageDebug");
+type PageDebugGlobal = typeof globalThis & {
+  __MTOOLS_PAGE_DEBUG_INSTALLED__?: boolean;
+};
 
-declare global {
-  interface globalThis {
-    __MTOOLS_PAGE_DEBUG_INSTALLED__?: boolean;
-  }
+function getPageDebugGlobal(): PageDebugGlobal {
+  return globalThis as PageDebugGlobal;
 }
 
 function nextBootCount(): number {
@@ -29,9 +30,10 @@ function summarizeNavigationType(): string {
 }
 
 export function installPageLifecycleDebug(): void {
+  const debugGlobal = getPageDebugGlobal();
   if (!import.meta.env.DEV) return;
-  if (globalThis.__MTOOLS_PAGE_DEBUG_INSTALLED__) return;
-  globalThis.__MTOOLS_PAGE_DEBUG_INSTALLED__ = true;
+  if (debugGlobal.__MTOOLS_PAGE_DEBUG_INSTALLED__) return;
+  debugGlobal.__MTOOLS_PAGE_DEBUG_INSTALLED__ = true;
 
   const bootCount = nextBootCount();
   const bootId = `${bootCount}-${Date.now().toString(36)}`;

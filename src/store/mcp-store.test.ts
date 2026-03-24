@@ -98,4 +98,49 @@ describe("mcp-store tool naming", () => {
       result: "天气截图如下\nMEDIA:/tmp/weather.png",
     });
   });
+
+  it("starts stdio MCP with initialize request plus initialized notification", async () => {
+    useMcpStore.setState((state) => ({
+      ...state,
+      servers: [
+        {
+          id: "mcp-chrome",
+          name: "Chrome DevTools MCP",
+          transport: "stdio",
+          command: "npx",
+          args: ["-y", "chrome-devtools-mcp@latest"],
+          enabled: true,
+        },
+      ],
+      serverStatus: {},
+      serverTools: {},
+      serverResources: {},
+      serverPrompts: {},
+    }));
+
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "start_mcp_stdio_server") {
+        return "Server mcp-chrome started";
+      }
+      if (command === "send_mcp_message") {
+        const parsed = JSON.parse(String((args as { message: string }).message));
+        expect(parsed.method).toBeTypeOf("string");
+        return JSON.stringify({ result: { tools: [] } });
+      }
+      if (command === "send_mcp_notification") {
+        const parsed = JSON.parse(String((args as { message: string }).message));
+        expect(parsed.id).toBeUndefined();
+        expect(parsed.method).toBe("notifications/initialized");
+        return null;
+      }
+      return null;
+    });
+
+    await useMcpStore.getState().startServer("mcp-chrome");
+
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("send_mcp_notification", {
+      serverId: "mcp-chrome",
+      message: expect.stringContaining("\"method\":\"notifications/initialized\""),
+    });
+  });
 });

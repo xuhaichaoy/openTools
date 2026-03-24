@@ -199,7 +199,6 @@ export const useClusterStore = create<ClusterState>()(
           source: sourceHandoff,
           sessionIdentity: {
             surface: "ai_center",
-            sessionKey: id,
             sessionKind: "workflow_session",
             workspaceId: workspaceRoot,
             runtimeSessionId: id,
@@ -232,7 +231,6 @@ export const useClusterStore = create<ClusterState>()(
             source: session.sourceHandoff,
             sessionIdentity: {
               surface: "ai_center",
-              sessionKey: id,
               sessionKind: "workflow_session",
               workspaceId: session.workspaceRoot,
               runtimeSessionId: id,

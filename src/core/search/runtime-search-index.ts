@@ -117,13 +117,20 @@ function openMarketPluginBySlug(
 }
 
 export class RuntimeSearchIndex {
+  private readonly options: {
+    builtinPlugins: MToolsPlugin[];
+    externalPlugins: PluginInstance[];
+    bookmarks: Bookmark[];
+    pushView: (viewId: string) => void;
+    handleDirectColorPicker: () => Promise<void>;
+  };
   private builtinEntries: IndexedEntry<BuiltinPayload>[];
   private externalPluginEntries: IndexedEntry<ExternalPluginPayload>[];
   private bookmarkEntries: IndexedEntry<BookmarkPayload>[];
   private shortcutEntries: IndexedEntry<ShortcutPayload>[];
 
   constructor(
-    private readonly options: {
+    options: {
       builtinPlugins: MToolsPlugin[];
       externalPlugins: PluginInstance[];
       bookmarks: Bookmark[];
@@ -131,6 +138,7 @@ export class RuntimeSearchIndex {
       handleDirectColorPicker: () => Promise<void>;
     },
   ) {
+    this.options = options;
     this.builtinEntries = options.builtinPlugins.map((plugin) => ({
       fields: [plugin.name, plugin.description, ...plugin.keywords, plugin.id].map(preparePinyinField),
       payload: { plugin },

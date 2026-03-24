@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::Mutex;
 use tauri::{Manager, State};
 
@@ -63,7 +63,7 @@ pub struct McpServerStatus {
 // ── State Manager ──
 
 pub struct McpServerManager {
-    pub processes: Mutex<HashMap<String, Child>>,
+    pub processes: Mutex<HashMap<String, ManagedMcpProcess>>,
 }
 
 impl McpServerManager {
@@ -72,6 +72,12 @@ impl McpServerManager {
             processes: Mutex::new(HashMap::new()),
         }
     }
+}
+
+pub struct ManagedMcpProcess {
+    pub child: Child,
+    pub stdin: ChildStdin,
+    pub stdout: BufReader<ChildStdout>,
 }
 
 // ── Config Persistence ──
@@ -229,6 +235,77 @@ fn find_npx_path() -> Option<String> {
     None
 }
 
+fn build_mcp_stdio_frame(message: &str) -> String {
+    format!(
+        "Content-Length: {}\r\n\r\n{}",
+        message.as_bytes().len(),
+        message
+    )
+}
+
+fn read_mcp_message_from_reader<R: BufRead + Read>(stdout: &mut R) -> Result<String, String> {
+    let mut content_length: Option<usize> = None;
+    let mut saw_header = false;
+    let mut noise_lines: Vec<String> = Vec::new();
+
+    loop {
+        let mut line = String::new();
+        let bytes_read = stdout
+            .read_line(&mut line)
+            .map_err(|e| format!("Failed to read MCP header: {}", e))?;
+
+        if bytes_read == 0 {
+            if let Some(raw_json) = noise_lines
+                .iter()
+                .rev()
+                .map(|line| line.trim())
+                .find(|line| line.starts_with('{') || line.starts_with('['))
+            {
+                return Ok(raw_json.to_string());
+            }
+            return Ok(String::new());
+        }
+
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if saw_header {
+                break;
+            }
+            continue;
+        }
+
+        if !saw_header && (trimmed.starts_with('{') || trimmed.starts_with('[')) {
+            return Ok(trimmed.to_string());
+        }
+
+        if let Some(value) = trimmed
+            .strip_prefix("Content-Length:")
+            .or_else(|| trimmed.strip_prefix("content-length:"))
+        {
+            let parsed = value
+                .trim()
+                .parse::<usize>()
+                .map_err(|e| format!("Invalid MCP Content-Length: {}", e))?;
+            content_length = Some(parsed);
+            saw_header = true;
+            continue;
+        }
+
+        if saw_header {
+            continue;
+        }
+
+        noise_lines.push(trimmed.to_string());
+    }
+
+    let length = content_length.ok_or("Missing MCP Content-Length header")?;
+    let mut body = vec![0u8; length];
+    stdout
+        .read_exact(&mut body)
+        .map_err(|e| format!("Failed to read MCP body: {}", e))?;
+    String::from_utf8(body).map_err(|e| format!("Invalid UTF-8 in MCP response: {}", e))
+}
+
 // ── Stdio Transport ──
 
 #[tauri::command]
@@ -249,8 +326,8 @@ pub async fn start_mcp_stdio_server(
             .processes
             .lock()
             .map_err(|e| format!("Lock poisoned: {}", e))?;
-        if let Some(mut old_child) = processes.remove(&server_id) {
-            let _ = old_child.kill();
+        if let Some(mut old_process) = processes.remove(&server_id) {
+            let _ = old_process.child.kill();
             println!("Stopped existing MCP server: {}", server_id);
         }
     }
@@ -321,12 +398,42 @@ pub async fn start_mcp_stdio_server(
         .spawn()
         .map_err(|e| format!("Failed to spawn process: {}", e))?;
 
+    let mut child = child;
+    let stdin = child.stdin.take().ok_or("Failed to capture stdin")?;
+    let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
+    if let Some(stderr) = child.stderr.take() {
+        let server_id_for_log = server_id.clone();
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stderr);
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            eprintln!("[mcp:{}] {}", server_id_for_log, trimmed);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+
     {
         let mut processes = manager
             .processes
             .lock()
             .map_err(|e| format!("Lock poisoned: {}", e))?;
-        processes.insert(server_id.clone(), child);
+        processes.insert(
+            server_id.clone(),
+            ManagedMcpProcess {
+                child,
+                stdin,
+                stdout: BufReader::new(stdout),
+            },
+        );
     }
 
     Ok(format!("Server {} started", server_id))
@@ -344,8 +451,9 @@ pub async fn stop_mcp_server(
         .lock()
         .map_err(|e| format!("Lock poisoned: {}", e))?;
 
-    if let Some(mut child) = processes.remove(&server_id) {
-        child
+    if let Some(mut process) = processes.remove(&server_id) {
+        process
+            .child
             .kill()
             .map_err(|e| format!("Failed to kill process: {}", e))?;
         Ok(())
@@ -367,43 +475,38 @@ pub async fn send_mcp_message(
         .lock()
         .map_err(|e| format!("Lock poisoned: {}", e))?;
 
-    if let Some(child) = processes.get_mut(&server_id) {
-        let stdin = child.stdin.as_mut().ok_or("Failed to get stdin")?;
-        let stdout = child.stdout.as_mut().ok_or("Failed to get stdout")?;
-
-        writeln!(stdin, "{}", message).map_err(|e| format!("Failed to write to stdin: {}", e))?;
-        stdin
+    if let Some(process) = processes.get_mut(&server_id) {
+        write!(process.stdin, "{}", build_mcp_stdio_frame(&message))
+            .map_err(|e| format!("Failed to write to stdin: {}", e))?;
+        process
+            .stdin
             .flush()
             .map_err(|e| format!("Failed to flush stdin: {}", e))?;
+        read_mcp_message_from_reader(&mut process.stdout)
+    } else {
+        Err(format!("Server {} not found", server_id))
+    }
+}
 
-        let mut reader = BufReader::new(stdout);
-        let mut lines = Vec::new();
+#[tauri::command]
+pub async fn send_mcp_notification(
+    server_id: String,
+    message: String,
+    manager: State<'_, McpServerManager>,
+) -> Result<(), String> {
+    let mut processes = manager
+        .processes
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {}", e))?;
 
-        loop {
-            let mut line = String::new();
-            reader
-                .read_line(&mut line)
-                .map_err(|e| format!("Failed to read from stdout: {}", e))?;
-
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                break;
-            }
-            if lines.is_empty() && trimmed.starts_with('{') {
-                return Ok(trimmed.to_string());
-            }
-            lines.push(line);
-        }
-
-        for line in &lines {
-            let trimmed = line.trim();
-            if trimmed.starts_with("data: ") {
-                let json_data = trimmed.strip_prefix("data: ").unwrap_or("");
-                return Ok(json_data.to_string());
-            }
-        }
-
-        Ok(lines.join("\n").trim().to_string())
+    if let Some(process) = processes.get_mut(&server_id) {
+        write!(process.stdin, "{}", build_mcp_stdio_frame(&message))
+            .map_err(|e| format!("Failed to write notification to stdin: {}", e))?;
+        process
+            .stdin
+            .flush()
+            .map_err(|e| format!("Failed to flush notification stdin: {}", e))?;
+        Ok(())
     } else {
         Err(format!("Server {} not found", server_id))
     }
@@ -441,4 +544,34 @@ pub async fn mcp_send_sse_message(
     }
 
     Ok(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_mcp_stdio_frame, read_mcp_message_from_reader};
+    use std::io::Cursor;
+
+    #[test]
+    fn builds_standard_mcp_stdio_frame() {
+        let frame = build_mcp_stdio_frame("{\"jsonrpc\":\"2.0\"}");
+        assert!(frame.starts_with("Content-Length: 17\r\n\r\n"));
+        assert!(frame.ends_with("{\"jsonrpc\":\"2.0\"}"));
+    }
+
+    #[test]
+    fn reads_content_length_framed_message() {
+        let payload = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}";
+        let raw = format!("Content-Length: {}\r\n\r\n{}", payload.len(), payload);
+        let mut reader = Cursor::new(raw.into_bytes());
+        let parsed = read_mcp_message_from_reader(&mut reader).unwrap();
+        assert_eq!(parsed, payload);
+    }
+
+    #[test]
+    fn reads_legacy_raw_json_line() {
+        let payload = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n";
+        let mut reader = Cursor::new(payload.as_bytes());
+        let parsed = read_mcp_message_from_reader(&mut reader).unwrap();
+        assert_eq!(parsed, payload.trim());
+    }
 }

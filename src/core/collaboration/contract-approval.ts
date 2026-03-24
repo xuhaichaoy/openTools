@@ -1,12 +1,14 @@
 import {
   getRoleBoundaryPolicyProfile,
   normalizeExecutionPolicy,
-  type ToolApprovalDecision,
-  type ToolApprovalLayer,
-  type ToolApprovalRisk,
-  type ToolApprovalTrustMode,
 } from "@/core/agent/actor/execution-policy";
 import type { ExecutionPolicy, SpawnedTaskRoleBoundary } from "@/core/agent/actor/types";
+import type {
+  ToolApprovalDecision,
+  ToolApprovalLayer,
+  ToolApprovalRisk,
+  ToolApprovalTrustMode,
+} from "@/core/agent/actor/tool-approval-policy";
 import { getExecutionStrategyLabel } from "./presentation";
 import type { ExecutionContract, ExecutionContractDraft } from "./types";
 

@@ -80,9 +80,9 @@ import {
   sealExecutionContract,
 } from "@/core/collaboration/execution-contract";
 import type {
+  CollaborationActorRosterEntry,
   CollaborationDispatchInput,
   CollaborationDispatchResult,
-  CollaborationRosterActor,
   CollaborationPresentationState,
   CollaborationSessionSnapshot,
   ExecutionContract,
@@ -353,16 +353,15 @@ function buildSessionSnapshot(
   };
 }
 
-function buildCollaborationActorRoster(actors: readonly ActorSnapshot[]): CollaborationRosterActor[] {
+function buildCollaborationActorRoster(
+  actors: readonly ActorSnapshot[],
+): CollaborationActorRosterEntry[] {
   return actors.map((actor) => ({
-    id: actor.id,
+    actorId: actor.id,
     roleName: actor.roleName,
-    capabilities: actor.capabilities,
+    capabilities: actor.capabilities?.tags,
     executionPolicy: actor.normalizedExecutionPolicy,
     workspace: actor.workspace,
-    toolPolicy: actor.toolPolicy,
-    thinkingLevel: actor.thinkingLevel,
-    middlewareOverrides: actor.middlewareOverrides,
   }));
 }
 
@@ -842,7 +841,6 @@ function syncDialogRuntimeSession(
     updatedAt,
     sessionIdentity: {
       surface: "local_dialog",
-      sessionKey: sessionId,
       sessionKind: "collaboration_room",
       workspaceId: workspaceRoot,
       runtimeSessionId: sessionId,
@@ -968,16 +966,15 @@ function syncDialogRuntimeState(params: {
       || session.status === "waiting",
     ).length
     : params.spawnedTasks?.filter((task) =>
-      task.status === "pending"
-      || task.status === "running"
+      task.status === "running"
       || (task.mode === "session" && task.sessionOpen),
     ).length ?? 0;
   if (controlPlaneSessionId) {
     useSessionControlPlaneStore.getState().patchSessionContinuityState(controlPlaneSessionId, {
       source: "local_dialog",
       updatedAt: params.updatedAt ?? Date.now(),
-      executionStrategy: params.collaborationSnapshot?.presentationState.executionStrategy,
-      contractState: params.collaborationSnapshot?.presentationState.contractState,
+      executionStrategy: params.collaborationSnapshot?.presentationState.executionStrategy ?? undefined,
+      contractState: params.collaborationSnapshot?.presentationState.contractState ?? undefined,
       pendingInteractionCount: params.collaborationSnapshot?.presentationState.pendingInteractionCount
         ?? params.pendingUserInteractions?.length,
       queuedFollowUpCount: params.collaborationSnapshot?.presentationState.queuedFollowUpCount
@@ -1167,7 +1164,6 @@ function syncDialogSpawnedRuntimeSessions(
       updatedAt,
       sessionIdentity: {
         surface: "child_session",
-        sessionKey: externalSessionId,
         sessionKind: kind,
         parentSessionId: rootRuntime?.identity?.id,
         runtimeSessionId: record.runId,
@@ -1292,7 +1288,7 @@ async function saveSessionSnapshot(system: ActorSystem): Promise<void> {
       systemPrompt: actor.systemPrompt,
       capabilities: actor.capabilities,
       toolPolicy: actor.toolPolicy,
-      executionPolicy: actor.normalizedExecutionPolicy,
+      executionPolicy: actor.executionPolicy,
       workspace: actor.workspace,
       thinkingLevel: actor.thinkingLevel,
       middlewareOverrides: actor.middlewareOverrides,
@@ -1681,7 +1677,6 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
               updatedAt: Date.now(),
               sessionIdentity: {
                 surface: "local_dialog",
-                sessionKey: detail.sessionId,
                 sessionKind: "collaboration_room",
                 runtimeSessionId: detail.sessionId,
               },

@@ -846,7 +846,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       source: sourceHandoff,
       sessionIdentity: {
         surface: "ai_center",
-        sessionKey: id,
         sessionKind: "task_session",
         runtimeSessionId: id,
       },
@@ -939,7 +938,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         source: session?.sourceHandoff,
         sessionIdentity: {
           surface: "ai_center",
-          sessionKey: sessionId,
           sessionKind: "task_session",
           runtimeSessionId: sessionId,
         },
@@ -1069,7 +1067,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       source: forked.sourceHandoff,
       sessionIdentity: {
         surface: "ai_center",
-        sessionKey: forked.id,
         sessionKind: "task_session",
         runtimeSessionId: forked.id,
       },
@@ -1197,7 +1194,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       updatedAt: now,
       sessionIdentity: {
         surface: "ai_center",
-        sessionKey: id,
         sessionKind: "task_session",
         runtimeSessionId: id,
       },

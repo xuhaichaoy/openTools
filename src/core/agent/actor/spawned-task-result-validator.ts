@@ -70,7 +70,9 @@ function claimsScheduleMutationSuccess(result: string): boolean {
 function hasScheduleMutationToolEvidence(steps: readonly AgentStep[] | undefined): boolean {
   if (!steps?.length) return false;
   return steps.some(
-    (step) => step.type === "action" && Boolean(step.toolName) && SCHEDULE_MUTATION_TOOL_NAMES.has(step.toolName),
+    (step) => step.type === "action"
+      && typeof step.toolName === "string"
+      && SCHEDULE_MUTATION_TOOL_NAMES.has(step.toolName),
   );
 }
 

@@ -102,8 +102,7 @@ function buildCurrentCheckpointLines(params: {
 }): string[] {
   const candidateTasks = [...params.spawnedTasks]
     .filter((task) =>
-      task.status === "pending"
-      || task.status === "running"
+      task.status === "running"
       || (task.mode === "session" && task.sessionOpen),
     )
     .sort((left, right) => getSpawnedTaskUpdatedAt(right) - getSpawnedTaskUpdatedAt(left))

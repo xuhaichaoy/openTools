@@ -177,7 +177,6 @@ function syncAskRuntimeConversation(conversation: Conversation): void {
     source: conversation.sourceHandoff,
     sessionIdentity: {
       surface: "ai_center",
-      sessionKey: conversation.id,
       sessionKind: "conversation",
       workspaceId: conversation.workspaceRoot,
       runtimeSessionId: conversation.id,

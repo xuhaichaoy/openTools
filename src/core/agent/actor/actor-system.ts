@@ -1837,7 +1837,7 @@ export class ActorSystem {
     const timeoutMs = (opts?.timeoutSeconds ?? DEFAULT_SPAWN_TIMEOUT_MS / 1000) * 1000;
     const cleanup = opts?.cleanup ?? (opts?.createIfMissing && mode === "run" ? "delete" : "keep");
     const expectsCompletionMessage = opts?.expectsCompletionMessage ?? true;
-    const rootRunId = parentRecord?.rootRunId ?? parentRecord?.runId ?? runId;
+    const rootRunId = runId;
     const effectiveContext = opts?.context ?? plannedSpawn?.context;
     const roleBoundaryInstruction = buildSpawnTaskRoleBoundaryInstruction(resolvedRoleBoundary);
     const executionHint = buildSpawnTaskExecutionHint(resolvedTask);
@@ -1858,7 +1858,7 @@ export class ActorSystem {
       contractId: activeContract?.contractId,
       plannedDelegationId: plannedSpawn?.id,
       dispatchSource: plannedSpawn ? "contract_suggestion" : "manual",
-      parentRunId: parentRecord?.runId,
+      parentRunId: undefined,
       rootRunId,
       roleBoundary: resolvedRoleBoundary,
       task: resolvedTask,
@@ -3104,9 +3104,10 @@ export class ActorSystem {
   /** 恢复子任务记录（用于 session 恢复后 UI 显示） */
   restoreSpawnedTasks(records: Array<Omit<SpawnedTaskRecord, "timeoutId">>): void {
     for (const record of records) {
+      const { dispatchSource = "manual", ...restoredRecord } = record;
       this.spawnedTasks.set(record.runId, {
-        dispatchSource: "manual",
-        ...record,
+        ...restoredRecord,
+        dispatchSource,
       });
     }
     log("Restored", records.length, "spawned task records");

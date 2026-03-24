@@ -35,6 +35,12 @@ const CHUNK_TARGETS = {
     "/src/components/plugins/PluginMarket",
     "/src/plugins/builtin/ManagementCenter/",
   ],
+  "database-client": [
+    "/src/plugins/builtin/DatabaseClient/",
+    "/src/store/database-store.ts",
+    "/src/store/data-export-dataset-store.ts",
+    "/src/core/data-export/",
+  ],
   "tauri-runtime": ["/node_modules/@tauri-apps/"],
 } as const;
 

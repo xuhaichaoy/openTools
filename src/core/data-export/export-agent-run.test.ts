@@ -43,7 +43,7 @@ vi.mock("@/plugins/builtin/SmartAgent/core/react-agent", () => ({
 
 import { invoke } from "@tauri-apps/api/core";
 import { runExportAgent } from "./export-agent";
-import type { RuntimeExportSourceConfig } from "./types";
+import type { RuntimeExportDatasetDefinition, RuntimeExportSourceConfig } from "./types";
 
 describe("runExportAgent model-first routing", () => {
   const personalMysqlSource: RuntimeExportSourceConfig = {
@@ -53,6 +53,25 @@ describe("runExportAgent model-first routing", () => {
     originSourceId: "personal-mysql",
     name: "个人 MySQL",
     db_type: "mysql",
+  };
+  const teamOrdersDataset: RuntimeExportDatasetDefinition = {
+    id: "team:team-1:dataset:orders",
+    scope: "team",
+    teamId: "team-1",
+    originDatasetId: "orders",
+    sourceId: "team:team-1:source:analytics",
+    originSourceId: "analytics",
+    entityName: "orders_view",
+    entityType: "view",
+    schema: "analytics",
+    displayName: "订单明细",
+    description: "订单事实数据集",
+    defaultFields: ["order_id", "amount"],
+    fields: [
+      { name: "order_id", label: "订单号", enabled: true },
+      { name: "amount", label: "支付金额", dataType: "number", enabled: true },
+    ],
+    enabled: true,
   };
 
   beforeEach(() => {
@@ -87,6 +106,12 @@ describe("runExportAgent model-first routing", () => {
     expect(decision).toEqual({
       kind: "answer",
       answer: expect.stringContaining("有，当前可读取的库 / schema 里包含 athena_user。"),
+      protocolContext: {
+        action: "namespace_exists",
+        sourceId: "personal-mysql",
+        sourceScope: "personal",
+        namespace: "athena_user",
+      },
     });
     expect(hoisted.agentRun).not.toHaveBeenCalled();
     expect(invoke).toHaveBeenCalledWith("db_connect", { config: personalMysqlSource });
@@ -115,6 +140,12 @@ describe("runExportAgent model-first routing", () => {
     expect(decision).toEqual({
       kind: "answer",
       answer: expect.stringContaining("company、company_user"),
+      protocolContext: {
+        action: "list_tables",
+        sourceId: "personal-mysql",
+        sourceScope: "personal",
+        namespace: "athena_user",
+      },
     });
     expect(hoisted.agentRun).not.toHaveBeenCalled();
     expect(invoke).toHaveBeenCalledWith("db_list_tables", {
@@ -153,6 +184,13 @@ describe("runExportAgent model-first routing", () => {
     expect(decision).toEqual({
       kind: "answer",
       answer: expect.stringContaining("样本数据："),
+      protocolContext: {
+        action: "sample_table",
+        sourceId: "personal-mysql",
+        sourceScope: "personal",
+        namespace: "athena_user",
+        table: "athena_user.company",
+      },
     });
     if (!decision || decision.kind !== "answer") {
       throw new Error("expected protocol sample answer");
@@ -160,6 +198,88 @@ describe("runExportAgent model-first routing", () => {
     expect(decision.answer).toContain("compname（varchar");
     expect(decision.answer).toContain("1. id=1；compname=王者荣耀");
     expect(hoisted.agentRun).not.toHaveBeenCalled();
+  });
+
+  it("executes dbproto table search through readonly tools", async () => {
+    hoisted.aiChat.mockResolvedValue({
+      content: '{"version":"dbproto/v1","action":"search_tables","sourceId":"personal-mysql","namespace":"athena_user","keyword":"订单","limit":3}',
+    });
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "db_connect") return null;
+      if (command === "db_search_tables") {
+        return [
+          { name: "order_main", schema: "athena_user", matched_columns: ["order_id", "status"] },
+          { name: "order_refund", schema: "athena_user", matched_columns: ["refund_status"] },
+        ];
+      }
+      throw new Error(`unexpected command: ${String(command)}`);
+    });
+
+    const decision = await runExportAgent({
+      userInput: "帮我找一下 athena_user 里和订单相关的表",
+    });
+
+    expect(decision).toEqual({
+      kind: "answer",
+      answer: expect.stringContaining("order_main"),
+      protocolContext: {
+        action: "search_tables",
+        sourceId: "personal-mysql",
+        sourceScope: "personal",
+        namespace: "athena_user",
+        keyword: "订单",
+      },
+    });
+    expect(invoke).toHaveBeenCalledWith("db_search_tables", {
+      connId: "personal-mysql",
+      keyword: "订单",
+      schema: "athena_user",
+      limit: 3,
+    });
+  });
+
+  it("executes dbproto dataset listing and inspection without agent fallback", async () => {
+    hoisted.loadRuntimeExportCatalog.mockResolvedValue({
+      activeTeamId: "team-1",
+      teamRuntimeAvailable: true,
+      sources: [personalMysqlSource],
+      datasets: [teamOrdersDataset],
+    });
+
+    hoisted.aiChat
+      .mockResolvedValueOnce({
+        content: '{"version":"dbproto/v1","action":"list_datasets"}',
+      })
+      .mockResolvedValueOnce({
+        content: '{"version":"dbproto/v1","action":"describe_dataset","datasetId":"team:team-1:dataset:orders"}',
+      });
+
+    const listDecision = await runExportAgent({
+      userInput: "有哪些可用数据集",
+    });
+    const describeDecision = await runExportAgent({
+      userInput: "看一下订单明细这个数据集的字段",
+    });
+
+    expect(listDecision).toEqual({
+      kind: "answer",
+      answer: expect.stringContaining("订单明细"),
+      protocolContext: {
+        action: "list_datasets",
+      },
+    });
+    expect(describeDecision).toEqual({
+      kind: "answer",
+      answer: expect.stringContaining("支付金额"),
+      protocolContext: {
+        action: "describe_dataset",
+        datasetId: "team:team-1:dataset:orders",
+        sourceId: "team:team-1:source:analytics",
+        sourceScope: "team",
+      },
+    });
+    expect(hoisted.agentRun).not.toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalled();
   });
 
   it("falls back to agent routing when dbproto delegates", async () => {
@@ -202,5 +322,47 @@ describe("runExportAgent model-first routing", () => {
       answer: expect.stringContaining("有，当前可读取的库 / schema 里包含 athena_user。"),
     });
     expect(invoke).toHaveBeenCalledWith("db_list_schemas", { connId: "personal-mysql" });
+  });
+
+  it("uses protocol context to list tables inside the current namespace when model routing fails", async () => {
+    hoisted.aiChat.mockRejectedValue(new Error("protocol unavailable"));
+    hoisted.agentRun.mockRejectedValue(new Error("ai unavailable"));
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "db_connect") return null;
+      if (command === "db_list_tables") {
+        return [
+          { name: "company", schema: "athena_user", table_type: "BASE TABLE" },
+          { name: "company_user", schema: "athena_user", table_type: "BASE TABLE" },
+        ];
+      }
+      throw new Error(`unexpected command: ${String(command)}`);
+    });
+
+    const decision = await runExportAgent({
+      userInput: "看一下这个库内可用的表",
+      originalRequest: "athena_user",
+      protocolContext: {
+        action: "namespace_exists",
+        sourceId: "personal-mysql",
+        sourceScope: "personal",
+        namespace: "athena_user",
+      },
+    });
+
+    expect(decision).toEqual({
+      kind: "answer",
+      answer: expect.stringContaining("company、company_user"),
+      protocolContext: {
+        action: "list_tables",
+        sourceId: "personal-mysql",
+        sourceScope: "personal",
+        namespace: "athena_user",
+      },
+    });
+    expect(invoke).toHaveBeenCalledWith("db_connect", { config: personalMysqlSource });
+    expect(invoke).toHaveBeenCalledWith("db_list_tables", {
+      connId: "personal-mysql",
+      schema: "athena_user",
+    });
   });
 });

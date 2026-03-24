@@ -99,7 +99,7 @@ function normalizeRelations(
         enabled: item.enabled !== false,
       };
     })
-    .filter((item): item is ExportDatasetRelationDefinition => Boolean(item));
+    .filter(Boolean) as ExportDatasetRelationDefinition[];
 }
 
 function inferBaseAlias(entityName: string): string {

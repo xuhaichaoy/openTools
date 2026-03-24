@@ -162,6 +162,35 @@ async function sendRpc(
   return parsed.result;
 }
 
+async function sendNotification(
+  serverId: string,
+  method: string,
+  params?: unknown,
+  transport?: "stdio" | "sse",
+  url?: string,
+  headers?: Record<string, string>,
+): Promise<void> {
+  const message = JSON.stringify({
+    jsonrpc: "2.0",
+    method,
+    params: params ?? {},
+  });
+
+  if (transport === "sse" && url) {
+    await invoke<string>("mcp_send_sse_message", {
+      url,
+      message,
+      headers: headers ?? null,
+    });
+    return;
+  }
+
+  await invoke("send_mcp_notification", {
+    serverId,
+    message,
+  });
+}
+
 export const useMcpStore = create<McpState>((set, get) => ({
   servers: [],
   serverStatus: {},
@@ -286,11 +315,14 @@ export const useMcpStore = create<McpState>((set, get) => ({
           capabilities: {},
           clientInfo: { name: "51ToolBox", version: "0.1.0" },
         });
-        // NOTE:
-        // `notifications/initialized` is a JSON-RPC notification, not a request.
-        // Our current bridge only supports request/response style RPC, so sending it
-        // here as a normal request will make compliant MCP servers reply with
-        // "Method not found" and falsely mark startup as failed.
+        await sendNotification(
+          id,
+          "notifications/initialized",
+          {},
+          server.transport,
+          server.url,
+          server.headers,
+        );
       }
       // SSE servers don't need start — they're always available
 

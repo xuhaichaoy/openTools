@@ -20,6 +20,7 @@ import { AICenterHandoffCard } from "@/components/ai/AICenterHandoffCard";
 import type { RuntimeFallbackContext } from "@/core/agent/runtime";
 import { describeCodingExecutionProfile } from "@/core/agent/coding-profile";
 import { getAICenterHandoffImportPaths } from "@/core/ai/ai-center-handoff";
+import { normalizeAIProductMode } from "@/core/ai/ai-mode-types";
 
 import { AgentInputBar } from "./components/AgentInputBar";
 import { useToolTrustStore } from "@/store/command-allowlist-store";
@@ -434,7 +435,7 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
 
     const pendingHandoff = useAppStore((s) => s.pendingAICenterHandoff);
     useEffect(() => {
-      if (!pendingHandoff || pendingHandoff.mode !== "agent") return;
+      if (!pendingHandoff || normalizeAIProductMode(pendingHandoff.mode) !== "build") return;
       let cancelled = false;
 
       const applyHandoff = async () => {

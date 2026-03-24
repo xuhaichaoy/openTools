@@ -9,6 +9,33 @@
 3. 钉钉场景下“四种模式”是否应该直出给用户，是否需要“新开窗口 / 重置”
 4. 钉钉当前对话为什么像阻塞式，最优解应该是什么
 
+## 0. 截至 2026-03-24 的现状修订（以本节为准）
+
+这份文档原本更多是方案；当前实现已经前进到下面这个状态：
+
+### 0.1 已经落地的部分
+
+1. IM 运行态已经有独立 `im_conversation` 语义，不再把 IM topic 默认注册成桌面 `Dialog 房间`。
+2. `im-conversation-runtime-manager` 已经以 `(channelId, conversationId, topicId)` 维度维护 `CollaborationSessionController`，topic 级别的 `activeContract`、pending interaction、queued follow-up、child session projection 都能进入 snapshot。
+3. IM surface 默认仍是 parent-first：用户继续给 parent 发消息，child session 主要作为内部后台线程，不要求 IM 用户先理解子线程再操作。
+4. 审批入口已经不再是“每条任务都必须人工确认”，当前链路会先走 policy 和 auto-review，模型拿不准或策略要求时才升级到 human。
+
+### 0.2 仍然没做透的部分
+
+1. 会话连续性还没有彻底收口到统一 `SessionControlPlane`，因此“历史记录偶尔丢 / topic 恢复不稳 / compaction 后 continuity 不够清晰”这类问题还没完全消失。
+2. 缺 OpenClaw 风格的 per-peer / per-channel-peer isolation、identity linking、session maintenance、thread binding/announce retry。
+3. IM 数据查询、导出、渠道适配已经各自有 runtime，但还没有完全被同一个 session / security / maintenance control plane 接住。
+
+### 0.3 当前最合理的产品心智
+
+对 IM 用户最合理的表达仍然是：
+
+`IM 会话 = 用户入口`
+
+`AI runtime = 内部执行与协作真相`
+
+内部可以升级为 agent / collab / background thread，但对外默认继续显示“当前会话正在处理”，而不是把内部实现名词直接抛给用户。
+
 ---
 
 ## 1. 结论先行

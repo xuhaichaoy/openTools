@@ -4,7 +4,10 @@ export type DatabaseProtocolAction =
   | "namespace_exists"
   | "list_tables"
   | "describe_table"
-  | "sample_table";
+  | "sample_table"
+  | "search_tables"
+  | "list_datasets"
+  | "describe_dataset";
 
 export interface DatabaseProtocolDirective {
   version: "dbproto/v1";
@@ -12,6 +15,8 @@ export interface DatabaseProtocolDirective {
   sourceId?: string;
   namespace?: string;
   table?: string;
+  datasetId?: string;
+  keyword?: string;
   target?: string;
   limit?: number;
   reason?: string;
@@ -51,6 +56,9 @@ function normalizeDirective(raw: unknown): DatabaseProtocolDirective | null {
     "list_tables",
     "describe_table",
     "sample_table",
+    "search_tables",
+    "list_datasets",
+    "describe_dataset",
   ].includes(action)) {
     return null;
   }
@@ -61,6 +69,8 @@ function normalizeDirective(raw: unknown): DatabaseProtocolDirective | null {
     ...(normalizeString(candidate.sourceId) ? { sourceId: normalizeString(candidate.sourceId) } : {}),
     ...(normalizeString(candidate.namespace) ? { namespace: normalizeString(candidate.namespace) } : {}),
     ...(normalizeString(candidate.table) ? { table: normalizeString(candidate.table) } : {}),
+    ...(normalizeString(candidate.datasetId) ? { datasetId: normalizeString(candidate.datasetId) } : {}),
+    ...(normalizeString(candidate.keyword) ? { keyword: normalizeString(candidate.keyword) } : {}),
     ...(normalizeString(candidate.target) ? { target: normalizeString(candidate.target) } : {}),
     ...(normalizeString(candidate.reason) ? { reason: normalizeString(candidate.reason) } : {}),
     ...(normalizeLimit(candidate.limit) ? { limit: normalizeLimit(candidate.limit) } : {}),
@@ -70,6 +80,12 @@ function normalizeDirective(raw: unknown): DatabaseProtocolDirective | null {
     return null;
   }
   if (["describe_table", "sample_table"].includes(directive.action) && !directive.table) {
+    return null;
+  }
+  if (directive.action === "search_tables" && !directive.keyword) {
+    return null;
+  }
+  if (directive.action === "describe_dataset" && !(directive.datasetId || directive.target)) {
     return null;
   }
 

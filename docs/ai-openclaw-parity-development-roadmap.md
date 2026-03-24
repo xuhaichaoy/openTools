@@ -7,11 +7,46 @@
 - [AI 助手三模式架构审查报告](./ai-assistant-architecture-review.md)
 - [AI 助手改进执行计划](./ai-assistant-improvement-plan.md)
 - [IM 通道 / Dialog 房间收敛方案](./ai-im-channel-dialog-solution.md)
+- [Dialog 模式稳内核重构与下一波改造清单](./dialog-mode-refactor-status-and-next-wave.md)
+- [数据查询协议与 MCP 状态](./data-export-query-and-mcp-status.md)
 - [AI 长期记忆说明](./ai-long-term-memory.md)
 - [OpenClaw 主体 + MEMO 增强层实施图](./ai-openclaw-memo-layered-architecture.md)
 - [Agent Cluster 架构审查](./agent-cluster-architecture-review.md)
 
 ---
+
+## 0. 截至 2026-03-24 的实现检查点（以下内容优先于旧路线）
+
+下面的大路线仍可作为施工背景，但如果和当前代码状态冲突，以本节为准。
+
+### 0.1 已明显推进到位的部分
+
+1. `Dialog` 协作真相已经基本从 bootstrap / live plan 迁到 runtime graph：`ExecutionContract`、`CollaborationSessionController`、child session、`contractDelegations`、`plannedDelegationId`、`dispatchSource` 都已经存在。
+2. IM 已进入 contract-first runtime：`im_conversation` 已独立于本地 `dialog` surface，topic 维度已有 controller snapshot 与恢复。
+3. 权限/审批已经不是“全靠提示词自觉”，当前至少有 `policy -> auto_review -> human` 三层审批链路和 child 继承约束。
+4. Dialog room compaction 已不再只是方案，`dialog-room-compaction.ts`、`dialog-context-pressure.ts` 与 middleware 已形成当前实现的一部分。
+5. 数据查询/导出协议最近显著前进：`dbproto/v1` 已扩到 `search_tables`、`list_datasets`、`describe_dataset`，IM 数据导出 runtime 会保留 `lastProtocolContext` 以承接 follow-up。
+6. MCP stdio transport 已完成标准 `Content-Length` framing 修复，`initialize` 之后会发送真正的 `notifications/initialized`，Chrome DevTools MCP 的 `Unexpected EOF` 问题已修复。
+
+### 0.2 当前和 OpenClaw / Codex / Claude Code 仍有差距的主轴
+
+1. 缺统一 `SessionControlPlane`：session 身份、恢复、gateway/source-of-truth 仍分散在多个 runtime/store 中。
+2. 产品模式仍不是真正的一等真相：`AIProductMode` 与旧 `AICenterMode` / runtime mode 仍处于混合态。
+3. `AccessMode / ApprovalMode` 仍偏 helper + inheritance，不是覆盖 surface / child / channel / workspace 的单一策略源。
+4. compaction 还不够运维化：缺 rotate/prune/archive retention、cleanup diagnostics、session maintenance。
+5. IM 的 per-peer / per-channel isolation、identity linking、thread binding/announce retry 仍明显弱于 OpenClaw。
+
+### 0.3 现在最该优先做什么
+
+如果下一轮只做一件事，优先级应是：
+
+1. `SessionControlPlane + 真实 Product Modes`
+
+这是当前同时对齐 OpenClaw、Codex、Claude Code 收益最大的交叉点。原因是：
+
+- 对 OpenClaw：补齐 session/gateway truth、surface isolation、maintenance 的骨架；
+- 对 Codex：让 parent/child runtime、session 恢复和权限继承挂到同一套会话真相上；
+- 对 Claude Code：让 `plan / build / review / dialog / im_conversation` 真正变成产品入口，而不是 metadata 标签。
 
 ## 1. 文档目标
 

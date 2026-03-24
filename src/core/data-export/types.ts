@@ -171,6 +171,24 @@ export interface StructuredExportIntent {
   outputFormat?: "csv";
 }
 
+export interface ExportProtocolContext {
+  action?:
+    | "list_namespaces"
+    | "namespace_exists"
+    | "list_tables"
+    | "describe_table"
+    | "sample_table"
+    | "search_tables"
+    | "list_datasets"
+    | "describe_dataset";
+  sourceId?: string;
+  sourceScope?: ExportScope;
+  namespace?: string;
+  table?: string;
+  datasetId?: string;
+  keyword?: string;
+}
+
 export interface ExportPreview {
   previewToken: string;
   sourceKind: string;
@@ -192,19 +210,23 @@ export type ExportAgentDecision =
   | {
       kind: "clarify";
       question: string;
+      protocolContext?: ExportProtocolContext;
     }
   | {
       kind: "answer";
       answer: string;
+      protocolContext?: ExportProtocolContext;
     }
   | {
       kind: "reject";
       reason: string;
+      protocolContext?: ExportProtocolContext;
     }
   | {
       kind: "intent";
       summary?: string;
       intent: StructuredExportIntent;
+      protocolContext?: ExportProtocolContext;
     };
 
 export interface ExportSessionState {
@@ -222,4 +244,5 @@ export interface ExportSessionState {
   clarificationQuestion?: string;
   preview?: ExportPreview;
   lastIntent?: StructuredExportIntent;
+  lastProtocolContext?: ExportProtocolContext;
 }

@@ -455,6 +455,7 @@ export class IMDataExportRuntimeManager {
           originalRequest: session.originalRequest,
           preview: session.preview,
           lastIntent: session.lastIntent,
+          lastProtocolContext: session.lastProtocolContext,
         });
         log.info("starting confirmed export", {
           channelId,
@@ -516,6 +517,7 @@ export class IMDataExportRuntimeManager {
       const decision = await runExportAgent({
         userInput: normalizedExportText,
         originalRequest: session ? originalRequest : undefined,
+        protocolContext: session?.lastProtocolContext,
       });
 
       if (decision.kind === "clarify") {
@@ -525,6 +527,7 @@ export class IMDataExportRuntimeManager {
           clarificationQuestion: decision.question,
           preview: undefined,
           lastIntent: undefined,
+          lastProtocolContext: decision.protocolContext ?? session?.lastProtocolContext,
         });
         this.recordConversationTurn({
           channelId,
@@ -550,6 +553,7 @@ export class IMDataExportRuntimeManager {
           originalRequest,
           preview: undefined,
           lastIntent: undefined,
+          lastProtocolContext: decision.protocolContext ?? session?.lastProtocolContext,
         });
         this.recordConversationTurn({
           channelId,
@@ -575,6 +579,7 @@ export class IMDataExportRuntimeManager {
           originalRequest,
           preview: undefined,
           lastIntent: undefined,
+          lastProtocolContext: decision.protocolContext ?? session?.lastProtocolContext,
         });
         this.recordConversationTurn({
           channelId,
@@ -668,6 +673,7 @@ export class IMDataExportRuntimeManager {
         originalRequest,
         preview: hasPreviewRows ? preview : undefined,
         lastIntent: hasPreviewRows ? resolvedIntent : undefined,
+        lastProtocolContext: decision.protocolContext ?? session?.lastProtocolContext,
       });
 
       const replyText = [
@@ -699,6 +705,7 @@ export class IMDataExportRuntimeManager {
         originalRequest: session?.originalRequest?.trim() || text,
         preview: undefined,
         lastIntent: undefined,
+        lastProtocolContext: session?.lastProtocolContext,
       });
       const replyText = `这次导出没有跑通：${error instanceof Error ? error.message : String(error)}`;
       this.recordConversationTurn({

@@ -437,7 +437,7 @@ export function createActorCommunicationTools(
         const descendants = system.getDescendantTasks(actorId);
         // 只等待当前 actor 直接派发出的子任务
         const myTasks = descendants.filter((r) => r.spawnerActorId === actorId);
-        const running = myTasks.filter((r) => r.status === "running" || r.status === "pending");
+        const running = myTasks.filter((r) => r.status === "running");
 
         if (running.length === 0) {
           const results = myTasks.map(r => {
@@ -548,9 +548,12 @@ export function createActorCommunicationTools(
       const currentInheritedImages = params.use_current_images === true
         ? (opts?.getInheritedImages?.() ?? opts?.inheritedImages ?? [])
         : [];
-      const namedAttachmentPaths = typeof params.attachment_name === "string" && params.attachment_name.trim()
+      const attachmentName = typeof params.attachment_name === "string"
+        ? params.attachment_name.trim()
+        : "";
+      const namedAttachmentPaths = attachmentName
         ? system.getSessionUploadsSnapshot()
-          .filter((record) => record.path && record.name.trim().toLowerCase() === params.attachment_name.trim().toLowerCase())
+          .filter((record) => record.path && record.name.trim().toLowerCase() === attachmentName.toLowerCase())
           .map((record) => record.path as string)
         : [];
 
@@ -971,8 +974,8 @@ export function createActorCommunicationTools(
           summary: {
             total: cron.list().length,
             enabled: cron.listActive().length,
-            running: cron.list().filter((job) => job.status === "running").length,
-            paused: cron.list().filter((job) => job.status === "paused").length,
+            running: cron.list().filter((job) => job.status === "active").length,
+            paused: 0,
             attention: 0,
           },
           jobs: jobs.map((j) => ({

@@ -14,6 +14,7 @@ import { tauriPersistStorage } from "@/core/storage";
 import type { AICenterCompatibleMode } from "@/core/ai/ai-mode-types";
 import { normalizeAIProductMode } from "@/core/ai/ai-mode-types";
 import type { AICenterSourceRef } from "@/store/app-store";
+import type { SessionIdentityInput } from "@/core/session-control-plane/types";
 import { useSessionControlPlaneStore } from "@/store/session-control-plane-store";
 
 interface AISessionRuntimeState {
@@ -60,9 +61,9 @@ function chooseTitle(
 function mergeSessionIdentityInput(
   existing: AISessionRuntimeSession | undefined,
   input: AISessionRuntimeUpsertInput,
-) {
+): Omit<SessionIdentityInput, "productMode" | "sessionKey"> {
   return {
-    surface: input.sessionIdentity?.surface ?? existing?.identity?.surface,
+    surface: input.sessionIdentity?.surface ?? existing?.identity?.surface ?? "ai_center",
     sessionKind: input.sessionIdentity?.sessionKind ?? existing?.identity?.sessionKind,
     scope: input.sessionIdentity?.scope ?? existing?.identity?.scope,
     workspaceId: input.sessionIdentity?.workspaceId ?? existing?.identity?.workspaceId,

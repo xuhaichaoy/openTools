@@ -7,6 +7,7 @@ import { api } from "@/core/api/client";
 import { primeTeamModelCache } from "@/core/ai/router";
 import { buildAICenterModelScope } from "@/core/ai/ai-center-model-scope";
 import { resolveAIConfig } from "@/core/ai/resolved-ai-config";
+import { normalizeAIProductMode } from "@/core/ai/ai-mode-types";
 import type { AIConfig } from "@/core/ai/types";
 
 interface TeamModelInfo {
@@ -40,7 +41,8 @@ export function ModelSelector({ scopeMode }: { scopeMode?: AICenterMode }) {
   const btnRef = useRef<HTMLButtonElement>(null);
 
   const effectiveMode = scopeMode ?? currentMode;
-  const currentScope = aiCenterModelScopes[effectiveMode];
+  const normalizedEffectiveMode = normalizeAIProductMode(effectiveMode);
+  const currentScope = aiCenterModelScopes[normalizedEffectiveMode];
   const effectiveConfig = resolveAIConfig({
     baseConfig: config,
     ownKeys,
@@ -57,17 +59,17 @@ export function ModelSelector({ scopeMode }: { scopeMode?: AICenterMode }) {
   const applyScopePatch = useCallback(
     (patch: Partial<AIConfig>) => {
       const aiState = useAIStore.getState();
-      const nextConfig = {
-        ...resolveAIConfig({
-          baseConfig: aiState.config,
-          ownKeys: aiState.ownKeys,
-          scope: useAppStore.getState().aiCenterModelScopes[effectiveMode],
-        }),
-        ...patch,
-      };
+          const nextConfig = {
+            ...resolveAIConfig({
+              baseConfig: aiState.config,
+              ownKeys: aiState.ownKeys,
+              scope: useAppStore.getState().aiCenterModelScopes[normalizedEffectiveMode],
+            }),
+            ...patch,
+          };
       rememberScope(nextConfig);
     },
-    [effectiveMode, rememberScope],
+    [normalizedEffectiveMode, rememberScope],
   );
 
   const { teams, loaded: teamsLoaded, loadTeams } = useTeamStore();

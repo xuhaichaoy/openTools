@@ -15,6 +15,50 @@
 - 产品层：用户默认只和主 Agent 对话，子线程默认后台化
 - 上下文层：不只是显示 token 估算，而是具备真正的“上下文过长后自动压缩并继续”的能力
 
+## 0. 截至 2026-03-24 的状态修订（以本节为准）
+
+下面旧章节保留为历史分析背景；当前代码真相以下面这版状态为准。
+
+### 0.1 已经真正落地的部分
+
+- `src/core/collaboration/` 已经成为稳定协作内核，`ExecutionContract`、`CollaborationSessionController`、`CollaborationChildSession`、snapshot / persistence / presentation 均已接入运行链路。
+- `ActorSystem` 已支持显式 parent/child 派工真相：`SpawnedTaskRecord` 带 `contractId`、`plannedDelegationId`、`dispatchSource`，`spawn_task` 成为 child 创建与复用的主路径。
+- controller 已是 graph-first 投影：`activeContract` 负责授权边界，`spawnedTasks` / child session 负责线程真相，`contractDelegations` 负责把“建议派工是否被主 Agent 采用”稳定投影给 UI。
+- 本地 Dialog 已切到 parent-first UX：默认输入仍发给主 Agent，后台线程只做一行状态预览；只有显式 `focus / steer / resume` 才进入 child session。
+- IM 已从 `dialog` 语义中拆出，运行态使用 `im_conversation`；`im-conversation-runtime-manager` 已按 topic 维护 controller snapshot，child session 默认不直接暴露给 IM 用户操作。
+- 房间级上下文压力与 compaction 已经进入真实代码路径，`dialog-context-pressure.ts`、`dialog-room-compaction.ts` 和对应 middleware 已形成可运行闭环，不再只是方案文档。
+- 权限/审批已有真实三层链路：`policy -> auto_review -> human`，并且 child 继承已受 `roleBoundary` / execution policy 约束。
+
+### 0.2 仍然没有完全收口的部分
+
+- `dialogExecutionPlan` 还没有彻底消失，当前主要残留在 store persistence、restore/migration 和一版兼容 adapter 中；它已经不是主运行真相，但 compat 尾巴还在。
+- 产品模式真相仍旧分裂：元数据里已有 `explore / build / plan / review / dialog / im_conversation`，但 app/store/runtime 仍残留旧的 `ask / agent / cluster / dialog` 心智。
+- `AccessMode / ApprovalMode` 已有雏形和继承 helper，但还不是覆盖 local dialog、IM、child session、workspace、channel 的单一策略源。
+- 缺少统一的 `SessionControlPlane`：本地 Dialog、IM runtime、runtime-state、持久化仍各自保留一部分 session 视角，离 OpenClaw 式 session/gateway truth 还有距离。
+- compaction 已经能跑，但还没有进入 OpenClaw 那种运维化生命周期：仍缺 pre-compaction memory flush、rotate/prune、archive retention、cleanup diagnostics。
+
+### 0.3 当前最准确的用户心智
+
+当前最接近事实的模型已经不再是“用户看着子线程自己做路由”，而是：
+
+`用户 -> 主 Agent ->（必要时）派工给子 Agent -> 子结果回流主 Agent -> 主 Agent 汇总回复`
+
+这里子会话的作用是：
+
+- 让主 Agent 在需要分工、校验、跑验证、隔离上下文时，有一个独立的 child run / session 容器；
+- 让这些后台工作可以被复用、等待、恢复，而不是把所有中间噪音都塞回主房间；
+- 但默认不要求用户盯着 child 做判断，用户仍然主要面向 parent。
+
+### 0.4 下一波最值钱的工作
+
+按当前代码状态，最值得继续推进的不是再堆更多面板，而是：
+
+1. 做出统一的 `SessionControlPlane`，把 local dialog / IM / runtime-state / persistence 的 session 身份和恢复真相收口。
+2. 让 `AIProductMode` 成为真实产品模式入口，清掉旧 `ask / agent / cluster / dialog` 的模式分裂。
+3. 把 `AccessMode / ApprovalMode / toolPolicy / workspace / sandbox` 合成真正的一等 `SurfaceSecurityPolicy`。
+4. 把 `dialogExecutionPlan` 压到 migration-only，不再参与正常运行态。
+5. 把现有房间 compaction 补成可运维的 lifecycle，而不只是“能压缩”。
+
 ---
 
 ## 2. 当前状态总结

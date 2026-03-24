@@ -10,7 +10,11 @@ import { getTauriStore } from "@/core/storage";
 import { handleError, ErrorLevel } from "@/core/errors";
 import { BUILTIN_SKILLS } from "./builtin-skills";
 import { parseSkillMd, serializeSkillMd } from "./skill-md-parser";
-import type { AgentSkill, AgentSkillInput } from "./types";
+import type {
+  AgentSkill,
+  AgentSkillInput,
+  SkillMarketplaceMeta,
+} from "./types";
 
 const STORE_FILENAME = "agent-skills.json";
 const STORE_KEY = "user_skills";
@@ -237,6 +241,52 @@ export async function importSkillFromMd(content: string): Promise<AgentSkill | n
   user.push(parsed);
   await saveUserSkills(user);
   return parsed;
+}
+
+export async function importMarketplaceSkillFromMd(params: {
+  content: string;
+  marketplaceMeta: SkillMarketplaceMeta;
+}): Promise<AgentSkill | null> {
+  const parsed = parseSkillMd(params.content);
+  if (!parsed) return null;
+
+  const now = Date.now();
+  const nextMarketplaceMeta: SkillMarketplaceMeta = {
+    ...params.marketplaceMeta,
+    installedAt: now,
+  };
+  const user = await loadUserSkills();
+  const existing = user.find((skill) =>
+    skill.source === "marketplace"
+    && skill.marketplaceMeta?.provider === nextMarketplaceMeta.provider
+    && skill.marketplaceMeta?.slug === nextMarketplaceMeta.slug
+  );
+
+  if (existing) {
+    Object.assign(existing, {
+      ...parsed,
+      id: existing.id,
+      createdAt: existing.createdAt,
+      updatedAt: now,
+      enabled: existing.enabled,
+      source: "marketplace",
+      marketplaceMeta: nextMarketplaceMeta,
+    } satisfies AgentSkill);
+    await saveUserSkills(user);
+    return existing;
+  }
+
+  const skill: AgentSkill = {
+    ...parsed,
+    id: generateId(),
+    source: "marketplace",
+    marketplaceMeta: nextMarketplaceMeta,
+    createdAt: now,
+    updatedAt: now,
+  };
+  user.push(skill);
+  await saveUserSkills(user);
+  return skill;
 }
 
 /**

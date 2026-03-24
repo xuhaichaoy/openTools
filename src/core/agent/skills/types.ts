@@ -9,6 +9,19 @@
 
 export type SkillSource = "builtin" | "user" | "marketplace" | "skillmd";
 
+export type SkillMarketplaceProvider = "clawhub";
+
+export interface SkillMarketplaceMeta {
+  provider: SkillMarketplaceProvider;
+  slug: string;
+  remoteVersion?: string;
+  installedVia?: "personal" | "team";
+  teamId?: string;
+  siteUrl?: string;
+  registryUrl?: string;
+  installedAt?: number;
+}
+
 export interface SkillToolFilter {
   include?: string[];
   exclude?: string[];
@@ -72,6 +85,9 @@ export interface AgentSkill {
   toolDependencies?: string[];
   /** 激活后需要加载的 MCP 服务器 ID */
   mcpDependencies?: string[];
+
+  /** 远程技能市场元数据（ClawHub 等） */
+  marketplaceMeta?: SkillMarketplaceMeta;
 }
 
 /**
