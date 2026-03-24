@@ -1,59 +1,23 @@
-import { isLikelyVisualAttachmentPath } from "@/core/ai/ai-center-handoff";
 import { resolveChannelOutgoingMedia } from "./channel-outbound-media";
 
-const MARKDOWN_IMAGE_PATTERN = /!\[([^\]]*)\]\(([^)\n\r]+)\)/g;
-const FILE_URL_PATTERN = /file:\/\/[^\s"'`<>]+/gi;
-const REMOTE_IMAGE_URL_PATTERN = /https?:\/\/[^\s"'`<>]+/gi;
-
-export function shouldExplicitlyDeliverMediaToIM(text?: string | null): boolean {
-  const normalized = String(text ?? "").trim().toLowerCase();
-  if (!normalized) return false;
-
-  const directPatterns = [
-    /发给我/u,
-    /给我发/u,
-    /传给我/u,
-    /回传给我/u,
-    /把.{0,20}(图|图片|截图|文件|原图|附件).{0,12}(发|传|给).{0,6}我/u,
-    /直接.{0,12}(发|传).{0,6}我/u,
-    /send (it|them|that|this)?\s*to me/i,
-    /attach (it|them|that|this)?/i,
-    /upload (it|them|that|this)?/i,
-  ];
-  if (directPatterns.some((pattern) => pattern.test(normalized))) {
-    return true;
-  }
-
-  const shortImperativePatterns = [
-    /^(发|传)$/,
-    /^(发|传)我$/,
-    /^(发|传)来$/,
-    /^(给我|给我看)$/,
-  ];
-  return shortImperativePatterns.some((pattern) => pattern.test(normalized));
-}
-
-const SHAREABLE_IM_PATH_PATTERNS = [
-  /(?:^|\/)downloads(?:\/|$)/i,
-  /(?:^|\/)desktop(?:\/|$)/i,
-  /(?:^|\/)documents(?:\/|$)/i,
-  /^\/tmp(?:\/|$)/i,
-  /^\/var\/folders(?:\/|$)/i,
-] as const;
-
-const ABSOLUTE_FILE_PATH_PATTERN = /(\/[^"'`\n\r<>]+?\.[A-Za-z0-9]{1,12}|[A-Za-z]:\\[^"'`\n\r<>]+?\.[A-Za-z0-9]{1,12})/g;
+const MEDIA_TOKEN_RE = /\bMEDIA:\s*`?([^\n]+)`?/gi;
+const WINDOWS_DRIVE_RE = /^[A-Za-z]:[\\/]/;
+const SCHEME_RE = /^[A-Za-z][A-Za-z0-9+.-]*:/;
+const HAS_FILE_EXT_RE = /\.\w{1,12}$/;
+const FENCED_BLOCK_RE = /(^|\n)(```|~~~)[^\n]*\n[\s\S]*?(?:\n\2(?=\n|$)|$)/g;
 
 function normalizePath(path?: string | null): string {
   const normalized = String(path ?? "").trim().replace(/\\/g, "/");
   return normalized.replace(/^\/{2,}(?=(Users|tmp|var|Volumes|home)\b)/, "/");
 }
 
-function normalizeFileUrl(value?: string | null): string {
+function normalizeMediaSource(value?: string | null): string {
   const trimmed = String(value ?? "").trim();
   if (!trimmed) return "";
   if (!/^file:\/\//i.test(trimmed)) {
     return normalizePath(trimmed);
   }
+
   try {
     const url = new URL(trimmed);
     const pathname = decodeURIComponent(url.pathname || "");
@@ -66,109 +30,170 @@ function normalizeFileUrl(value?: string | null): string {
   }
 }
 
-function stripTrailingPathPunctuation(path: string): string {
-  return path.replace(/[),\]}:;!?。，“”"'`]+$/g, "");
+function cleanCandidate(raw: string): string {
+  return String(raw ?? "")
+    .trim()
+    .replace(/^[`"'[{(]+/, "")
+    .replace(/[`"'\\})\],:;!?。，“”]+$/, "");
 }
 
-function isShareableIMPath(path: string): boolean {
-  const normalized = normalizePath(path);
-  if (!normalized) return false;
-  return SHAREABLE_IM_PATH_PATTERNS.some((pattern) => pattern.test(normalized));
+function unwrapQuoted(value: string): string | undefined {
+  const trimmed = String(value ?? "").trim();
+  if (trimmed.length < 2) return undefined;
+  const first = trimmed[0];
+  const last = trimmed[trimmed.length - 1];
+  if (first !== last) return undefined;
+  if (first !== `"` && first !== "'" && first !== "`") return undefined;
+  return trimmed.slice(1, -1).trim();
 }
 
-function isHttpMediaUrl(path: string): boolean {
-  return /^https?:\/\//i.test(path);
+function isLikelyLocalPath(candidate: string): boolean {
+  return (
+    candidate.startsWith("/")
+    || candidate.startsWith("file://")
+    || WINDOWS_DRIVE_RE.test(candidate)
+    || candidate.startsWith("\\\\")
+  );
 }
 
-function isLikelyRemoteImageUrl(path: string): boolean {
-  if (!isHttpMediaUrl(path)) return false;
-  const sanitized = path.split("#")[0]?.split("?")[0] ?? path;
-  return isLikelyVisualAttachmentPath(sanitized);
+function isValidMediaRef(
+  candidate: string,
+  opts?: { allowSpaces?: boolean; allowBareFilename?: boolean },
+): boolean {
+  if (!candidate || candidate.length > 4096) {
+    return false;
+  }
+  if (!opts?.allowSpaces && /\s/.test(candidate)) {
+    return false;
+  }
+  if (/^https?:\/\//i.test(candidate)) {
+    return true;
+  }
+  if (isLikelyLocalPath(candidate)) {
+    return true;
+  }
+  if (opts?.allowBareFilename && !SCHEME_RE.test(candidate) && HAS_FILE_EXT_RE.test(candidate)) {
+    return true;
+  }
+  return false;
 }
 
-function extractAbsoluteFilePaths(text?: string | null): string[] {
-  const source = String(text ?? "");
-  if (!source.trim()) return [];
-
-  const matches = [...source.matchAll(ABSOLUTE_FILE_PATH_PATTERN)]
-    .map((match) => stripTrailingPathPunctuation(match[1] || match[0] || ""))
-    .map((path) => normalizePath(path))
-    .filter(Boolean);
-
-  return [...new Set(matches)];
+function parseFenceSpans(input: string): Array<{ start: number; end: number }> {
+  return [...input.matchAll(FENCED_BLOCK_RE)].map((match) => ({
+    start: match.index ?? 0,
+    end: (match.index ?? 0) + match[0].length,
+  }));
 }
 
-function extractMarkdownImageRefs(text?: string | null): string[] {
-  const source = String(text ?? "");
-  if (!source.trim()) return [];
-
-  const refs = [...source.matchAll(MARKDOWN_IMAGE_PATTERN)]
-    .map((match) => normalizeFileUrl(stripTrailingPathPunctuation(match[2] || "")))
-    .filter(Boolean);
-
-  return [...new Set(refs)];
+function isInsideFence(
+  spans: Array<{ start: number; end: number }>,
+  offset: number,
+): boolean {
+  return spans.some((span) => offset >= span.start && offset < span.end);
 }
 
-function extractFileUrls(text?: string | null): string[] {
-  const source = String(text ?? "");
-  if (!source.trim()) return [];
-
-  const matches = [...(source.match(FILE_URL_PATTERN) ?? [])]
-    .map((match) => normalizeFileUrl(stripTrailingPathPunctuation(match)))
-    .filter(Boolean);
-
-  return [...new Set(matches)];
-}
-
-function extractRemoteImageUrls(text?: string | null): string[] {
-  const source = String(text ?? "");
-  if (!source.trim()) return [];
-
-  const matches = [...(source.match(REMOTE_IMAGE_URL_PATTERN) ?? [])]
-    .map((match) => stripTrailingPathPunctuation(match))
-    .filter(isLikelyRemoteImageUrl);
-
-  return [...new Set(matches)];
-}
-
-export function deriveShareableIMMediaFromText(text?: string | null): {
+export function splitStructuredIMMediaReply(text?: string | null): {
+  text: string;
   mediaUrl?: string;
   mediaUrls?: string[];
   images?: string[];
   attachments?: Array<{ path: string; fileName?: string }>;
 } {
-  const candidates = [
-    ...extractMarkdownImageRefs(text),
-    ...extractFileUrls(text),
-    ...extractAbsoluteFilePaths(text),
-    ...extractRemoteImageUrls(text),
-  ].filter((candidate, index, list) => {
-    if (list.indexOf(candidate) !== index) return false;
-    return isHttpMediaUrl(candidate) || isShareableIMPath(candidate);
-  });
-  if (!candidates.length) return {};
-  return resolveChannelOutgoingMedia({ mediaUrls: candidates });
-}
+  const trimmedRaw = String(text ?? "").trimEnd();
+  if (!trimmedRaw.trim()) {
+    return { text: "" };
+  }
 
-export function sanitizeIMReplyTextForMedia(text?: string | null): string {
-  const lines = String(text ?? "")
-    .replace(MARKDOWN_IMAGE_PATTERN, (_match, altText: string) => {
-      const label = String(altText ?? "").trim();
-      return label ? `[图片: ${label}]` : "[图片]";
-    })
-    .split(/\r?\n/)
-    .map((line) => line.trimEnd());
+  const hasFenceMarkers = trimmedRaw.includes("```") || trimmedRaw.includes("~~~");
+  const fenceSpans = hasFenceMarkers ? parseFenceSpans(trimmedRaw) : [];
+  const lines = trimmedRaw.split("\n");
+  const mediaRefs: string[] = [];
+  const keptLines: string[] = [];
 
-  const filtered = lines.filter((line) => {
-    const normalized = line.trim();
-    if (!normalized) return true;
-    if (/^\[图片(?:: [^\]]+)?\]$/.test(normalized)) {
-      return false;
+  let lineOffset = 0;
+  for (const line of lines) {
+    if (hasFenceMarkers && isInsideFence(fenceSpans, lineOffset)) {
+      keptLines.push(line);
+      lineOffset += line.length + 1;
+      continue;
     }
-    return !(
-    /当前渠道不能|无法直接发送|不能直接把|只能把本机|回到本机打开|打开图片所在文件夹|不支持(直接)?发送(图片|文件|附件)/u.test(line)
-    );
-  });
 
-  return filtered.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+    const trimmedStart = line.trimStart();
+    if (!trimmedStart.startsWith("MEDIA:")) {
+      keptLines.push(line);
+      lineOffset += line.length + 1;
+      continue;
+    }
+
+    const matches = [...line.matchAll(MEDIA_TOKEN_RE)];
+    if (!matches.length) {
+      keptLines.push(line);
+      lineOffset += line.length + 1;
+      continue;
+    }
+
+    const pieces: string[] = [];
+    let cursor = 0;
+
+    for (const match of matches) {
+      const start = match.index ?? 0;
+      pieces.push(line.slice(cursor, start));
+
+      const payload = String(match[1] ?? "");
+      const unwrapped = unwrapQuoted(payload);
+      const payloadValue = (unwrapped ?? payload).trim();
+      const parts = unwrapped ? [unwrapped] : payload.split(/\s+/).filter(Boolean);
+      const invalidParts: string[] = [];
+      const mediaCountBeforeMatch = mediaRefs.length;
+
+      for (const part of parts) {
+        const candidate = normalizeMediaSource(cleanCandidate(part));
+        if (isValidMediaRef(candidate, unwrapped ? { allowSpaces: true } : undefined)) {
+          mediaRefs.push(candidate);
+        } else if (part.trim()) {
+          invalidParts.push(part.trim());
+        }
+      }
+
+      if (mediaRefs.length === mediaCountBeforeMatch && payloadValue) {
+        const fallback = normalizeMediaSource(cleanCandidate(payloadValue));
+        if (isValidMediaRef(fallback, { allowSpaces: true, allowBareFilename: true })) {
+          mediaRefs.push(fallback);
+          invalidParts.length = 0;
+        }
+      }
+
+      if (invalidParts.length) {
+        pieces.push(invalidParts.join(" "));
+      }
+      cursor = start + match[0].length;
+    }
+
+    pieces.push(line.slice(cursor));
+    const cleanedLine = pieces
+      .join("")
+      .replace(/[ \t]{2,}/g, " ")
+      .trim();
+
+    if (cleanedLine) {
+      keptLines.push(cleanedLine);
+    }
+    lineOffset += line.length + 1;
+  }
+
+  const cleanedText = keptLines
+    .join("\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  const outgoingMedia = resolveChannelOutgoingMedia({ mediaUrls: mediaRefs });
+  return {
+    text: cleanedText,
+    ...(outgoingMedia.mediaUrl ? { mediaUrl: outgoingMedia.mediaUrl } : {}),
+    ...(outgoingMedia.mediaUrls?.length ? { mediaUrls: outgoingMedia.mediaUrls } : {}),
+    ...(outgoingMedia.images?.length ? { images: outgoingMedia.images } : {}),
+    ...(outgoingMedia.attachments?.length ? { attachments: outgoingMedia.attachments } : {}),
+  };
 }

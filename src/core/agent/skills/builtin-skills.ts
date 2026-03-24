@@ -166,6 +166,37 @@ export const SKILL_DATA_ANALYSIS: AgentSkill = {
   source: "builtin",
 };
 
+export const SKILL_DATA_EXPORT: AgentSkill = {
+  id: "builtin-data-export",
+  name: "数据导出",
+  description: "面向运营场景的自然语言查数与 CSV 导出约束，强调只读、先探查后导出",
+  version: "1.0.0",
+  author: "51ToolBox",
+  enabled: true,
+  autoActivate: true,
+  triggerPatterns: [
+    "(?:帮我|请|麻烦(?:你)?|可以)?从数据库(?:内|里)?(?:导出|查询|查一下|查一查)",
+    "(?:数据库|数据)导出[:：]?",
+    "从数据库(?:内|里)?.{0,16}(?:导出|查询)",
+    "导出.{0,12}(?:数据库|数据)",
+  ],
+  systemPrompt: `## 数据导出 Skill
+你现在作为数据导出助手工作，遵循以下原则：
+- 用户画像：默认面对运营、销售、客服等非研发人员，不要求对方知道真实表名、字段名、schema 或 SQL
+- 只读边界：只允许查询、预览、导出；禁止执行写入、更新、删除、DDL、权限修改等任何非只读操作
+- 先探查后导出：优先看已配置数据集；如果没有现成数据集，再查可用数据源、database/schema、候选表、字段与样本
+- 不要臆造：没有通过工具确认前，不能假设表名、字段名、关联关系
+- 澄清最少化：只有当业务口径确实无法判断时，才提出一个最关键的问题
+- 导出策略：优先单表或已发布数据集；复杂多表联查只有在已有明确结构和可验证字段时才继续
+- 输出习惯：先复述你理解的导出目标，再给预览，确认后再导出 CSV`,
+  category: "data",
+  tags: ["database", "export", "csv", "mysql", "postgres", "mongodb"],
+  icon: "🗃️",
+  createdAt: BUILTIN_TIMESTAMP,
+  updatedAt: BUILTIN_TIMESTAMP,
+  source: "builtin",
+};
+
 export const SKILL_CODING_WORKFLOW: AgentSkill = {
   id: "builtin-coding-workflow",
   name: "编程工作流",
@@ -221,4 +252,5 @@ export const BUILTIN_SKILLS: AgentSkill[] = [
   SKILL_DEVOPS,
   SKILL_WRITING,
   SKILL_DATA_ANALYSIS,
+  SKILL_DATA_EXPORT,
 ];

@@ -61,6 +61,8 @@ import {
 import { cloneDialogRoomCompaction } from "@/core/agent/actor/dialog-room-compaction";
 import { ensureDialogRoomCompaction } from "@/core/agent/actor/dialog-context-pressure";
 import { useAISessionRuntimeStore } from "@/store/ai-session-runtime-store";
+import { useSessionControlPlaneStore } from "@/store/session-control-plane-store";
+import { resolveRecoveredDialogRoomCompaction } from "@/core/session-control-plane/recovery";
 import {
   registerRuntimeAbortHandler,
   unregisterRuntimeAbortHandler,
@@ -627,6 +629,8 @@ async function runDialogRoomCompaction(params: {
     dialogHistory,
     spawnedTasks,
     pendingUserInteractions,
+    actors: params.system.getAll().map(snapshotActor),
+    coordinatorActorId: params.system.getCoordinatorId(),
     sourceHandoff: latestStore.sourceHandoff,
   });
   syncDialogRuntimeState({
@@ -638,6 +642,7 @@ async function runDialogRoomCompaction(params: {
     spawnedTasks,
     pendingUserInteractions,
     queuedFollowUps,
+    collaborationSnapshot,
     sourceHandoff: latestStore.sourceHandoff,
   });
   debouncedSave(params.system);
@@ -785,6 +790,8 @@ function syncDialogRuntimeSession(
     dialogHistory?: readonly DialogMessage[];
     spawnedTasks?: readonly SpawnedTaskRecord[];
     pendingUserInteractions?: readonly PendingInteraction[];
+    actors?: readonly Pick<ActorSnapshot, "id" | "workspace">[];
+    coordinatorActorId?: string | null;
     sourceHandoff?: AICenterHandoff | null;
     updatedAt?: number;
   },
@@ -823,12 +830,23 @@ function syncDialogRuntimeSession(
     return;
   }
 
+  const workspaceRoot = resolveDialogRuntimeWorkspaceRoot(
+    options?.actors,
+    options?.coordinatorActorId,
+  );
   runtimeStore.ensureSession({
     mode: "dialog",
     externalSessionId: sessionId,
     title: title || "Dialog 房间",
     summary,
     updatedAt,
+    sessionIdentity: {
+      surface: "local_dialog",
+      sessionKey: sessionId,
+      sessionKind: "collaboration_room",
+      workspaceId: workspaceRoot,
+      runtimeSessionId: sessionId,
+    },
     ...(options?.sourceHandoff?.sourceMode
       ? {
           source: {
@@ -879,6 +897,7 @@ function syncDialogRuntimeState(params: {
   spawnedTasks?: readonly SpawnedTaskRecord[];
   pendingUserInteractions?: readonly PendingInteraction[];
   queuedFollowUps?: readonly DialogQueuedFollowUp[];
+  collaborationSnapshot?: CollaborationSessionSnapshot | null;
   sourceHandoff?: AICenterHandoff | null;
   updatedAt?: number;
 }): void {
@@ -937,6 +956,42 @@ function syncDialogRuntimeState(params: {
     params.actors,
     params.coordinatorActorId,
   );
+  const activeCompaction = params.system.getDialogRoomCompaction();
+  const controlPlaneSessionId = useAISessionRuntimeStore
+    .getState()
+    .getSessionByExternal("dialog", params.sessionId)
+    ?.identity?.id;
+  const openChildSessionCount = params.collaborationSnapshot
+    ? params.collaborationSnapshot.childSessions.filter((session) =>
+      session.status === "pending"
+      || session.status === "running"
+      || session.status === "waiting",
+    ).length
+    : params.spawnedTasks?.filter((task) =>
+      task.status === "pending"
+      || task.status === "running"
+      || (task.mode === "session" && task.sessionOpen),
+    ).length ?? 0;
+  if (controlPlaneSessionId) {
+    useSessionControlPlaneStore.getState().patchSessionContinuityState(controlPlaneSessionId, {
+      source: "local_dialog",
+      updatedAt: params.updatedAt ?? Date.now(),
+      executionStrategy: params.collaborationSnapshot?.presentationState.executionStrategy,
+      contractState: params.collaborationSnapshot?.presentationState.contractState,
+      pendingInteractionCount: params.collaborationSnapshot?.presentationState.pendingInteractionCount
+        ?? params.pendingUserInteractions?.length,
+      queuedFollowUpCount: params.collaborationSnapshot?.presentationState.queuedFollowUpCount
+        ?? params.queuedFollowUps?.length,
+      childSessionCount: params.collaborationSnapshot?.childSessions.length ?? params.spawnedTasks?.length,
+      openChildSessionCount,
+      roomCompactionSummary: activeCompaction?.summary,
+      ...buildRuntimeSessionCompactionPreview(activeCompaction),
+      roomCompactionTriggerReasons: activeCompaction?.triggerReasons,
+      roomCompactionMemoryFlushNoteId: activeCompaction?.memoryFlushNoteId,
+      roomCompactionMemoryConfirmedCount: activeCompaction?.memoryConfirmedCount,
+      roomCompactionMemoryQueuedCount: activeCompaction?.memoryQueuedCount,
+    });
+  }
 
   useRuntimeStateStore.getState().upsertSession({
     mode: "dialog",
@@ -949,7 +1004,14 @@ function syncDialogRuntimeState(params: {
     workspaceRoot,
     waitingStage,
     status,
-    ...buildRuntimeSessionCompactionPreview(params.system.getDialogRoomCompaction()),
+    sessionIdentity: {
+      surface: "local_dialog",
+      sessionKey: params.sessionId,
+      sessionKind: "collaboration_room",
+      workspaceId: workspaceRoot,
+      runtimeSessionId: params.sessionId,
+    },
+    ...buildRuntimeSessionCompactionPreview(activeCompaction),
   });
 }
 
@@ -1103,6 +1165,13 @@ function syncDialogSpawnedRuntimeSessions(
       summary,
       createdAt: record.spawnedAt,
       updatedAt,
+      sessionIdentity: {
+        surface: "child_session",
+        sessionKey: externalSessionId,
+        sessionKind: kind,
+        parentSessionId: rootRuntime?.identity?.id,
+        runtimeSessionId: record.runId,
+      },
       source: {
         sourceMode: "dialog",
         sourceSessionId: sessionId,
@@ -1236,7 +1305,11 @@ async function saveSessionSnapshot(system: ActorSystem): Promise<void> {
   saveActiveSessionPointer(system.sessionId);
 }
 
-function restoreSnapshot(system: ActorSystem, persisted: PersistedSession): void {
+interface RestoreSnapshotResult {
+  dialogRoomCompaction: DialogRoomCompactionState | null;
+}
+
+function restoreSnapshot(system: ActorSystem, persisted: PersistedSession): RestoreSnapshotResult {
   if (persisted.dialogHistory.length) {
     system.restoreDialogHistory(persisted.dialogHistory);
   }
@@ -1288,8 +1361,14 @@ function restoreSnapshot(system: ActorSystem, persisted: PersistedSession): void
   if (persisted.sessionUploads?.length) {
     system.restoreSessionUploads(persisted.sessionUploads);
   }
-  if (persisted.dialogRoomCompaction) {
-    system.setDialogRoomCompaction(persisted.dialogRoomCompaction);
+  const recoveredCompaction = resolveRecoveredDialogRoomCompaction({
+    persisted: persisted.dialogRoomCompaction,
+    continuity: useSessionControlPlaneStore.getState()
+      .findSessionByRuntimeSessionId(system.sessionId)
+      ?.continuityState,
+  });
+  if (recoveredCompaction) {
+    system.setDialogRoomCompaction(recoveredCompaction);
   }
   // 恢复子任务记录（UI 展示用，不会恢复运行态）
   if (persisted.spawnedTasks?.length) {
@@ -1329,6 +1408,10 @@ function restoreSnapshot(system: ActorSystem, persisted: PersistedSession): void
       // ignore stale focus pointer
     }
   }
+
+  return {
+    dialogRoomCompaction: recoveredCompaction,
+  };
 }
 
 async function loadPersistedSessionSnapshot(): Promise<PersistedSession | null> {
@@ -1596,6 +1679,12 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
               externalSessionId: detail.sessionId,
               title: detail.title,
               updatedAt: Date.now(),
+              sessionIdentity: {
+                surface: "local_dialog",
+                sessionKey: detail.sessionId,
+                sessionKind: "collaboration_room",
+                runtimeSessionId: detail.sessionId,
+              },
             });
           }
         }
@@ -1634,7 +1723,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
         (system as unknown as { sessionId: string }).sessionId = persisted.sessionId;
       }
       if (persisted) {
-        restoreSnapshot(system, persisted);
+        const restored = restoreSnapshot(system, persisted);
         if (persisted.collaborationSnapshot) {
           controller.restore(persisted.collaborationSnapshot);
         } else {
@@ -1645,23 +1734,31 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
           queuedFollowUps: mapCollaborationQueuedFollowUps(collaborationSnapshot),
           sourceHandoff: cloneAICenterHandoff(persisted.sourceHandoff),
           contextSnapshot: cloneDialogContextSnapshot(persisted.contextSnapshot),
-          dialogRoomCompaction: cloneDialogRoomCompaction(persisted.dialogRoomCompaction),
+          dialogRoomCompaction: cloneDialogRoomCompaction(
+            restored.dialogRoomCompaction ?? persisted.dialogRoomCompaction,
+          ),
           collaborationSnapshot,
           presentationState: { ...collaborationSnapshot.presentationState },
         });
       } else if (system.getAll().length === 0) {
-        spawnDefaultDialogActors(system);
+        spawnDefaultDialogActors(system, {
+          productMode: options?.defaultProductMode ?? "dialog",
+        });
       }
       await bootstrapSavedIMChannels();
       saveActiveSessionPointer(system.sessionId);
       syncDialogRuntimeSession(system.sessionId, {
         sourceHandoff: persisted?.sourceHandoff,
+        actors: system.getAll().map(snapshotActor),
+        coordinatorActorId: system.getCoordinatorId(),
       });
       get().sync();
     })().catch(async (err) => {
       log.warn("Failed to hydrate dialog session snapshot", err);
       if (system.getAll().length === 0) {
-        spawnDefaultDialogActors(system);
+        spawnDefaultDialogActors(system, {
+          productMode: options?.defaultProductMode ?? "dialog",
+        });
       }
       const collaborationSnapshot = controller.syncFromSystem();
       set({
@@ -1674,7 +1771,10 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
       });
       await bootstrapSavedIMChannels();
       saveActiveSessionPointer(system.sessionId);
-      syncDialogRuntimeSession(system.sessionId);
+      syncDialogRuntimeSession(system.sessionId, {
+        actors: system.getAll().map(snapshotActor),
+        coordinatorActorId: system.getCoordinatorId(),
+      });
       get().sync();
     });
     return system;
@@ -1998,6 +2098,8 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
         dialogHistory,
         spawnedTasks,
         pendingUserInteractions,
+        actors: system.getAll().map(snapshotActor),
+        coordinatorActorId: system.getCoordinatorId(),
         sourceHandoff: nextHandoff,
       });
       syncDialogRuntimeState({
@@ -2009,6 +2111,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
         spawnedTasks,
         pendingUserInteractions,
         queuedFollowUps,
+        collaborationSnapshot,
         sourceHandoff: nextHandoff,
       });
       scheduleDialogRoomCompaction({
@@ -2109,6 +2212,8 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
       dialogHistory,
       spawnedTasks,
       pendingUserInteractions,
+      actors,
+      coordinatorActorId,
       sourceHandoff,
     });
     syncDialogRuntimeState({
@@ -2120,6 +2225,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
       spawnedTasks,
       pendingUserInteractions,
       queuedFollowUps,
+      collaborationSnapshot,
       sourceHandoff,
     });
     syncDialogSpawnedRuntimeSessions(system.sessionId, spawnedTasks, actors, {

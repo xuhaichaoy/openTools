@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Loader2,
   ChevronDown,
@@ -19,6 +19,8 @@ import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import type { AgentTask } from "@/store/agent-store";
 import { ChatImage } from "@/components/ai/MessageBubble";
+import { StructuredMediaAttachments } from "@/components/ai/StructuredMediaAttachments";
+import { mergeStructuredMedia } from "@/core/media/structured-media";
 import {
   getExecutionWaitingStageLabel,
   type ExecutionWaitingStage,
@@ -215,6 +217,10 @@ function AgentTaskBlockInner({
   const shouldCollapseProcess = processCollapsed && effectiveStatus !== "running";
   const lastStep = task.steps[task.steps.length - 1];
   const { mainText, attachmentMeta } = splitTaskQueryDisplay(task.query);
+  const structuredAnswer = useMemo(
+    () => mergeStructuredMedia({ text: task.answer }),
+    [task.answer],
+  );
   const appliedMemoryPreview = task.appliedMemoryPreview ?? [];
   const appliedMemoryCount =
     task.appliedMemoryIds?.length ?? appliedMemoryPreview.length;
@@ -489,15 +495,28 @@ function AgentTaskBlockInner({
             )}
             {effectiveStatus === "running" ? "回答（生成中）" : "回答"}
           </h4>
+          {structuredAnswer.images && structuredAnswer.images.length > 0 && (
+            <div className="mb-2 flex flex-wrap gap-2">
+              {structuredAnswer.images.map((img) => (
+                <ChatImage
+                  key={img}
+                  path={img}
+                  className="max-w-[220px] max-h-[220px] object-cover rounded-xl border border-[var(--color-border)] cursor-pointer hover:opacity-80 transition-opacity"
+                  onClick={(blobUrl) => setPreviewImage(blobUrl)}
+                />
+              ))}
+            </div>
+          )}
           <div className="text-[13px] leading-relaxed break-words [&_p]:my-1.5 [&_p]:whitespace-pre-wrap [&_ul]:my-1.5 [&_ol]:my-1.5 [&_li]:my-0.5 [&_li]:whitespace-pre-wrap [&_h1]:text-[17px] [&_h1]:font-semibold [&_h1]:my-2 [&_h2]:text-[16px] [&_h2]:font-semibold [&_h2]:my-2 [&_h3]:text-[15px] [&_h3]:font-semibold [&_h3]:my-1.5 [&_hr]:my-2 [&_hr]:border-[var(--color-border)] [&_blockquote]:my-2 [&_blockquote]:border-l-2 [&_blockquote]:border-emerald-500/35 [&_blockquote]:pl-3 [&_blockquote]:text-[var(--color-text-secondary)] [&_table]:w-full [&_table]:border-collapse [&_th]:border [&_th]:border-[var(--color-border)] [&_th]:px-2 [&_th]:py-1 [&_td]:border [&_td]:border-[var(--color-border)] [&_td]:px-2 [&_td]:py-1 [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-[var(--color-code-bg)] [&_pre]:p-2 [&_pre]:text-[12px] [&_code]:rounded [&_code]:bg-[var(--color-code-bg)] [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-[12px]">
             <MarkdownContent
-              content={task.answer}
+              content={structuredAnswer.text}
               isStreaming={effectiveStatus === "running"}
             />
             {effectiveStatus === "running" && (
               <span className="inline-block w-1.5 h-4 bg-emerald-600 animate-pulse ml-1 align-middle" />
             )}
           </div>
+          <StructuredMediaAttachments attachments={structuredAnswer.attachments} />
         </div>
       )}
 

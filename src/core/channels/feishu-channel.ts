@@ -173,10 +173,11 @@ export class FeishuChannel implements IMChannel {
             ...msg,
             messageType: "file",
             text: fileKey,
+            fileName: attachment.fileName,
             mediaUrl: undefined,
             mediaUrls: [],
             images: [],
-            attachments: [attachment],
+            attachments: [],
           });
         } catch (error) {
           log.error("Failed to upload/send attachment to Feishu", { path: attachment.path, error });

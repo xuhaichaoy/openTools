@@ -25,10 +25,35 @@ export interface ExportDatasetFieldDefinition {
   nullable?: boolean;
   primaryKey?: boolean;
   aliases?: string[];
+  description?: string;
   enabled: boolean;
 }
 
-export interface PersonalExportDatasetDefinition {
+export interface ExportDatasetRelationDefinition {
+  id: string;
+  name: string;
+  description?: string;
+  targetEntityName: string;
+  targetEntityType?: "table" | "view" | "collection";
+  targetSchema?: string;
+  alias?: string;
+  joinType?: "inner" | "left" | "right";
+  triggerKeywords?: string[];
+  on: ExportJoinCondition[];
+  defaultFields?: ExportFieldSelection[];
+  enabled?: boolean;
+}
+
+interface ExportDatasetSemanticDefinition {
+  aliases?: string[];
+  intentTags?: string[];
+  examplePrompts?: string[];
+  keywordField?: string;
+  baseAlias?: string;
+  relations?: ExportDatasetRelationDefinition[];
+}
+
+export interface PersonalExportDatasetDefinition extends ExportDatasetSemanticDefinition {
   id: string;
   scope: "personal";
   sourceId: string;
@@ -73,7 +98,7 @@ export type RuntimeExportSourceConfig =
   | PersonalRuntimeExportSourceConfig
   | TeamRuntimeExportSourceConfig;
 
-export interface TeamExportDatasetDefinition {
+export interface TeamExportDatasetDefinition extends ExportDatasetSemanticDefinition {
   id: string;
   scope: "team";
   teamId: string;
@@ -109,6 +134,26 @@ export interface ExportSort {
   direction: "asc" | "desc";
 }
 
+export interface ExportFieldSelection {
+  field: string;
+  alias?: string;
+}
+
+export interface ExportJoinCondition {
+  left: string;
+  op?: string;
+  right: string;
+}
+
+export interface ExportJoinDefinition {
+  entityName: string;
+  entityType?: "table" | "view" | "collection";
+  schema?: string;
+  alias?: string;
+  joinType?: "inner" | "left" | "right";
+  on: ExportJoinCondition[];
+}
+
 export interface StructuredExportIntent {
   sourceId: string;
   sourceScope?: ExportScope;
@@ -117,7 +162,9 @@ export interface StructuredExportIntent {
   entityName: string;
   entityType?: "table" | "view" | "collection";
   schema?: string;
-  fields?: string[];
+  baseAlias?: string;
+  fields?: Array<string | ExportFieldSelection>;
+  joins?: ExportJoinDefinition[];
   filters?: ExportFilter[];
   sort?: ExportSort[];
   limit?: number;
@@ -147,6 +194,10 @@ export type ExportAgentDecision =
       question: string;
     }
   | {
+      kind: "answer";
+      answer: string;
+    }
+  | {
       kind: "reject";
       reason: string;
     }
@@ -161,6 +212,7 @@ export interface ExportSessionState {
   channelId: string;
   conversationId: string;
   status:
+    | "awaiting_followup"
     | "awaiting_clarification"
     | "awaiting_confirmation"
     | "exporting";

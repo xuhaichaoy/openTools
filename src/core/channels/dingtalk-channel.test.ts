@@ -279,10 +279,9 @@ describe("DingTalkChannel.send", () => {
       clientSecret: "ding-app-secret",
       robotCode: "ding-robot",
       openConversationId: "conv-send-1",
-      msgKey: "sampleMarkdown",
+      msgKey: "sampleImageMsg",
       msgParam: JSON.stringify({
-        title: "图片",
-        text: "![图片](media-image-1)",
+        photoURL: "media-image-1",
       }),
     });
   });
@@ -313,10 +312,9 @@ describe("DingTalkChannel.send", () => {
       clientSecret: "ding-app-secret",
       robotCode: "ding-robot",
       openConversationId: "conv-send-openclaw-1",
-      msgKey: "sampleMarkdown",
+      msgKey: "sampleImageMsg",
       msgParam: JSON.stringify({
-        title: "图片",
-        text: "![图片](media-image-openclaw)",
+        photoURL: "media-image-openclaw",
       }),
     });
   });
@@ -347,10 +345,9 @@ describe("DingTalkChannel.send", () => {
       clientSecret: "ding-app-secret",
       robotCode: "ding-app-key",
       openConversationId: "conv-send-2",
-      msgKey: "sampleMarkdown",
+      msgKey: "sampleImageMsg",
       msgParam: JSON.stringify({
-        title: "图片",
-        text: "![图片](media-image-2)",
+        photoURL: "media-image-2",
       }),
     });
   });
@@ -358,16 +355,7 @@ describe("DingTalkChannel.send", () => {
   it("sends private images through the single-chat DingTalk API", async () => {
     invokeMock
       .mockResolvedValueOnce(undefined)
-      .mockResolvedValueOnce({
-        running: true,
-        starting: false,
-        host: "127.0.0.1",
-        port: 21947,
-        baseUrl: "http://127.0.0.1:21947",
-        callbackBaseUrl: "http://127.0.0.1:21947/callbacks/im",
-        lastError: null,
-      })
-      .mockResolvedValueOnce("http://127.0.0.1:21947/callbacks/im/media/private-image-token")
+      .mockResolvedValueOnce("media-image-private-1")
       .mockResolvedValueOnce(undefined);
 
     const channel = new DingTalkChannel();
@@ -387,7 +375,48 @@ describe("DingTalkChannel.send", () => {
       userId: "user-private-1",
       msgKey: "sampleImageMsg",
       msgParam: JSON.stringify({
-        photoURL: "http://127.0.0.1:21947/callbacks/im/media/private-image-token",
+        photoURL: "media-image-private-1",
+      }),
+    });
+  });
+
+  it("uploads each attachment only once and preserves the file name", async () => {
+    invokeMock
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce("media-file-1")
+      .mockResolvedValueOnce(undefined);
+
+    const channel = new DingTalkChannel();
+    await channel.connect(APP_CONFIG);
+    await channel.send({
+      conversationId: "conv-file-1",
+      conversationType: "group",
+      robotCode: "ding-robot",
+      attachments: [
+        {
+          path: "/tmp/report.csv",
+          fileName: "report.csv",
+        },
+      ],
+    });
+
+    expect(invokeMock).toHaveBeenCalledWith("dingtalk_upload_media", {
+      clientId: "ding-app-key",
+      clientSecret: "ding-app-secret",
+      mediaType: "file",
+      filePath: "/tmp/report.csv",
+    });
+    expect(invokeMock).toHaveBeenCalledTimes(3);
+    expect(invokeMock).toHaveBeenLastCalledWith("dingtalk_send_app_message", {
+      clientId: "ding-app-key",
+      clientSecret: "ding-app-secret",
+      robotCode: "ding-robot",
+      openConversationId: "conv-file-1",
+      msgKey: "sampleFile",
+      msgParam: JSON.stringify({
+        mediaId: "media-file-1",
+        fileName: "report.csv",
+        fileType: "csv",
       }),
     });
   });

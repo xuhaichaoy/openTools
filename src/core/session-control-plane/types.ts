@@ -1,5 +1,9 @@
 import type { ChannelType } from "@/core/channels/types";
-import type { AIProductMode, AICenterCompatibleMode } from "@/core/ai/ai-mode-types";
+import type {
+  AIProductMode,
+  AICenterCompatibleMode,
+  RuntimeSessionMode,
+} from "@/core/ai/ai-mode-types";
 import type { AICenterSourceRef } from "@/store/app-store";
 import { normalizeAIProductMode } from "@/core/ai/ai-mode-types";
 
@@ -67,10 +71,53 @@ export interface SessionControlPlaneSession {
   summary?: string;
   status?: string;
   source?: AICenterSourceRef;
+  runtimeState?: SessionControlPlaneRuntimeState;
+  continuityState?: SessionControlPlaneContinuityState;
   createdAt: number;
   updatedAt: number;
   lastActiveAt: number;
   placeholder?: boolean;
+}
+
+export interface SessionControlPlaneRuntimeState {
+  mode?: RuntimeSessionMode;
+  active: boolean;
+  status?: string;
+  waitingStage?: string;
+  query?: string;
+  displayLabel?: string;
+  displayDetail?: string;
+  workspaceRoot?: string;
+  startedAt?: number;
+  updatedAt: number;
+}
+
+export type SessionControlPlaneContinuitySource =
+  | "runtime_state"
+  | "local_dialog"
+  | "im_conversation"
+  | "ai_session";
+
+export interface SessionControlPlaneContinuityState {
+  source: SessionControlPlaneContinuitySource;
+  updatedAt: number;
+  executionStrategy?: string;
+  contractState?: string;
+  pendingInteractionCount?: number;
+  queuedFollowUpCount?: number;
+  childSessionCount?: number;
+  openChildSessionCount?: number;
+  roomCompactionSummary?: string;
+  roomCompactionSummaryPreview?: string;
+  roomCompactionUpdatedAt?: number;
+  roomCompactionMessageCount?: number;
+  roomCompactionTaskCount?: number;
+  roomCompactionArtifactCount?: number;
+  roomCompactionPreservedIdentifiers?: string[];
+  roomCompactionTriggerReasons?: string[];
+  roomCompactionMemoryFlushNoteId?: string;
+  roomCompactionMemoryConfirmedCount?: number;
+  roomCompactionMemoryQueuedCount?: number;
 }
 
 export type SessionControlPlaneLinkType = "handoff" | "resume" | "derived" | "runtime_mirror";
@@ -168,6 +215,30 @@ export function cloneSessionControlPlaneSession(
     ...session,
     identity: cloneSessionIdentity(session.identity),
     ...(session.source ? { source: { ...session.source } } : {}),
+    ...(session.runtimeState ? { runtimeState: cloneSessionControlPlaneRuntimeState(session.runtimeState) } : {}),
+    ...(session.continuityState ? { continuityState: cloneSessionControlPlaneContinuityState(session.continuityState) } : {}),
+  };
+}
+
+export function cloneSessionControlPlaneRuntimeState(
+  state: SessionControlPlaneRuntimeState,
+): SessionControlPlaneRuntimeState {
+  return {
+    ...state,
+  };
+}
+
+export function cloneSessionControlPlaneContinuityState(
+  state: SessionControlPlaneContinuityState,
+): SessionControlPlaneContinuityState {
+  return {
+    ...state,
+    ...(state.roomCompactionPreservedIdentifiers
+      ? { roomCompactionPreservedIdentifiers: [...state.roomCompactionPreservedIdentifiers] }
+      : {}),
+    ...(state.roomCompactionTriggerReasons
+      ? { roomCompactionTriggerReasons: [...state.roomCompactionTriggerReasons] }
+      : {}),
   };
 }
 

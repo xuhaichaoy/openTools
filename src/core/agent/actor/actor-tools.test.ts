@@ -1,6 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { createActorCommunicationTools } from "./actor-tools";
 
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn(async (command: string) => {
+    if (command === "path_exists") return true;
+    throw new Error(`unexpected invoke: ${command}`);
+  }),
+}));
+
 describe("createActorCommunicationTools", () => {
   it("reads inherited images lazily when spawn_task executes", async () => {
     const spawnTask = vi.fn(() => ({
@@ -151,5 +158,98 @@ describe("createActorCommunicationTools", () => {
         roleBoundary: "reviewer",
       }),
     ]);
+  });
+
+  it("stages explicit local media for the next external IM reply", async () => {
+    const recordArtifact = vi.fn();
+    const stageResultMedia = vi.fn();
+    const system = {
+      get: (id: string) => ({ id, role: { name: id === "coordinator" ? "Coordinator" : id } }),
+      getAll: () => [],
+      getCoordinatorId: () => "coordinator",
+      getDialogHistory: () => ([
+        {
+          id: "msg-user-1",
+          from: "user",
+          kind: "user_input",
+          externalChannelType: "dingtalk",
+        },
+      ]),
+      getSessionUploadsSnapshot: () => ([
+        { id: "upload-1", name: "poster.png", path: "/repo/assets/poster.png" },
+      ]),
+      recordArtifact,
+      stageResultMedia,
+    } as any;
+
+    const tools = createActorCommunicationTools("coordinator", system, {
+      getInheritedImages: () => ["/tmp/current-image.png"],
+    });
+    const sendTool = tools.find((tool) => tool.name === "send_local_media");
+
+    expect(sendTool).toBeTruthy();
+    if (!sendTool) return;
+
+    const result = await sendTool.execute({
+      attachment_name: "poster.png",
+      use_current_images: true,
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      queued: true,
+      count: 2,
+    }));
+    expect(stageResultMedia).toHaveBeenCalledWith(
+      "coordinator",
+      expect.objectContaining({
+        images: expect.arrayContaining([
+          "/repo/assets/poster.png",
+          "/tmp/current-image.png",
+        ]),
+      }),
+    );
+    expect(recordArtifact).toHaveBeenCalledTimes(2);
+  });
+
+  it("treats non-visual local paths as IM attachments", async () => {
+    const stageResultMedia = vi.fn();
+    const system = {
+      get: (id: string) => ({ id, role: { name: id === "coordinator" ? "Coordinator" : id } }),
+      getAll: () => [],
+      getCoordinatorId: () => "coordinator",
+      getDialogHistory: () => ([
+        {
+          id: "msg-user-file",
+          from: "user",
+          kind: "user_input",
+          externalChannelType: "feishu",
+        },
+      ]),
+      getSessionUploadsSnapshot: () => [],
+      recordArtifact: vi.fn(),
+      stageResultMedia,
+    } as any;
+
+    const tools = createActorCommunicationTools("coordinator", system);
+    const sendTool = tools.find((tool) => tool.name === "send_local_media");
+
+    expect(sendTool).toBeTruthy();
+    if (!sendTool) return;
+
+    const result = await sendTool.execute({
+      path: "/Users/haichao/Downloads/file",
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      queued: true,
+      count: 1,
+      attachments: [{ path: "/Users/haichao/Downloads/file", fileName: "file" }],
+    }));
+    expect(stageResultMedia).toHaveBeenCalledWith(
+      "coordinator",
+      expect.objectContaining({
+        attachments: [{ path: "/Users/haichao/Downloads/file", fileName: "file" }],
+      }),
+    );
   });
 });

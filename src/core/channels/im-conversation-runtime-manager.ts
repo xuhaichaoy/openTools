@@ -13,6 +13,8 @@ import {
 } from "@/core/agent/context-runtime/runtime-state";
 import { buildRuntimeSessionCompactionPreview } from "@/core/agent/context-runtime/runtime-session-compaction";
 import { useToolTrustStore } from "@/store/command-allowlist-store";
+import { useSessionControlPlaneStore } from "@/store/session-control-plane-store";
+import { resolveRecoveredDialogRoomCompaction } from "@/core/session-control-plane/recovery";
 import { CollaborationSessionController } from "@/core/collaboration/session-controller";
 import { assessExecutionContractApproval } from "@/core/collaboration/contract-approval";
 import { cloneCollaborationSnapshotForPersistence } from "@/core/collaboration/persistence";
@@ -51,9 +53,7 @@ import {
   type PersistedIMRuntimeRecord,
 } from "./im-conversation-persistence";
 import {
-  deriveShareableIMMediaFromText,
-  sanitizeIMReplyTextForMedia,
-  shouldExplicitlyDeliverMediaToIM,
+  splitStructuredIMMediaReply,
 } from "./im-media-delivery";
 import { resolveChannelOutgoingMedia } from "./channel-outbound-media";
 
@@ -150,6 +150,14 @@ interface IMConversationRuntimeManagerOptions {
   }) => void;
 }
 
+interface IMOutgoingReplyPayload {
+  text: string;
+  mediaUrl?: string;
+  mediaUrls?: string[];
+  images?: string[];
+  attachments?: { path: string; fileName?: string }[];
+}
+
 function getChannelDisplayLabel(channelType: ChannelType): string {
   return channelType === "dingtalk" ? "钉钉会话" : "飞书会话";
 }
@@ -193,28 +201,6 @@ function cloneDialogMessage(message: DialogMessage): DialogMessage {
         }
       : {}),
   };
-}
-
-function mergeUniqueStrings(...groups: Array<readonly string[] | undefined>): string[] | undefined {
-  const result = [...new Set(groups.flatMap((group) => group ?? []).map((value) => String(value ?? "").trim()).filter(Boolean))];
-  return result.length ? result : undefined;
-}
-
-function mergeUniqueAttachments(
-  ...groups: Array<ReadonlyArray<{ path: string; fileName?: string }> | undefined>
-): Array<{ path: string; fileName?: string }> | undefined {
-  const merged = new Map<string, { path: string; fileName?: string }>();
-  for (const group of groups) {
-    for (const item of group ?? []) {
-      const path = String(item.path ?? "").trim();
-      if (!path) continue;
-      merged.set(path, {
-        path,
-        ...(item.fileName ? { fileName: item.fileName } : {}),
-      });
-    }
-  }
-  return merged.size > 0 ? [...merged.values()] : undefined;
 }
 
 function clonePendingIMMessage(message?: PendingIMMessage): PendingIMMessage | undefined {
@@ -605,8 +591,14 @@ export class IMConversationRuntimeManager {
     if (restoredDialogHistory?.length) {
       system.restoreDialogHistory(restoredDialogHistory.map((message) => cloneDialogMessage(message)));
     }
-    if (restored?.dialogRoomCompaction) {
-      system.setDialogRoomCompaction(restored.dialogRoomCompaction);
+    const recoveredCompaction = resolveRecoveredDialogRoomCompaction({
+      persisted: restored?.dialogRoomCompaction,
+      continuity: useSessionControlPlaneStore.getState()
+        .findSessionByRuntimeSessionId(system.sessionId)
+        ?.continuityState,
+    });
+    if (recoveredCompaction) {
+      system.setDialogRoomCompaction(recoveredCompaction);
     }
     const controller = new CollaborationSessionController(system, {
       surface: "im_conversation",
@@ -710,31 +702,17 @@ export class IMConversationRuntimeManager {
         }
 
         if (this.shouldForwardFinalAgentResult(runtime, latestDialogEvent)) {
-          const originalText = String(latestDialogEvent.content || "").slice(0, 2000).trim();
-          const shouldDeliverMedia = shouldExplicitlyDeliverMediaToIM(runtime.lastInput?.text);
-          const derivedMedia = shouldDeliverMedia
-            ? deriveShareableIMMediaFromText(originalText)
-            : {};
-          const outgoingMedia = shouldDeliverMedia
-            ? resolveChannelOutgoingMedia({
-                mediaUrls: derivedMedia.mediaUrls,
-                images: latestDialogEvent.images,
-                attachments: latestDialogEvent.attachments,
-              })
-            : {};
-          const text = shouldDeliverMedia && outgoingMedia.mediaUrls?.length
-            ? sanitizeIMReplyTextForMedia(originalText)
-            : originalText;
-          const hasMedia = Boolean(outgoingMedia.mediaUrls?.length);
-          
+          const outgoingReply = this.buildOutgoingReplyPayload(latestDialogEvent);
+          const text = outgoingReply.text;
+          const hasMedia = Boolean(outgoingReply.mediaUrls?.length);
+
           if (text || hasMedia) {
-            log.info("Forwarding agent reply to IM", { 
+            log.info("Forwarding agent reply to IM", {
               conversationId: runtime.conversationId,
               hasText: !!text,
-              mediaCount: outgoingMedia.mediaUrls?.length || 0,
-              imageCount: outgoingMedia.images?.length || 0,
-              attachmentCount: outgoingMedia.attachments?.length || 0,
-              shouldDeliverMedia,
+              mediaCount: outgoingReply.mediaUrls?.length || 0,
+              imageCount: outgoingReply.images?.length || 0,
+              attachmentCount: outgoingReply.attachments?.length || 0,
             });
 
             runtime.forwardedResultMessageIds.add(latestDialogEvent.id);
@@ -748,10 +726,10 @@ export class IMConversationRuntimeManager {
               conversationId: runtime.conversationId,
               text,
               messageId: runtime.lastInput?.messageId,
-              mediaUrl: outgoingMedia.mediaUrl,
-              mediaUrls: outgoingMedia.mediaUrls,
-              images: outgoingMedia.images,
-              attachments: outgoingMedia.attachments,
+              mediaUrl: outgoingReply.mediaUrl,
+              mediaUrls: outgoingReply.mediaUrls,
+              images: outgoingReply.images,
+              attachments: outgoingReply.attachments,
             }).catch((error) => {
               log.error("Failed to send IM runtime reply", error);
             });
@@ -1038,6 +1016,39 @@ export class IMConversationRuntimeManager {
     return {
       ...buildRuntimeSessionCompactionPreview(runtime.system.getDialogRoomCompaction()),
     };
+  }
+
+  private syncRuntimeControlPlane(
+    runtime: IMConversationRuntime,
+    snapshot: CollaborationSessionSnapshot,
+    sessionIdentityId?: string,
+  ): void {
+    const controlPlaneSessionId = sessionIdentityId?.trim();
+    if (!controlPlaneSessionId) return;
+    const activeCompaction = runtime.system.getDialogRoomCompaction();
+
+    const openChildSessionCount = snapshot.childSessions.filter((session) =>
+      session.status === "pending"
+      || session.status === "running"
+      || session.status === "waiting",
+    ).length;
+
+    useSessionControlPlaneStore.getState().patchSessionContinuityState(controlPlaneSessionId, {
+      source: "im_conversation",
+      updatedAt: runtime.updatedAt,
+      executionStrategy: snapshot.presentationState.executionStrategy,
+      contractState: snapshot.presentationState.contractState,
+      pendingInteractionCount: snapshot.presentationState.pendingInteractionCount,
+      queuedFollowUpCount: snapshot.presentationState.queuedFollowUpCount,
+      childSessionCount: snapshot.childSessions.length,
+      openChildSessionCount,
+      roomCompactionSummary: activeCompaction?.summary,
+      ...buildRuntimeSessionCompactionPreview(activeCompaction),
+      roomCompactionTriggerReasons: activeCompaction?.triggerReasons,
+      roomCompactionMemoryFlushNoteId: activeCompaction?.memoryFlushNoteId,
+      roomCompactionMemoryConfirmedCount: activeCompaction?.memoryConfirmedCount,
+      roomCompactionMemoryQueuedCount: activeCompaction?.memoryQueuedCount,
+    });
   }
 
   private findQueuedApprovalMessage(
@@ -1630,7 +1641,7 @@ export class IMConversationRuntimeManager {
       this.refreshRuntime(runtime);
     });
 
-    useRuntimeStateStore.getState().upsertSession({
+    const runtimeRecord = useRuntimeStateStore.getState().upsertSession({
       mode: "im_conversation",
       sessionId: runtime.system.sessionId,
       query,
@@ -1641,8 +1652,20 @@ export class IMConversationRuntimeManager {
       updatedAt: runtime.updatedAt,
       waitingStage,
       status,
+      sessionIdentity: {
+        surface: "im_conversation",
+        sessionKey: runtime.key,
+        sessionKind: "channel_topic",
+        scope: "channel_topic",
+        accountId: runtime.channelId,
+        channelType: runtime.channelType,
+        conversationId: runtime.conversationId,
+        topicId: runtime.topicId,
+        runtimeSessionId: runtime.system.sessionId,
+      },
       ...this.buildRuntimeCompactionPreview(runtime),
     });
+    this.syncRuntimeControlPlane(runtime, snapshot, runtimeRecord?.sessionIdentityId);
     this.syncConversationSnapshots();
   }
 
@@ -2149,6 +2172,24 @@ export class IMConversationRuntimeManager {
     }
 
     return message.from === coordinatorId;
+  }
+
+  private buildOutgoingReplyPayload(message: DialogMessage): IMOutgoingReplyPayload {
+    const originalText = String(message.content || "");
+    const structuredReply = splitStructuredIMMediaReply(originalText);
+    const outgoingMedia = resolveChannelOutgoingMedia({
+      mediaUrls: structuredReply.mediaUrls,
+      images: message.images,
+      attachments: message.attachments,
+    });
+
+    return {
+      text: structuredReply.text.slice(0, 2000).trim(),
+      ...(outgoingMedia.mediaUrl ? { mediaUrl: outgoingMedia.mediaUrl } : {}),
+      ...(outgoingMedia.mediaUrls?.length ? { mediaUrls: outgoingMedia.mediaUrls } : {}),
+      ...(outgoingMedia.images?.length ? { images: outgoingMedia.images } : {}),
+      ...(outgoingMedia.attachments?.length ? { attachments: outgoingMedia.attachments } : {}),
+    };
   }
 
   private buildExternalInteractionPrompt(

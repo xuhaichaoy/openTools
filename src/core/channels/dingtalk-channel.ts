@@ -23,7 +23,7 @@ import { createLogger } from "@/core/logger";
 import { resolveChannelOutgoingMedia } from "./channel-outbound-media";
 
 const log = createLogger("DingTalk");
-const DINGTALK_SEND_LOGIC_VERSION = "2026-03-20-media-send-v4-private-photo-url";
+const DINGTALK_SEND_LOGIC_VERSION = "2026-03-24-media-send-v5-upload-native";
 
 interface DingTalkDownloadedFile {
   downloadCode: string;
@@ -169,7 +169,7 @@ export class DingTalkChannel implements IMChannel {
       log.info("Processing images for DingTalk", { count: outgoingMedia.images!.length });
       for (const imagePath of outgoingMedia.images!) {
         try {
-          const imageRef = await this._prepareImageForSend(imagePath, msg.conversationType);
+          const imageRef = await this._prepareImageForSend(imagePath);
           log.info("Image prepared for DingTalk delivery", {
             conversationType: msg.conversationType,
             imageRefType: isHttpMediaUrl(imageRef) ? "url" : "mediaId",
@@ -203,11 +203,12 @@ export class DingTalkChannel implements IMChannel {
             ...msg,
             messageType: "file",
             text: mediaId,
+            fileName: attachment.fileName,
             markdown: undefined,
             mediaUrl: undefined,
             mediaUrls: [],
             images: [],
-            attachments: [attachment],
+            attachments: [],
             replyWebhookUrl: undefined,
             replyWebhookExpiresAt: undefined,
           });
@@ -283,31 +284,10 @@ export class DingTalkChannel implements IMChannel {
 
   private async _prepareImageForSend(
     imagePath: string,
-    conversationType?: ChannelOutgoingMessage["conversationType"],
   ): Promise<string> {
     if (isHttpMediaUrl(imagePath)) {
       return imagePath.trim();
     }
-
-    if (conversationType === "private") {
-      try {
-        await invoke("start_im_callback_server");
-        const mediaUrl = await invoke<string>("register_im_callback_media", {
-          filePath: imagePath,
-        });
-        log.info("Prepared local media URL for DingTalk private image", {
-          imagePath,
-          mediaUrl,
-        });
-        return mediaUrl;
-      } catch (error) {
-        log.warn("Failed to prepare local media URL for DingTalk private image, falling back to upload", {
-          imagePath,
-          error,
-        });
-      }
-    }
-
     return this._uploadMedia(imagePath, "image");
   }
 
@@ -945,31 +925,22 @@ function buildDingTalkAppPayload(msg: ChannelOutgoingMessage): {
 } {
   if (msg.messageType === "image") {
     const imageRef = String(msg.text ?? "").trim();
-    if (isHttpMediaUrl(imageRef)) {
-      return {
-        msgKey: "sampleImageMsg",
-        msgParam: JSON.stringify({
-          photoURL: imageRef,
-        }),
-      };
-    }
     return {
-      msgKey: "sampleMarkdown",
+      msgKey: "sampleImageMsg",
       msgParam: JSON.stringify({
-        title: "图片",
-        text: `![图片](${imageRef})`,
+        photoURL: imageRef,
       }),
     };
   }
 
   if (msg.messageType === "file") {
-    const attachment = msg.attachments?.[0];
+    const fileName = msg.fileName || msg.attachments?.[0]?.fileName || "file";
     return {
       msgKey: "sampleFile",
       msgParam: JSON.stringify({
         mediaId: msg.text,
-        fileName: attachment?.fileName || "file",
-        fileType: attachment?.fileName?.split(".").pop() || "bin",
+        fileName,
+        fileType: fileName.split(".").pop() || "bin",
       }),
     };
   }

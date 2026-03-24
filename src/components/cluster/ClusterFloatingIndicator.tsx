@@ -5,6 +5,7 @@ import { useAppStore } from "@/store/app-store";
 import { useAgentStore } from "@/store/agent-store";
 import { useAIStore } from "@/store/ai-store";
 import { routeToAICenter } from "@/core/ai/ai-center-routing";
+import { getAIProductModeForRuntimeMode } from "@/core/ai/ai-mode-types";
 import {
   abortRuntimeSession,
   hasRuntimeAbortHandler,
@@ -79,7 +80,7 @@ export function ClusterFloatingIndicator() {
       case "ask":
         setAskCurrentConversation(sessionId);
         routeToAICenter({
-          mode: "ask",
+          mode: "explore",
           source: "floating_indicator",
           taskId: sessionId,
           note: "resume ask runtime",
@@ -89,7 +90,7 @@ export function ClusterFloatingIndicator() {
       case "agent":
         setAgentCurrentSession(sessionId);
         routeToAICenter({
-          mode: "agent",
+          mode: "build",
           source: "floating_indicator",
           taskId: sessionId,
           note: "resume agent runtime",
@@ -99,7 +100,7 @@ export function ClusterFloatingIndicator() {
       case "cluster":
         setClusterCurrentSession(sessionId);
         routeToAICenter({
-          mode: "cluster",
+          mode: "plan",
           source: "floating_indicator",
           taskId: sessionId,
           note: "resume cluster runtime",
@@ -169,7 +170,7 @@ export function ClusterFloatingIndicator() {
   if (isOnManagementCenter) return null;
   const visibleItems = items.filter((item) => {
     if (!isOnAiCenter) return true;
-    return aiCenterMode !== item.mode;
+    return aiCenterMode !== getAIProductModeForRuntimeMode(item.mode);
   });
 
   if (visibleItems.length === 0) return null;

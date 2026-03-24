@@ -13,6 +13,7 @@ vi.mock("@/core/agent/actor/actor-transcript", () => ({
 import { clearAllRuntimeSessions } from "@/core/agent/context-runtime/runtime-state";
 import * as dialogContextPressure from "@/core/agent/actor/dialog-context-pressure";
 import { useIMConversationRuntimeStore } from "@/store/im-conversation-runtime-store";
+import { useSessionControlPlaneStore } from "@/store/session-control-plane-store";
 import { useToolTrustStore } from "@/store/command-allowlist-store";
 import {
   clearPersistedIMConversationRuntimeSnapshot,
@@ -32,6 +33,7 @@ describe("IMConversationRuntimeManager persistence", () => {
     clearPersistedIMConversationRuntimeSnapshot();
     localStorage.clear();
     useIMConversationRuntimeStore.getState().reset();
+    useSessionControlPlaneStore.getState().clear();
     useToolTrustStore.getState().setTrustLevel("auto_approve_file");
   });
 
@@ -320,6 +322,89 @@ describe("IMConversationRuntimeManager persistence", () => {
     manager.dispose();
   });
 
+  it("recovers IM room compaction from session control plane when persisted runtime omitted it", () => {
+    const session = useSessionControlPlaneStore.getState().upsertSession({
+      identity: {
+        productMode: "im_conversation",
+        surface: "im_conversation",
+        sessionKey: "ch-restore::conv-restore::default",
+        sessionKind: "channel_topic",
+        scope: "channel_topic",
+        channelType: "dingtalk",
+        accountId: "ch-restore",
+        conversationId: "conv-restore",
+        topicId: "default",
+        runtimeSessionId: "im-session-restore",
+      },
+      title: "钉钉会话",
+      summary: "继续沿用之前的话题",
+      status: "running",
+      createdAt: 100,
+      updatedAt: 200,
+      lastActiveAt: 200,
+    });
+    useSessionControlPlaneStore.getState().patchSessionContinuityState(session?.id ?? "", {
+      source: "im_conversation",
+      updatedAt: 220,
+      roomCompactionSummary: "已整理较早的话题背景和回归结论，后续只需结合最近消息继续。",
+      roomCompactionSummaryPreview: "已整理较早的话题背景和回归结论",
+      roomCompactionUpdatedAt: 210,
+      roomCompactionMessageCount: 18,
+      roomCompactionTaskCount: 2,
+      roomCompactionArtifactCount: 1,
+      roomCompactionPreservedIdentifiers: ["src/App.tsx", "review-notes.md"],
+    });
+
+    savePersistedIMConversationRuntimeSnapshot({
+      version: 2,
+      savedAt: 1710000000000,
+      conversations: [
+        {
+          key: "ch-restore::conv-restore",
+          channelType: "dingtalk",
+          conversationType: "private",
+          activeTopicId: "default",
+          nextTopicSeq: 2,
+          updatedAt: 1710000000000,
+        },
+      ],
+      runtimes: [
+        {
+          key: "ch-restore::conv-restore::default",
+          channelId: "ch-restore",
+          channelType: "dingtalk",
+          conversationId: "conv-restore",
+          conversationType: "private",
+          topicId: "default",
+          sessionId: "im-session-restore",
+          updatedAt: 1710000000000,
+          dialogHistory: [],
+          actorConfigs: [
+            {
+              id: "agent-lead-restore",
+              roleName: "Lead",
+              maxIterations: 40,
+            },
+          ],
+        },
+      ],
+    });
+
+    const manager = new IMConversationRuntimeManager({
+      onReply: async () => undefined,
+    });
+
+    const preview = useIMConversationRuntimeStore.getState().sessionPreviews["im-session-restore"];
+
+    expect(preview?.roomCompactionMessageCount).toBe(18);
+    expect(preview?.roomCompactionTaskCount).toBe(2);
+    expect(preview?.roomCompactionArtifactCount).toBe(1);
+    expect(preview?.roomCompactionPreservedIdentifiers).toEqual(["src/App.tsx", "review-notes.md"]);
+    expect(preview?.roomCompactionSummaryPreview).toContain("已整理较早的话题背景");
+
+    manager.dispose();
+  });
+
   it("asks for human approval in strict manual mode before IM dispatch", async () => {
     useToolTrustStore.getState().setTrustLevel("always_ask");
     const onReply = vi.fn(async () => undefined);
@@ -421,6 +506,113 @@ describe("IMConversationRuntimeManager persistence", () => {
     expect(["sealed", "active", "completed"]).toContain(preview?.contractState);
     expect(onReply).not.toHaveBeenCalledWith(expect.objectContaining({
       text: expect.stringContaining("请直接回复“允许”或“拒绝”"),
+    }));
+
+    manager.dispose();
+  });
+
+  it("forwards OpenClaw-style MEDIA directives without relying on user trigger words", async () => {
+    const onReply = vi.fn(async () => undefined);
+    const manager = new IMConversationRuntimeManager({
+      onReply,
+    });
+
+    await manager.handleIncoming({
+      channelId: "ch-media",
+      channelType: "dingtalk",
+      msg: {
+        messageId: "msg-media-1",
+        conversationId: "conv-media-1",
+        conversationType: "private",
+        senderId: "user-media",
+        senderName: "Carol",
+        text: "使用 mcp 打开百度，搜索今天天气并截图",
+      },
+    });
+    await flushMicrotasks();
+    onReply.mockClear();
+
+    const runtime = [...((manager as unknown as {
+      runtimes: Map<string, {
+        system: {
+          getCoordinatorId(): string | null;
+          publishResult(actorId: string, content: string): unknown;
+        };
+      }>;
+    }).runtimes.values())][0];
+    const coordinatorId = runtime?.system.getCoordinatorId();
+    expect(coordinatorId).toBeTruthy();
+
+    runtime?.system.publishResult(
+      coordinatorId!,
+      [
+        "已完成，见截图。",
+        "MEDIA:/tmp/baidu-weather.png",
+      ].join("\n"),
+    );
+    await flushMicrotasks();
+
+    expect(onReply).toHaveBeenCalledWith(expect.objectContaining({
+      channelId: "ch-media",
+      conversationId: "conv-media-1",
+      text: "已完成，见截图。",
+      mediaUrl: "/tmp/baidu-weather.png",
+      mediaUrls: ["/tmp/baidu-weather.png"],
+      images: ["/tmp/baidu-weather.png"],
+    }));
+
+    manager.dispose();
+  });
+
+  it("forwards explicitly staged local media on the next coordinator result", async () => {
+    const onReply = vi.fn(async () => undefined);
+    const manager = new IMConversationRuntimeManager({
+      onReply,
+    });
+
+    await manager.handleIncoming({
+      channelId: "ch-send",
+      channelType: "dingtalk",
+      msg: {
+        messageId: "msg-send-1",
+        conversationId: "conv-send-1",
+        conversationType: "private",
+        senderId: "user-send",
+        senderName: "Dana",
+        text: "把刚才那张图发给我",
+      },
+    });
+    await flushMicrotasks();
+    onReply.mockClear();
+
+    const runtime = [...((manager as unknown as {
+      runtimes: Map<string, {
+        system: {
+          getCoordinatorId(): string | null;
+          stageResultMedia(actorId: string, media: {
+            images?: string[];
+            attachments?: { path: string; fileName?: string }[];
+          }): unknown;
+          publishResult(actorId: string, content: string): unknown;
+        };
+      }>;
+    }).runtimes.values())][0];
+    const coordinatorId = runtime?.system.getCoordinatorId();
+    expect(coordinatorId).toBeTruthy();
+
+    runtime?.system.stageResultMedia(coordinatorId!, {
+      images: ["/repo/project/assets/mockup.png"],
+      attachments: [{ path: "/repo/project/output/report.pdf", fileName: "report.pdf" }],
+    });
+    runtime?.system.publishResult(coordinatorId!, "已发给你。");
+    await flushMicrotasks();
+
+    expect(onReply).toHaveBeenCalledWith(expect.objectContaining({
+      channelId: "ch-send",
+      conversationId: "conv-send-1",
+      text: "已发给你。",
+      images: ["/repo/project/assets/mockup.png"],
+      attachments: [{ path: "/repo/project/output/report.pdf", fileName: "report.pdf" }],
     }));
 
     manager.dispose();

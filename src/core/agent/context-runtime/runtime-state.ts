@@ -4,6 +4,7 @@ import type { AIProductMode, RuntimeSessionMode as CoreRuntimeSessionMode } from
 import { getAIProductModeForRuntimeMode } from "@/core/ai/ai-mode-types";
 import type { SessionIdentityInput } from "@/core/session-control-plane/types";
 import { useSessionControlPlaneStore } from "@/store/session-control-plane-store";
+import { createLogger } from "@/core/logger";
 
 export type RuntimeSessionMode = CoreRuntimeSessionMode;
 
@@ -59,6 +60,7 @@ interface RuntimeStateStore extends RuntimeStateSnapshot {
 type RuntimeAbortHandler = () => void | Promise<void>;
 
 const STORAGE_KEY = "mtools-runtime-state-v1";
+const log = createLogger("RuntimeState");
 const runtimeAbortHandlers = new Map<string, RuntimeAbortHandler>();
 
 function canUseLocalStorage(): boolean {
@@ -260,6 +262,86 @@ export function buildRuntimeSessionKey(
   return `${mode}:${sessionId.trim()}`;
 }
 
+function resolveMirroredSessionIdentityInput(params: {
+  mode: RuntimeSessionMode;
+  productMode: AIProductMode;
+  sessionId: string;
+  workspaceRoot?: string;
+  sessionIdentity?: SessionIdentityInput;
+  existingSessionIdentityId?: string;
+}): SessionIdentityInput {
+  const existingIdentity = params.existingSessionIdentityId
+    ? useSessionControlPlaneStore.getState().getSession(params.existingSessionIdentityId)?.identity
+    : null;
+  return {
+    productMode: params.productMode,
+    surface: params.sessionIdentity?.surface
+      ?? existingIdentity?.surface
+      ?? (params.mode === "im_conversation" ? "im_conversation" : "runtime_state"),
+    sessionKey: params.sessionIdentity?.sessionKey
+      ?? existingIdentity?.sessionKey
+      ?? params.sessionId,
+    sessionKind: params.sessionIdentity?.sessionKind ?? existingIdentity?.sessionKind,
+    scope: params.sessionIdentity?.scope ?? existingIdentity?.scope,
+    workspaceId: params.sessionIdentity?.workspaceId
+      ?? params.workspaceRoot
+      ?? existingIdentity?.workspaceId,
+    channelType: params.sessionIdentity?.channelType ?? existingIdentity?.channelType,
+    accountId: params.sessionIdentity?.accountId ?? existingIdentity?.accountId,
+    conversationId: params.sessionIdentity?.conversationId ?? existingIdentity?.conversationId,
+    topicId: params.sessionIdentity?.topicId ?? existingIdentity?.topicId,
+    peerId: params.sessionIdentity?.peerId ?? existingIdentity?.peerId,
+    parentSessionId: params.sessionIdentity?.parentSessionId ?? existingIdentity?.parentSessionId,
+    runtimeSessionId: params.sessionIdentity?.runtimeSessionId
+      ?? existingIdentity?.runtimeSessionId
+      ?? params.sessionId,
+  };
+}
+
+function syncRuntimeSessionToControlPlane(record: RuntimeSessionRecord): void {
+  if (!record.sessionIdentityId) return;
+  useSessionControlPlaneStore.getState().patchSessionRuntimeState(record.sessionIdentityId, {
+    mode: record.mode,
+    active: true,
+    status: record.status,
+    waitingStage: record.waitingStage,
+    query: record.query,
+    displayLabel: record.displayLabel,
+    displayDetail: record.displayDetail,
+    workspaceRoot: record.workspaceRoot,
+    startedAt: record.startedAt,
+    updatedAt: record.updatedAt,
+  });
+  useSessionControlPlaneStore.getState().patchSessionContinuityState(record.sessionIdentityId, {
+    source: "runtime_state",
+    updatedAt: record.updatedAt,
+    roomCompactionSummaryPreview: record.roomCompactionSummaryPreview,
+    roomCompactionUpdatedAt: record.roomCompactionUpdatedAt,
+    roomCompactionMessageCount: record.roomCompactionMessageCount,
+    roomCompactionTaskCount: record.roomCompactionTaskCount,
+    roomCompactionArtifactCount: record.roomCompactionArtifactCount,
+    roomCompactionPreservedIdentifiers: record.roomCompactionPreservedIdentifiers,
+  });
+}
+
+function clearRuntimeSessionFromControlPlane(
+  record: RuntimeSessionRecord | undefined,
+): void {
+  if (!record?.sessionIdentityId) return;
+  useSessionControlPlaneStore.getState().patchSessionRuntimeState(record.sessionIdentityId, {
+    mode: record.mode,
+    active: false,
+    status: "idle",
+    waitingStage: undefined,
+    query: record.query,
+    displayLabel: record.displayLabel,
+    displayDetail: record.displayDetail,
+    workspaceRoot: record.workspaceRoot,
+    startedAt: record.startedAt,
+    updatedAt: Date.now(),
+  });
+}
+
 const initialSnapshot = loadRuntimeSnapshot();
 
 export const useRuntimeStateStore = create<RuntimeStateStore>((set, get) => ({
@@ -273,25 +355,20 @@ export const useRuntimeStateStore = create<RuntimeStateStore>((set, get) => ({
     const now = input.updatedAt ?? Date.now();
     const startedAt = input.startedAt ?? now;
     const key = buildRuntimeSessionKey(input.mode, sessionId);
+    const existingSessionIdentityId = get().sessions[key]?.sessionIdentityId;
     const productMode = input.productMode
       ? getAIProductModeForRuntimeMode(input.productMode)
       : getAIProductModeForRuntimeMode(input.mode);
+    const mirroredIdentity = resolveMirroredSessionIdentityInput({
+      mode: input.mode,
+      productMode,
+      sessionId,
+      workspaceRoot: input.workspaceRoot,
+      sessionIdentity: input.sessionIdentity,
+      existingSessionIdentityId,
+    });
     const mirroredSession = useSessionControlPlaneStore.getState().upsertSession({
-      identity: {
-        productMode,
-        surface: input.sessionIdentity?.surface ?? (input.mode === "im_conversation" ? "im_conversation" : "runtime_state"),
-        sessionKey: input.sessionIdentity?.sessionKey ?? sessionId,
-        sessionKind: input.sessionIdentity?.sessionKind,
-        scope: input.sessionIdentity?.scope,
-        workspaceId: input.sessionIdentity?.workspaceId ?? input.workspaceRoot,
-        channelType: input.sessionIdentity?.channelType,
-        accountId: input.sessionIdentity?.accountId,
-        conversationId: input.sessionIdentity?.conversationId,
-        topicId: input.sessionIdentity?.topicId,
-        peerId: input.sessionIdentity?.peerId,
-        parentSessionId: input.sessionIdentity?.parentSessionId,
-        runtimeSessionId: input.sessionIdentity?.runtimeSessionId ?? sessionId,
-      },
+      identity: mirroredIdentity,
       title: input.displayLabel?.trim() || query,
       summary: query,
       status: input.status ?? "running",
@@ -369,11 +446,16 @@ export const useRuntimeStateStore = create<RuntimeStateStore>((set, get) => ({
       return nextState;
     });
 
+    if (created) {
+      syncRuntimeSessionToControlPlane(created);
+    }
+
     return created;
   },
 
   patchSession: (mode, sessionId, patch) => {
     const key = buildRuntimeSessionKey(mode, sessionId);
+    let patchedRecord: RuntimeSessionRecord | null = null;
     set((state) => {
       const existing = state.sessions[key];
       if (!existing) return state;
@@ -395,14 +477,15 @@ export const useRuntimeStateStore = create<RuntimeStateStore>((set, get) => ({
         ...(typeof patch.status === "string" ? { status: patch.status } : {}),
         updatedAt: patch.updatedAt ?? Date.now(),
       }, patch);
+      const mirroredIdentity = resolveMirroredSessionIdentityInput({
+        mode,
+        productMode: existing.productMode,
+        sessionId: existing.sessionId,
+        workspaceRoot: nextRecord.workspaceRoot,
+        existingSessionIdentityId: existing.sessionIdentityId,
+      });
       void useSessionControlPlaneStore.getState().upsertSession({
-        identity: {
-          productMode: existing.productMode,
-          surface: existing.mode === "im_conversation" ? "im_conversation" : "runtime_state",
-          sessionKey: existing.sessionId,
-          workspaceId: nextRecord.workspaceRoot,
-          runtimeSessionId: existing.sessionId,
-        },
+        identity: mirroredIdentity,
         title: nextRecord.displayLabel?.trim() || nextRecord.query,
         summary: nextRecord.query,
         status: nextRecord.status,
@@ -411,8 +494,10 @@ export const useRuntimeStateStore = create<RuntimeStateStore>((set, get) => ({
         lastActiveAt: nextRecord.updatedAt,
       });
       if (areRuntimeSessionRecordsEqual(existing, nextRecord, { ignoreUpdatedAt: true })) {
+        patchedRecord = nextRecord;
         return state;
       }
+      patchedRecord = nextRecord;
       const nextState: RuntimeStateSnapshot = {
         sessions: {
           ...state.sessions,
@@ -424,10 +509,15 @@ export const useRuntimeStateStore = create<RuntimeStateStore>((set, get) => ({
       persistRuntimeSnapshot(nextState);
       return nextState;
     });
+
+    if (patchedRecord) {
+      syncRuntimeSessionToControlPlane(patchedRecord);
+    }
   },
 
   removeSession: (mode, sessionId) => {
     const key = buildRuntimeSessionKey(mode, sessionId);
+    const existingRecord = get().sessions[key];
     set((state) => {
       if (!state.sessions[key]) return state;
       const nextSessions = { ...state.sessions };
@@ -449,9 +539,11 @@ export const useRuntimeStateStore = create<RuntimeStateStore>((set, get) => ({
       persistRuntimeSnapshot(nextState);
       return nextState;
     });
+    clearRuntimeSessionFromControlPlane(existingRecord);
   },
 
   clearMode: (mode) => {
+    const affectedRecords = Object.values(get().sessions).filter((session) => session.mode === mode);
     set((state) => {
       const nextSessions = Object.fromEntries(
         Object.entries(state.sessions).filter(([, session]) => session.mode !== mode),
@@ -469,6 +561,7 @@ export const useRuntimeStateStore = create<RuntimeStateStore>((set, get) => ({
       persistRuntimeSnapshot(nextState);
       return nextState;
     });
+    affectedRecords.forEach((record) => clearRuntimeSessionFromControlPlane(record));
   },
 
   setForegroundSession: (mode, sessionId) => {
@@ -478,6 +571,13 @@ export const useRuntimeStateStore = create<RuntimeStateStore>((set, get) => ({
       const currentForeground = state.foregroundSessionIds[mode] ?? "";
       if (currentForeground === normalized) {
         return state;
+      }
+      if (mode === "im_conversation" || mode === "dialog") {
+        log.info("foreground session changed", {
+          mode,
+          from: currentForeground || null,
+          to: normalized || null,
+        });
       }
       if (normalized) {
         nextForeground[mode] = normalized;
@@ -513,8 +613,10 @@ export const useRuntimeStateStore = create<RuntimeStateStore>((set, get) => ({
   },
 
   resetAll: () => {
+    const records = Object.values(get().sessions);
     persistRuntimeSnapshot(buildEmptySnapshot());
     set(buildEmptySnapshot());
+    records.forEach((record) => clearRuntimeSessionFromControlPlane(record));
   },
 }));
 

@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef, useEffect } from "react";
+import React, { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import {
   Network,
   Play,
@@ -22,6 +22,7 @@ import { writeTextFile } from "@tauri-apps/plugin-fs";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AICenterHandoffCard } from "@/components/ai/AICenterHandoffCard";
+import { StructuredMediaAttachments } from "@/components/ai/StructuredMediaAttachments";
 import {
   buildAICenterHandoffScopedFileRefs,
   getAICenterHandoffImportPaths,
@@ -30,6 +31,7 @@ import {
 import { AttachDropdown } from "@/components/ui/AttachDropdown";
 import { useClusterStore, type ClusterSession } from "@/store/cluster-store";
 import { ChatImage } from "@/components/ai/MessageBubble";
+import { mergeStructuredMedia } from "@/core/media/structured-media";
 import { useAIStore } from "@/store/ai-store";
 import { useAppStore, type AICenterHandoff } from "@/store/app-store";
 import {
@@ -83,6 +85,7 @@ import {
 import { useToast } from "@/components/ui/Toast";
 import { handleError } from "@/core/errors";
 import { routeToAICenter } from "@/core/ai/ai-center-routing";
+import { normalizeAIProductMode } from "@/core/ai/ai-mode-types";
 import { recordAIRouteEvent } from "@/store/ai-route-store";
 import { modelSupportsImageInput } from "@/core/ai/model-capabilities";
 import {
@@ -165,6 +168,23 @@ function mergeUniqueLines(lines: Array<string | undefined | null>): string[] {
     result.push(normalized);
   }
   return result;
+}
+
+function buildStructuredResultExport(result: ReturnType<typeof mergeStructuredMedia>): string {
+  const sections: string[] = [];
+  const body = result.text.trim();
+  if (body) {
+    sections.push(body);
+  }
+  if (result.images?.length) {
+    sections.push(["## 图片", ...result.images.map((path) => `- ${path}`)].join("\n"));
+  }
+  if (result.attachments?.length) {
+    sections.push(
+      ["## 附件", ...result.attachments.map((attachment) => `- ${attachment.path}`)].join("\n"),
+    );
+  }
+  return sections.join("\n\n").trim();
 }
 
 const STATUS_LABELS: Record<ClusterSessionStatus, string> = {
@@ -250,6 +270,20 @@ function SessionCard({
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const { toast } = useToast();
   const contextSnapshot = session.contextSnapshot;
+  const structuredResult = useMemo(
+    () => mergeStructuredMedia({ text: session.result?.finalAnswer }),
+    [session.result?.finalAnswer],
+  );
+  const exportedResult = useMemo(
+    () => buildStructuredResultExport(structuredResult),
+    [structuredResult],
+  );
+  const resultImagePaths = structuredResult.images ?? [];
+  const resultAttachmentPaths = (structuredResult.attachments ?? []).map((attachment) => attachment.path);
+  const handoffAttachmentPaths = useMemo(
+    () => [...new Set([...(session.images ?? []), ...resultImagePaths, ...resultAttachmentPaths])],
+    [resultAttachmentPaths, resultImagePaths, session.images],
+  );
 
   const handleCopyQuery = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -262,7 +296,7 @@ function SessionCard({
   const handleCopyResult = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (!session.result) return;
-    navigator.clipboard.writeText(session.result.finalAnswer).then(() => {
+    navigator.clipboard.writeText(exportedResult || structuredResult.text || session.result.finalAnswer).then(() => {
       toast("success", "已复制");
     }).catch(() => { toast("warning", "复制失败"); });
   };
@@ -278,7 +312,7 @@ function SessionCard({
         filters: [{ name: "Markdown", extensions: ["md"] }],
       });
       if (filePath) {
-        await writeTextFile(filePath, session.result.finalAnswer);
+        await writeTextFile(filePath, exportedResult || structuredResult.text || session.result.finalAnswer);
         toast("success", "已保存");
       }
     } catch (err) {
@@ -290,44 +324,44 @@ function SessionCard({
   const handleContinueWithAgent = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (!session.result) return;
-    const sessionImages = session.images ?? [];
-    const report = session.result.finalAnswer;
-    const truncated = report.length > 2000 ? report.slice(0, 2000) + "\n\n...（完整内容见上方 Cluster 报告）" : report;
-    const prefilled = `根据以下 Cluster 分析报告，请帮我改进/修复或按报告执行（可在此补充具体诉求，如：修复其中的问题、把建议落地为代码、保存为文档等）：\n\n${truncated}`;
+    const sessionImages = resultImagePaths;
+    const report = structuredResult.text || session.result.finalAnswer;
+    const truncated = report.length > 2000 ? report.slice(0, 2000) + "\n\n...（完整内容见上方 Plan 报告）" : report;
+    const prefilled = `根据以下 Plan 分析报告，请帮我改进/修复或按报告执行（可在此补充具体诉求，如：修复其中的问题、把建议落地为代码、保存为文档等）：\n\n${truncated}`;
     const inferredCoding = inferCodingExecutionProfile({
       query: `${session.query}\n\n${truncated}`,
-      attachmentPaths: sessionImages,
+      attachmentPaths: handoffAttachmentPaths,
       handoff: session.sourceHandoff,
     });
     routeToAICenter({
-      mode: "agent",
+      mode: "build",
       source: "cluster_continue_to_agent",
       handoff: normalizeAICenterHandoff({
         query: prefilled,
-        attachmentPaths: sessionImages,
+        attachmentPaths: handoffAttachmentPaths,
         visualAttachmentPaths: sessionImages,
-        title: "基于 Cluster 报告继续落地",
-        goal: session.query.slice(0, 140) || "根据 Cluster 报告继续执行",
+        title: "基于 Plan 报告继续落地",
+        goal: session.query.slice(0, 140) || "根据 Plan 报告继续执行",
         intent: inferredCoding.profile.codingMode ? "coding" : "delivery",
         keyPoints: [
-          "已带入 Cluster 最终报告",
+          "已带入 Plan 最终报告",
           sessionImages.length > 0 ? `附带 ${sessionImages.length} 张视觉参考图` : "",
           session.plan?.steps?.length ? `本轮计划共 ${session.plan.steps.length} 个步骤` : "",
         ].filter(Boolean),
         nextSteps: [
-          "先阅读 Cluster 报告，再决定修改、验证或产出最终文件",
+          "先阅读 Plan 报告，再决定修改、验证或产出最终文件",
           sessionImages.length > 0 ? "先查看带入的视觉参考图，再继续实现或修复" : "",
           "如果报告已指出问题，优先按问题清单逐项落地",
         ],
         files: buildAICenterHandoffScopedFileRefs({
-          attachmentPaths: sessionImages,
+          attachmentPaths: handoffAttachmentPaths,
           visualAttachmentPaths: sessionImages,
-          visualReason: "Cluster 视觉参考图",
+          visualReason: "Plan 视觉参考图",
         }),
         sourceMode: "cluster",
         sourceSessionId: session.id,
-        sourceLabel: "Cluster 报告",
-        summary: "已带入 Cluster 最终报告，适合继续修改和落地执行",
+        sourceLabel: "Plan 报告",
+        summary: "已带入 Plan 最终报告，适合继续修改和落地执行",
       }),
       taskId: session.id,
       navigate: false,
@@ -337,13 +371,13 @@ function SessionCard({
   const handleContinueWithDialog = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (!session.result) return;
-    const sessionImages = session.images ?? [];
-    const report = session.result.finalAnswer;
-    const truncated = report.length > 2000 ? report.slice(0, 2000) + "\n\n...（完整内容见上方 Cluster 报告）" : report;
-    const prefilled = `这是当前 Cluster 的分析报告。请让多个 Agent 基于它继续 review、争论方案、拆补细节或形成下一步执行共识：\n\n${truncated}`;
+    const sessionImages = resultImagePaths;
+    const report = structuredResult.text || session.result.finalAnswer;
+    const truncated = report.length > 2000 ? report.slice(0, 2000) + "\n\n...（完整内容见上方 Plan 报告）" : report;
+    const prefilled = `这是当前 Plan 的分析报告。请让多个 Agent 基于它继续 review、争论方案、拆补细节或形成下一步执行共识：\n\n${truncated}`;
     const inferredCoding = inferCodingExecutionProfile({
       query: `${session.query}\n\n${truncated}`,
-      attachmentPaths: sessionImages,
+      attachmentPaths: handoffAttachmentPaths,
       handoff: session.sourceHandoff,
     });
     routeToAICenter({
@@ -351,32 +385,32 @@ function SessionCard({
       source: "cluster_continue_to_dialog",
       handoff: normalizeAICenterHandoff({
         query: prefilled,
-        attachmentPaths: sessionImages,
+        attachmentPaths: handoffAttachmentPaths,
         visualAttachmentPaths: sessionImages,
-        title: "围绕 Cluster 报告继续协作",
-        goal: session.query.slice(0, 140) || "基于 Cluster 报告继续讨论",
+        title: "围绕 Plan 报告继续协作",
+        goal: session.query.slice(0, 140) || "基于 Plan 报告继续讨论",
         intent: inferredCoding.profile.codingMode ? "coding" : "research",
         keyPoints: [
-          "已带入 Cluster 最终报告",
+          "已带入 Plan 最终报告",
           sessionImages.length > 0 ? `附带 ${sessionImages.length} 张视觉参考图` : "",
           session.result.agentInstances.length > 0
-            ? `Cluster 中共有 ${session.result.agentInstances.length} 个 Agent 参与`
+            ? `本次 Plan 中共有 ${session.result.agentInstances.length} 个 Agent 参与`
             : "",
         ].filter(Boolean),
         nextSteps: [
           "围绕报告中的争议点、风险和后续动作继续讨论",
           sessionImages.length > 0 ? "先结合视觉参考图理解现状，再继续讨论分工" : "",
-          "必要时把需要落地的部分再接力给 Agent",
+          "必要时把需要落地的部分再接力给 Build",
         ],
         files: buildAICenterHandoffScopedFileRefs({
-          attachmentPaths: sessionImages,
+          attachmentPaths: handoffAttachmentPaths,
           visualAttachmentPaths: sessionImages,
-          visualReason: "Cluster 视觉参考图",
+          visualReason: "Plan 视觉参考图",
         }),
         sourceMode: "cluster",
         sourceSessionId: session.id,
-        sourceLabel: "Cluster 报告",
-        summary: "已带入 Cluster 最终报告，适合继续多 Agent 讨论和评审",
+        sourceLabel: "Plan 报告",
+        summary: "已带入 Plan 最终报告，适合继续多 Agent 讨论和评审",
       }),
       taskId: session.id,
       navigate: false,
@@ -547,10 +581,10 @@ function SessionCard({
                     type="button"
                     className="flex items-center gap-1 px-2 py-1 text-[10px] rounded text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-accent)] transition-colors"
                     onClick={handleContinueWithAgent}
-                    title="跳转到 Agent 并带入报告，便于后续修改/写文件"
+                    title="跳转到 Build 并带入报告，便于后续修改/写文件"
                   >
                     <ArrowRightCircle className="w-3 h-3" />
-                    用 Agent 继续
+                    用 Build 继续
                   </button>
                   <button
                     type="button"
@@ -564,9 +598,22 @@ function SessionCard({
                 </div>
               </div>
               <div className="prose prose-sm dark:prose-invert max-w-none text-[13px] leading-relaxed bg-[var(--color-bg-secondary)] rounded-lg p-4 prose-p:my-2 prose-headings:mt-4 prose-headings:mb-2 prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 prose-table:my-3 prose-td:py-1.5 prose-th:py-1.5">
+                {structuredResult.images?.length ? (
+                  <div className="mb-3 flex flex-wrap gap-2 not-prose">
+                    {structuredResult.images.map((img) => (
+                      <ChatImage
+                        key={img}
+                        path={img}
+                        className="h-28 w-28 rounded-lg border border-[var(--color-border)] object-cover cursor-pointer hover:opacity-85 transition-opacity"
+                        onClick={(blobUrl) => setPreviewImage(blobUrl)}
+                      />
+                    ))}
+                  </div>
+                ) : null}
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {session.result.finalAnswer}
+                  {structuredResult.text || ""}
                 </ReactMarkdown>
+                <StructuredMediaAttachments attachments={structuredResult.attachments} />
               </div>
               <div className="text-[10px] text-[var(--color-text-tertiary)] mt-1">
                 耗时 {(session.result.totalDurationMs / 1000).toFixed(1)}s ·{" "}
@@ -599,7 +646,7 @@ function SessionCard({
 }
 
 export function ClusterPanel({ active = true }: { active?: boolean }) {
-  const clusterMeta = AI_CENTER_MODE_META.cluster;
+  const clusterMeta = AI_CENTER_MODE_META.plan;
   const savedSettings = loadSettings();
   const [input, setInput] = useState("");
   const [mode, setMode] = useState<ClusterMode>("parallel_split");
@@ -660,7 +707,7 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
   }, [autoReview, humanApproval, codingMode, largeProjectMode, openClawMode]);
 
   useEffect(() => {
-    if (!pendingAICenterHandoff || pendingAICenterHandoff.mode !== "cluster") return;
+    if (!pendingAICenterHandoff || normalizeAIProductMode(pendingAICenterHandoff.mode) !== "plan") return;
     let cancelled = false;
 
     const applyHandoff = async () => {
@@ -1015,7 +1062,7 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <Network className="w-4 h-4 text-[var(--color-accent)]" />
-            <span className="text-sm font-medium">Cluster · 规划与并行执行</span>
+            <span className="text-sm font-medium">Plan · 规划与并行执行</span>
             <span className="text-xs text-[var(--color-text-tertiary)]">
               ({sessions.length})
             </span>
@@ -1208,7 +1255,7 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
               className="flex-1 text-sm bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg px-3 py-2 resize-none focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)] min-h-[2.5rem]"
               rows={2}
               maxLength={10000}
-              placeholder={attachments.length > 0 ? "输入描述（可省略）..." : "输入复杂任务，Agent 集群将协作完成..."}
+              placeholder={attachments.length > 0 ? "输入描述（可省略）..." : "输入复杂任务，Plan 会先拆解再并行推进..."}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}

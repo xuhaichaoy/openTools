@@ -20,6 +20,7 @@ import { routeAIRequest } from "@/core/ai/router";
 import { AssistantReasoningStreamNormalizer } from "@/core/ai/reasoning-tag-stream";
 import { getResolvedAIConfigForMode } from "@/core/ai/resolved-ai-config-store";
 import { handleError } from "@/core/errors";
+import { mergeStructuredMedia } from "@/core/media/structured-media";
 import type { AICenterMode } from "@/store/app-store";
 import type {
   ToolCallInfo,
@@ -259,17 +260,27 @@ export async function startStreamingChat(opts: {
     updateAssistant((m) => {
       const nextContent = visibleContent ? m.content + visibleContent : m.content;
       const normalizedError = errorText.trim() || "请求失败";
-      finalizedAssistantContent = nextContent.trim()
+      const rawFinalContent = nextContent.trim()
         ? `${nextContent}\n\n⚠️ 生成中断：${normalizedError}`
         : `❌ ${normalizedError}`;
+      const structuredReply = mergeStructuredMedia({
+        text: rawFinalContent,
+        images: m.images,
+        attachments: m.attachments,
+      });
+      finalizedAssistantContent = structuredReply.text;
       return {
         ...m,
-        content: finalizedAssistantContent,
+        content: structuredReply.text,
         streaming: false,
         thinkingContent: thinkingContent
           ? (m.thinkingContent || "") + thinkingContent
           : m.thinkingContent,
         thinkingStreaming: false,
+        ...(structuredReply.images?.length ? { images: structuredReply.images } : {}),
+        ...(structuredReply.attachments?.length
+          ? { attachments: structuredReply.attachments }
+          : {}),
       };
     });
     setState({ isStreaming: false, pendingToolConfirm: null });
@@ -401,15 +412,25 @@ export async function startStreamingChat(opts: {
           let completedAssistantContent = "";
           updateAssistant((m) => {
             const shouldSuggestUpgrade = (m.toolCalls?.length ?? 0) >= 2;
-            completedAssistantContent = remainingVisible ? m.content + remainingVisible : m.content;
+            const rawCompletedContent = remainingVisible ? m.content + remainingVisible : m.content;
+            const structuredReply = mergeStructuredMedia({
+              text: rawCompletedContent,
+              images: m.images,
+              attachments: m.attachments,
+            });
+            completedAssistantContent = structuredReply.text;
             return {
               ...m,
-              content: completedAssistantContent,
+              content: structuredReply.text,
               streaming: false,
               thinkingContent: thinkingRemaining
                 ? (m.thinkingContent || "") + thinkingRemaining
                 : m.thinkingContent,
               thinkingStreaming: false,
+              ...(structuredReply.images?.length ? { images: structuredReply.images } : {}),
+              ...(structuredReply.attachments?.length
+                ? { attachments: structuredReply.attachments }
+                : {}),
               ...(shouldSuggestUpgrade ? { suggestAgentUpgrade: true } : {}),
             };
           });

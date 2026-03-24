@@ -49,6 +49,7 @@ import {
   resolveChildExecutionSettings,
 } from "@/core/collaboration/execution-contract";
 import type { ExecutionContract } from "@/core/collaboration/types";
+import { splitStructuredMediaReply } from "@/core/media/structured-media";
 import {
   buildExecutionContractFromLegacyDialogExecutionPlan,
   buildLegacyDialogExecutionPlanFromContract,
@@ -581,6 +582,7 @@ export const MODIFY_HOOKS: ModifyHookType[] = ["beforeSpawn", "beforeKill"];
 export interface ActorSystemOptions {
   askUser?: AskUserCallback;
   confirmDangerousAction?: ConfirmDangerousAction;
+  defaultProductMode?: "dialog" | "review";
 }
 
 /**
@@ -601,6 +603,7 @@ export class ActorSystem {
   private spawnedTasks = new Map<string, SpawnedTaskRecord>();
   private artifactRecords = new Map<string, DialogArtifactRecord>();
   private sessionUploads = new Map<string, SessionUploadRecord>();
+  private stagedResultMedia = new Map<string, Pick<DialogMessage, "images" | "attachments">>();
   private coordinatorActorId: string | null = null;
   private activeExecutionContract: ExecutionContract | null = null;
   private legacyDialogExecutionPlanRuntimeState: LegacyDialogExecutionPlanRuntimeState | null = null;
@@ -621,6 +624,14 @@ export class ActorSystem {
   /** 定时任务调度器（对标 OpenClaw cron） */
   get cron(): ActorCron {
     return this._cron;
+  }
+
+  get defaultProductMode(): "dialog" | "review" {
+    return this.options.defaultProductMode === "review" ? "review" : "dialog";
+  }
+
+  set defaultProductMode(mode: "dialog" | "review") {
+    this.options.defaultProductMode = mode === "review" ? "review" : "dialog";
   }
 
   // ── Actor Lifecycle ──
@@ -2261,6 +2272,60 @@ export class ActorSystem {
     return normalized;
   }
 
+  stageResultMedia(
+    actorId: string,
+    media: Pick<DialogMessage, "images" | "attachments">,
+  ): Pick<DialogMessage, "images" | "attachments"> {
+    const existing = this.stagedResultMedia.get(actorId);
+    const nextImages = [...new Set([
+      ...(existing?.images ?? []),
+      ...(media.images ?? []),
+    ].map((value) => normalizePath(value)).filter(Boolean))];
+    const nextAttachments = new Map<string, { path: string; fileName?: string }>();
+    for (const item of [...(existing?.attachments ?? []), ...(media.attachments ?? [])]) {
+      const normalizedPath = normalizePath(item.path);
+      if (!normalizedPath) continue;
+      nextAttachments.set(normalizedPath, {
+        path: normalizedPath,
+        ...(item.fileName ? { fileName: item.fileName } : {}),
+      });
+    }
+
+    const staged = {
+      ...(nextImages.length ? { images: nextImages } : {}),
+      ...(nextAttachments.size ? { attachments: [...nextAttachments.values()] } : {}),
+    } satisfies Pick<DialogMessage, "images" | "attachments">;
+
+    if (!staged.images?.length && !staged.attachments?.length) {
+      this.stagedResultMedia.delete(actorId);
+      return {};
+    }
+
+    this.stagedResultMedia.set(actorId, staged);
+    return {
+      ...(staged.images?.length ? { images: [...staged.images] } : {}),
+      ...(staged.attachments?.length ? { attachments: staged.attachments.map((item) => ({ ...item })) } : {}),
+    };
+  }
+
+  getStagedResultMediaSnapshot(
+    actorId: string,
+  ): Pick<DialogMessage, "images" | "attachments"> {
+    const staged = this.stagedResultMedia.get(actorId);
+    return {
+      ...(staged?.images?.length ? { images: [...staged.images] } : {}),
+      ...(staged?.attachments?.length ? { attachments: staged.attachments.map((item) => ({ ...item })) } : {}),
+    };
+  }
+
+  private consumeStagedResultMedia(
+    actorId: string,
+  ): Pick<DialogMessage, "images" | "attachments"> {
+    const staged = this.getStagedResultMediaSnapshot(actorId);
+    this.stagedResultMedia.delete(actorId);
+    return staged;
+  }
+
   getArtifactRecordsSnapshot(): DialogArtifactRecord[] {
     return [...this.artifactRecords.values()].sort((a, b) => b.timestamp - a.timestamp);
   }
@@ -2582,6 +2647,8 @@ export class ActorSystem {
   ): DialogMessage | null {
     const trimmed = content.trim();
     if (!trimmed) return null;
+    const structuredReply = splitStructuredMediaReply(trimmed);
+    const visibleContent = structuredReply.text.trim() || trimmed;
 
     const actor = this.actors.get(actorId);
     const actorName = actor?.role.name ?? actorId;
@@ -2590,25 +2657,44 @@ export class ActorSystem {
     const suppressLowSignal = opts?.suppressLowSignal ?? true;
     const relatedRunId = this.getOpenSpawnedSessionByTarget(actorId)?.runId;
 
-    if (suppressLowSignal && fromNonCoordinator && isLowSignalCoordinationMessage(trimmed)) {
+    if (suppressLowSignal && fromNonCoordinator && isLowSignalCoordinationMessage(visibleContent)) {
       log(`publishResult: suppress low-signal message from ${actorName}`);
       return null;
     }
 
-    const resultMedia = this.collectShareableResultMedia(actorId, relatedRunId);
+    const inferredResultMedia = this.collectShareableResultMedia(actorId, relatedRunId);
+    const stagedResultMedia = this.consumeStagedResultMedia(actorId);
+    const resultImages = [...new Set([
+      ...(inferredResultMedia.images ?? []),
+      ...(stagedResultMedia.images ?? []),
+      ...(structuredReply.images ?? []),
+    ])];
+    const resultAttachments = new Map<string, { path: string; fileName?: string }>();
+    for (const item of [
+      ...(inferredResultMedia.attachments ?? []),
+      ...(stagedResultMedia.attachments ?? []),
+      ...(structuredReply.attachments ?? []),
+    ]) {
+      const normalizedPath = normalizePath(item.path);
+      if (!normalizedPath) continue;
+      resultAttachments.set(normalizedPath, {
+        path: normalizedPath,
+        ...(item.fileName ? { fileName: item.fileName } : {}),
+      });
+    }
 
     const msg: DialogMessage = {
       id: generateId(),
       from: actorId,
       to: undefined, // 广播模式
-      content: trimmed,
+      content: visibleContent,
       timestamp: Date.now(),
       priority: "normal",
       kind: "agent_result",
       relatedRunId,
       ...this.buildDialogMessageRecallPatch(actorId),
-      ...(resultMedia.images?.length ? { images: resultMedia.images } : {}),
-      ...(resultMedia.attachments?.length ? { attachments: resultMedia.attachments } : {}),
+      ...(resultImages.length ? { images: resultImages } : {}),
+      ...(resultAttachments.size ? { attachments: [...resultAttachments.values()] } : {}),
     };
     this.dialogHistory.push(msg);
     appendDialogMessage(this.sessionId, msg);

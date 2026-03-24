@@ -1,5 +1,8 @@
 import type { AICenterSourceRef } from "@/store/app-store";
-import type { HumanSelectableAIProductMode } from "@/core/ai/ai-mode-types";
+import type {
+  AICenterCompatibleMode,
+  HumanSelectableAIProductMode,
+} from "@/core/ai/ai-mode-types";
 import { normalizeHumanSelectableAIProductMode } from "@/core/ai/ai-mode-types";
 import {
   formatAICenterProductLabel,
@@ -36,6 +39,12 @@ export const AI_CENTER_MODE_META: Record<HumanSelectableAIProductMode, AICenterM
   review: buildModeMeta("review"),
   dialog: buildModeMeta("dialog"),
 };
+
+export function getAICenterModeMeta(
+  mode?: AICenterCompatibleMode | null,
+): AICenterModeMeta {
+  return AI_CENTER_MODE_META[normalizeHumanSelectableAIProductMode(mode)];
+}
 
 export function formatAICenterModeLabel(mode?: HumanSelectableAIProductMode | null | string): string {
   return formatAICenterProductLabel(mode);

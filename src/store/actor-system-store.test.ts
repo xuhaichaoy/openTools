@@ -1,0 +1,146 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const mockLoadSessionFromDisk = vi.fn();
+const mockSaveSessionToDisk = vi.fn(async () => undefined);
+const mockGetLatestActiveSessionId = vi.fn(async () => null);
+
+vi.mock("@/core/agent/actor/actor-transcript", () => ({
+  appendDialogMessageSync: vi.fn(),
+  appendSpawnEventSync: vi.fn(),
+  appendAnnounceEventSync: vi.fn(),
+  updateTranscriptActors: vi.fn(async () => undefined),
+  archiveSession: vi.fn(async () => undefined),
+  deleteTranscriptSession: vi.fn(async () => undefined),
+  clearSessionCache: vi.fn(),
+}));
+
+vi.mock("@/core/channels", () => ({
+  getChannelManager: () => ({
+    connectToActorSystem: vi.fn(),
+    listenForCallbacks: vi.fn(async () => undefined),
+    register: vi.fn(async () => undefined),
+  }),
+  loadSavedChannels: () => [],
+}));
+
+vi.mock("@/core/task-center", () => ({
+  getTaskQueue: () => ({
+    setExecutor: vi.fn(),
+  }),
+  createActorSystemExecutor: vi.fn(() => vi.fn()),
+}));
+
+vi.mock("@/core/agent/actor/session-persistence", () => ({
+  getLatestActiveSessionId: (...args: unknown[]) => mockGetLatestActiveSessionId(...args),
+  loadSession: (...args: unknown[]) => mockLoadSessionFromDisk(...args),
+  saveSession: (...args: unknown[]) => mockSaveSessionToDisk(...args),
+}));
+
+import { clearAllRuntimeSessions } from "@/core/agent/context-runtime/runtime-state";
+import { useSessionControlPlaneStore } from "@/store/session-control-plane-store";
+import { useActorSystemStore } from "./actor-system-store";
+
+async function flushMicrotasks(): Promise<void> {
+  await Promise.resolve();
+}
+
+describe("actor-system-store restore", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    mockLoadSessionFromDisk.mockReset();
+    mockSaveSessionToDisk.mockClear();
+    mockGetLatestActiveSessionId.mockReset();
+    useActorSystemStore.getState().destroyAll();
+    clearAllRuntimeSessions();
+    useSessionControlPlaneStore.getState().clear();
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    useActorSystemStore.getState().destroyAll();
+    clearAllRuntimeSessions();
+    useSessionControlPlaneStore.getState().clear();
+    vi.runOnlyPendingTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("recovers local dialog room compaction from session control plane when persisted snapshot omitted it", async () => {
+    const runtimeSessionId = "dialog-session-restore";
+    const session = useSessionControlPlaneStore.getState().upsertSession({
+      identity: {
+        productMode: "dialog",
+        surface: "local_dialog",
+        sessionKey: runtimeSessionId,
+        sessionKind: "collaboration_room",
+        scope: "workspace",
+        runtimeSessionId,
+      },
+      title: "Dialog 工作台",
+      summary: "继续沿用之前房间压缩后的摘要",
+      status: "running",
+      createdAt: 100,
+      updatedAt: 200,
+      lastActiveAt: 200,
+    });
+    useSessionControlPlaneStore.getState().patchSessionContinuityState(session?.id ?? "", {
+      source: "local_dialog",
+      updatedAt: 220,
+      roomCompactionSummary: "已整理较早的房间协作上下文，后续只需接着当前任务继续。",
+      roomCompactionSummaryPreview: "已整理较早的房间协作上下文",
+      roomCompactionUpdatedAt: 210,
+      roomCompactionMessageCount: 16,
+      roomCompactionTaskCount: 2,
+      roomCompactionArtifactCount: 1,
+      roomCompactionPreservedIdentifiers: ["src/App.tsx", "notes.md"],
+    });
+
+    localStorage.setItem("dialog_session_pointer", runtimeSessionId);
+    mockLoadSessionFromDisk.mockResolvedValue({
+      sessionId: runtimeSessionId,
+      createdAt: 100,
+      updatedAt: 200,
+      entries: [],
+      actorConfigs: [],
+      snapshot: {
+        version: 9,
+        sessionId: runtimeSessionId,
+        dialogHistory: [],
+        actorConfigs: [
+          {
+            id: "agent-lead-restore",
+            roleName: "Lead",
+            maxIterations: 40,
+          },
+        ],
+        dialogRoomCompaction: null,
+        savedAt: 1710000000000,
+      },
+    });
+
+    useActorSystemStore.getState().init();
+    await flushMicrotasks();
+    await flushMicrotasks();
+    await vi.runAllTimersAsync();
+    await flushMicrotasks();
+
+    const state = useActorSystemStore.getState();
+
+    expect(state.dialogRoomCompaction).toMatchObject({
+      summary: "已整理较早的房间协作上下文，后续只需接着当前任务继续。",
+      compactedMessageCount: 16,
+      compactedSpawnedTaskCount: 2,
+      compactedArtifactCount: 1,
+      preservedIdentifiers: ["src/App.tsx", "notes.md"],
+      updatedAt: 210,
+    });
+    expect(state._system?.getDialogRoomCompaction()).toMatchObject({
+      summary: "已整理较早的房间协作上下文，后续只需接着当前任务继续。",
+      compactedMessageCount: 16,
+      compactedSpawnedTaskCount: 2,
+      compactedArtifactCount: 1,
+      preservedIdentifiers: ["src/App.tsx", "notes.md"],
+      updatedAt: 210,
+    });
+  });
+});

@@ -195,6 +195,19 @@ function getIMRuntimeStatusLabel(
   }
 }
 
+function isDatabaseOperationMode(
+  item?: { conversationMode?: "normal" | "database_operation" } | null,
+): boolean {
+  return item?.conversationMode === "database_operation";
+}
+
+function getDatabaseOperationModeHint(
+  item?: { conversationMode?: "normal" | "database_operation" } | null,
+): string | null {
+  if (!isDatabaseOperationMode(item)) return null;
+  return "发送“退出数据库操作”可返回普通对话";
+}
+
 function getExecutionStrategyLabel(strategy?: IMConversationSessionPreview["executionStrategy"] | IMConversationSnapshot["executionStrategy"]): string | null {
   switch (strategy) {
     case "direct":
@@ -273,6 +286,25 @@ export function inferIMChannelType(params: {
   return null;
 }
 
+function isSameChannelConversation(params: {
+  channelType: "dingtalk" | "feishu";
+  channelId?: string | null;
+  conversationId?: string | null;
+  existing: DialogChannelConversationItem;
+}): boolean {
+  if (params.existing.channelType !== params.channelType) return false;
+  const nextConversationId = params.conversationId?.trim() || "";
+  if (!nextConversationId || params.existing.conversationId !== nextConversationId) {
+    return false;
+  }
+  const nextChannelId = params.channelId?.trim() || "";
+  const existingChannelId = params.existing.conversation.channelId?.trim() || "";
+  if (nextChannelId && existingChannelId) {
+    return nextChannelId === existingChannelId;
+  }
+  return true;
+}
+
 export function buildDialogChannelGroups(params: {
   currentRoomSessionId?: string | null;
   conversations: IMConversationSnapshot[];
@@ -339,14 +371,20 @@ export function buildDialogChannelGroups(params: {
   for (const runtimeRecord of Object.values(params.runtimeSessions)) {
     if (runtimeRecord.mode !== "im_conversation" && runtimeRecord.mode !== "dialog") continue;
     if (runtimeRecord.sessionId === currentRoomSessionId) continue;
-    const alreadyCovered = Object.values(groups).some((group) =>
-      group.conversations.some((conversation) => conversation.activeSessionId === runtimeRecord.sessionId),
-    );
-    if (alreadyCovered) continue;
     const preview = params.sessionPreviews[runtimeRecord.sessionId];
     if (!preview) continue;
     const channelType = inferIMChannelType({ preview, runtimeRecord });
     if (!channelType) continue;
+    const alreadyCovered = groups[channelType].conversations.some((conversation) =>
+      conversation.activeSessionId === runtimeRecord.sessionId
+      || isSameChannelConversation({
+        channelType,
+        channelId: preview.channelId,
+        conversationId: preview.conversationId,
+        existing: conversation,
+      }),
+    );
+    if (alreadyCovered) continue;
     groups[channelType].conversations.push({
       key: `runtime:${runtimeRecord.sessionId}`,
       conversationId: preview?.conversationId ?? runtimeRecord.sessionId,
@@ -387,6 +425,7 @@ export function buildDialogChannelGroups(params: {
         roomCompactionTaskCount: preview?.roomCompactionTaskCount,
         roomCompactionArtifactCount: preview?.roomCompactionArtifactCount,
         roomCompactionPreservedIdentifiers: preview?.roomCompactionPreservedIdentifiers,
+        conversationMode: preview?.conversationMode,
         backgroundTopicCount: 0,
         topics: preview
           ? [{
@@ -410,14 +449,15 @@ export function buildDialogChannelGroups(params: {
               roomCompactionPreservedIdentifiers: preview.roomCompactionPreservedIdentifiers,
               updatedAt: preview.updatedAt,
               startedAt: preview.startedAt,
+              conversationMode: preview.conversationMode,
               lastInputText: preview.lastInputText,
             }]
           : [],
       },
       preview,
       runtimeRecord,
-    });
-  }
+  });
+}
 
   for (const channelType of ["dingtalk", "feishu"] as const) {
     groups[channelType].conversations.sort((a, b) => b.updatedAt - a.updatedAt);
@@ -468,6 +508,10 @@ function RuntimeSessionPreview({
     () => getPrimaryChildSessionPreview(preview.childSessionsPreview),
     [preview.childSessionsPreview],
   );
+  const databaseOperationModeHint = useMemo(
+    () => getDatabaseOperationModeHint(preview),
+    [preview],
+  );
   const compactionHeadline = useMemo(() => buildCompactionHeadline(preview), [preview]);
   const compactionDetail = useMemo(() => buildCompactionDetail(preview), [preview]);
   const visibleDialogHistory = useMemo(() => {
@@ -500,6 +544,11 @@ function RuntimeSessionPreview({
                     hasPendingApproval: hasPendingApprovalPreview(preview),
                   })}
                 </span>
+                {isDatabaseOperationMode(preview) && (
+                  <span className="rounded-full border border-fuchsia-500/20 bg-fuchsia-500/8 px-2 py-0.5 text-[10px] text-fuchsia-700">
+                    数据库操作模式
+                  </span>
+                )}
               </div>
               <div className="mt-1 text-[11px] text-[var(--color-text-secondary)]">
                 {[preview.displayDetail, preview.topicId].filter(Boolean).join(" · ")}
@@ -539,6 +588,17 @@ function RuntimeSessionPreview({
               </button>
             )}
           </div>
+        </div>
+      )}
+
+      {databaseOperationModeHint && (
+        <div className="rounded-2xl border border-fuchsia-500/18 bg-fuchsia-500/8 px-3 py-2 text-[11px] text-fuchsia-900">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="rounded-full border border-fuchsia-500/20 bg-white/80 px-2 py-0.5 text-[10px] font-medium text-fuchsia-800">
+              当前处于数据库操作模式
+            </span>
+          </div>
+          <div className="mt-1 leading-relaxed">{databaseOperationModeHint}</div>
         </div>
       )}
 
@@ -774,6 +834,9 @@ export function ChannelSessionBoard({
   }
 
   if (group.conversations.length === 1 && selectedConversation) {
+    const singleConversationInDatabaseMode = isDatabaseOperationMode(
+      selectedConversation.preview ?? selectedConversation.conversation,
+    );
     return (
       <div className="flex min-h-full flex-col gap-2.5">
         <div className="rounded-[24px] border border-sky-500/15 bg-[linear-gradient(135deg,rgba(14,165,233,0.09),rgba(255,255,255,0.76)_58%)] px-3.5 py-3 shadow-[0_18px_40px_-36px_rgba(14,165,233,0.55)]">
@@ -788,6 +851,11 @@ export function ChannelSessionBoard({
                 <span className="rounded-full border border-white/80 bg-white/75 px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
                   {selectedConversation.statusLabel}
                 </span>
+                {singleConversationInDatabaseMode && (
+                  <span className="rounded-full border border-fuchsia-500/18 bg-fuchsia-500/8 px-2 py-0.5 text-[10px] text-fuchsia-700">
+                    当前处于数据库操作模式
+                  </span>
+                )}
               </div>
               <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] text-[var(--color-text-secondary)]">
                 <span>{selectedConversation.label}</span>
@@ -796,6 +864,11 @@ export function ChannelSessionBoard({
                 <span>·</span>
                 <span>{formatSessionStripTime(selectedConversation.updatedAt)}</span>
               </div>
+              {singleConversationInDatabaseMode && (
+                <div className="mt-2 rounded-[16px] border border-fuchsia-500/15 bg-fuchsia-500/8 px-2.5 py-1.5 text-[10px] text-fuchsia-800">
+                  发送“退出数据库操作”可返回普通对话
+                </div>
+              )}
             </div>
             {currentRoomSessionId && onReturnToCurrentRoom && (
               <button
@@ -937,6 +1010,12 @@ export function ChannelSessionBoard({
                         <span>·</span>
                         <span>{formatSessionStripTime(conversation.updatedAt)}</span>
                       </div>
+                      {isDatabaseOperationMode(conversation.preview ?? conversation.conversation) && (
+                        <div className="mt-1.5 rounded-[14px] border border-fuchsia-500/18 bg-fuchsia-500/7 px-2 py-1 text-[9px] leading-relaxed text-fuchsia-900">
+                          <span className="font-medium">数据库操作模式：</span>
+                          <span>发送“退出数据库操作”可返回普通对话</span>
+                        </div>
+                      )}
                       {approvalHeadline && (
                         <div className="mt-1.5 rounded-[14px] border border-amber-500/20 bg-amber-500/8 px-2 py-1 text-[9px] leading-relaxed text-amber-800">
                           <span className="font-medium">{approvalHeadline}</span>

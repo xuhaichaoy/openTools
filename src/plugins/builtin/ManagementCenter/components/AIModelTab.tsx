@@ -1,9 +1,10 @@
 import React, { useState, useEffect, lazy, Suspense, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useAIStore } from "@/store/ai-store";
-import { useAppStore, type AICenterMode } from "@/store/app-store";
+import { useAppStore } from "@/store/app-store";
 import { buildAICenterModelScope } from "@/core/ai/ai-center-model-scope";
-import { AI_CENTER_MODE_META } from "@/core/ai/ai-center-mode-meta";
+import { getAICenterModeMeta } from "@/core/ai/ai-center-mode-meta";
+import type { HumanSelectableAIProductMode } from "@/core/ai/ai-mode-types";
 import {
   deleteMemory,
   listMemoryCandidates,
@@ -36,9 +37,7 @@ import {
   Smartphone,
   Trash2,
   Cpu,
-  ChevronDown,
   Loader2,
-  Users,
   Database,
   Radio,
 } from "lucide-react";
@@ -47,7 +46,7 @@ const ChannelConfigPanel = lazy(() => import("@/plugins/builtin/SmartAgent/compo
 
 type AIModelSource = "own_key" | "team" | "platform";
 type AIConfigPanel = "source" | "assistant" | "knowledge" | "channels";
-const AI_CENTER_MODES: AICenterMode[] = ["ask", "agent", "cluster", "dialog"];
+const AI_CENTER_MODES: HumanSelectableAIProductMode[] = ["explore", "build", "plan", "dialog"];
 
 export function AIModelTab() {
   const { config, setConfig, saveConfig, ownKeys, loadOwnKeys, saveOwnKeys, selectOwnKeyModel } =
@@ -237,7 +236,7 @@ export function AIModelTab() {
 
       <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2.5 text-[10px] text-[var(--color-text-secondary)]">
         管理中心负责维护模型池与全局执行基座；AI 助手顶部模型选择会按 Explore / Build / Plan / Dialog 分别记住默认模型，不会覆盖这里的能力开关。
-        <ScopePills items={AI_CENTER_MODES.map((mode) => `${AI_CENTER_MODE_META[mode].label} 默认`)} />
+        <ScopePills items={AI_CENTER_MODES.map((mode) => `${getAICenterModeMeta(mode).label} 默认`)} />
       </div>
 
       <div className="grid grid-cols-4 gap-2">

@@ -175,6 +175,13 @@ function syncAskRuntimeConversation(conversation: Conversation): void {
       ?? conversation.createdAt,
     summary: buildAskRuntimeSummary(conversation),
     source: conversation.sourceHandoff,
+    sessionIdentity: {
+      surface: "ai_center",
+      sessionKey: conversation.id,
+      sessionKind: "conversation",
+      workspaceId: conversation.workspaceRoot,
+      runtimeSessionId: conversation.id,
+    },
   });
 }
 
@@ -197,6 +204,13 @@ function startAskRuntimeSession(params: {
     workspaceRoot: params.workspaceRoot,
     waitingStage: "model_first_token",
     status: "running",
+    sessionIdentity: {
+      surface: "ai_center",
+      sessionKey: params.conversationId,
+      sessionKind: "conversation",
+      workspaceId: params.workspaceRoot,
+      runtimeSessionId: params.conversationId,
+    },
   });
 }
 
@@ -917,7 +931,7 @@ export const useAIStore = create<AIState>((set, get) => ({
         config: resolveAIConfig({
           baseConfig: state.config,
           ownKeys: state.ownKeys,
-          scope: useAppStore.getState().aiCenterModelScopes.ask,
+          scope: useAppStore.getState().aiCenterModelScopes.explore,
         }),
         mode: "ask",
         extraTools: extraTools.length > 0 ? extraTools : undefined,

@@ -5,6 +5,7 @@ import {
   type AICenterMode,
   type AICenterHandoff,
 } from "@/store/app-store";
+import { normalizeHumanSelectableAIProductMode } from "@/core/ai/ai-mode-types";
 import {
   recordAIRouteEvent,
   type AIRouteSource,
@@ -48,34 +49,35 @@ export function routeToAICenter(params: RouteToAICenterParams): void {
     pushView,
   } = params;
 
+  const normalizedMode = normalizeHumanSelectableAIProductMode(mode);
   const appStore = useAppStore.getState();
-  appStore.setAiInitialMode(mode);
-  appStore.setAiCenterMode(mode);
+  appStore.setAiInitialMode(normalizedMode);
+  appStore.setAiCenterMode(normalizedMode);
 
   const normalizedHandoff = handoff
     ? normalizeAICenterHandoff(handoff)
     : agentHandoff
       ? normalizeAICenterHandoff(agentHandoff)
       : undefined;
-  if (mode === "ask" && query?.trim() && !normalizedHandoff) {
+  if (normalizedMode === "explore" && query?.trim() && !normalizedHandoff) {
     void useAIStore.getState().sendMessage(query, images);
   }
   if (normalizedHandoff) {
     appStore.setPendingAICenterHandoff({
-      mode,
+      mode: normalizedMode,
       payload: normalizedHandoff,
       createdAt: Date.now(),
     });
-  } else if (mode === "agent" && agentInitialQuery?.trim()) {
+  } else if (normalizedMode === "build" && agentInitialQuery?.trim()) {
     appStore.setPendingAICenterHandoff({
-      mode,
+      mode: normalizedMode,
       payload: normalizeAICenterHandoff({ query: agentInitialQuery }),
       createdAt: Date.now(),
     });
   }
 
   recordAIRouteEvent({
-    mode,
+    mode: normalizedMode,
     source,
     taskId,
     queryPreview: preview(query ?? normalizedHandoff?.query ?? agentInitialQuery),

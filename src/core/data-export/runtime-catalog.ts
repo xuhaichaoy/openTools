@@ -109,8 +109,10 @@ async function loadTeamRuntimeCatalog(): Promise<{
       listTeamDataSources(activeTeamId),
       listTeamExportDatasets(activeTeamId),
     ]);
+    const enabledSources = sources.filter((source) => source.enabled !== false);
+    const enabledDatasets = datasets.filter((dataset) => dataset.enabled !== false);
 
-    const mappedSources = sources.map<TeamRuntimeExportSourceConfig>((source) => ({
+    const mappedSources = enabledSources.map<TeamRuntimeExportSourceConfig>((source) => ({
       id: buildTeamRuntimeSourceId(activeTeamId, source.id),
       scope: "team",
       executionTarget: "team_service",
@@ -128,7 +130,7 @@ async function loadTeamRuntimeCatalog(): Promise<{
     }));
 
     const sourceMap = new Map(mappedSources.map((source) => [source.originSourceId, source]));
-    const mappedDatasets = datasets.map<TeamExportDatasetDefinition>((dataset) => {
+    const mappedDatasets = enabledDatasets.map<TeamExportDatasetDefinition>((dataset) => {
       const runtimeSource = sourceMap.get(dataset.source_id);
       const fallbackFields = fallbackDatasetFields({
         defaultFields: dataset.default_fields,
@@ -149,6 +151,12 @@ async function loadTeamRuntimeCatalog(): Promise<{
         ...(dataset.time_field ? { timeField: dataset.time_field } : {}),
         defaultFields: dataset.default_fields ?? [],
         fields: dataset.fields?.length ? dataset.fields : fallbackFields,
+        ...(dataset.aliases?.length ? { aliases: dataset.aliases } : {}),
+        ...(dataset.intent_tags?.length ? { intentTags: dataset.intent_tags } : {}),
+        ...(dataset.example_prompts?.length ? { examplePrompts: dataset.example_prompts } : {}),
+        ...(dataset.keyword_field ? { keywordField: dataset.keyword_field } : {}),
+        ...(dataset.base_alias ? { baseAlias: dataset.base_alias } : {}),
+        ...(dataset.relations?.length ? { relations: dataset.relations } : {}),
         ...(runtimeSource?.max_export_rows ? { maxExportRows: runtimeSource.max_export_rows } : {}),
         enabled: dataset.enabled !== false,
         ...(dataset.updated_at ? { updatedAt: Date.parse(dataset.updated_at) || Date.now() } : {}),

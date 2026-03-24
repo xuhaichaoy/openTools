@@ -481,7 +481,7 @@ async function injectMemoryForMessages(
  * 创建 MToolsAI SDK 实例
  * 每个 mode 维护一个单例；配置始终从 stores 实时 resolve。
  */
-export function createMToolsAI(mode: AICenterMode = "ask"): MToolsAI {
+export function createMToolsAI(mode: AICenterMode = "explore"): MToolsAI {
   return {
     /**
      * 单轮对话 — 发送消息并等待完整回复
@@ -1590,7 +1590,7 @@ export function createMToolsAI(mode: AICenterMode = "ask"): MToolsAI {
 
 /** 按 mode 缓存的单例 */
 const _instances = new Map<AICenterMode, MToolsAI>();
-export function getMToolsAI(mode: AICenterMode = "ask"): MToolsAI {
+export function getMToolsAI(mode: AICenterMode = "explore"): MToolsAI {
   const existing = _instances.get(mode);
   if (existing) {
     return existing;
@@ -1612,7 +1612,7 @@ export async function chatDirect(options: {
   signal?: AbortSignal;
   mode?: AICenterMode;
 }): Promise<{ content: string }> {
-  const config = getConfig(options.mode ?? "ask");
+  const config = getConfig(options.mode ?? "explore");
   return withRoutedAIConfig(
     {
       ...config,

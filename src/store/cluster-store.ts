@@ -197,6 +197,13 @@ export const useClusterStore = create<ClusterState>()(
           createdAt: now,
           updatedAt: now,
           source: sourceHandoff,
+          sessionIdentity: {
+            surface: "ai_center",
+            sessionKey: id,
+            sessionKind: "workflow_session",
+            workspaceId: workspaceRoot,
+            runtimeSessionId: id,
+          },
         });
         return id;
       },
@@ -223,6 +230,13 @@ export const useClusterStore = create<ClusterState>()(
             summary: buildClusterRuntimeSummary(session),
             updatedAt: session.finishedAt ?? Date.now(),
             source: session.sourceHandoff,
+            sessionIdentity: {
+              surface: "ai_center",
+              sessionKey: id,
+              sessionKind: "workflow_session",
+              workspaceId: session.workspaceRoot,
+              runtimeSessionId: id,
+            },
           });
         }
       },

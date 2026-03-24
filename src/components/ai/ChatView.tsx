@@ -51,6 +51,7 @@ import { useDragWindow } from "@/hooks/useDragWindow";
 import { routeToAICenter } from "@/core/ai/ai-center-routing";
 import { useShallow } from "zustand/shallow";
 import { getForegroundRuntimeSession, useRuntimeStateStore } from "@/core/agent/context-runtime/runtime-state";
+import { normalizeAIProductMode, type HumanSelectableAIProductMode } from "@/core/ai/ai-mode-types";
 
 export interface ChatViewHandle {
   toggleHistory: () => void;
@@ -58,9 +59,9 @@ export interface ChatViewHandle {
   exportChat: () => void;
   newChat: () => void;
   hasMessages: () => boolean;
-  /** 将当前 Ask 对话上下文传递到 Agent 模式继续 */
+  /** 将当前 Explore 对话上下文传递到 Build 模式继续 */
   continueInAgent: () => void;
-  /** 将当前 Ask 对话上下文传递到 Cluster 模式继续 */
+  /** 将当前 Explore 对话上下文传递到 Plan 模式继续 */
   continueInCluster: () => void;
   /** 将当前 Ask 对话上下文传递到 Dialog 模式继续 */
   continueInDialog: () => void;
@@ -189,10 +190,10 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
     if (!conversationHandoff && !hasDraft) return null;
 
     const fallbackText = fileContextBlock.trim()
-      ? "请先阅读我从 Ask 带入的附件/目录，再继续处理。"
+      ? "请先阅读我从 Explore 带入的附件/目录，再继续处理。"
       : imagePaths.length > 0
-        ? "请先查看我从 Ask 带入的图片，再继续处理。"
-        : "请继续处理我在 Ask 中准备的草稿。";
+        ? "请先查看我从 Explore 带入的图片，再继续处理。"
+        : "请继续处理我在 Explore 中准备的草稿。";
     const draftQuery = attachmentSummary
       ? `${attachmentSummary}\n${draftText || fallbackText}`
       : (draftText || fallbackText);
@@ -207,30 +208,30 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
         query: draftQuery,
         ...(draftAttachmentPaths.length > 0 ? { attachmentPaths: draftAttachmentPaths } : {}),
         ...(draftVisualAttachmentPaths.length > 0 ? { visualAttachmentPaths: draftVisualAttachmentPaths } : {}),
-        title: "延续 Ask 草稿",
-        goal: draftText || "继续处理 Ask 草稿里的当前任务",
+        title: "延续 Explore 草稿",
+        goal: draftText || "继续处理 Explore 草稿里的当前任务",
         intent: inferredDraftCoding.profile.codingMode ? "coding" : "general",
         keyPoints: [
-          draftText ? "带入尚未发送的 Ask 草稿" : "带入尚未发送的 Ask 附件",
+          draftText ? "带入尚未发送的 Explore 草稿" : "带入尚未发送的 Explore 附件",
           draftAttachmentPaths.length > 0 ? `包含 ${draftAttachmentPaths.length} 个草稿附件` : "",
           draftVisualAttachmentPaths.length > 0 ? `包含 ${draftVisualAttachmentPaths.length} 张视觉参考图` : "",
         ].filter(Boolean),
         nextSteps: [
-          "先阅读 Ask 草稿，再决定直接回答、继续执行，还是切换工作方式",
+          "先阅读 Explore 草稿，再决定直接回答、继续执行，还是切换工作方式",
           draftVisualAttachmentPaths.length > 0 ? "优先利用草稿里已带入的视觉参考图" : "",
         ],
         files: buildAICenterHandoffScopedFileRefs({
           attachmentPaths: draftAttachmentPaths,
           visualAttachmentPaths: draftVisualAttachmentPaths,
-          visualReason: "Ask 草稿视觉参考图",
-          attachmentReason: draftAttachmentPaths.length > 0 ? "Ask 草稿附件" : undefined,
+          visualReason: "Explore 草稿视觉参考图",
+          attachmentReason: draftAttachmentPaths.length > 0 ? "Explore 草稿附件" : undefined,
         }),
         sourceMode: "ask" as const,
         ...(conversation?.id ? { sourceSessionId: conversation.id } : {}),
-        sourceLabel: "Ask 草稿",
+        sourceLabel: "Explore 草稿",
         summary: draftAttachmentPaths.length > 0
-          ? `Ask 草稿，附带 ${draftAttachmentPaths.length} 个文件/图片/目录${draftVisualAttachmentPaths.length > 0 ? `，其中 ${draftVisualAttachmentPaths.length} 张为视觉参考图` : ""}`
-          : "Ask 草稿",
+          ? `Explore 草稿，附带 ${draftAttachmentPaths.length} 个文件/图片/目录${draftVisualAttachmentPaths.length > 0 ? `，其中 ${draftVisualAttachmentPaths.length} 张为视觉参考图` : ""}`
+          : "Explore 草稿",
       });
     }
 
@@ -249,7 +250,7 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
       ]),
     );
     const draftBlock = [
-      "以下是我在 Ask 中尚未发送、但希望一起带过去的当前草稿/附件：",
+      "以下是我在 Explore 中尚未发送、但希望一起带过去的当前草稿/附件：",
       "",
       draftQuery,
     ].join("\n");
@@ -259,7 +260,7 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
       query: `${conversationHandoff.query}\n\n---\n\n${draftBlock}`,
       ...(attachmentPaths.length > 0 ? { attachmentPaths } : {}),
       ...(visualAttachmentPaths.length > 0 ? { visualAttachmentPaths } : {}),
-      title: conversationHandoff.title || "延续 Ask 对话与草稿",
+      title: conversationHandoff.title || "延续 Explore 对话与草稿",
       goal: draftText || conversationHandoff.goal,
       intent: conversationHandoff.intent === "coding" || inferredDraftCoding.profile.codingMode
         ? "coding"
@@ -278,22 +279,22 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
       files: buildAICenterHandoffScopedFileRefs({
         attachmentPaths,
         visualAttachmentPaths,
-        visualReason: "Ask 视觉参考图",
-        attachmentReason: "Ask 附件/目录上下文",
-      }),
-      summary: attachmentPaths.length > 0
-        ? `Ask 对话上下文 + 当前草稿，附带 ${attachmentPaths.length} 个文件/图片/目录${visualAttachmentPaths.length > 0 ? `，其中 ${visualAttachmentPaths.length} 张为视觉参考图` : ""}`
-        : "Ask 对话上下文 + 当前草稿",
+          visualReason: "Explore 视觉参考图",
+          attachmentReason: "Explore 附件/目录上下文",
+        }),
+        summary: attachmentPaths.length > 0
+        ? `Explore 对话上下文 + 当前草稿，附带 ${attachmentPaths.length} 个文件/图片/目录${visualAttachmentPaths.length > 0 ? `，其中 ${visualAttachmentPaths.length} 张为视觉参考图` : ""}`
+        : "Explore 对话上下文 + 当前草稿",
     });
   }, [attachmentSummary, attachments, conversation, fileContextBlock, imagePaths.length, input]);
 
-  const continueAskInMode = useCallback((mode: "agent" | "cluster" | "dialog") => {
+  const continueAskInMode = useCallback((mode: Extract<HumanSelectableAIProductMode, "build" | "plan" | "dialog">) => {
     const handoff = buildAskModeHandoff();
     routeToAICenter({
       mode,
-      source: mode === "agent"
+      source: mode === "build"
         ? "ask_continue_to_agent"
-        : mode === "cluster"
+        : mode === "plan"
           ? "ask_continue_to_cluster"
           : "ask_continue_to_dialog",
       ...(handoff ? { handoff } : {}),
@@ -319,8 +320,8 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
       inputRef.current?.focus();
     },
     hasMessages: () => messages.length > 0,
-    continueInAgent: () => continueAskInMode("agent"),
-    continueInCluster: () => continueAskInMode("cluster"),
+    continueInAgent: () => continueAskInMode("build"),
+    continueInCluster: () => continueAskInMode("plan"),
     continueInDialog: () => continueAskInMode("dialog"),
   }), [continueAskInMode, createConversation, messages.length]);
 
@@ -430,7 +431,7 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
   }, []);
 
   useEffect(() => {
-    if (!pendingAICenterHandoff || pendingAICenterHandoff.mode !== "ask") return;
+    if (!pendingAICenterHandoff || normalizeAIProductMode(pendingAICenterHandoff.mode) !== "explore") return;
     let cancelled = false;
 
     const applyHandoff = async () => {
@@ -544,7 +545,7 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
     const hasAttachments = attachments.length > 0;
     if ((!trimmed && !hasAttachments) || isStreaming) return;
 
-    const resolvedConfig = getResolvedAIConfigForMode("ask");
+    const resolvedConfig = getResolvedAIConfigForMode("explore");
     const source = resolvedConfig.source || "own_key";
     if (source === "own_key" && !resolvedConfig.api_key) {
       toast("warning", "请先在设置中配置 AI API Key");
@@ -637,7 +638,7 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
           </div>
 
           <div className="flex-1 flex justify-end items-center gap-1">
-            {!hideModelSelector && <ModelSelector scopeMode="ask" />}
+            {!hideModelSelector && <ModelSelector scopeMode="explore" />}
             {messages.length > 0 && (
               <>
                 <button

@@ -1258,10 +1258,7 @@ fn extract_rec_class_count(output: &ort::value::Outlet) -> Option<usize> {
     None
 }
 
-fn extract_rec_step_count(
-    output: &ort::value::Outlet,
-    class_count: Option<usize>,
-) -> Option<u32> {
+fn extract_rec_step_count(output: &ort::value::Outlet, class_count: Option<usize>) -> Option<u32> {
     if let ort::value::ValueType::Tensor { shape, .. } = output.dtype() {
         let dimensions = shape.as_ref();
         if dimensions.len() < 2 {

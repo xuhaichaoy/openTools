@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, State as TauriState};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message, MaybeTlsStream};
@@ -1167,8 +1168,48 @@ async fn connect_async_robust(
     let port = url.port_or_known_default().ok_or("URL 端口未知")?;
 
     log::info!("[DingTalk] Resolving host: {} (port={})", host, port);
+    let mut connect_errs = Vec::new();
 
-    // 优先尝试直接连接 (connect_async)
+    // 1. 尝试环境变量中的 HTTP 代理
+    if let Some(proxy_url) =
+        read_proxy_env(&["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"])
+    {
+        let proxy_label = redact_proxy_url(&proxy_url);
+        log::info!(
+            "[DingTalk] Attempting connection via proxy: {}",
+            proxy_label
+        );
+
+        match connect_via_http_proxy(&proxy_url, host, port).await {
+            Ok(tcp_stream) => {
+                let request = match tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(url_str) {
+                    Ok(req) => req,
+                    Err(e) => return Err(format!("构建请求失败: {}", e)),
+                };
+                match tokio_tungstenite::client_async_tls(request, tcp_stream).await {
+                    Ok(ok) => {
+                        log::info!(
+                            "[DingTalk] Connection established via proxy: {}",
+                            proxy_label
+                        );
+                        return Ok(ok);
+                    }
+                    Err(err) => {
+                        let msg = format!("代理握手失败({}): {}", proxy_label, err);
+                        log::warn!("[DingTalk] {}", msg);
+                        connect_errs.push(msg);
+                    }
+                }
+            }
+            Err(err) => {
+                let msg = format!("代理连接失败({}): {}", proxy_label, err);
+                log::warn!("[DingTalk] {}", msg);
+                connect_errs.push(msg);
+            }
+        }
+    }
+
+    // 2. 优先尝试直接连接 (connect_async)
     // 如果失败且是 Network is down (os error 50)，则尝试 IPv4 强制连接
     match connect_async(url_str).await {
         Ok(ok) => return Ok(ok),
@@ -1245,7 +1286,58 @@ async fn connect_async_robust(
         }
     }
 
+    if !connect_errs.is_empty() {
+        return Err(format!(
+            "所有尝试均失败。记录的错误: {}",
+            connect_errs.join(" | ")
+        ));
+    }
     Err(format!("所有尝试均失败。最后错误: {}", connect_err))
+}
+
+async fn connect_via_http_proxy(
+    proxy_url: &str,
+    target_host: &str,
+    target_port: u16,
+) -> Result<TcpStream, String> {
+    let url = url::Url::parse(proxy_url).map_err(|e| format!("代理 URL 无效: {}", e))?;
+    let proxy_host = url.host_str().ok_or("代理 URL 缺少 host")?;
+    let proxy_port = url.port_or_known_default().ok_or("代理 URL 缺少端口")?;
+
+    match url.scheme() {
+        "http" | "https" => {}
+        _ => return Err(format!("不支持的代理协议: {}", url.scheme())),
+    }
+
+    let mut stream = TcpStream::connect(format!("{}:{}", proxy_host, proxy_port))
+        .await
+        .map_err(|e| format!("连接代理服务器失败({}:{}): {}", proxy_host, proxy_port, e))?;
+
+    let connect_req = format!(
+        "CONNECT {0}:{1} HTTP/1.1\r\nHost: {0}:{1}\r\nProxy-Connection: Keep-Alive\r\nUser-Agent: {2}\r\n\r\n",
+        target_host, target_port, DINGTALK_STREAM_UA
+    );
+
+    stream
+        .write_all(connect_req.as_bytes())
+        .await
+        .map_err(|e| format!("发送 CONNECT 请求失败: {}", e))?;
+
+    let mut response = [0u8; 1024];
+    let n = stream
+        .read(&mut response)
+        .await
+        .map_err(|e| format!("读取代理响应失败: {}", e))?;
+    let response_text = String::from_utf8_lossy(&response[..n]);
+
+    if !response_text.contains("HTTP/1.1 200") && !response_text.contains("HTTP/1.0 200") {
+        return Err(format!(
+            "代理隧道建立失败: {}",
+            response_text.lines().next().unwrap_or("Unknown Error")
+        ));
+    }
+
+    Ok(stream)
 }
 
 fn build_ws_url(endpoint: &str, ticket: &str) -> String {

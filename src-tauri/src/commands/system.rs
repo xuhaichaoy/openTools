@@ -88,20 +88,26 @@ pub async fn get_python_path() -> Result<String, String> {
 }
 
 /// 读取文件并返回 base64 字符串（用于前端显示图片等）
-#[derive(serde::Deserialize)]
-pub(crate) struct ReadFileBase64Args {
-    #[serde(rename = "filePath")]
-    file_path: String,
-}
-
 #[tauri::command]
-pub async fn read_file_base64(args: ReadFileBase64Args) -> Result<String, String> {
-    let path = std::path::Path::new(&args.file_path);
+pub async fn read_file_base64(file_path: String) -> Result<String, String> {
+    let path = std::path::Path::new(&file_path);
     if !path.exists() {
-        return Err(format!("文件不存在: {}", args.file_path));
+        return Err(format!("文件不存在: {}", file_path));
     }
     let bytes = std::fs::read(path).map_err(|e| format!("读取失败: {}", e))?;
     Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
+}
+
+/// 检查给定路径是否存在且为文件（遵循系统允许目录规则）
+#[tauri::command]
+pub async fn path_exists(app: tauri::AppHandle, path: String) -> Result<bool, String> {
+    validate_path_access(&app, &path)?;
+    let metadata = match std::fs::metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(format!("检查路径失败: {}", err)),
+    };
+    Ok(metadata.is_file())
 }
 
 /// 预览文件内容（限制读取大小）
@@ -127,6 +133,13 @@ pub async fn preview_file(file_path: String, max_bytes: Option<usize>) -> Result
 #[tauri::command]
 pub async fn open_url(url: String) -> Result<(), String> {
     open::that(&url).map_err(|e| format!("打开 URL 失败: {}", e))
+}
+
+/// 用系统默认程序打开本地文件或目录
+#[tauri::command]
+pub async fn shell_open_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    validate_path_access(&app, &path)?;
+    open::that(&path).map_err(|e| format!("打开路径失败: {}", e))
 }
 
 /// 在文件管理器中打开文件所在目录

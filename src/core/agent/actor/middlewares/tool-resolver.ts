@@ -14,8 +14,8 @@ import { useAIStore } from "@/store/ai-store";
 import { ensureMcpServersLoaded } from "@/store/mcp-store";
 import type { ActorMiddleware, ActorRunContext } from "../actor-middleware";
 
-function getPluginTools(): AgentTool[] {
-  const ai = getMToolsAI("dialog");
+function getPluginTools(mode: "dialog" | "review" = "dialog"): AgentTool[] {
+  const ai = getMToolsAI(mode);
   return registry.getAllActions().map(({ pluginId, pluginName, action }) =>
     pluginActionToTool(pluginId, pluginName, action, ai),
   );
@@ -38,6 +38,7 @@ export class ToolResolverMiddleware implements ActorMiddleware {
   readonly name = "ToolResolver";
 
   async apply(ctx: ActorRunContext): Promise<void> {
+    const productMode = ctx.actorSystem?.defaultProductMode ?? "dialog";
     const builtinResult = createBuiltinAgentTools(
       async () => true,
       ctx.askUser,
@@ -63,7 +64,7 @@ export class ToolResolverMiddleware implements ActorMiddleware {
     const mcpTools = getEnabledMcpAgentTools();
 
     const allTools = dedupeToolsByName([
-      ...getPluginTools(),
+      ...getPluginTools(productMode),
       ...builtinResult.tools,
       ...ctx.extraTools,
       ...commTools,

@@ -180,6 +180,13 @@ export class ChannelManager {
         channelType: sourceChannelType,
         msg,
       });
+      log.info("export lane routing result", {
+        channelId: sourceChannelId,
+        conversationId: msg.conversationId,
+        messageId: msg.messageId,
+        handled: exportResult.handled,
+        textPreview: String(msg.text ?? "").slice(0, 120),
+      });
       if (exportResult.handled) {
         return;
       }

@@ -335,7 +335,7 @@ pub fn get_advanced_tools() -> Vec<serde_json::Value> {
             "type": "function",
             "function": {
                 "name": "open_path",
-                "description": "使用系统默认程序打开一个文件或文件夹（如用 Finder 打开目录、用默认程序打开图片等）。",
+                "description": "仅当用户明确要求用系统打开文件/文件夹时使用（如 Finder 打开目录、默认程序打开图片）。如果用户想在聊天里直接看到图片或收到文件，不要调用此工具，而应在最终回复中输出 MEDIA:<绝对路径或URL>。",
                 "parameters": {
                     "type": "object",
                     "properties": {

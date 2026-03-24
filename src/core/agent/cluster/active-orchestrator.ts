@@ -61,6 +61,13 @@ export function setActiveOrchestrator(
     startedAt,
     workspaceRoot: runtimeInfo?.workspaceRoot,
     status: runtimeInfo?.status || "running",
+    sessionIdentity: {
+      surface: "ai_center",
+      sessionKey: sessionId,
+      sessionKind: "workflow_session",
+      workspaceId: runtimeInfo?.workspaceRoot,
+      runtimeSessionId: sessionId,
+    },
   });
 }
 

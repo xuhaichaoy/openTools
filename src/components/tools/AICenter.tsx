@@ -24,7 +24,10 @@ import { useAgentStore } from "@/store/agent-store";
 import { useClusterStore } from "@/store/cluster-store";
 import { useAppStore } from "@/store/app-store";
 import { isClusterRunning } from "@/core/agent/cluster/active-orchestrator";
-import { AI_CENTER_MODE_META } from "@/core/ai/ai-center-mode-meta";
+import {
+  AI_CENTER_MODE_META,
+  getAICenterModeMeta,
+} from "@/core/ai/ai-center-mode-meta";
 import {
   buildAICenterModelScope,
   matchesAICenterModelScope,
@@ -38,7 +41,10 @@ import { SkillsManager } from "@/components/ai/SkillsManager";
 import type { PluginContext } from "@/core/plugin-system/context";
 import type { ChatViewHandle } from "@/components/ai/ChatView";
 import type { SmartAgentHandle } from "@/plugins/builtin/SmartAgent/index";
-import type { AICenterMode } from "@/store/app-store";
+import {
+  normalizeHumanSelectableAIProductMode,
+  type HumanSelectableAIProductMode,
+} from "@/core/ai/ai-mode-types";
 
 const ChatView = lazy(() =>
   import("@/components/ai/ChatView").then((m) => ({ default: m.ChatView })),
@@ -66,21 +72,33 @@ export function AICenter({
 }) {
   const { ai } = context;
 
-  const mode = useAppStore((s) => s.aiCenterMode);
+  const rawMode = useAppStore((s) => s.aiCenterMode);
   const setMode = useAppStore((s) => s.setAiCenterMode);
   const aiCenterModelScopes = useAppStore((s) => s.aiCenterModelScopes);
   const setAICenterModelScope = useAppStore((s) => s.setAICenterModelScope);
-  const modeMeta = AI_CENTER_MODE_META[mode];
-  const compactModeMetaBar = mode === "dialog" || mode === "ask";
+  const mode = normalizeHumanSelectableAIProductMode(rawMode);
+  const primaryMode: "explore" | "build" | "dialog" = mode === "plan"
+    ? "build"
+    : mode === "review"
+      ? "dialog"
+      : mode;
+  const modeMeta = getAICenterModeMeta(mode);
+  const compactModeMetaBar = mode === "dialog" || mode === "review" || mode === "explore";
   const aiConfig = useAIStore((s) => s.config);
   const aiSourceLabel = getAIConfigSourceLabel(aiConfig.source);
   const assistantConfigBrief = describeAssistantConfigBrief(aiConfig);
   const ownKeys = useAIStore((s) => s.ownKeys);
 
   useEffect(() => {
+    if (rawMode !== mode) {
+      setMode(mode);
+    }
+  }, [mode, rawMode, setMode]);
+
+  useEffect(() => {
     const oneshot = useAppStore.getState().consumeAiInitialMode();
-    if (oneshot !== "ask") {
-      setMode(oneshot as AICenterMode);
+    if (oneshot !== "explore") {
+      setMode(oneshot);
     }
   }, [setMode]);
 
@@ -120,12 +138,16 @@ export function AICenter({
     setAICenterModelScope,
   ]);
 
-  const [mounted, setMounted] = useState({ agent: mode === "agent", cluster: mode === "cluster", dialog: mode === "dialog" });
+  const [mounted, setMounted] = useState({
+    build: mode === "build",
+    plan: mode === "plan",
+    actor: mode === "review" || mode === "dialog",
+  });
   useEffect(() => {
     setMounted((prev) => {
-      if (mode === "agent" && !prev.agent) return { ...prev, agent: true };
-      if (mode === "cluster" && !prev.cluster) return { ...prev, cluster: true };
-      if (mode === "dialog" && !prev.dialog) return { ...prev, dialog: true };
+      if (mode === "build" && !prev.build) return { ...prev, build: true };
+      if (mode === "plan" && !prev.plan) return { ...prev, plan: true };
+      if ((mode === "review" || mode === "dialog") && !prev.actor) return { ...prev, actor: true };
       return prev;
     });
   }, [mode]);
@@ -161,32 +183,60 @@ export function AICenter({
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  const compactMetaCopy = mode === "ask"
+  const compactMetaCopy = mode === "explore"
     ? {
-      detail: "提问 / 读图 / 轻工具",
-      model: `${AI_CENTER_MODE_META.ask.label} 默认`,
+      detail: "提问 / 读图 / 轻量检索",
+      model: `${AI_CENTER_MODE_META.explore.label} 默认`,
       skill: "自动激活",
     }
+    : mode === "review"
+      ? {
+        detail: "Dialog 内只读审查 / 风险归纳 / 不改文件",
+        model: modeMeta.modelScopeShort,
+        skill: modeMeta.skillScopeShort,
+      }
     : mode === "dialog"
       ? {
-        detail: "review / debug / brainstorm",
+        detail: "主 Agent 派工 / 讨论 / 汇总",
         model: modeMeta.modelScopeShort,
         skill: modeMeta.skillScopeShort,
       }
       : null;
-  const modeBtn = (m: AICenterMode, icon: React.ReactNode, label: string) => (
+  const modeBtn = (
+    m: Extract<HumanSelectableAIProductMode, "explore" | "build" | "dialog">,
+    icon: React.ReactNode,
+    label: string,
+  ) => (
     <button
       onClick={() => {
         setShowAskMore(false);
         setMode(m);
       }}
       className={`flex items-center gap-1 text-[11px] px-2 py-1 rounded-md transition-all ${
-        mode === m
+        primaryMode === m
           ? "bg-[var(--color-bg)] text-[var(--color-text)] shadow-sm"
           : "text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
       }`}
     >
       {icon}
+      {label}
+    </button>
+  );
+  const secondaryLaneBtn = (
+    actualMode: HumanSelectableAIProductMode,
+    label: string,
+    title: string,
+  ) => (
+    <button
+      type="button"
+      title={title}
+      onClick={() => setMode(actualMode)}
+      className={`rounded-md border px-2 py-0.5 text-[10px] transition-colors ${
+        mode === actualMode
+          ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
+          : "border-[var(--color-border)] bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+      }`}
+    >
       {label}
     </button>
   );
@@ -202,27 +252,34 @@ export function AICenter({
           <ArrowLeft className="w-4 h-4" />
         </button>
 
-        {/* 三模式切换 */}
+        {/* 主模式切换 */}
         <div className="flex items-center bg-[var(--color-bg-secondary)] rounded-lg p-0.5 border border-[var(--color-border)]">
-          {modeBtn("ask", <MessageCircle className="w-3 h-3" />, AI_CENTER_MODE_META.ask.label)}
-          {modeBtn("agent", <Bot className="w-3 h-3" />, AI_CENTER_MODE_META.agent.label)}
-          {modeBtn(
-            "cluster",
-            <div className="relative">
-              <Network className="w-3 h-3" />
-              {isClusterRunning() && (
-                <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 bg-cyan-500 rounded-full animate-pulse" />
-              )}
-            </div>,
-            AI_CENTER_MODE_META.cluster.label,
-          )}
+          {modeBtn("explore", <MessageCircle className="w-3 h-3" />, AI_CENTER_MODE_META.explore.label)}
+          {modeBtn("build", <Bot className="w-3 h-3" />, AI_CENTER_MODE_META.build.label)}
           {modeBtn("dialog", <Users className="w-3 h-3" />, AI_CENTER_MODE_META.dialog.label)}
         </div>
 
         <div className="w-px h-4 bg-[var(--color-border)] mx-0.5" />
 
-        {/* Ask 模式操作按钮 */}
-        {mode === "ask" && (
+        {primaryMode === "build" && (
+          <div className="flex items-center gap-1">
+            {secondaryLaneBtn("build", "执行", "直接落地、改文件、跑命令")}
+            {secondaryLaneBtn("plan", "规划", "复杂任务拆解、并行分析与汇总")}
+            {mode === "plan" && isClusterRunning() && (
+              <span className="inline-flex h-2 w-2 rounded-full bg-cyan-500 animate-pulse" />
+            )}
+          </div>
+        )}
+
+        {primaryMode === "dialog" && (
+          <div className="flex items-center gap-1">
+            {secondaryLaneBtn("dialog", "协作", "多 Agent 持续协作")}
+            {secondaryLaneBtn("review", "审查", "只读审查与风险归纳")}
+          </div>
+        )}
+
+        {/* Explore 模式操作按钮 */}
+        {mode === "explore" && (
           <>
             <button
               onClick={() => chatRef.current?.toggleHistory()}
@@ -281,7 +338,7 @@ export function AICenter({
                     className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] text-[var(--color-text)] transition-colors hover:bg-[var(--color-bg-hover)]"
                   >
                     <ArrowRightCircle className="w-3.5 h-3.5 text-[var(--color-text-secondary)]" />
-                    用 Agent 继续
+                    用 Build 继续
                   </button>
                   <button
                     onClick={() => {
@@ -291,7 +348,7 @@ export function AICenter({
                     className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] text-[var(--color-text)] transition-colors hover:bg-[var(--color-bg-hover)]"
                   >
                     <Network className="w-3.5 h-3.5 text-[var(--color-text-secondary)]" />
-                    用 Cluster 继续
+                    用 Plan 继续
                   </button>
                   <button
                     onClick={() => {
@@ -309,8 +366,8 @@ export function AICenter({
           </>
         )}
 
-        {/* Agent 模式操作按钮 */}
-        {mode === "agent" && (
+        {/* Build 模式操作按钮 */}
+        {mode === "build" && (
           <>
             <button
               onClick={() => agentRef.current?.toggleHistory()}
@@ -353,8 +410,8 @@ export function AICenter({
           </>
         )}
 
-        {/* Cluster 模式操作按钮 */}
-        {mode === "cluster" && (
+        {/* Plan 模式操作按钮 */}
+        {mode === "plan" && (
           <span className="text-[11px] text-[var(--color-text-secondary)]">
             {clusterSessionCount > 0
               ? `${clusterSessionCount} 个会话`
@@ -362,7 +419,12 @@ export function AICenter({
           </span>
         )}
 
-        {/* Dialog 模式操作按钮 */}
+        {mode === "review" && (
+          <span className="text-[11px] text-[var(--color-text-secondary)]">
+            Dialog 的只读审查 lane，默认收紧权限与审批
+          </span>
+        )}
+
         <div className="flex-1" />
 
         <button
@@ -426,22 +488,25 @@ export function AICenter({
       {/* ====== 内容区 ====== */}
       <div className="flex-1 overflow-hidden relative">
         <Suspense fallback={Loading}>
-          <div className={`absolute inset-0 ${mode === "ask" ? "" : "invisible pointer-events-none"}`}>
-            <ChatView ref={chatRef} headless hideModelSelector active={mode === "ask"} />
+          <div className={`absolute inset-0 ${mode === "explore" ? "" : "invisible pointer-events-none"}`}>
+            <ChatView ref={chatRef} headless hideModelSelector active={mode === "explore"} />
           </div>
-          {mounted.agent && (
-            <div className={`absolute inset-0 ${mode === "agent" ? "" : "invisible pointer-events-none"}`}>
-              <SmartAgentPlugin ref={agentRef} ai={ai} headless active={mode === "agent"} />
+          {mounted.build && (
+            <div className={`absolute inset-0 ${mode === "build" ? "" : "invisible pointer-events-none"}`}>
+              <SmartAgentPlugin ref={agentRef} ai={ai} headless active={mode === "build"} />
             </div>
           )}
-          {mounted.cluster && (
-            <div className={`absolute inset-0 ${mode === "cluster" ? "" : "invisible pointer-events-none"}`}>
-              <ClusterPanel active={mode === "cluster"} />
+          {mounted.plan && (
+            <div className={`absolute inset-0 ${mode === "plan" ? "" : "invisible pointer-events-none"}`}>
+              <ClusterPanel active={mode === "plan"} />
             </div>
           )}
-          {mounted.dialog && (
-            <div className={`absolute inset-0 ${mode === "dialog" ? "" : "invisible pointer-events-none"}`}>
-              <ActorChatPanel active={mode === "dialog"} />
+          {mounted.actor && (
+            <div className={`absolute inset-0 ${mode === "review" || mode === "dialog" ? "" : "invisible pointer-events-none"}`}>
+              <ActorChatPanel
+                active={mode === "review" || mode === "dialog"}
+                productMode={mode === "review" ? "review" : "dialog"}
+              />
             </div>
           )}
         </Suspense>

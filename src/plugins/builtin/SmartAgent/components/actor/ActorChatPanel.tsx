@@ -66,6 +66,7 @@ import { routeToAICenter } from "@/core/ai/ai-center-routing";
 import { buildDialogContextBreakdown, type DialogContextBreakdown } from "@/core/ai/dialog-context-breakdown";
 import { buildDialogWorkingSetSnapshot } from "@/core/ai/ai-working-set";
 import { summarizeAISessionRuntimeText } from "@/core/ai/ai-session-runtime";
+import { normalizeAIProductMode } from "@/core/ai/ai-mode-types";
 import {
   abortRuntimeSession,
   buildRuntimeSessionKey,
@@ -700,7 +701,13 @@ const NEW_MESSAGE_TARGET = "__new_message__";
 const DIALOG_PLAN_APPROVAL_KEY = "dialog-plan-approval-enabled";
 // ── Main Panel ──
 
-export function ActorChatPanel({ active = true }: { active?: boolean }) {
+export function ActorChatPanel({
+  active = true,
+  productMode = "dialog",
+}: {
+  active?: boolean;
+  productMode?: "dialog" | "review";
+}) {
   const [showConfig, setShowConfig] = useState(false);
   const [overlay, setOverlay] = useState<DialogOverlay>(null);
   const [workspacePanel, setWorkspacePanel] = useState<WorkspacePanel>(null);
@@ -742,6 +749,8 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   }>>({});
   const queuedFollowUpDispatchRef = useRef(false);
   const lastDialogSelectionRef = useRef<string | null>(null);
+  const dialogSurfaceMode = productMode === "review" ? "review" : "dialog";
+  const isReviewSurface = dialogSurfaceMode === "review";
 
   const {
     active: systemActive, actors, dialogHistory, pendingUserInteractions, spawnedTasks, artifacts: structuredArtifacts,
@@ -989,11 +998,11 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       {
         key: "local",
         label: "本机",
-        detail: "本地 Dialog 协作房间",
-        statusLabel: localRuntimeRecord ? getRuntimeIndicatorStatus(localRuntimeRecord) : "本机协作",
+        detail: isReviewSurface ? "本地 Dialog 审查房间" : "本地 Dialog 协作房间",
+        statusLabel: localRuntimeRecord ? getRuntimeIndicatorStatus(localRuntimeRecord) : (isReviewSurface ? "本机审查" : "本机协作"),
         updatedAt: localRuntimeRecord?.updatedAt ?? (dialogHistory[dialogHistory.length - 1]?.timestamp ?? 0),
         connectionState: "connected",
-        connectionLabel: "本机协作",
+        connectionLabel: isReviewSurface ? "本机审查" : "本机协作",
       },
     ];
     for (const channelType of ["dingtalk", "feishu"] as const) {
@@ -1014,7 +1023,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       });
     }
     return items;
-  }, [currentRoomSessionId, dialogChannelConnectionMeta, dialogChannelGroups, dialogHistory, runtimeSessions]);
+  }, [currentRoomSessionId, dialogChannelConnectionMeta, dialogChannelGroups, dialogHistory, isReviewSurface, runtimeSessions]);
   const activeDialogView = dialogTopSessionItems.some((item) => item.key === requestedDialogView)
     ? requestedDialogView
     : "local";
@@ -1052,6 +1061,41 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   const activeChannelConversation = activeChannelGroup?.conversations.find((item) => item.key === activeChannelConversationKey)
     ?? activeChannelGroup?.conversations[0]
     ?? null;
+  useEffect(() => {
+    if (activeDialogView === "local") return;
+    dialogRenderLogger.info("active dialog channel snapshot", {
+      activeDialogView,
+      selectedDialogSessionId,
+      activeChannelConversationKey,
+      activeChannelConversation: activeChannelConversation
+        ? {
+            key: activeChannelConversation.key,
+            conversationId: activeChannelConversation.conversationId,
+            activeSessionId: activeChannelConversation.activeSessionId,
+            previewSessionId: activeChannelConversation.preview?.sessionId,
+            previewTopicId: activeChannelConversation.preview?.topicId,
+            previewMessageCount: activeChannelConversation.preview?.dialogHistory.length ?? 0,
+            statusLabel: activeChannelConversation.statusLabel,
+            updatedAt: activeChannelConversation.updatedAt,
+          }
+        : null,
+      groupConversations: activeChannelGroup?.conversations.map((conversation) => ({
+        key: conversation.key,
+        conversationId: conversation.conversationId,
+        activeSessionId: conversation.activeSessionId,
+        previewSessionId: conversation.preview?.sessionId,
+        previewTopicId: conversation.preview?.topicId,
+        previewMessageCount: conversation.preview?.dialogHistory.length ?? 0,
+        updatedAt: conversation.updatedAt,
+      })) ?? [],
+    });
+  }, [
+    activeChannelConversation,
+    activeChannelConversationKey,
+    activeChannelGroup,
+    activeDialogView,
+    selectedDialogSessionId,
+  ]);
   const returnToLocalDialogRoom = useCallback(() => {
     useRuntimeStateStore.getState().setForegroundSession("im_conversation", null);
     if (currentRoomSessionId) {
@@ -1256,9 +1300,10 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     if (storeState.active) return;
     init({
       confirmDangerousAction,
+      defaultProductMode: dialogSurfaceMode,
     });
     sync();
-  }, [confirmDangerousAction, init, sync]);
+  }, [confirmDangerousAction, dialogSurfaceMode, init, sync]);
 
   useEffect(() => {
     if (active && !initRef.current) {
@@ -1266,6 +1311,13 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       ensureSystem();
     }
   }, [active, ensureSystem]);
+
+  useEffect(() => {
+    const system = useActorSystemStore.getState().getSystem();
+    if (system) {
+      system.defaultProductMode = dialogSurfaceMode;
+    }
+  }, [dialogSurfaceMode]);
 
   useEffect(() => {
     useRuntimeStateStore.getState().setPanelVisible("dialog", active);
@@ -1312,7 +1364,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
   }, [activeChannelConversationKey, activeDialogView]);
 
   useEffect(() => {
-    if (!pendingAICenterHandoff || pendingAICenterHandoff.mode !== "dialog") return;
+    if (!pendingAICenterHandoff || normalizeAIProductMode(pendingAICenterHandoff.mode) !== dialogSurfaceMode) return;
     let cancelled = false;
 
     const applyHandoff = async () => {
@@ -1352,7 +1404,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     return () => {
       cancelled = true;
     };
-  }, [pendingAICenterHandoff, ensureSystem, clearAttachments, addAttachmentFromPath, getSystem, setSourceHandoff]);
+  }, [pendingAICenterHandoff, ensureSystem, clearAttachments, addAttachmentFromPath, getSystem, setSourceHandoff, dialogSurfaceMode]);
 
   // 加载自定义预设
   useEffect(() => {
@@ -1650,7 +1702,10 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     if (!preset) return;
     destroyAll();
     initRef.current = false;
-    init();
+    init({
+      confirmDangerousAction,
+      defaultProductMode: dialogSurfaceMode,
+    });
     for (const p of preset.participants) {
       const normalizedCaps = normalizeAgentCapabilities(p.suggestedCapabilities);
       spawnActor({
@@ -1676,7 +1731,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
       setRequirePlanApproval(preset.requirePlanApproval);
     }
     setShowConfig(false);
-  }, [destroyAll, init, spawnActor, customPresets]);
+  }, [confirmDangerousAction, customPresets, destroyAll, dialogSurfaceMode, init, spawnActor]);
 
   // 保存当前配置为新预设
   const handleSaveCurrentAsPreset = useCallback(() => {
@@ -1722,7 +1777,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     });
     if (!handoff) return;
     routeToAICenter({
-      mode: "agent",
+      mode: "build",
       source: "dialog_continue_to_agent",
       handoff,
       navigate: false,
@@ -1744,7 +1799,7 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     });
     if (!handoff) return;
     routeToAICenter({
-      mode: "agent",
+      mode: "build",
       source: "dialog_continue_to_agent",
       handoff,
       navigate: false,
@@ -2588,12 +2643,13 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
     if (coordinatorName) {
       items.push(`主代理 ${coordinatorName}`);
     }
+    items.push(isReviewSurface ? "只读审查" : "主房间协作");
     items.push(routingModeMeta.label);
     if (activeDialogView !== "local") {
       items.push(`当前查看 ${getDialogViewLabel(activeDialogView)}`);
     }
     return items;
-  }, [activeDialogView, coordinatorName, routingModeMeta.label]);
+  }, [activeDialogView, coordinatorName, isReviewSurface, routingModeMeta.label]);
   const localStatusBadges = useMemo(() => {
     if (activeDialogView !== "local") return [];
     const badges: Array<{ key: string; label: string; className: string }> = [];
@@ -2681,7 +2737,17 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                 </div>
                 <div className="min-w-0">
                   <div className="flex min-w-0 flex-wrap items-center gap-2">
-                    <span className="text-[14px] font-semibold text-[var(--color-text)]">Dialog 工作台</span>
+                    <span className="text-[14px] font-semibold text-[var(--color-text)]">
+                      {isReviewSurface ? "Dialog · 审查工作台" : "Dialog 工作台"}
+                    </span>
+                    <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] ${
+                      isReviewSurface
+                        ? "bg-violet-500/10 text-violet-600"
+                        : "bg-cyan-500/10 text-cyan-700"
+                    }`}>
+                      {isReviewSurface && <ShieldCheck className="h-3 w-3" />}
+                      {isReviewSurface ? "只读审查" : "主 Agent 协作"}
+                    </span>
                     <span className={`rounded-full px-2 py-0.5 text-[10px] ${
                       actors.length > 0
                         ? "bg-emerald-500/10 text-emerald-600"
@@ -2761,10 +2827,10 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                 <button
                   onClick={handleContinueWithAgent}
                   className="inline-flex items-center gap-1.5 rounded-full border border-cyan-500/20 bg-cyan-500/5 px-2.5 py-1 text-[10px] text-cyan-700 hover:border-cyan-500/35 hover:bg-cyan-500/10 transition-colors"
-                  title="把当前多 Agent 协作上下文带到 Agent，继续落地执行"
+                  title="把当前多 Agent 协作上下文带到 Build，继续落地执行"
                 >
                   <ArrowRightCircle className="w-3 h-3" />
-                  转 Agent
+                  转 Build
                 </button>
               )}
             </div>
@@ -3525,7 +3591,9 @@ export function ActorChatPanel({ active = true }: { active?: boolean }) {
                           ? `向 ${pendingSteerTargetLabel} 发送 steer 指令...`
                           : pendingUserInteractions.length > 0
                             ? `有 ${pendingUserInteractions.length} 条待回复交互，先选择要回复的问题...`
-                            : "输入消息给主 Agent，必要时它会自动复用后台线程或分派子 Agent"}
+                            : isReviewSurface
+                              ? "输入审查任务给主 Agent；它会按只读审查边界组织协作，不直接改业务文件"
+                              : "输入消息给主 Agent，必要时它会自动复用后台线程或分派子 Agent"}
                     value={input}
                     onChange={handleInputChange}
                     onKeyDown={handleKeyDown}

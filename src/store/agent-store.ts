@@ -844,6 +844,12 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       createdAt: now,
       updatedAt: now,
       source: sourceHandoff,
+      sessionIdentity: {
+        surface: "ai_center",
+        sessionKey: id,
+        sessionKind: "task_session",
+        runtimeSessionId: id,
+      },
     });
     debouncedPersist();
     return id;
@@ -931,6 +937,12 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         summary: buildAgentRuntimeSummary(updates),
         updatedAt,
         source: session?.sourceHandoff,
+        sessionIdentity: {
+          surface: "ai_center",
+          sessionKey: sessionId,
+          sessionKind: "task_session",
+          runtimeSessionId: sessionId,
+        },
       });
     }
     debouncedPersist();
@@ -1055,6 +1067,12 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       updatedAt: now,
       summary: buildAgentRuntimeSummary(clonedTasks[clonedTasks.length - 1] ?? {}),
       source: forked.sourceHandoff,
+      sessionIdentity: {
+        surface: "ai_center",
+        sessionKey: forked.id,
+        sessionKind: "task_session",
+        runtimeSessionId: forked.id,
+      },
     });
     debouncedPersist();
     return forked.id;
@@ -1177,6 +1195,12 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       title: session.title,
       createdAt: now,
       updatedAt: now,
+      sessionIdentity: {
+        surface: "ai_center",
+        sessionKey: id,
+        sessionKind: "task_session",
+        runtimeSessionId: id,
+      },
     });
     debouncedPersist();
   },

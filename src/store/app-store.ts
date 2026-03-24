@@ -5,6 +5,7 @@ import type { AICenterModelScope } from '@/core/ai/ai-center-model-scope'
 import type {
   AIProductMode,
   AICenterCompatibleMode,
+  HumanSelectableAIProductMode,
 } from '@/core/ai/ai-mode-types'
 import {
   normalizeAIProductMode,
@@ -27,6 +28,7 @@ const APP_STORE_SCHEMA_VERSION = 2
 
 export type {
   AIProductMode,
+  HumanSelectableAIProductMode,
   AICenterCompatibleMode as AICenterMode,
   AIInitialMode,
 } from '@/core/ai/ai-mode-types'
@@ -103,10 +105,10 @@ export interface AppState {
   windowExpanded: boolean
   /** 最近使用的工具 viewId 列表（最新在前） */
   recentTools: string[]
-  /** AI 助手打开时的初始模式（一次性消费：读取后自动重置为 ask） */
-  aiInitialMode: AIProductMode
+  /** AI 助手打开时的初始模式（一次性消费：读取后自动重置为 explore） */
+  aiInitialMode: HumanSelectableAIProductMode
   /** AI 助手当前选中的 tab 模式（跨组件生命周期持久） */
-  aiCenterMode: AIProductMode
+  aiCenterMode: HumanSelectableAIProductMode
   /** 待处理的嵌入打开请求（一次性消费） */
   pendingEmbed: EmbedRequest | null
   /** 待处理的视图导航请求（一次性消费） */
@@ -127,8 +129,8 @@ export interface AppState {
   addRecentTool: (viewId: string) => void
   /** 设置 AI 打开时的初始模式 */
   setAiInitialMode: (mode: AICenterCompatibleMode) => void
-  /** 消费 aiInitialMode（读取并重置为 ask） */
-  consumeAiInitialMode: () => AIProductMode
+  /** 消费 aiInitialMode（读取并重置为 explore） */
+  consumeAiInitialMode: () => HumanSelectableAIProductMode
   /** 设置 AI 助手当前 tab 模式 */
   setAiCenterMode: (mode: AICenterCompatibleMode) => void
   /** 请求在主窗口中嵌入打开外部插件 */
@@ -186,8 +188,8 @@ export const useAppStore = create<AppState>()(
       selectedIndex: 0,
       windowExpanded: false,
       recentTools: [] as string[],
-      aiInitialMode: 'explore' as AIProductMode,
-      aiCenterMode: 'explore' as AIProductMode,
+      aiInitialMode: 'explore' as HumanSelectableAIProductMode,
+      aiCenterMode: 'explore' as HumanSelectableAIProductMode,
       pendingEmbed: null as EmbedRequest | null,
       pendingNavigate: null as string | null,
       pendingAICenterHandoff: null as PendingAICenterHandoff | null,
@@ -272,6 +274,20 @@ export const useAppStore = create<AppState>()(
       name: "mtools-app",
       version: APP_STORE_SCHEMA_VERSION,
       storage: tauriPersistStorage("app-settings.json", "应用设置"),
+      merge: (persistedState, currentState) => {
+        const state = (persistedState ?? {}) as Partial<AppState> & {
+          aiCenterMode?: AICenterCompatibleMode
+          aiInitialMode?: AICenterCompatibleMode
+          aiCenterModelScopes?: Record<string, AICenterModelScope>
+        }
+        return {
+          ...currentState,
+          ...state,
+          aiInitialMode: normalizeHumanSelectableAIProductMode(state.aiInitialMode),
+          aiCenterMode: normalizeHumanSelectableAIProductMode(state.aiCenterMode),
+          aiCenterModelScopes: normalizeAICenterModelScopes(state.aiCenterModelScopes),
+        }
+      },
       migrate: (persistedState) => {
         const state = (persistedState ?? {}) as Partial<AppState> & {
           aiCenterMode?: AICenterCompatibleMode

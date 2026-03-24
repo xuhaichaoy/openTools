@@ -57,6 +57,25 @@ function chooseTitle(
   return getAISessionRuntimeFallbackTitle(mode);
 }
 
+function mergeSessionIdentityInput(
+  existing: AISessionRuntimeSession | undefined,
+  input: AISessionRuntimeUpsertInput,
+) {
+  return {
+    surface: input.sessionIdentity?.surface ?? existing?.identity?.surface,
+    sessionKind: input.sessionIdentity?.sessionKind ?? existing?.identity?.sessionKind,
+    scope: input.sessionIdentity?.scope ?? existing?.identity?.scope,
+    workspaceId: input.sessionIdentity?.workspaceId ?? existing?.identity?.workspaceId,
+    channelType: input.sessionIdentity?.channelType ?? existing?.identity?.channelType,
+    accountId: input.sessionIdentity?.accountId ?? existing?.identity?.accountId,
+    conversationId: input.sessionIdentity?.conversationId ?? existing?.identity?.conversationId,
+    topicId: input.sessionIdentity?.topicId ?? existing?.identity?.topicId,
+    peerId: input.sessionIdentity?.peerId ?? existing?.identity?.peerId,
+    parentSessionId: input.sessionIdentity?.parentSessionId ?? existing?.identity?.parentSessionId,
+    runtimeSessionId: input.sessionIdentity?.runtimeSessionId ?? existing?.identity?.runtimeSessionId,
+  };
+}
+
 export const useAISessionRuntimeStore = create<AISessionRuntimeState>()(
   persist(
     (set, get) => ({
@@ -96,6 +115,10 @@ export const useAISessionRuntimeStore = create<AISessionRuntimeState>()(
               identity: buildAISessionRuntimeIdentity({
                 mode: sourceMode,
                 externalSessionId: source.sourceSessionId,
+                sessionIdentity: mergeSessionIdentityInput(undefined, {
+                  mode: sourceMode,
+                  externalSessionId: source.sourceSessionId,
+                }),
               }),
               summary: source.summary?.trim() || undefined,
               createdAt: now,
@@ -126,6 +149,7 @@ export const useAISessionRuntimeStore = create<AISessionRuntimeState>()(
                 identity: buildAISessionRuntimeIdentity({
                   ...input,
                   mode: normalizedMode,
+                  sessionIdentity: mergeSessionIdentityInput(existing, input),
                 }),
                 source: mergeSourceRef(existing.source, input.source),
               }
@@ -139,6 +163,7 @@ export const useAISessionRuntimeStore = create<AISessionRuntimeState>()(
                 identity: buildAISessionRuntimeIdentity({
                   ...input,
                   mode: normalizedMode,
+                  sessionIdentity: mergeSessionIdentityInput(undefined, input),
                 }),
                 summary: input.summary?.trim() || undefined,
                 createdAt,

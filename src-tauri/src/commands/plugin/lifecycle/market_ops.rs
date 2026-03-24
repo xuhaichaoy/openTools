@@ -7,8 +7,8 @@ use tauri::{AppHandle, Manager};
 use zip::ZipArchive;
 
 use super::{
-    get_cached_plugins, get_official_plugins_dir, invalidate_plugin_runtime, is_developer_mode_enabled,
-    persist_plugin_settings, refresh_plugin_cache,
+    get_cached_plugins, get_official_plugins_dir, invalidate_plugin_runtime,
+    is_developer_mode_enabled, persist_plugin_settings, refresh_plugin_cache,
 };
 use crate::commands::plugin::types::{PluginCache, PluginInfo};
 

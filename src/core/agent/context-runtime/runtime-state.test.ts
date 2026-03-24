@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { useSessionControlPlaneStore } from "@/store/session-control-plane-store";
 import {
   abortRuntimeSession,
   buildRuntimeSessionKey,
@@ -12,6 +13,7 @@ import {
 describe("runtime-state", () => {
   beforeEach(() => {
     clearAllRuntimeSessions();
+    useSessionControlPlaneStore.getState().clear();
     localStorage.clear();
   });
 
@@ -39,6 +41,21 @@ describe("runtime-state", () => {
     expect(record?.status).toBe("executing");
     expect(getForegroundRuntimeSession("agent")?.sessionId).toBe("session-1");
     expect(raw).toContain("继续实现设置页");
+    expect(record?.sessionIdentityId).toBeTruthy();
+    expect(
+      useSessionControlPlaneStore.getState().getSession(record?.sessionIdentityId ?? ""),
+    ).toMatchObject({
+      title: "继续实现设置页",
+      summary: "继续实现设置页",
+      status: "executing",
+      runtimeState: {
+        active: true,
+        mode: "agent",
+        status: "executing",
+        waitingStage: "tool_waiting",
+        workspaceRoot: "/repo",
+      },
+    });
   });
 
   it("invokes registered abort handlers and clears runtime entry", async () => {
@@ -77,7 +94,7 @@ describe("runtime-state", () => {
   });
 
   it("stores and clears compaction preview metadata", () => {
-    useRuntimeStateStore.getState().upsertSession({
+    const createdRecord = useRuntimeStateStore.getState().upsertSession({
       mode: "dialog",
       sessionId: "dialog-1",
       query: "继续沿用刚才的话题",
@@ -90,6 +107,9 @@ describe("runtime-state", () => {
       roomCompactionArtifactCount: 1,
       roomCompactionPreservedIdentifiers: ["src/App.tsx", "README.md"],
     });
+    const mirroredBeforeClear = useSessionControlPlaneStore
+      .getState()
+      .getSession(createdRecord?.sessionIdentityId ?? "");
     useRuntimeStateStore.getState().patchSession("dialog", "dialog-1", {
       roomCompactionSummaryPreview: undefined,
       roomCompactionUpdatedAt: undefined,
@@ -100,9 +120,52 @@ describe("runtime-state", () => {
     });
 
     const record = getRuntimeSession("dialog", "dialog-1");
+    const mirroredAfterClear = useSessionControlPlaneStore
+      .getState()
+      .getSession(record?.sessionIdentityId ?? "");
 
+    expect(mirroredBeforeClear?.continuityState).toMatchObject({
+      source: "runtime_state",
+      roomCompactionSummaryPreview: "已整理较早的对话上下文",
+      roomCompactionMessageCount: 24,
+      roomCompactionTaskCount: 2,
+      roomCompactionArtifactCount: 1,
+      roomCompactionPreservedIdentifiers: ["src/App.tsx", "README.md"],
+    });
     expect(record?.roomCompactionSummaryPreview).toBeUndefined();
     expect(record?.roomCompactionMessageCount).toBeUndefined();
     expect(record?.roomCompactionPreservedIdentifiers).toBeUndefined();
+    expect(mirroredAfterClear?.continuityState?.roomCompactionSummaryPreview).toBeUndefined();
+    expect(mirroredAfterClear?.continuityState?.roomCompactionMessageCount).toBeUndefined();
+    expect(mirroredAfterClear?.continuityState?.roomCompactionPreservedIdentifiers).toBeUndefined();
+  });
+
+  it("marks mirrored runtime state inactive when a runtime entry is removed", () => {
+    const record = useRuntimeStateStore.getState().upsertSession({
+      mode: "im_conversation",
+      sessionId: "im-2",
+      query: "继续处理渠道话题",
+      startedAt: 500,
+      status: "awaiting_reply",
+      waitingStage: "user_reply",
+      displayLabel: "钉钉渠道",
+      displayDetail: "钉钉 · 群聊",
+    });
+
+    useRuntimeStateStore.getState().removeSession("im_conversation", "im-2");
+
+    const mirrored = useSessionControlPlaneStore
+      .getState()
+      .getSession(record?.sessionIdentityId ?? "");
+
+    expect(getRuntimeSession("im_conversation", "im-2")).toBeNull();
+    expect(mirrored?.runtimeState).toMatchObject({
+      active: false,
+      mode: "im_conversation",
+      status: "idle",
+      query: "继续处理渠道话题",
+      displayLabel: "钉钉渠道",
+      displayDetail: "钉钉 · 群聊",
+    });
   });
 });

@@ -1,12 +1,26 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
 }));
 
 import { buildMcpToolName, parseMcpToolName } from "./mcp-store";
+import { executeMcpTool, useMcpStore } from "./mcp-store";
+import { invoke } from "@tauri-apps/api/core";
 
 describe("mcp-store tool naming", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    useMcpStore.setState((state) => ({
+      ...state,
+      servers: [],
+      serverStatus: {},
+      serverTools: {},
+      serverResources: {},
+      serverPrompts: {},
+    }));
+  });
+
   it("keeps Chrome DevTools MCP tool names within OpenAI tool name limits", () => {
     const toolName = buildMcpToolName(
       "mcp-chrome-devtools-1773898231482",
@@ -38,6 +52,50 @@ describe("mcp-store tool naming", () => {
     ).toEqual({
       serverId,
       realToolName: "take_snapshot",
+    });
+  });
+
+  it("materializes MCP image content into OpenClaw-style MEDIA lines", async () => {
+    useMcpStore.setState((state) => ({
+      ...state,
+      servers: [
+        {
+          id: "mcp-browser",
+          name: "Browser",
+          transport: "stdio",
+          enabled: true,
+        },
+      ],
+    }));
+
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "send_mcp_message") {
+        return JSON.stringify({
+          result: {
+            content: [
+              { type: "text", text: "天气截图如下" },
+              { type: "image", data: "ZmFrZS1zY3JlZW5zaG90", mimeType: "image/png" },
+            ],
+          },
+        });
+      }
+      if (command === "ai_save_chat_image") {
+        expect(args).toMatchObject({
+          imageData: "ZmFrZS1zY3JlZW5zaG90",
+        });
+        return "/tmp/weather.png";
+      }
+      throw new Error(`unexpected invoke: ${String(command)}`);
+    });
+
+    const result = await executeMcpTool(
+      buildMcpToolName("mcp-browser", "take_screenshot"),
+      "{}",
+    );
+
+    expect(result).toEqual({
+      success: true,
+      result: "天气截图如下\nMEDIA:/tmp/weather.png",
     });
   });
 });

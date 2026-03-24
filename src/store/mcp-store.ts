@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { handleError } from "@/core/errors";
+import { materializeMcpToolResult } from "@/core/mcp/mcp-tool-result";
 
 export interface McpServerConfig {
   id: string;
@@ -442,12 +443,9 @@ export async function executeMcpTool(
       server.transport,
       server.url,
       server.headers,
-    ) as { content?: Array<{ text?: string }> };
+    );
 
-    if (Array.isArray(result?.content)) {
-      return { success: true, result: result.content.map((c) => c.text ?? "").join("\n") };
-    }
-    return { success: true, result: JSON.stringify(result) };
+    return { success: true, result: await materializeMcpToolResult(result) };
   } catch (e) {
     return { success: false, result: `MCP 工具执行失败: ${e}` };
   }

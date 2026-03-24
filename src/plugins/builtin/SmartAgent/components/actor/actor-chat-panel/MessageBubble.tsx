@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -19,6 +19,8 @@ import type {
   PendingInteraction,
 } from "@/core/agent/actor/types";
 import { ChatImage } from "@/components/ai/MessageBubble";
+import { StructuredMediaAttachments } from "@/components/ai/StructuredMediaAttachments";
+import { mergeStructuredMedia } from "@/core/media/structured-media";
 
 const MARKDOWN_REMARK_PLUGINS = [remarkGfm];
 const FILE_PATH_REGEX = /(?:\/[\w.\-/]+\.(?:xlsx|csv|pdf|docx|pptx|xls))/g;
@@ -542,6 +544,14 @@ function MessageBubbleBase({
     : null;
   const hasBrief = !approvalResponseText && isUser && !!message._briefContent && message._briefContent !== message.content;
   const displayText = approvalResponseText ?? (hasBrief && !showFullContext ? message._briefContent! : message.content);
+  const structuredDisplay = useMemo(
+    () => mergeStructuredMedia({
+      text: displayText,
+      images: message.images,
+      attachments: message.attachments,
+    }),
+    [displayText, message.attachments, message.images],
+  );
   const isStructuredApproval = message.kind === "approval_request" && !!message.approvalRequest;
   const interactionStatus = pendingInteraction?.status ?? message.interactionStatus;
   const showTimedOutHint = !isUser && message.expectReply && !isStructuredApproval && interactionStatus === "timed_out";
@@ -570,9 +580,9 @@ function MessageBubbleBase({
           </span>
         </div>
         <div className={`inline-block w-fit text-[13px] leading-relaxed max-w-full ${bubbleClassName} ${isStructuredApproval ? "" : "rounded-xl px-3 py-2"}`}>
-          {!isStructuredApproval && message.images && message.images.length > 0 && (
+          {!isStructuredApproval && structuredDisplay.images && structuredDisplay.images.length > 0 && (
             <div className="flex gap-1.5 flex-wrap mb-1.5">
-              {message.images.map((imgPath: string, i: number) => (
+              {structuredDisplay.images.map((imgPath: string, i: number) => (
                 <ChatImage
                   key={i}
                   path={imgPath}
@@ -591,9 +601,10 @@ function MessageBubbleBase({
             <>
               <div className={`prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-headings:mt-2 prose-headings:mb-1 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_code]:break-words [&_p]:whitespace-pre-wrap [&_li]:whitespace-pre-wrap ${isUser ? "[&_p]:text-right [&_li]:text-right [&_ol]:text-right [&_ul]:text-right" : ""}`}>
                 <ReactMarkdown remarkPlugins={MARKDOWN_REMARK_PLUGINS}>
-                  {displayText}
+                  {structuredDisplay.text}
                 </ReactMarkdown>
               </div>
+              <StructuredMediaAttachments attachments={structuredDisplay.attachments} compact />
               {hasBrief && (
                 <button
                   onClick={() => setShowFullContext((v) => !v)}
@@ -603,7 +614,7 @@ function MessageBubbleBase({
                   {showFullContext ? "收起上下文" : "查看完整上下文"}
                 </button>
               )}
-              {!isUser && message.kind !== "approval_request" && <FileActionButtons content={message.content} />}
+              {!isUser && message.kind !== "approval_request" && <FileActionButtons content={structuredDisplay.text} />}
             </>
           )}
         </div>
@@ -630,7 +641,14 @@ export const MessageBubble = React.memo(
     prev.message.id === next.message.id &&
     prev.message.content === next.message.content &&
     prev.message._briefContent === next.message._briefContent &&
-    prev.message.images === next.message.images &&
+    (prev.message.images?.join("\n") || "") === (next.message.images?.join("\n") || "") &&
+    (
+      prev.message.attachments?.map((item) => `${item.path}:${item.fileName ?? ""}`).join("\n")
+      || ""
+    ) === (
+      next.message.attachments?.map((item) => `${item.path}:${item.fileName ?? ""}`).join("\n")
+      || ""
+    ) &&
     prev.message.timestamp === next.message.timestamp &&
     prev.message.memoryRecallAttempted === next.message.memoryRecallAttempted &&
     (prev.message.appliedMemoryPreview?.join("\n") || "") ===

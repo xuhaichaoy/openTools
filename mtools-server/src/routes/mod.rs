@@ -6,6 +6,7 @@ pub mod ocr;
 pub mod plugins;
 pub mod stubs;
 pub mod sync;
+pub mod team_data_export;
 pub mod team_entitlements;
 pub mod team_quota_common;
 pub mod team_quota_routes;
@@ -62,6 +63,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .nest(
             "/teams",
             teams::routes_no_layer()
+                .merge(team_data_export::routes_no_layer())
                 .merge(team_entitlements::routes_no_layer())
                 .merge(team_workflow_templates::routes_no_layer())
                 .merge(kb::team_kb_routes()),
@@ -82,6 +84,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .nest(
             "/teams",
             teams::routes_no_layer()
+                .merge(team_data_export::routes_no_layer())
                 .merge(team_entitlements::routes_no_layer())
                 .merge(team_workflow_templates::routes_no_layer())
                 .merge(kb::team_kb_routes()),

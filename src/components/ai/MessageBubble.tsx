@@ -1,4 +1,5 @@
 import { memo, useCallback, useRef, useState, useEffect, useMemo } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import {
   User,
   Bot,
@@ -20,9 +21,12 @@ import { readFile } from "@tauri-apps/plugin-fs";
 import { useAIStore } from "@/store/ai-store";
 import { stripReasoningTagsFromText } from "@/core/ai/reasoning-tag-stream";
 import { buildAskAgentHandoff } from "@/core/ai/ask-agent-handoff";
+import { StructuredMediaAttachments } from "@/components/ai/StructuredMediaAttachments";
+import { mergeStructuredMedia } from "@/core/media/structured-media";
 import { ToolCallDisplay } from "./ToolCallDisplay";
 import { routeToAICenter } from "@/core/ai/ai-center-routing";
 import type { ChatMessage } from "@/core/ai/types";
+import type { HumanSelectableAIProductMode } from "@/core/ai/ai-mode-types";
 
 // ── 图片 blob URL LRU 缓存 ──
 const IMAGE_CACHE_MAX = 60;
@@ -42,7 +46,7 @@ function setCachedBlobUrl(path: string, url: string) {
     const oldest = _imageCache.keys().next().value;
     if (oldest) {
       const oldUrl = _imageCache.get(oldest);
-      if (oldUrl) URL.revokeObjectURL(oldUrl);
+      if (oldUrl?.startsWith("blob:")) URL.revokeObjectURL(oldUrl);
       _imageCache.delete(oldest);
     }
   }
@@ -71,14 +75,34 @@ export function ChatImage({
 }) {
   const [blobUrl, setBlobUrl] = useState(() => getCachedBlobUrl(path) ?? "");
   const [error, setError] = useState(false);
+  const isRemote = /^https?:\/\//i.test(path);
 
   useEffect(() => {
+    if (isRemote) {
+      setBlobUrl(path);
+      setError(false);
+      return;
+    }
     const cached = getCachedBlobUrl(path);
     if (cached) {
       setBlobUrl(cached);
+      setError(false);
       return;
     }
     let cancelled = false;
+    setBlobUrl("");
+    setError(false);
+    const loadWithCommandFallback = async () => {
+      try {
+        const base64 = await invoke<string>("read_file_base64", { filePath: path });
+        if (cancelled) return;
+        const dataUrl = `data:${getMimeType(path)};base64,${base64}`;
+        setCachedBlobUrl(path, dataUrl);
+        setBlobUrl(dataUrl);
+      } catch {
+        if (!cancelled) setError(true);
+      }
+    };
     readFile(path)
       .then((bytes) => {
         if (cancelled) return;
@@ -88,10 +112,10 @@ export function ChatImage({
         setBlobUrl(url);
       })
       .catch(() => {
-        if (!cancelled) setError(true);
+        void loadWithCommandFallback();
       });
     return () => { cancelled = true; };
-  }, [path]);
+  }, [isRemote, path]);
 
   if (error)
     return (
@@ -340,7 +364,7 @@ export const MessageBubble = memo(function MessageBubble({
   msg: ChatMessage;
   isLastAssistant?: boolean;
   searchQuery?: string;
-  onContinueAskMode?: (mode: "agent" | "cluster" | "dialog") => void;
+  onContinueAskMode?: (mode: Extract<HumanSelectableAIProductMode, "build" | "plan" | "dialog">) => void;
 }) {
   const isUser = msg.role === "user";
   const [editing, setEditing] = useState(false);
@@ -362,14 +386,22 @@ export const MessageBubble = memo(function MessageBubble({
           }),
     [isUser, msg.content],
   );
+  const structuredMessage = useMemo(
+    () => mergeStructuredMedia({
+      text: sanitizedAssistantContent,
+      images: msg.images,
+      attachments: msg.attachments,
+    }),
+    [msg.attachments, msg.images, sanitizedAssistantContent],
+  );
   const shouldTruncate =
     !isUser &&
     !expanded &&
-    sanitizedAssistantContent.length > TRUNCATE_LENGTH &&
+    structuredMessage.text.length > TRUNCATE_LENGTH &&
     !msg.streaming;
   const displayContent = shouldTruncate
-    ? sanitizedAssistantContent.slice(0, TRUNCATE_LENGTH) + "\n\n..."
-    : sanitizedAssistantContent;
+    ? structuredMessage.text.slice(0, TRUNCATE_LENGTH) + "\n\n..."
+    : structuredMessage.text;
 
   // 简单文本检测：不含 Markdown 语法且不在流式中时跳过 ReactMarkdown
   const isPlainText = useMemo(() => {
@@ -509,6 +541,18 @@ export const MessageBubble = memo(function MessageBubble({
                   )}
                 </div>
               )}
+              {structuredMessage.images && structuredMessage.images.length > 0 && (
+                <div className="mb-2 flex gap-1.5 flex-wrap">
+                  {structuredMessage.images.map((imgPath, index) => (
+                    <ChatImage
+                      key={`${imgPath}-${index}`}
+                      path={imgPath}
+                      className="max-w-[220px] max-h-[220px] object-cover rounded-lg cursor-zoom-in hover:opacity-90 transition-opacity"
+                      onClick={(url) => setPreviewImage(url)}
+                    />
+                  ))}
+                </div>
+              )}
               <div
                 className={`prose prose-invert prose-base max-w-none [&_p]:leading-7 [&_p]:my-2 [&_li]:my-1 first:[&_p]:mt-0 last:[&_p]:mb-0 ${msg.streaming ? "min-h-[1.5rem]" : ""}`}
               >
@@ -552,12 +596,13 @@ export const MessageBubble = memo(function MessageBubble({
                   </button>
                 )}
               </div>
+              <StructuredMediaAttachments attachments={structuredMessage.attachments} />
               {msg.suggestAgentUpgrade && !msg.streaming && (
                 <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
                   <button
                     onClick={() => {
                       if (onContinueAskMode) {
-                        onContinueAskMode("agent");
+                        onContinueAskMode("build");
                         return;
                       }
                       const aiState = useAIStore.getState();
@@ -569,7 +614,7 @@ export const MessageBubble = memo(function MessageBubble({
                         maxCharsPerMessage: 400,
                       });
                       routeToAICenter({
-                        mode: "agent",
+                        mode: "build",
                         source: "ask_continue_to_agent",
                         ...(handoff ? { handoff } : {}),
                         navigate: false,
@@ -578,12 +623,12 @@ export const MessageBubble = memo(function MessageBubble({
                     className="flex items-center gap-1 text-indigo-400 hover:text-indigo-300 transition-colors"
                   >
                     <ArrowRight className="w-3 h-3" />
-                    转 Agent 落地
+                    转 Build 落地
                   </button>
                   <button
                     onClick={() => {
                       if (onContinueAskMode) {
-                        onContinueAskMode("cluster");
+                        onContinueAskMode("plan");
                         return;
                       }
                       const aiState = useAIStore.getState();
@@ -595,7 +640,7 @@ export const MessageBubble = memo(function MessageBubble({
                         maxCharsPerMessage: 400,
                       });
                       routeToAICenter({
-                        mode: "cluster",
+                        mode: "plan",
                         source: "ask_continue_to_cluster",
                         ...(handoff ? { handoff } : {}),
                         navigate: false,
@@ -604,7 +649,7 @@ export const MessageBubble = memo(function MessageBubble({
                     className="flex items-center gap-1 text-cyan-500 hover:text-cyan-400 transition-colors"
                   >
                     <Network className="w-3 h-3" />
-                    转 Cluster 拆解
+                    转 Plan 拆解
                   </button>
                   <button
                     onClick={() => {
@@ -680,9 +725,9 @@ export const MessageBubble = memo(function MessageBubble({
           ) : (
             <div>
               {/* 用户消息图片 */}
-              {msg.images && msg.images.length > 0 && (
+              {structuredMessage.images && structuredMessage.images.length > 0 && (
                 <div className="flex gap-1.5 flex-wrap mb-1.5">
-                  {msg.images.map((imgPath: string, i: number) => (
+                  {structuredMessage.images.map((imgPath: string, i: number) => (
                     <ChatImage
                       key={i}
                       path={imgPath}
@@ -693,8 +738,9 @@ export const MessageBubble = memo(function MessageBubble({
                 </div>
               )}
               <div className="leading-7 whitespace-pre-wrap">
-                <HighlightText text={msg.content} query={searchQuery} />
+                <HighlightText text={structuredMessage.text} query={searchQuery} />
               </div>
+              <StructuredMediaAttachments attachments={structuredMessage.attachments} compact />
             </div>
           )}
         </div>

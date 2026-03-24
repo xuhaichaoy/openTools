@@ -137,11 +137,25 @@ describe("dialog-presets", () => {
 
     expect(external.executionPolicy).toEqual({
       accessMode: "read_only",
-      approvalMode: "off",
+      approvalMode: "normal",
     });
     expect(external.middlewareOverrides).toEqual({
-      approvalLevel: "off",
+      approvalLevel: "normal",
       disable: ["Clarification"],
     });
+    expect(external.role.systemPrompt).toContain("send_local_media");
+    expect(external.role.systemPrompt).toContain("MEDIA:");
+  });
+
+  it("teaches local dialog actors to return local media through MEDIA lines", () => {
+    const local = buildDefaultDialogActorConfig("Lead", {
+      mode: "local",
+      productMode: "dialog",
+    });
+
+    expect(local.role.systemPrompt).toContain("桌面端可以直接展示本地图片和导出文件");
+    expect(local.role.systemPrompt).toContain("MEDIA:");
+    expect(local.role.systemPrompt).toContain("不要声称“当前会话不能直接回发本地图片/文件”");
+    expect(local.toolPolicy?.deny).toContain("send_local_media");
   });
 });

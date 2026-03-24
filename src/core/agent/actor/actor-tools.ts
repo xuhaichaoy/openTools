@@ -2,6 +2,7 @@ import type { AgentTool } from "@/plugins/builtin/SmartAgent/core/react-agent";
 import type { ActorSystem } from "./actor-system";
 import type { AgentCapability, SpawnedTaskRoleBoundary } from "./types";
 import type { AgentScheduledTask, AgentTaskOriginMode } from "@/core/ai/types";
+import { isLikelyVisualAttachmentPath } from "@/core/ai/ai-center-handoff";
 import {
   buildPersistentScheduledQuery,
   inferDirectScheduledDelivery,
@@ -12,7 +13,6 @@ import {
   readSessionHistory,
   getSessionSummary,
   listTranscriptSessionIds,
-  compactTranscript,
 } from "./actor-transcript";
 
 const KNOWN_AGENT_CAPABILITIES = new Set<AgentCapability>([
@@ -133,6 +133,57 @@ function inferScheduledTaskOrigin(system: ActorSystem): {
         originLabel: "本机",
         sessionId: system.sessionId,
       };
+  }
+}
+
+function normalizeMediaPathCandidate(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  if (!/^file:\/\//i.test(trimmed)) {
+    return trimmed.replace(/\\/g, "/");
+  }
+
+  try {
+    const url = new URL(trimmed);
+    const pathname = decodeURIComponent(url.pathname || "");
+    if (/^\/[A-Za-z]:\//.test(pathname)) {
+      return pathname.slice(1).replace(/\\/g, "/");
+    }
+    return (pathname || trimmed).replace(/\\/g, "/");
+  } catch {
+    return trimmed.replace(/\\/g, "/");
+  }
+}
+
+function parseLocalMediaCandidates(params: {
+  path?: unknown;
+  paths?: unknown;
+}): string[] {
+  const single = typeof params.path === "string" ? [params.path] : [];
+  const multiple = typeof params.paths === "string"
+    ? params.paths
+      .split(/\r?\n|,/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+    : [];
+  return [...single, ...multiple]
+    .map((item) => normalizeMediaPathCandidate(item))
+    .filter(Boolean);
+}
+
+function getMediaFileName(path: string): string {
+  const normalized = normalizeMediaPathCandidate(path);
+  const cleanPath = normalized.split("?")[0]?.split("#")[0] ?? normalized;
+  const parts = cleanPath.split("/");
+  return parts[parts.length - 1] || cleanPath;
+}
+
+async function doesMediaPathExist(path: string): Promise<boolean> {
+  if (/^https?:\/\//i.test(path)) return true;
+  try {
+    return await invokeTauriCommand<boolean>("path_exists", { path });
+  } catch {
+    return false;
   }
 }
 
@@ -442,6 +493,133 @@ export function createActorCommunicationTools(
       } catch (e) {
         return { sent: false, error: e instanceof Error ? e.message : String(e) };
       }
+    },
+  });
+
+  tools.push({
+    name: "send_local_media",
+    description:
+      "把本地图片或文件作为当前外部 IM 回复的附件发给用户。" +
+      "适合把截图、海报、生成图片、导出文件等回传给当前渠道用户。" +
+      "调用后，最终答复会自动带上这些媒体；最终正文只需简短说明，不要重复输出路径。",
+    parameters: {
+      path: {
+        type: "string",
+        description: "单个本地文件路径或 http(s) URL；优先使用绝对路径",
+        required: false,
+      },
+      paths: {
+        type: "string",
+        description: "多个本地文件路径或 URL；支持换行或逗号分隔",
+        required: false,
+      },
+      attachment_name: {
+        type: "string",
+        description: "当前会话里已上传/已生成文件的名称；当你只知道名字不知道路径时使用",
+        required: false,
+      },
+      use_current_images: {
+        type: "boolean",
+        description: "把当前任务继承到的图片一并回发给用户，适合“把这张图发给我”",
+        required: false,
+      },
+    },
+    readonly: false,
+    execute: async (params) => {
+      const coordinatorId = system.getCoordinatorId();
+      if (coordinatorId && actorId !== coordinatorId) {
+        return {
+          queued: false,
+          error: `send_local_media 只能由主协调者 ${getActorName(coordinatorId)} 调用；请把媒体路径回传给主协调者统一回复用户。`,
+        };
+      }
+
+      const latestExternalUserMessage = [...system.getDialogHistory()]
+        .slice()
+        .reverse()
+        .find((message) => message.from === "user" && message.kind === "user_input" && message.externalChannelType);
+      if (!latestExternalUserMessage?.externalChannelType) {
+        return {
+          queued: false,
+          error: "send_local_media 仅适用于外部 IM 会话；当前不是可直接回发媒体的渠道上下文。",
+        };
+      }
+
+      const currentInheritedImages = params.use_current_images === true
+        ? (opts?.getInheritedImages?.() ?? opts?.inheritedImages ?? [])
+        : [];
+      const namedAttachmentPaths = typeof params.attachment_name === "string" && params.attachment_name.trim()
+        ? system.getSessionUploadsSnapshot()
+          .filter((record) => record.path && record.name.trim().toLowerCase() === params.attachment_name.trim().toLowerCase())
+          .map((record) => record.path as string)
+        : [];
+
+      const candidates = [...new Set([
+        ...parseLocalMediaCandidates({
+          path: params.path,
+          paths: params.paths,
+        }),
+        ...namedAttachmentPaths.map((item) => normalizeMediaPathCandidate(item)),
+        ...currentInheritedImages.map((item) => normalizeMediaPathCandidate(item)),
+      ].filter(Boolean))];
+
+      if (candidates.length === 0) {
+        return {
+          queued: false,
+          error: "未提供可发送的媒体路径。请传入 path / paths，或指定 attachment_name，或启用 use_current_images。",
+        };
+      }
+
+      const existingPaths: string[] = [];
+      const missingPaths: string[] = [];
+      for (const candidate of candidates) {
+        if (await doesMediaPathExist(candidate)) {
+          existingPaths.push(candidate);
+        } else {
+          missingPaths.push(candidate);
+        }
+      }
+
+      if (existingPaths.length === 0) {
+        return {
+          queued: false,
+          error: `没有找到可发送的媒体文件：${missingPaths.join("、")}`,
+        };
+      }
+
+      const images = existingPaths.filter((path) => isLikelyVisualAttachmentPath(path));
+      const attachments = existingPaths
+        .filter((path) => !isLikelyVisualAttachmentPath(path))
+        .map((path) => ({
+          path,
+          fileName: getMediaFileName(path),
+        }));
+
+      system.stageResultMedia(actorId, {
+        ...(images.length ? { images } : {}),
+        ...(attachments.length ? { attachments } : {}),
+      });
+
+      const timestamp = Date.now();
+      for (const path of existingPaths) {
+        system.recordArtifact({
+          actorId,
+          path,
+          source: "message",
+          toolName: "send_local_media",
+          summary: `准备回传给当前 IM 用户：${getMediaFileName(path)}`,
+          timestamp,
+        });
+      }
+
+      return {
+        queued: true,
+        count: existingPaths.length,
+        images,
+        attachments,
+        ...(missingPaths.length ? { missing: missingPaths } : {}),
+        hint: "这些媒体已加入本轮外部回复。最终答复只需简短说明结果，不要重复输出路径。",
+      };
     },
   });
 

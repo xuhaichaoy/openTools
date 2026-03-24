@@ -1,5 +1,9 @@
 import { getTauriStore } from "@/core/storage";
-import type { PersonalExportDatasetDefinition as PersonalDataset } from "./types";
+import type {
+  ExportDatasetRelationDefinition,
+  ExportFieldSelection,
+  PersonalExportDatasetDefinition as PersonalDataset,
+} from "./types";
 
 const DATASET_STORE_FILE = "data-export-datasets.json";
 const DATASET_STORE_KEY = "personal_datasets_v1";
@@ -14,6 +18,18 @@ const TIME_FIELD_CANDIDATES = [
   "paidAt",
   "orderTime",
 ] as const;
+const KEYWORD_FIELD_CANDIDATES = [
+  "name",
+  "title",
+  "compname",
+  "bus_name",
+  "company_name",
+  "enterprise_name",
+  "corp_name",
+  "customer_name",
+  "merchant_name",
+  "contact_name",
+] as const;
 
 interface DraftColumnInput {
   name: string;
@@ -22,19 +38,102 @@ interface DraftColumnInput {
   primary_key?: boolean;
 }
 
+function normalizeStringList(values?: readonly string[] | null): string[] {
+  return [...new Set((values ?? []).map((item) => String(item ?? "").trim()).filter(Boolean))];
+}
+
+function normalizeFieldSelections(
+  values?: readonly ExportFieldSelection[] | null,
+): ExportFieldSelection[] {
+  return (values ?? [])
+    .filter((item): item is ExportFieldSelection => Boolean(item && typeof item === "object"))
+    .map((item) => {
+      const field = String(item.field ?? "").trim();
+      const alias = String(item.alias ?? "").trim();
+      if (!field) return null;
+      return alias ? { field, alias } : { field };
+    })
+    .filter((item): item is ExportFieldSelection => Boolean(item));
+}
+
+function normalizeRelations(
+  values?: readonly ExportDatasetRelationDefinition[] | null,
+): ExportDatasetRelationDefinition[] {
+  return (values ?? [])
+    .filter((item): item is ExportDatasetRelationDefinition => Boolean(item && typeof item === "object"))
+    .map((item, index) => {
+      const targetEntityName = String(item.targetEntityName ?? "").trim();
+      if (!targetEntityName) return null;
+      const name = String(item.name ?? "").trim();
+      const alias = String(item.alias ?? "").trim();
+      const triggerKeywords = normalizeStringList(item.triggerKeywords);
+      const on = (item.on ?? [])
+        .filter((condition) => Boolean(condition && typeof condition === "object"))
+        .map((condition) => {
+          const left = String(condition.left ?? "").trim();
+          const right = String(condition.right ?? "").trim();
+          const op = String(condition.op ?? "").trim();
+          if (!left || !right) return null;
+          return op ? { left, right, op } : { left, right };
+        })
+        .filter((condition): condition is NonNullable<typeof condition> => Boolean(condition));
+      if (on.length === 0) return null;
+      return {
+        id: String(item.id ?? "").trim() || `relation-${index + 1}`,
+        name: name || humanizeIdentifier(targetEntityName),
+        ...(String(item.description ?? "").trim()
+          ? { description: String(item.description ?? "").trim() }
+          : {}),
+        targetEntityName,
+        ...(item.targetEntityType ? { targetEntityType: item.targetEntityType } : {}),
+        ...(String(item.targetSchema ?? "").trim()
+          ? { targetSchema: String(item.targetSchema ?? "").trim() }
+          : {}),
+        ...(alias ? { alias } : {}),
+        ...(item.joinType ? { joinType: item.joinType } : {}),
+        ...(triggerKeywords.length ? { triggerKeywords } : {}),
+        on,
+        ...(normalizeFieldSelections(item.defaultFields).length
+          ? { defaultFields: normalizeFieldSelections(item.defaultFields) }
+          : {}),
+        enabled: item.enabled !== false,
+      };
+    })
+    .filter((item): item is ExportDatasetRelationDefinition => Boolean(item));
+}
+
+function inferBaseAlias(entityName: string): string {
+  const trimmed = String(entityName ?? "").trim();
+  const match = trimmed.match(/[a-z]/i);
+  return match?.[0]?.toLowerCase() || "base";
+}
+
 function normalizeDataset(input: PersonalDataset): PersonalDataset {
+  const normalizedFields = input.fields.map((field) => ({
+    ...field,
+    label: String(field.label ?? "").trim() || humanizeIdentifier(field.name),
+    aliases: normalizeStringList(field.aliases),
+    ...(String(field.description ?? "").trim()
+      ? { description: String(field.description ?? "").trim() }
+      : {}),
+    enabled: field.enabled !== false,
+  }));
   return {
     ...input,
     scope: "personal",
-    fields: input.fields.map((field) => ({
-      ...field,
-      aliases: [...new Set((field.aliases ?? []).map((item) => String(item ?? "").trim()).filter(Boolean))],
-      enabled: field.enabled !== false,
-    })),
-    defaultFields: [...new Set((input.defaultFields ?? []).map((item) => String(item ?? "").trim()).filter(Boolean))],
+    fields: normalizedFields,
+    defaultFields: normalizeStringList(input.defaultFields).filter((fieldName) =>
+      normalizedFields.some((field) => field.name === fieldName && field.enabled !== false),
+    ),
     displayName: String(input.displayName ?? "").trim() || input.entityName,
     description: String(input.description ?? "").trim(),
     entityType: input.entityType ?? "table",
+    aliases: normalizeStringList(input.aliases ?? [input.displayName, input.entityName]),
+    intentTags: normalizeStringList(input.intentTags),
+    examplePrompts: normalizeStringList(input.examplePrompts),
+    ...(String(input.keywordField ?? "").trim() ? { keywordField: String(input.keywordField ?? "").trim() } : {}),
+    baseAlias: String(input.baseAlias ?? "").trim() || inferBaseAlias(input.entityName),
+    relations: normalizeRelations(input.relations),
     enabled: input.enabled !== false,
   };
 }
@@ -57,6 +156,17 @@ function inferDefaultFields(columns: DraftColumnInput[]): string[] {
     return !lower.endsWith("password") && !lower.endsWith("secret");
   });
   return preferred.slice(0, 8).map((item) => item.name);
+}
+
+function inferKeywordField(columns: DraftColumnInput[]): string | undefined {
+  const exact = KEYWORD_FIELD_CANDIDATES.find((candidate) =>
+    columns.some((item) => item.name === candidate),
+  );
+  if (exact) return exact;
+  return columns.find((item) => {
+    const lower = item.name.toLowerCase();
+    return lower.includes("name") || lower.includes("title");
+  })?.name;
 }
 
 async function loadRawDatasets(): Promise<PersonalDataset[]> {
@@ -116,6 +226,7 @@ export function createDatasetDraftFromTable(params: {
   const displayName = String(params.displayName ?? "").trim() || humanizeIdentifier(params.entityName);
   const timeField = inferTimeField(params.columns);
   const defaultFields = inferDefaultFields(params.columns);
+  const keywordField = inferKeywordField(params.columns);
 
   return {
     id: `dataset-${crypto.randomUUID()}`,
@@ -127,6 +238,11 @@ export function createDatasetDraftFromTable(params: {
     displayName,
     description:
       String(params.description ?? "").trim() || `${displayName} 数据集草稿，可用于自然语言导出。`,
+    aliases: normalizeStringList([displayName, params.entityName, humanizeIdentifier(params.entityName)]),
+    intentTags: normalizeStringList([displayName]),
+    examplePrompts: [],
+    ...(keywordField ? { keywordField } : {}),
+    baseAlias: inferBaseAlias(params.entityName),
     ...(timeField ? { timeField } : {}),
     defaultFields,
     fields: params.columns.map((column) => {
@@ -141,6 +257,7 @@ export function createDatasetDraftFromTable(params: {
         enabled: true,
       };
     }),
+    relations: [],
     maxExportRows: params.maxExportRows ?? DEFAULT_DATASET_LIMIT,
     enabled: true,
     createdAt: now,

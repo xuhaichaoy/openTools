@@ -42,6 +42,13 @@ export const useAgentRunningStore = create<AgentRunningState>((set) => ({
       workspaceRoot: info.workspaceRoot,
       waitingStage: info.waitingStage,
       status: "running",
+      sessionIdentity: {
+        surface: "ai_center",
+        sessionKey: info.sessionId,
+        sessionKind: "task_session",
+        workspaceId: info.workspaceRoot,
+        runtimeSessionId: info.sessionId,
+      },
     });
     return { info, abortFn: abortFn ?? null };
   }),

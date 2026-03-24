@@ -1,6 +1,6 @@
 import React from "react";
 import { act } from "react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { buildRuntimeSessionKey, type RuntimeSessionRecord } from "@/core/agent/context-runtime/runtime-state";
 import type {
@@ -13,6 +13,15 @@ import {
   ChannelSessionBoard,
   getPrimaryChildSessionPreview,
 } from "./DialogChannelBoard";
+
+vi.mock("@tauri-apps/plugin-store", () => ({
+  load: vi.fn(async () => ({
+    get: vi.fn(async () => null),
+    set: vi.fn(async () => undefined),
+    delete: vi.fn(async () => undefined),
+    save: vi.fn(async () => undefined),
+  })),
+}));
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -63,6 +72,7 @@ function makeSessionPreview(input: Partial<IMConversationSessionPreview> & Pick<
     startedAt: input.startedAt ?? 1,
     updatedAt: input.updatedAt ?? 2,
     lastInputText: input.lastInputText,
+    conversationMode: input.conversationMode,
     actors: input.actors ?? [],
     dialogHistory: input.dialogHistory ?? [],
   };
@@ -99,6 +109,7 @@ function makeConversation(input: Partial<IMConversationSnapshot> & Pick<IMConver
     roomCompactionArtifactCount: input.roomCompactionArtifactCount,
     roomCompactionPreservedIdentifiers: input.roomCompactionPreservedIdentifiers,
     backgroundTopicCount: input.backgroundTopicCount ?? 0,
+    conversationMode: input.conversationMode,
     topics: input.topics ?? [],
   };
 }
@@ -198,6 +209,55 @@ describe("buildDialogChannelGroups", () => {
     expect(groups.feishu.conversations).toHaveLength(1);
     expect(groups.feishu.conversations[0].activeSessionId).toBe(sessionId);
     expect(groups.feishu.conversations[0].preview?.sessionId).toBe(sessionId);
+  });
+
+  it("deduplicates runtime fallback sessions when the same channel conversation is already present", () => {
+    const activeSessionId = "export-overlay-session";
+    const staleSessionId = "runtime-history-session";
+    const conversation = makeConversation({
+      key: "channel-1::conversation-1",
+      channelId: "channel-1",
+      channelType: "dingtalk",
+      conversationId: "conversation-1",
+      displayLabel: "钉钉会话",
+      activeSessionId,
+      updatedAt: 200,
+    });
+
+    const groups = buildDialogChannelGroups({
+      currentRoomSessionId: null,
+      conversations: [conversation],
+      runtimeSessions: {
+        [buildRuntimeSessionKey("im_conversation", staleSessionId)]: makeRuntimeRecord({
+          sessionId: staleSessionId,
+          mode: "im_conversation",
+          updatedAt: 150,
+          displayLabel: "钉钉会话",
+          displayDetail: "测试群",
+        }),
+      },
+      sessionPreviews: {
+        [activeSessionId]: makeSessionPreview({
+          sessionId: activeSessionId,
+          channelId: "channel-1",
+          channelType: "dingtalk",
+          conversationId: "conversation-1",
+          displayLabel: "钉钉会话",
+          displayDetail: "测试群",
+        }),
+        [staleSessionId]: makeSessionPreview({
+          sessionId: staleSessionId,
+          channelId: "channel-1",
+          channelType: "dingtalk",
+          conversationId: "conversation-1",
+          displayLabel: "钉钉会话",
+          displayDetail: "测试群",
+        }),
+      },
+    });
+
+    expect(groups.dingtalk.conversations).toHaveLength(1);
+    expect(groups.dingtalk.conversations[0].activeSessionId).toBe(activeSessionId);
   });
 
   it("shows waiting confirmation label when the active conversation is pending approval", () => {
@@ -420,5 +480,57 @@ describe("buildDialogChannelGroups", () => {
     expect(container?.textContent).toContain("消息 24");
     expect(container?.textContent).toContain("线程 2");
     expect(container?.textContent).toContain("已整理早期排查结论");
+  });
+
+  it("shows database operation mode hints for explicit export sessions", () => {
+    const sessionId = "im-db-mode-session";
+    const preview = makeSessionPreview({
+      sessionId,
+      channelType: "dingtalk",
+      conversationId: "conversation-db-mode",
+      displayLabel: "钉钉会话",
+      displayDetail: "数据库模式",
+      conversationMode: "database_operation",
+      actors: [{ id: "agent-1", roleName: "Lead", status: "idle" }],
+      dialogHistory: [createDialogMessage(1)],
+    });
+    const conversation = makeConversation({
+      key: "conv-db-mode",
+      channelId: "channel-db-mode",
+      channelType: "dingtalk",
+      conversationId: "conversation-db-mode",
+      displayLabel: "钉钉会话",
+      activeSessionId: sessionId,
+      updatedAt: 2,
+      conversationMode: "database_operation",
+    });
+    const groups = buildDialogChannelGroups({
+      currentRoomSessionId: null,
+      conversations: [conversation],
+      runtimeSessions: {},
+      sessionPreviews: {
+        [sessionId]: preview,
+      },
+    });
+
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    act(() => {
+      root?.render(
+        <ChannelSessionBoard
+          group={groups.dingtalk}
+          selectedConversationKey={groups.dingtalk.conversations[0]?.key}
+          onSelectConversation={() => undefined}
+          onClearExtraConversations={null}
+          onReturnToCurrentRoom={null}
+          renderMessageBubble={({ message }) => <div>{message.content}</div>}
+        />,
+      );
+    });
+
+    expect(container?.textContent).toContain("当前处于数据库操作模式");
+    expect(container?.textContent).toContain("发送“退出数据库操作”可返回普通对话");
   });
 });

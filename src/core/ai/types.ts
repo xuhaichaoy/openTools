@@ -1,5 +1,6 @@
 import type { AskContextSnapshot } from "@/core/ai/ask-context-snapshot";
 import type { AskContextRuntimeDebugReport } from "@/core/agent/context-runtime/debug-types";
+import type { StructuredMediaAttachment } from "@/core/media/structured-media";
 import type { AICenterHandoff } from "@/store/app-store";
 
 export interface ToolCallInfo {
@@ -20,6 +21,7 @@ export interface ChatMessage {
   thinkingStreaming?: boolean;
   toolCalls?: ToolCallInfo[];
   images?: string[];
+  attachments?: StructuredMediaAttachment[];
   /** 用户消息附带的非图片上下文块，供重发/重生成复用 */
   contextPrefix?: string;
   /** Ask -> Agent 等跨模式流转时可重建的原始附件路径 */

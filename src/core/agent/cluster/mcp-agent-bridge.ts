@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { AgentStep } from "@/plugins/builtin/SmartAgent/core/react-agent";
+import { materializeMcpToolResult } from "@/core/mcp/mcp-tool-result";
 import type {
   AgentBridge,
   AgentBridgeResult,
@@ -11,7 +12,7 @@ let nextId = 1;
 let jsonRpcId = 1;
 
 interface MCPToolResult {
-  content: Array<{ type: string; text: string }>;
+  content?: unknown[];
   isError?: boolean;
 }
 
@@ -206,9 +207,7 @@ export class MCPAgentBridge implements AgentBridge {
         ...context,
       });
 
-      const resultText = toolResult.content
-        .map((c) => c.text)
-        .join("\n");
+      const resultText = await materializeMcpToolResult(toolResult);
 
       steps.push({
         type: "observation",

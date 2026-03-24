@@ -1017,6 +1017,41 @@ describe("ActorSystem dialog recall metadata", () => {
     ]);
   });
 
+  it("attaches explicitly staged media to the next agent result even inside workspace", () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator", {
+      workspace: "/repo/project",
+    }));
+
+    system.stageResultMedia("coordinator", {
+      images: ["/repo/project/assets/mockup.png"],
+      attachments: [{ path: "/repo/project/output/internal-report.pdf", fileName: "internal-report.pdf" }],
+    });
+
+    const msg = system.publishResult("coordinator", "已附上本地图片和文档。");
+
+    expect(msg?.images).toEqual(["/repo/project/assets/mockup.png"]);
+    expect(msg?.attachments).toEqual([
+      { path: "/repo/project/output/internal-report.pdf", fileName: "internal-report.pdf" },
+    ]);
+    expect(system.getStagedResultMediaSnapshot("coordinator")).toEqual({});
+  });
+
+  it("extracts MEDIA lines into local dialog result media and strips them from text", () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator", {
+      workspace: "/repo/project",
+    }));
+
+    const msg = system.publishResult("coordinator", [
+      "已完成，见截图。",
+      "MEDIA:/tmp/baidu_today_weather.png",
+    ].join("\n"));
+
+    expect(msg?.content).toBe("已完成，见截图。");
+    expect(msg?.images).toEqual(["/tmp/baidu_today_weather.png"]);
+  });
+
   it("does not echo uploaded files back as result media", () => {
     const system = new ActorSystem();
     system.spawn(buildActorConfig("coordinator", "Coordinator", {

@@ -463,12 +463,9 @@ pub async fn ssh_shell_open(
             }
 
             while let Ok(msg) = rx.try_recv() {
-                if let Err(reason) = handle_shell_msg(
-                    msg,
-                    &mut pending_write,
-                    &mut channel,
-                    &session_id_for_log,
-                ) {
+                if let Err(reason) =
+                    handle_shell_msg(msg, &mut pending_write, &mut channel, &session_id_for_log)
+                {
                     break 'shell_loop reason;
                 }
             }

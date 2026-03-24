@@ -10,8 +10,9 @@ export class FCCompatibilityMiddleware implements ActorMiddleware {
   readonly name = "FCCompatibility";
 
   async apply(ctx: ActorRunContext): Promise<void> {
+    const productMode = ctx.actorSystem?.defaultProductMode ?? "dialog";
     ctx.fcCompatibilityKey = buildAgentFCCompatibilityKey(
-      getResolvedAIConfigForMode("dialog"),
+      getResolvedAIConfigForMode(productMode),
     );
   }
 }

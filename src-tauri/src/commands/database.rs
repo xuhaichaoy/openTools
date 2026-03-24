@@ -52,6 +52,14 @@ pub struct TableInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableSearchResult {
+    pub name: String,
+    pub schema: Option<String>,
+    pub table_type: Option<String>,
+    pub matched_columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColumnInfo {
     pub name: String,
     pub data_type: String,
@@ -140,8 +148,8 @@ pub async fn db_save_connections(
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     let path = config_path(&app)?;
-    let json =
-        serde_json::to_string_pretty(&connections).map_err(|e| format!("Serialize error: {}", e))?;
+    let json = serde_json::to_string_pretty(&connections)
+        .map_err(|e| format!("Serialize error: {}", e))?;
     std::fs::write(&path, json).map_err(|e| format!("Write error: {}", e))?;
     Ok(())
 }
@@ -157,6 +165,54 @@ fn escape_connection_part(value: &str) -> String {
     utf8_percent_encode(value, NON_ALPHANUMERIC).to_string()
 }
 
+fn normalize_identifier(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("Identifier cannot be empty".to_string());
+    }
+    let valid = trimmed.chars().enumerate().all(|(index, ch)| {
+        ch == '_'
+            || ch.is_ascii_alphabetic()
+            || (index > 0 && ch.is_ascii_digit())
+            || (index > 0 && ch == '$')
+    });
+    if !valid {
+        return Err(format!("Unsupported identifier: {}", trimmed));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn quote_identifier(dialect: &str, value: &str) -> Result<String, String> {
+    let normalized = normalize_identifier(value)?;
+    Ok(match dialect {
+        "mysql" => format!("`{}`", normalized),
+        _ => format!("\"{}\"", normalized),
+    })
+}
+
+fn build_qualified_table_ref(
+    dialect: &str,
+    schema: Option<&str>,
+    table: &str,
+) -> Result<String, String> {
+    let table_ref = quote_identifier(dialect, table)?;
+    match schema {
+        Some(schema_name) if !schema_name.trim().is_empty() && dialect != "sqlite" => Ok(format!(
+            "{}.{}",
+            quote_identifier(dialect, schema_name)?,
+            table_ref
+        )),
+        _ => Ok(table_ref),
+    }
+}
+
+fn parse_table_reference(table: &str) -> (Option<String>, String) {
+    table
+        .split_once('.')
+        .map(|(schema_name, table_only)| (Some(schema_name.to_string()), table_only.to_string()))
+        .unwrap_or((None, table.to_string()))
+}
+
 fn build_connection_string(config: &DatabaseConfig) -> Result<String, String> {
     if let Some(cs) = &config.connection_string {
         if !cs.trim().is_empty() {
@@ -167,33 +223,59 @@ fn build_connection_string(config: &DatabaseConfig) -> Result<String, String> {
     let host = config.host.as_deref().unwrap_or("localhost");
     let user = escape_connection_part(config.username.as_deref().unwrap_or("root"));
     let pass = escape_connection_part(config.password.as_deref().unwrap_or(""));
-    let db = escape_connection_part(config.database.as_deref().unwrap_or("default"));
-
     match config.db_type.as_str() {
-        "postgres" => Ok(format!(
-            "postgres://{}:{}@{}:{}/{}",
-            user,
-            pass,
-            host,
-            config.port.unwrap_or(5432),
-            db
-        )),
-        "mysql" => Ok(format!(
-            "mysql://{}:{}@{}:{}/{}",
-            user,
-            pass,
-            host,
-            config.port.unwrap_or(3306),
-            db
-        )),
-        "mongodb" => Ok(format!(
-            "mongodb://{}:{}@{}:{}/{}",
-            user,
-            pass,
-            host,
-            config.port.unwrap_or(27017),
-            db
-        )),
+        "postgres" => {
+            let db = escape_connection_part(
+                config
+                    .database
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or("PostgreSQL requires a database name")?,
+            );
+            Ok(format!(
+                "postgres://{}:{}@{}:{}/{}",
+                user,
+                pass,
+                host,
+                config.port.unwrap_or(5432),
+                db
+            ))
+        }
+        "mysql" => {
+            let prefix = format!(
+                "mysql://{}:{}@{}:{}",
+                user,
+                pass,
+                host,
+                config.port.unwrap_or(3306),
+            );
+            if let Some(db) = config
+                .database
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
+                Ok(format!("{}/{}", prefix, escape_connection_part(db)))
+            } else {
+                Ok(prefix)
+            }
+        }
+        "mongodb" => {
+            let db = escape_connection_part(
+                config
+                    .database
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or("MongoDB requires a database name")?,
+            );
+            Ok(format!(
+                "mongodb://{}:{}@{}:{}/{}",
+                user,
+                pass,
+                host,
+                config.port.unwrap_or(27017),
+                db
+            ))
+        }
         other => Err(format!("Unsupported database type: {}", other)),
     }
 }
@@ -324,7 +406,9 @@ fn mysql_value_to_json(row: &MySqlRow, index: usize) -> Result<serde_json::Value
             return Ok(value);
         }
     }
-    if type_name.contains("date") && !type_name.contains("datetime") && !type_name.contains("timestamp")
+    if type_name.contains("date")
+        && !type_name.contains("datetime")
+        && !type_name.contains("timestamp")
     {
         if let Ok(value) = row.try_get::<chrono::NaiveDate, _>(index) {
             return Ok(serde_json::json!(value.to_string()));
@@ -370,7 +454,9 @@ fn flatten_bson_document(
         };
         match value {
             Bson::Document(inner) => {
-                fields.entry(path.clone()).or_insert_with(|| "object".to_string());
+                fields
+                    .entry(path.clone())
+                    .or_insert_with(|| "object".to_string());
                 flatten_bson_document(Some(&path), inner, fields);
             }
             Bson::Array(items) => {
@@ -591,8 +677,8 @@ pub async fn db_connect(
                 .as_ref()
                 .or(config.database.as_ref())
                 .ok_or("SQLite requires a file path")?;
-            let conn =
-                rusqlite::Connection::open(path).map_err(|e| format!("SQLite open failed: {}", e))?;
+            let conn = rusqlite::Connection::open(path)
+                .map_err(|e| format!("SQLite open failed: {}", e))?;
             DbConnection::Sqlite(Arc::new(Mutex::new(conn)))
         }
         "postgres" => {
@@ -717,6 +803,12 @@ pub async fn db_execute_query(
     query: String,
     manager: State<'_, DatabaseManager>,
 ) -> Result<QueryResult, String> {
+    if !is_select_like(&query) {
+        return Err(
+            "数据库客户端当前为只读模式，只允许 SELECT / SHOW / DESCRIBE / EXPLAIN 查询。"
+                .to_string(),
+        );
+    }
     let conn = manager.get_connection(&conn_id)?;
     execute_dynamic_query(&conn, &query).await
 }
@@ -747,13 +839,19 @@ pub async fn db_list_schemas(
                 .collect())
         }
         DbConnection::MySql(pool) => {
-            let rows = sqlx::query("SELECT DATABASE()")
+            let rows = sqlx::query("SHOW DATABASES")
                 .fetch_all(&pool)
                 .await
                 .map_err(|e| format!("MySQL schema query failed: {}", e))?;
             Ok(rows
                 .iter()
-                .filter_map(|row| row.try_get::<Option<String>, _>(0).ok().flatten())
+                .filter_map(|row| row.try_get::<String, _>(0).ok())
+                .filter(|name| {
+                    !matches!(
+                        name.as_str(),
+                        "information_schema" | "mysql" | "performance_schema" | "sys"
+                    )
+                })
                 .collect())
         }
         DbConnection::Mongo(conn) => Ok(vec![conn.database_name]),
@@ -872,6 +970,367 @@ pub async fn db_list_tables(
 }
 
 #[tauri::command]
+pub async fn db_search_tables(
+    conn_id: String,
+    keyword: String,
+    schema: Option<String>,
+    limit: Option<u32>,
+    manager: State<'_, DatabaseManager>,
+) -> Result<Vec<TableSearchResult>, String> {
+    let conn = manager.get_connection(&conn_id)?;
+    let search = keyword.trim().to_ascii_lowercase();
+    if search.is_empty() {
+        return Ok(vec![]);
+    }
+    let result_limit = limit.unwrap_or(12).clamp(1, 50) as usize;
+
+    match conn {
+        DbConnection::Sqlite(sqlite_conn) => {
+            let sqlite_conn = sqlite_conn
+                .lock()
+                .map_err(|e| format!("SQLite lock error: {}", e))?;
+            let mut stmt = sqlite_conn
+                .prepare(
+                    "SELECT name, type
+                     FROM sqlite_master
+                     WHERE type IN ('table', 'view')
+                     ORDER BY name",
+                )
+                .map_err(|e| format!("Query error: {}", e))?;
+
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)
+                            .unwrap_or_else(|_| "table".to_string()),
+                    ))
+                })
+                .map_err(|e| format!("Query error: {}", e))?;
+
+            let mut matches = Vec::new();
+            for row in rows {
+                let (table_name, table_type) = row.map_err(|e| format!("Row error: {}", e))?;
+                let mut matched_columns = Vec::new();
+                if !table_name.to_ascii_lowercase().contains(&search) {
+                    let pragma = format!("PRAGMA table_info('{}')", table_name.replace('\'', "''"));
+                    let mut column_stmt = sqlite_conn
+                        .prepare(&pragma)
+                        .map_err(|e| format!("Pragma error: {}", e))?;
+                    let column_rows = column_stmt
+                        .query_map([], |column_row| column_row.get::<_, String>(1))
+                        .map_err(|e| format!("Query error: {}", e))?;
+                    for column_row in column_rows {
+                        let column_name = column_row.map_err(|e| format!("Row error: {}", e))?;
+                        if column_name.to_ascii_lowercase().contains(&search) {
+                            matched_columns.push(column_name);
+                        }
+                    }
+                    if matched_columns.is_empty() {
+                        continue;
+                    }
+                }
+
+                matches.push(TableSearchResult {
+                    name: table_name,
+                    schema: Some("main".to_string()),
+                    table_type: Some(table_type),
+                    matched_columns,
+                });
+                if matches.len() >= result_limit {
+                    break;
+                }
+            }
+            Ok(matches)
+        }
+        DbConnection::Postgres(pool) => {
+            let pattern = format!("%{}%", search);
+            let rows = if let Some(schema_name) = schema.clone() {
+                sqlx::query(
+                    "SELECT
+                        t.table_name,
+                        t.table_schema,
+                        t.table_type,
+                        COALESCE(
+                          STRING_AGG(DISTINCT c.column_name, ',' ORDER BY c.column_name)
+                            FILTER (WHERE LOWER(c.column_name) LIKE $2),
+                          ''
+                        ) AS matched_columns
+                     FROM information_schema.tables t
+                     LEFT JOIN information_schema.columns c
+                       ON c.table_schema = t.table_schema
+                      AND c.table_name = t.table_name
+                     WHERE t.table_schema = $1
+                       AND t.table_type IN ('BASE TABLE', 'VIEW')
+                       AND (
+                         LOWER(t.table_name) LIKE $2
+                         OR LOWER(COALESCE(c.column_name, '')) LIKE $2
+                       )
+                     GROUP BY t.table_name, t.table_schema, t.table_type
+                     ORDER BY t.table_schema, t.table_name
+                     LIMIT $3",
+                )
+                .bind(schema_name)
+                .bind(&pattern)
+                .bind(result_limit as i64)
+                .fetch_all(&pool)
+                .await
+                .map_err(|e| format!("PostgreSQL search tables failed: {}", e))?
+            } else {
+                sqlx::query(
+                    "SELECT
+                        t.table_name,
+                        t.table_schema,
+                        t.table_type,
+                        COALESCE(
+                          STRING_AGG(DISTINCT c.column_name, ',' ORDER BY c.column_name)
+                            FILTER (WHERE LOWER(c.column_name) LIKE $1),
+                          ''
+                        ) AS matched_columns
+                     FROM information_schema.tables t
+                     LEFT JOIN information_schema.columns c
+                       ON c.table_schema = t.table_schema
+                      AND c.table_name = t.table_name
+                     WHERE t.table_schema NOT IN ('pg_catalog', 'information_schema')
+                       AND t.table_type IN ('BASE TABLE', 'VIEW')
+                       AND (
+                         LOWER(t.table_name) LIKE $1
+                         OR LOWER(COALESCE(c.column_name, '')) LIKE $1
+                       )
+                     GROUP BY t.table_name, t.table_schema, t.table_type
+                     ORDER BY t.table_schema, t.table_name
+                     LIMIT $2",
+                )
+                .bind(&pattern)
+                .bind(result_limit as i64)
+                .fetch_all(&pool)
+                .await
+                .map_err(|e| format!("PostgreSQL search tables failed: {}", e))?
+            };
+
+            Ok(rows
+                .into_iter()
+                .map(|row| TableSearchResult {
+                    name: row.try_get::<String, _>("table_name").unwrap_or_default(),
+                    schema: row.try_get::<String, _>("table_schema").ok(),
+                    table_type: row.try_get::<String, _>("table_type").ok(),
+                    matched_columns: row
+                        .try_get::<String, _>("matched_columns")
+                        .unwrap_or_default()
+                        .split(',')
+                        .filter_map(|item| {
+                            let trimmed = item.trim();
+                            (!trimmed.is_empty()).then(|| trimmed.to_string())
+                        })
+                        .collect(),
+                })
+                .collect())
+        }
+        DbConnection::MySql(pool) => {
+            let pattern = format!("%{}%", search);
+            let rows = if let Some(schema_name) = schema.clone() {
+                sqlx::query(
+                    "SELECT
+                        t.table_name,
+                        t.table_schema,
+                        t.table_type,
+                        COALESCE(
+                          GROUP_CONCAT(DISTINCT CASE
+                            WHEN LOWER(c.column_name) LIKE ? THEN c.column_name
+                            ELSE NULL
+                          END ORDER BY c.column_name SEPARATOR ','),
+                          ''
+                        ) AS matched_columns
+                     FROM information_schema.tables t
+                     LEFT JOIN information_schema.columns c
+                       ON c.table_schema = t.table_schema
+                      AND c.table_name = t.table_name
+                     WHERE t.table_schema = ?
+                       AND (
+                         LOWER(t.table_name) LIKE ?
+                         OR LOWER(COALESCE(c.column_name, '')) LIKE ?
+                       )
+                     GROUP BY t.table_name, t.table_schema, t.table_type
+                     ORDER BY t.table_schema, t.table_name
+                     LIMIT ?",
+                )
+                .bind(&pattern)
+                .bind(schema_name)
+                .bind(&pattern)
+                .bind(&pattern)
+                .bind(result_limit as u64)
+                .fetch_all(&pool)
+                .await
+                .map_err(|e| format!("MySQL search tables failed: {}", e))?
+            } else {
+                sqlx::query(
+                    "SELECT
+                        t.table_name,
+                        t.table_schema,
+                        t.table_type,
+                        COALESCE(
+                          GROUP_CONCAT(DISTINCT CASE
+                            WHEN LOWER(c.column_name) LIKE ? THEN c.column_name
+                            ELSE NULL
+                          END ORDER BY c.column_name SEPARATOR ','),
+                          ''
+                        ) AS matched_columns
+                     FROM information_schema.tables t
+                     LEFT JOIN information_schema.columns c
+                       ON c.table_schema = t.table_schema
+                      AND c.table_name = t.table_name
+                     WHERE t.table_schema NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
+                       AND (
+                         LOWER(t.table_name) LIKE ?
+                         OR LOWER(COALESCE(c.column_name, '')) LIKE ?
+                       )
+                     GROUP BY t.table_name, t.table_schema, t.table_type
+                     ORDER BY t.table_schema, t.table_name
+                     LIMIT ?",
+                )
+                .bind(&pattern)
+                .bind(&pattern)
+                .bind(&pattern)
+                .bind(result_limit as u64)
+                .fetch_all(&pool)
+                .await
+                .map_err(|e| format!("MySQL search tables failed: {}", e))?
+            };
+
+            Ok(rows
+                .into_iter()
+                .map(|row| TableSearchResult {
+                    name: row.try_get::<String, _>("table_name").unwrap_or_default(),
+                    schema: row.try_get::<String, _>("table_schema").ok(),
+                    table_type: row.try_get::<String, _>("table_type").ok(),
+                    matched_columns: row
+                        .try_get::<String, _>("matched_columns")
+                        .unwrap_or_default()
+                        .split(',')
+                        .filter_map(|item| {
+                            let trimmed = item.trim();
+                            (!trimmed.is_empty()).then(|| trimmed.to_string())
+                        })
+                        .collect(),
+                })
+                .collect())
+        }
+        DbConnection::Mongo(conn) => {
+            let collections = conn
+                .client
+                .database(&conn.database_name)
+                .list_collection_names()
+                .await
+                .map_err(|e| format!("MongoDB list collections failed: {}", e))?;
+            Ok(collections
+                .into_iter()
+                .filter(|name| name.to_ascii_lowercase().contains(&search))
+                .take(result_limit)
+                .map(|name| TableSearchResult {
+                    name,
+                    schema: Some(conn.database_name.clone()),
+                    table_type: Some("collection".to_string()),
+                    matched_columns: vec![],
+                })
+                .collect())
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn db_sample_table(
+    conn_id: String,
+    table: String,
+    limit: Option<u32>,
+    manager: State<'_, DatabaseManager>,
+) -> Result<QueryResult, String> {
+    let conn = manager.get_connection(&conn_id)?;
+    let sample_limit = limit.unwrap_or(5).clamp(1, 20);
+    let (schema, table_name) = parse_table_reference(&table);
+
+    match &conn {
+        DbConnection::Mongo(mongo_conn) => {
+            let collection = mongo_conn
+                .client
+                .database(
+                    schema
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or(&mongo_conn.database_name),
+                )
+                .collection::<Document>(&table_name);
+            let mut cursor = collection
+                .find(doc! {})
+                .limit(sample_limit as i64)
+                .await
+                .map_err(|e| format!("MongoDB sample query failed: {}", e))?;
+            let mut documents = Vec::new();
+            while cursor
+                .advance()
+                .await
+                .map_err(|e| format!("MongoDB cursor error: {}", e))?
+            {
+                documents.push(
+                    cursor
+                        .deserialize_current()
+                        .map_err(|e| format!("MongoDB document decode failed: {}", e))?,
+                );
+            }
+
+            let mut columns_set = BTreeMap::new();
+            for document in &documents {
+                flatten_bson_document(None, document, &mut columns_set);
+            }
+            let columns = columns_set.keys().cloned().collect::<Vec<_>>();
+            let rows = documents
+                .iter()
+                .map(|document| {
+                    columns
+                        .iter()
+                        .map(|column| {
+                            document
+                                .get(column)
+                                .map(mongo_bson_to_json)
+                                .unwrap_or(serde_json::Value::Null)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            Ok(QueryResult {
+                columns,
+                rows,
+                affected: 0,
+                elapsed_ms: 0,
+            })
+        }
+        DbConnection::Sqlite(_) => {
+            let query = format!(
+                "SELECT * FROM {} LIMIT {}",
+                build_qualified_table_ref("sqlite", schema.as_deref(), &table_name)?,
+                sample_limit
+            );
+            execute_dynamic_query(&conn, &query).await
+        }
+        DbConnection::Postgres(_) => {
+            let query = format!(
+                "SELECT * FROM {} LIMIT {}",
+                build_qualified_table_ref("postgres", schema.as_deref(), &table_name)?,
+                sample_limit
+            );
+            execute_dynamic_query(&conn, &query).await
+        }
+        DbConnection::MySql(_) => {
+            let query = format!(
+                "SELECT * FROM {} LIMIT {}",
+                build_qualified_table_ref("mysql", schema.as_deref(), &table_name)?,
+                sample_limit
+            );
+            execute_dynamic_query(&conn, &query).await
+        }
+    }
+}
+
+#[tauri::command]
 pub async fn db_describe_table(
     conn_id: String,
     table: String,
@@ -889,7 +1348,10 @@ pub async fn db_describe_table(
                 .lock()
                 .map_err(|e| format!("SQLite lock error: {}", e))?;
             let mut stmt = sqlite_conn
-                .prepare(&format!("PRAGMA table_info('{}')", table_name.replace('\'', "''")))
+                .prepare(&format!(
+                    "PRAGMA table_info('{}')",
+                    table_name.replace('\'', "''")
+                ))
                 .map_err(|e| format!("Pragma error: {}", e))?;
 
             let columns: Vec<ColumnInfo> = stmt
@@ -957,7 +1419,10 @@ pub async fn db_describe_table(
                         .map(|value| value == "YES")
                         .unwrap_or(true),
                     primary_key: row.try_get::<bool, _>("is_primary_key").unwrap_or(false),
-                    default_value: row.try_get::<Option<String>, _>("column_default").ok().flatten(),
+                    default_value: row
+                        .try_get::<Option<String>, _>("column_default")
+                        .ok()
+                        .flatten(),
                 })
                 .collect())
         }
@@ -992,7 +1457,10 @@ pub async fn db_describe_table(
                         .try_get::<String, _>("column_key")
                         .map(|value| value == "PRI")
                         .unwrap_or(false),
-                    default_value: row.try_get::<Option<String>, _>("column_default").ok().flatten(),
+                    default_value: row
+                        .try_get::<Option<String>, _>("column_default")
+                        .ok()
+                        .flatten(),
                 })
                 .collect())
         }
@@ -1012,9 +1480,9 @@ pub async fn db_describe_table(
                 .await
                 .map_err(|e| format!("MongoDB cursor error: {}", e))?
             {
-                let document = cursor.deserialize_current().map_err(|e| {
-                    format!("MongoDB sample document decode failed: {}", e)
-                })?;
+                let document = cursor
+                    .deserialize_current()
+                    .map_err(|e| format!("MongoDB sample document decode failed: {}", e))?;
                 flatten_bson_document(None, &document, &mut fields);
             }
             Ok(fields

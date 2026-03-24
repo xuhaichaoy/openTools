@@ -1,5 +1,6 @@
 import { api, ApiError } from "@/core/api/client";
 import type {
+  ExportDatasetRelationDefinition,
   ExportDatasetFieldDefinition,
   ExportPreview,
   ExportResult,
@@ -49,6 +50,12 @@ export interface TeamExportDatasetSummary {
   time_field?: string | null;
   default_fields?: string[];
   fields?: ExportDatasetFieldDefinition[];
+  aliases?: string[];
+  intent_tags?: string[];
+  example_prompts?: string[];
+  keyword_field?: string | null;
+  base_alias?: string | null;
+  relations?: ExportDatasetRelationDefinition[];
   enabled?: boolean;
   updated_at?: string | null;
 }
@@ -64,6 +71,12 @@ export interface TeamExportDatasetUpsertPayload {
   time_field?: string;
   default_fields?: string[];
   fields?: ExportDatasetFieldDefinition[];
+  aliases?: string[];
+  intent_tags?: string[];
+  example_prompts?: string[];
+  keyword_field?: string;
+  base_alias?: string;
+  relations?: ExportDatasetRelationDefinition[];
   enabled?: boolean;
 }
 

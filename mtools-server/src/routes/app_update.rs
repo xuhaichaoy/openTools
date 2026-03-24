@@ -40,8 +40,8 @@ fn get_latest_release() -> Option<UpdateManifest> {
     let version = std::env::var("APP_LATEST_VERSION").ok()?;
     let notes = std::env::var("APP_RELEASE_NOTES")
         .unwrap_or_else(|_| "修复若干问题并提升稳定性".to_string());
-    let pub_date = std::env::var("APP_RELEASE_DATE")
-        .unwrap_or_else(|_| chrono::Utc::now().to_rfc3339());
+    let pub_date =
+        std::env::var("APP_RELEASE_DATE").unwrap_or_else(|_| chrono::Utc::now().to_rfc3339());
     let base_url = std::env::var("APP_RELEASE_BASE_URL").ok()?;
 
     let mut platforms = HashMap::new();
@@ -55,10 +55,7 @@ fn get_latest_release() -> Option<UpdateManifest> {
             "darwin-aarch64".to_string(),
             PlatformUpdate {
                 signature: sig,
-                url: format!(
-                    "{}/51ToolBox_{}_aarch64.dmg.tar.gz",
-                    base_url, version
-                ),
+                url: format!("{}/51ToolBox_{}_aarch64.dmg.tar.gz", base_url, version),
             },
         );
     }
@@ -69,10 +66,7 @@ fn get_latest_release() -> Option<UpdateManifest> {
             "darwin-x86_64".to_string(),
             PlatformUpdate {
                 signature: sig,
-                url: format!(
-                    "{}/51ToolBox_{}_x64.dmg.tar.gz",
-                    base_url, version
-                ),
+                url: format!("{}/51ToolBox_{}_x64.dmg.tar.gz", base_url, version),
             },
         );
     }
@@ -83,10 +77,7 @@ fn get_latest_release() -> Option<UpdateManifest> {
             "windows-x86_64".to_string(),
             PlatformUpdate {
                 signature: sig,
-                url: format!(
-                    "{}/51ToolBox_{}_x64-setup.nsis.zip",
-                    base_url, version
-                ),
+                url: format!("{}/51ToolBox_{}_x64-setup.nsis.zip", base_url, version),
             },
         );
     }
@@ -97,10 +88,7 @@ fn get_latest_release() -> Option<UpdateManifest> {
             "linux-x86_64".to_string(),
             PlatformUpdate {
                 signature: sig,
-                url: format!(
-                    "{}/51ToolBox_{}_amd64.AppImage.tar.gz",
-                    base_url, version
-                ),
+                url: format!("{}/51ToolBox_{}_amd64.AppImage.tar.gz", base_url, version),
             },
         );
     }

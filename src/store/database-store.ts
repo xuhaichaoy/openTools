@@ -41,6 +41,35 @@ export interface ColumnInfo {
   default_value?: string;
 }
 
+export interface DatabaseClientContext {
+  connectionId: string | null;
+  connectionName?: string;
+  dbType?: DatabaseConfig["db_type"];
+  schema: string | null;
+  tableKey: string | null;
+  tableName: string | null;
+}
+
+function getDatabaseTypeLabel(dbType: DatabaseConfig["db_type"]): string {
+  switch (dbType) {
+    case "sqlite":
+      return "SQLite";
+    case "postgres":
+      return "PostgreSQL";
+    case "mysql":
+      return "MySQL";
+    case "mongodb":
+      return "MongoDB";
+    default:
+      return dbType;
+  }
+}
+
+function requiresDatabaseName(config: Pick<DatabaseConfig, "db_type" | "connection_string" | "database">): boolean {
+  if (config.connection_string?.trim()) return false;
+  return config.db_type === "postgres" || config.db_type === "mongodb";
+}
+
 interface QueryHistoryItem {
   query: string;
   connId: string;
@@ -53,6 +82,7 @@ interface DatabaseState {
   connections: DatabaseConfig[];
   activeConnectionId: string | null;
   connectedIds: Set<string>;
+  databaseClientContext: DatabaseClientContext;
   queryResult: QueryResult | null;
   queryHistory: QueryHistoryItem[];
   tables: TableInfo[];
@@ -74,12 +104,22 @@ interface DatabaseState {
   loadTables: (schema?: string) => Promise<void>;
   describeTable: (table: string) => Promise<ColumnInfo[]>;
   setActiveConnection: (id: string | null) => void;
+  setDatabaseClientContext: (context: Partial<DatabaseClientContext>) => void;
+  clearDatabaseClientContext: () => void;
 }
+
+const EMPTY_DATABASE_CLIENT_CONTEXT: DatabaseClientContext = {
+  connectionId: null,
+  schema: null,
+  tableKey: null,
+  tableName: null,
+};
 
 export const useDatabaseStore = create<DatabaseState>((set, get) => ({
   connections: [],
   activeConnectionId: null,
   connectedIds: new Set(),
+  databaseClientContext: EMPTY_DATABASE_CLIENT_CONTEXT,
   queryResult: null,
   queryHistory: [],
   tables: [],
@@ -129,13 +169,38 @@ export const useDatabaseStore = create<DatabaseState>((set, get) => ({
   connect: async (id) => {
     const config = get().connections.find((c) => c.id === id);
     if (!config) throw new Error("Connection not found");
-    await invoke("db_connect", { config });
-    set((s) => ({
-      connectedIds: new Set([...s.connectedIds, id]),
-      activeConnectionId: id,
-    }));
-    await get().loadSchemas();
-    await get().loadTables();
+    if (
+      requiresDatabaseName(config)
+      && !config.database?.trim()
+    ) {
+      const error = new Error(`${getDatabaseTypeLabel(config.db_type)} 需要填写数据库名，请删除该连接后重新创建`);
+      handleError(error, { context: `连接数据库（${config.name}）` });
+      throw error;
+    }
+    try {
+      await invoke("db_connect", { config });
+      set((s) => ({
+        connectedIds: new Set([...s.connectedIds, id]),
+        activeConnectionId: id,
+        databaseClientContext: {
+          connectionId: id,
+          connectionName: config.name,
+          dbType: config.db_type,
+          schema: config.database?.trim() || null,
+          tableKey: null,
+          tableName: null,
+        },
+      }));
+      await get().loadSchemas();
+      if (config.db_type === "mysql" && !config.database?.trim()) {
+        set({ tables: [], tableColumns: {} });
+      } else {
+        await get().loadTables();
+      }
+    } catch (e) {
+      handleError(e, { context: `连接数据库（${config.name}）` });
+      throw e;
+    }
   },
 
   disconnect: async (id) => {
@@ -148,11 +213,22 @@ export const useDatabaseStore = create<DatabaseState>((set, get) => ({
       return {
         connectedIds: next,
         activeConnectionId: s.activeConnectionId === id ? null : s.activeConnectionId,
+        databaseClientContext:
+          s.databaseClientContext.connectionId === id
+            ? EMPTY_DATABASE_CLIENT_CONTEXT
+            : s.databaseClientContext,
       };
     });
   },
 
   testConnection: async (config) => {
+    if (
+      requiresDatabaseName(config)
+      && !config.database?.trim()
+    ) {
+      handleError(new Error(`${getDatabaseTypeLabel(config.db_type)} 需要填写数据库名`), { context: "测试数据库连接" });
+      return false;
+    }
     try {
       return await invoke<boolean>("db_test_connection", { config });
     } catch {
@@ -230,5 +306,38 @@ export const useDatabaseStore = create<DatabaseState>((set, get) => ({
     }
   },
 
-  setActiveConnection: (id) => set({ activeConnectionId: id }),
+  setActiveConnection: (id) => set((state) => {
+    const connection = state.connections.find((item) => item.id === id) ?? null;
+    return {
+      activeConnectionId: id,
+      databaseClientContext: {
+        connectionId: id,
+        connectionName: connection?.name,
+        dbType: connection?.db_type,
+        schema:
+          state.databaseClientContext.connectionId === id
+            ? state.databaseClientContext.schema
+            : connection?.database?.trim() || null,
+        tableKey:
+          state.databaseClientContext.connectionId === id
+            ? state.databaseClientContext.tableKey
+            : null,
+        tableName:
+          state.databaseClientContext.connectionId === id
+            ? state.databaseClientContext.tableName
+            : null,
+      },
+    };
+  }),
+
+  setDatabaseClientContext: (context) => set((state) => ({
+    databaseClientContext: {
+      ...state.databaseClientContext,
+      ...context,
+    },
+  })),
+
+  clearDatabaseClientContext: () => set({
+    databaseClientContext: EMPTY_DATABASE_CLIENT_CONTEXT,
+  }),
 }));

@@ -7,11 +7,13 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::commands::plugin::api_bridge::plugin_open;
 use crate::commands::plugin::types::{
-    PluginDevState, PluginDevTraceItem, PluginDevWatchStatus, PluginDevWatcherRuntime,
-    PluginInfo, PluginManifest,
+    PluginDevState, PluginDevTraceItem, PluginDevWatchStatus, PluginDevWatcherRuntime, PluginInfo,
+    PluginManifest,
 };
 
-use super::{get_cached_plugins, get_plugin_dev_dirs, invalidate_plugin_runtime, refresh_plugin_cache};
+use super::{
+    get_cached_plugins, get_plugin_dev_dirs, invalidate_plugin_runtime, refresh_plugin_cache,
+};
 
 const DEV_WATCH_DEBOUNCE_MS: u64 = 200;
 

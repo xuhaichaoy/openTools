@@ -81,6 +81,8 @@ export interface ChannelOutgoingMessage {
     path: string;
     fileName?: string;
   }>;
+  /** 文件消息显示名（内部递归发送已上传文件时使用） */
+  fileName?: string;
   /** 是否 @所有人 */
   atAll?: boolean;
   /** @指定人的手机号或 ID 列表 */

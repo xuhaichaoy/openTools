@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { applySkillToolFilter, resolveSkills, clearRegexCache } from "./skill-resolver";
+import { SKILL_DATA_EXPORT } from "./builtin-skills";
 import type { AgentSkill } from "./types";
 
 function makeSkill(overrides: Partial<AgentSkill>): AgentSkill {
@@ -187,5 +188,19 @@ describe("resolveSkills", () => {
     expect(result.visibleSkillIds).toEqual(["root", "root-2", "dep"]);
     expect(result.dependencyToolNames.sort()).toEqual(["read_file", "search_in_files"]);
     expect(result.dependencyMcpNames).toEqual(["filesystem"]);
+  });
+
+  it("activates builtin data export skill only for explicit export phrases", () => {
+    const exportResult = resolveSkills(
+      [{ ...SKILL_DATA_EXPORT }],
+      "帮我从数据库导出昨天已支付订单明细",
+    );
+    expect(exportResult.activeSkillIds).toEqual(["builtin-data-export"]);
+
+    const nonExportResult = resolveSkills(
+      [{ ...SKILL_DATA_EXPORT }],
+      "数据库索引怎么优化更快",
+    );
+    expect(nonExportResult.activeSkillIds).toEqual([]);
   });
 });
