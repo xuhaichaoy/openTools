@@ -252,6 +252,9 @@ export async function importMarketplaceSkillFromMd(params: {
 
   const now = Date.now();
   const nextMarketplaceMeta: SkillMarketplaceMeta = {
+    ...(params.marketplaceMeta.installedVersion && !params.marketplaceMeta.remoteVersion
+      ? { remoteVersion: params.marketplaceMeta.installedVersion }
+      : {}),
     ...params.marketplaceMeta,
     installedAt: now,
   };

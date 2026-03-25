@@ -33,6 +33,7 @@ import {
   createBuiltinAgentTools,
   type AskUserQuestion,
   type AskUserAnswers,
+  type BuiltinToolsRuntimeOptions,
 } from "@/plugins/builtin/SmartAgent/core/default-tools";
 import { filterToolsByRole } from "./agent-role";
 import type {
@@ -54,9 +55,12 @@ function getPluginTools(): AgentTool[] {
   );
 }
 
-function getBuiltinTools(askUser?: AskUserCallback): { tools: AgentTool[]; resetPerRunState: () => void; notifyToolCalled: (toolName: string) => void } {
+function getBuiltinTools(
+  askUser?: AskUserCallback,
+  runtimeOptions?: BuiltinToolsRuntimeOptions,
+): { tools: AgentTool[]; resetPerRunState: () => void; notifyToolCalled: (toolName: string) => void } {
   const confirmHostFallback = async () => true;
-  return createBuiltinAgentTools(confirmHostFallback, askUser);
+  return createBuiltinAgentTools(confirmHostFallback, askUser, runtimeOptions);
 }
 
 export function buildAllTools(askUser?: AskUserCallback): AgentTool[] {
@@ -125,7 +129,9 @@ export class LocalAgentBridge implements AgentBridge {
     const ai = getMToolsAI("cluster");
     const aiConfig = useAIStore.getState().config;
     await ensureMcpServersLoaded();
-    const builtinResult = getBuiltinTools(this.askUser);
+    const builtinResult = getBuiltinTools(this.askUser, {
+      getCurrentQuery: () => task,
+    });
     builtinResult.resetPerRunState();
     const { notifyToolCalled } = builtinResult;
     const allTools = [...getPluginTools(), ...builtinResult.tools, ...getEnabledMcpAgentTools()];

@@ -1,12 +1,12 @@
 /**
  * Announce Delivery — 任务完成通知投递系统
- * 
+ *
  * 对标 OpenClaw 的 announce 投递能力。
- * 
+ *
  * 支持的投递方式：
  * - webhook: HTTP POST 请求
  * - email: 发送邮件通知
- * 
+ *
  * 使用 Hook 系统集成：
  * - 监听 onSpawnTaskEnd 事件
  * - 自动投递任务完成通知
@@ -78,7 +78,7 @@ export async function deliverToWebhook(
       }
     } catch (err) {
       const error = err instanceof Error ? err.message : "Unknown error";
-      
+
       // 如果已经达到最大重试次数
       if (attempt === maxAttempts - 1) {
         return {
@@ -91,7 +91,7 @@ export async function deliverToWebhook(
 
     // 等待后重试
     if (attempt < maxAttempts - 1) {
-      await new Promise(resolve => setTimeout(resolve, delays[attempt]));
+      await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
     }
   }
 
@@ -104,7 +104,7 @@ export async function deliverToWebhook(
 
 /**
  * Email 投递器（使用系统 mailto 链接或 API）
- * 
+ *
  * 注意：在实际生产环境中，应该使用专用的邮件服务 API（如 SendGrid、Mailgun 等）
  * 这里提供两种方式：
  * 1. mailto 链接 - 适用于简单的邮件发送
@@ -124,14 +124,14 @@ export async function deliverToEmail(
   // 方式 1: 使用 mailto 链接（适用于桌面应用）
   // 这会打开系统默认邮件客户端
   const mailtoUrl = `mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-  
+
   try {
     if (typeof window !== "undefined" && typeof window.open === "function") {
       window.open(mailtoUrl, "_blank");
     } else {
       throw new Error("window.open is not available");
     }
-    
+
     return {
       success: true,
       attempts: 1,
@@ -140,8 +140,9 @@ export async function deliverToEmail(
   } catch (err) {
     // 如果在非 Tauri 环境或打开失败，记录错误
     // 在生产环境中，应该使用邮件服务 API
-    const error = err instanceof Error ? err.message : "Failed to open mail client";
-    
+    const error =
+      err instanceof Error ? err.message : "Failed to open mail client";
+
     return {
       success: false,
       error: `Email delivery not available: ${error}`,
@@ -162,36 +163,38 @@ export function buildAnnounceContent(
   },
 ): { title: string; body: string } {
   const { spawnerId, targetId, task, runId, status, result, error } = ctx;
-  
+
   const title = `[${status === "completed" ? "完成" : "失败"}] 任务通知 - ${runId.slice(0, 8)}`;
-  
+
   const lines: string[] = [];
-  lines.push(`任务状态: ${status === "completed" ? "✅ 完成" : "❌ " + status}`);
+  lines.push(
+    `任务状态: ${status === "completed" ? "✅ 完成" : "❌ " + status}`,
+  );
   lines.push(`执行者: ${targetId}`);
   lines.push(`派发者: ${spawnerId}`);
-  
+
   if (options?.includeTask !== false) {
     lines.push("");
     lines.push("任务内容:");
     lines.push(task.slice(0, 500) + (task.length > 500 ? "..." : ""));
   }
-  
+
   if (status === "completed" && result && options?.includeResult !== false) {
     lines.push("");
     lines.push("执行结果:");
     lines.push(result.slice(0, 1000) + (result.length > 1000 ? "..." : ""));
   }
-  
+
   if (status !== "completed" && error && options?.includeError !== false) {
     lines.push("");
     lines.push("错误信息:");
     lines.push(error);
   }
-  
+
   lines.push("");
   lines.push(`-- `);
-  lines.push(`由 51ToolBox Agent System 自动发送`);
-  
+  lines.push(`由 HiClow Agent System 自动发送`);
+
   return {
     title,
     body: lines.join("\n"),
@@ -213,19 +216,27 @@ export async function sendAnnounce(
 
   if (config.mode === "webhook") {
     if (!config.url) {
-      return { success: false, error: "Webhook URL not configured", attempts: 0 };
+      return {
+        success: false,
+        error: "Webhook URL not configured",
+        attempts: 0,
+      };
     }
 
-    return deliverToWebhook(config.url, {
-      title,
-      body,
-      task: ctx.task,
-      runId: ctx.runId,
-      status: ctx.status,
-      result: ctx.result,
-      error: ctx.error,
-      timestamp: Date.now(),
-    }, config.headers);
+    return deliverToWebhook(
+      config.url,
+      {
+        title,
+        body,
+        task: ctx.task,
+        runId: ctx.runId,
+        status: ctx.status,
+        result: ctx.result,
+        error: ctx.error,
+        timestamp: Date.now(),
+      },
+      config.headers,
+    );
   }
 
   if (config.mode === "email") {
@@ -233,26 +244,30 @@ export async function sendAnnounce(
       return { success: false, error: "Email not configured", attempts: 0 };
     }
 
-    const subject = config.emailSubjectPrefix 
-      ? `${config.emailSubjectPrefix} ${title}` 
+    const subject = config.emailSubjectPrefix
+      ? `${config.emailSubjectPrefix} ${title}`
       : title;
 
     return deliverToEmail(config.email, subject, body);
   }
 
-  return { success: false, error: `Unknown delivery mode: ${config.mode}`, attempts: 0 };
+  return {
+    success: false,
+    error: `Unknown delivery mode: ${config.mode}`,
+    attempts: 0,
+  };
 }
 
 /**
  * 创建 Announce Hook 处理器
- * 
+ *
  * 用法：
  * ```typescript
  * const announceHandler = createAnnounceHook({
  *   mode: "webhook",
  *   url: "https://example.com/webhook",
  * });
- * 
+ *
  * actorSystem.registerHook("onSpawnTaskEnd", announceHandler);
  * ```
  */
@@ -261,11 +276,13 @@ export function createAnnounceHook(config: DeliveryConfig) {
     // 只在任务完成或失败时发送通知
     if (ctx.status === "completed" || ctx.status === "error") {
       const result = await sendAnnounce(ctx, config);
-      
+
       if (!result.success) {
         console.warn(`[Announce] Failed to deliver: ${result.error}`);
       } else {
-        console.log(`[Announce] Delivered to ${config.mode} (attempts: ${result.attempts})`);
+        console.log(
+          `[Announce] Delivered to ${config.mode} (attempts: ${result.attempts})`,
+        );
       }
     }
   };
@@ -293,6 +310,8 @@ export function getDefaultDeliveryConfig(): DeliveryConfig {
 /**
  * 使用默认配置发送 announce
  */
-export async function sendAnnounceWithDefault(ctx: SpawnTaskEndHookContext): Promise<DeliveryResult> {
+export async function sendAnnounceWithDefault(
+  ctx: SpawnTaskEndHookContext,
+): Promise<DeliveryResult> {
   return sendAnnounce(ctx, defaultDeliveryConfig);
 }

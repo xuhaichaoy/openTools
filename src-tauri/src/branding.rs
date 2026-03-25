@@ -4,6 +4,6 @@
 /// 前端对应文件：src/config/app-branding.ts
 /// 静态文件需手动同步：package.json / tauri.conf.json / index.html / README.md
 
-pub const APP_NAME: &str = "51ToolBox";
-pub const APP_CLOUD_NAME: &str = "51ToolBox Cloud";
-pub const APP_AI_ASSISTANT_DESC: &str = "51ToolBox 内置助手";
+pub const APP_NAME: &str = "HiClow";
+pub const APP_CLOUD_NAME: &str = "HiClow Cloud";
+pub const APP_AI_ASSISTANT_DESC: &str = "HiClow 内置助手";

@@ -7,7 +7,7 @@
 
 // ── 窗口尺寸 ──
 export const WINDOW_HEIGHT_COLLAPSED = 60;
-export const WINDOW_HEIGHT_EXPANDED = 520;
+export const WINDOW_HEIGHT_EXPANDED = 600;
 export const WINDOW_HEIGHT_CHAT = 640;
 export const WINDOW_HEIGHT_MAX = 460;
 export const RESULT_ITEM_HEIGHT = 56;

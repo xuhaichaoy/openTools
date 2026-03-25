@@ -2,7 +2,7 @@
 
 ## 1. 目的
 
-本文档用于明确 `51ToolBox` 接入 `ClawHub` / Skill Center 时，**团队场景下的最优产品方案与技术方案**。
+本文档用于明确 `HiClow` 接入 `ClawHub` / Skill Center 时，**团队场景下的最优产品方案与技术方案**。
 
 目标不是只解决“怎么把 token 配上去”，而是回答以下问题：
 
@@ -162,7 +162,7 @@
 flowchart TD
   A["ClawHub 外部技能市场"] --> B["mtools-server 团队技能同步层"]
   B --> C["团队技能仓库 / 发布中心"]
-  C --> D["51ToolBox 客户端技能中心"]
+  C --> D["HiClow 客户端技能中心"]
 ```
 
 ### 5.1 外部市场层
@@ -736,34 +736,34 @@ flowchart TD
 
 ### 服务端
 
-- `/Users/haichao/Desktop/work/51ToolBox/mtools-server/src/routes/teams.rs`
+- `/Users/haichao/Desktop/work/HiClow/mtools-server/src/routes/teams.rs`
   - 团队 `ClawHub` 配置读写
   - 团队配置验证
   - 团队 skill 代理安装
 
-- `/Users/haichao/Desktop/work/51ToolBox/mtools-server/src/main.rs`
+- `/Users/haichao/Desktop/work/HiClow/mtools-server/src/main.rs`
   - 明文 token 加密迁移
 
-- `/Users/haichao/Desktop/work/51ToolBox/mtools-server/migrations/20260324110000_add_team_skill_marketplace_configs.sql`
+- `/Users/haichao/Desktop/work/HiClow/mtools-server/migrations/20260324110000_add_team_skill_marketplace_configs.sql`
   - 团队 skill marketplace 配置表
 
 ### 客户端
 
-- `/Users/haichao/Desktop/work/51ToolBox/src/components/ai/ClawHubSkillMarketplaceSection.tsx`
+- `/Users/haichao/Desktop/work/HiClow/src/components/ai/ClawHubSkillMarketplaceSection.tsx`
   - 技能中心 UI
   - 个人与团队来源切换
 
-- `/Users/haichao/Desktop/work/51ToolBox/src/core/agent/skills/clawhub-team-api.ts`
+- `/Users/haichao/Desktop/work/HiClow/src/core/agent/skills/clawhub-team-api.ts`
   - 团队配置接口
   - 团队验证接口
   - 团队代理安装接口
 
-- `/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/ManagementCenter/components/team/TeamAIConfigSection.tsx`
+- `/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/ManagementCenter/components/team/TeamAIConfigSection.tsx`
   - 团队管理页的 ClawHub 配置与验证
 
 ### 本地 Tauri
 
-- `/Users/haichao/Desktop/work/51ToolBox/src-tauri/src/commands/skill_marketplace.rs`
+- `/Users/haichao/Desktop/work/HiClow/src-tauri/src/commands/skill_marketplace.rs`
   - 个人模式下本地 `clawhub` CLI 能力
 
 ---
@@ -842,4 +842,3 @@ flowchart TD
 - 成员只消费团队已发布技能
 
 这样既不会阻塞当前上线，也不会把错误架构越做越深。
-

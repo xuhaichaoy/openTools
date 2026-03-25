@@ -34,7 +34,9 @@ const AI_AUTH_ERROR_PATTERNS = [
 ];
 
 function normalizeProtocol(protocol?: string): "openai" | "anthropic" {
-  return String(protocol || "").trim().toLowerCase() === "anthropic"
+  return String(protocol || "")
+    .trim()
+    .toLowerCase() === "anthropic"
     ? "anthropic"
     : "openai";
 }
@@ -106,7 +108,7 @@ export function resolveTeamModelConfig(
   // Let an explicit model override win when it disagrees with a stale team_config_id.
   const selected =
     (selectedByModel &&
-      (!selectedById || selectedById.model_name !== requestedModel)
+    (!selectedById || selectedById.model_name !== requestedModel)
       ? selectedByModel
       : selectedById) ||
     selectedByModel ||
@@ -152,7 +154,10 @@ export async function resolveRoutedConfig(
   return applyRouting(resolved, resolvedToken);
 }
 
-export function primeTeamModelCache(teamId: string, models: TeamModelInfo[]): void {
+export function primeTeamModelCache(
+  teamId: string,
+  models: TeamModelInfo[],
+): void {
   const normalizedTeamId = teamId.trim();
   if (!normalizedTeamId) return;
   teamModelCache.set(normalizedTeamId, {
@@ -231,7 +236,11 @@ export async function withRoutedAIConfig<T>(
     const routed = await resolveRoutedConfig(config, initialToken);
     return await runner(routed);
   } catch (error) {
-    if (!allowRetry || !shouldUseManagedAuth(source) || !isAIUnauthorizedError(error)) {
+    if (
+      !allowRetry ||
+      !shouldUseManagedAuth(source) ||
+      !isAIUnauthorizedError(error)
+    ) {
       throw error;
     }
 
@@ -253,7 +262,10 @@ export async function withRoutedAIConfig<T>(
  *
  * 所有需要调用 Rust AI 命令的地方都应先用此函数处理 config。
  */
-export function applyRouting(config: AIConfig, token?: string | null): AIConfig {
+export function applyRouting(
+  config: AIConfig,
+  token?: string | null,
+): AIConfig {
   const source = config.source || "own_key";
   const baseUrl = getServerUrl();
 
@@ -262,7 +274,11 @@ export function applyRouting(config: AIConfig, token?: string | null): AIConfig 
       return { ...config, base_url: `${baseUrl}/v1/ai`, api_key: token || "" };
     }
     case "team": {
-      return { ...config, base_url: `${baseUrl}/v1/ai/team`, api_key: token || "" };
+      return {
+        ...config,
+        base_url: `${baseUrl}/v1/ai/team`,
+        api_key: token || "",
+      };
     }
     default:
       return config;
@@ -280,8 +296,8 @@ export function getRoutedConfig(config: AIConfig): AIConfig {
 /**
  * 根据 AI 来源配置路由请求
  * - own_key: 直接使用用户配置的 API Key
- * - platform: 通过 51ToolBox 服务器代理（消耗能量）
- * - team: 通过 51ToolBox 服务器的团队代理（使用团队 Key）
+ * - platform: 通过 HiClow 服务器代理（消耗能量）
+ * - team: 通过 HiClow 服务器的团队代理（使用团队 Key）
  */
 export async function routeAIRequest(options: RouteOptions) {
   const { messages, config, conversationId, token, extraTools } = options;

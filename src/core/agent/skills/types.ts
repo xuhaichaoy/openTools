@@ -15,10 +15,18 @@ export interface SkillMarketplaceMeta {
   provider: SkillMarketplaceProvider;
   slug: string;
   remoteVersion?: string;
+  installedVersion?: string;
   installedVia?: "personal" | "team";
+  sourceKind?:
+    | "team_proxy"
+    | "personal_registry"
+    | "public_registry";
   teamId?: string;
   siteUrl?: string;
   registryUrl?: string;
+  bundleRootPath?: string;
+  bundleHash?: string;
+  originUrl?: string;
   installedAt?: number;
 }
 

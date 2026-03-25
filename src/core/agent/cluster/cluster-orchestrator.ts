@@ -1,10 +1,22 @@
 import { getMToolsAI, chatDirect } from "@/core/ai/mtools-ai";
 import type { AgentStep } from "@/plugins/builtin/SmartAgent/core/react-agent";
-import { ROLE_PLANNER, ROLE_REVIEWER, getRoleById as getPresetRole } from "./preset-roles";
+import {
+  ROLE_PLANNER,
+  ROLE_REVIEWER,
+  getRoleById as getPresetRole,
+} from "./preset-roles";
 import { getRoleById as getAsyncRole } from "./agent-role";
-import { LocalAgentBridge, type ConfirmDangerousAction, type AskUserCallback } from "./local-agent-bridge";
+import {
+  LocalAgentBridge,
+  type ConfirmDangerousAction,
+  type AskUserCallback,
+} from "./local-agent-bridge";
 import { ClusterMessageBus } from "./message-bus";
-import { createClusterPlan, topologicalSort, validatePlan } from "./cluster-plan";
+import {
+  createClusterPlan,
+  topologicalSort,
+  validatePlan,
+} from "./cluster-plan";
 import {
   getClusterAggregateBudgets,
   getClusterPlannerCodingHint,
@@ -38,7 +50,8 @@ const CLUSTER_EXECUTION_TIMEOUT_MS = 1_800_000; // 30 minutes
 const STEP_EXECUTION_TIMEOUT_MS = 300_000; // 5 minutes per step
 const STEP_EXECUTION_TIMEOUT_OPENCLAW_MS = 600_000; // 10 minutes per step
 
-const CODING_PLAN_GATE_RE = /Coding Plan.*only available|only available.*Coding/i;
+const CODING_PLAN_GATE_RE =
+  /Coding Plan.*only available|only available.*Coding/i;
 
 /**
  * Retry wrapper for ai.chat calls — handles transient network / decoding errors.
@@ -72,7 +85,9 @@ async function retryChat(
       const msg = err instanceof Error ? err.message : String(err);
 
       if (CODING_PLAN_GATE_RE.test(msg)) {
-        console.warn("[Cluster] API gateway blocked 'Coding Plan', falling back to chatDirect");
+        console.warn(
+          "[Cluster] API gateway blocked 'Coding Plan', falling back to chatDirect",
+        );
         return await chatDirect({
           mode: "cluster",
           messages: params.messages.map((m) => ({
@@ -104,7 +119,9 @@ export interface ClusterOrchestratorOptions {
   onInstanceUpdate?: (instance: AgentInstance) => void;
   onStep?: (instanceId: string, step: AgentStep) => void;
   onProgress?: (event: ClusterProgressEvent) => void;
-  onPlanApproval?: (request: PlanApprovalRequest) => Promise<PlanApprovalRequest>;
+  onPlanApproval?: (
+    request: PlanApprovalRequest,
+  ) => Promise<PlanApprovalRequest>;
   /** 危险操作确认回调 */
   confirmDangerousAction?: ConfirmDangerousAction;
   /** 向用户提问回调（集群中的 Agent 可通过此回调与用户交互） */
@@ -188,7 +205,12 @@ export class ClusterOrchestrator {
     this.options.onStatusChange?.(status);
   }
 
-  private emitProgress(type: ClusterProgressEventType, detail?: unknown, stepId?: string, instanceId?: string) {
+  private emitProgress(
+    type: ClusterProgressEventType,
+    detail?: unknown,
+    stepId?: string,
+    instanceId?: string,
+  ) {
     this.options.onProgress?.({
       type,
       timestamp: Date.now(),
@@ -217,10 +239,15 @@ export class ClusterOrchestrator {
   }> {
     const config = useAIStore.getState().config;
     const projectPathHints = collectContextPathHints(this.projectContext);
-    const attachmentSummary = [
-      projectPathHints.length > 0 ? `路径线索 ${projectPathHints.length} 项` : "",
-      this.runImages?.length ? `图片 ${this.runImages.length} 张` : "",
-    ].filter(Boolean).join("，") || undefined;
+    const attachmentSummary =
+      [
+        projectPathHints.length > 0
+          ? `路径线索 ${projectPathHints.length} 项`
+          : "",
+        this.runImages?.length ? `图片 ${this.runImages.length} 张` : "",
+      ]
+        .filter(Boolean)
+        .join("，") || undefined;
     const executionContextPlan = await buildAgentExecutionContextPlan({
       query,
       explicitWorkspaceRoot: this.options.workspaceRoot,
@@ -232,7 +259,9 @@ export class ClusterOrchestrator {
       executionContextPlan,
       attachmentSummary,
       systemHint: this.projectContext,
-      supplementalSystemPrompt: buildAssistantSupplementalPrompt(config.system_prompt),
+      supplementalSystemPrompt: buildAssistantSupplementalPrompt(
+        config.system_prompt,
+      ),
     });
 
     return {
@@ -271,7 +300,8 @@ export class ClusterOrchestrator {
         const approvalResult = await this.approvalPhase(plan);
         if (approvalResult.status === "rejected") {
           this.setStatus("done");
-          const rejectionReason = approvalResult.reason?.trim() || "用户取消了执行计划。";
+          const rejectionReason =
+            approvalResult.reason?.trim() || "用户取消了执行计划。";
           return {
             planId: plan.id,
             mode: plan.mode,
@@ -280,7 +310,10 @@ export class ClusterOrchestrator {
             totalDurationMs: Date.now() - startTime,
           };
         }
-        if (approvalResult.status === "modified" && approvalResult.modifiedPlan) {
+        if (
+          approvalResult.status === "modified" &&
+          approvalResult.modifiedPlan
+        ) {
           const modErrors = validatePlan(approvalResult.modifiedPlan);
           if (modErrors.length > 0) {
             throw new Error(`修改后的计划验证失败:\n${modErrors.join("\n")}`);
@@ -344,7 +377,9 @@ export class ClusterOrchestrator {
       openClawMode: this.options.openClawMode,
     });
 
-    const plannerSupportsImageInput = this.supportsImageInput(this.resolveModel("planner"));
+    const plannerSupportsImageInput = this.supportsImageInput(
+      this.resolveModel("planner"),
+    );
     const imageHint = this.runImages?.length
       ? plannerSupportsImageInput
         ? `\n\n注意：用户已附带 ${this.runImages.length} 张图片，这些图片会自动传递给每个执行步骤的 Agent，无需再通过工具去寻找或获取图片，也不要对图片路径调用 read_file / read_file_range。请在规划时考虑这些已有图片。`
@@ -361,10 +396,15 @@ export class ClusterOrchestrator {
       "只返回 JSON，不要附加其他内容。",
       chatRuntimeContext.systemPromptBlock || "",
     ]
-      .filter((block): block is string => typeof block === "string" && block.trim().length > 0)
+      .filter(
+        (block): block is string =>
+          typeof block === "string" && block.trim().length > 0,
+      )
       .join("\n\n");
 
-    const projectBlock = this.projectContext ? `\n\n## 项目上下文\n${this.projectContext}` : "";
+    const projectBlock = this.projectContext
+      ? `\n\n## 项目上下文\n${this.projectContext}`
+      : "";
     const plannerUserPrompt = `用户任务: ${query}${imageHint}${projectBlock}
 
 请分析任务并返回 JSON 执行计划。`;
@@ -374,7 +414,11 @@ export class ClusterOrchestrator {
       messages: [
         { role: "system" as const, content: plannerSystemPrompt },
         ...chatRuntimeContext.contextMessages,
-        { role: "user" as const, content: plannerUserPrompt, ...(this.runImages?.length ? { images: this.runImages } : {}) },
+        {
+          role: "user" as const,
+          content: plannerUserPrompt,
+          ...(this.runImages?.length ? { images: this.runImages } : {}),
+        },
       ],
       temperature: ROLE_PLANNER.temperature,
       signal: this.signal,
@@ -425,7 +469,10 @@ export class ClusterOrchestrator {
           ...chatParams,
           messages: [
             ...chatParams.messages,
-            { role: "assistant" as const, content: response.content.slice(0, 500) },
+            {
+              role: "assistant" as const,
+              content: response.content.slice(0, 500),
+            },
             {
               role: "user" as const,
               content: `你上一轮输出不是有效 JSON。${errorDetail}\n请重新输出一个合法 JSON 对象，不要代码块，不要解释文字。仅包含 mode 和 steps 字段，steps 不超过 6。`,
@@ -450,13 +497,15 @@ export class ClusterOrchestrator {
         raw: response.content.slice(0, 300),
       });
       const fallbackMode: ClusterMode = forceMode ?? "parallel_split";
-      const fallbackSteps: ClusterStep[] = [{
-        id: "step_1",
-        role: "researcher",
-        task: query,
-        dependencies: [],
-        outputKey: "step_1_result",
-      }];
+      const fallbackSteps: ClusterStep[] = [
+        {
+          id: "step_1",
+          role: "researcher",
+          task: query,
+          dependencies: [],
+          outputKey: "step_1_result",
+        },
+      ];
       const fallbackPlan = createClusterPlan(fallbackMode, fallbackSteps);
       this.messageBus.setContext("_query", query);
       this.messageBus.setContext("_plan", fallbackPlan);
@@ -464,10 +513,10 @@ export class ClusterOrchestrator {
     }
 
     const rawSteps: ParsedStep[] =
-      parsed.steps
-      ?? parsed.tasks
-      ?? (Array.isArray(parsed.plan) ? parsed.plan : parsed.plan?.steps)
-      ?? [];
+      parsed.steps ??
+      parsed.tasks ??
+      (Array.isArray(parsed.plan) ? parsed.plan : parsed.plan?.steps) ??
+      [];
 
     const planMode: ClusterMode =
       forceMode ??
@@ -505,14 +554,19 @@ export class ClusterOrchestrator {
     });
 
     if (steps.length === 0) {
-      this.emitProgress("plan_retry", { reason: "empty_steps", rawJson: (planJson ?? "").slice(0, 300) });
-      const fallbackSteps: ClusterStep[] = [{
-        id: "step_1",
-        role: "researcher",
-        task: query,
-        dependencies: [],
-        outputKey: "step_1_result",
-      }];
+      this.emitProgress("plan_retry", {
+        reason: "empty_steps",
+        rawJson: (planJson ?? "").slice(0, 300),
+      });
+      const fallbackSteps: ClusterStep[] = [
+        {
+          id: "step_1",
+          role: "researcher",
+          task: query,
+          dependencies: [],
+          outputKey: "step_1_result",
+        },
+      ];
       const fallbackPlan = createClusterPlan(planMode, fallbackSteps);
       this.messageBus.setContext("_query", query);
       this.messageBus.setContext("_plan", fallbackPlan);
@@ -571,28 +625,34 @@ export class ClusterOrchestrator {
         await Promise.allSettled(
           chunk.map((step) => {
             const isCritical = step.critical !== false;
-            const blockedBy = step.dependencies.find(
-              (dep) => failedCriticalSteps.has(dep),
+            const blockedBy = step.dependencies.find((dep) =>
+              failedCriticalSteps.has(dep),
             );
             if (blockedBy) {
-              this.emitProgress("step_skipped", {
-                stepId: step.id,
-                reason: `关键依赖 ${blockedBy} 已失败`,
-              }, step.id);
+              this.emitProgress(
+                "step_skipped",
+                {
+                  stepId: step.id,
+                  reason: `关键依赖 ${blockedBy} 已失败`,
+                },
+                step.id,
+              );
               this.messageBus.setContext(
                 step.outputKey ?? step.id,
                 `[已跳过] 因依赖 ${blockedBy} 失败而跳过`,
               );
               return Promise.resolve();
             }
-            return this.executeStepWithReview(step, plan).then(() => {
-              const inst = this.getLatestInstanceForStep(step.id, "error");
-              if (inst && isCritical) {
-                failedCriticalSteps.add(step.id);
-              }
-            }).catch(() => {
-              if (isCritical) failedCriticalSteps.add(step.id);
-            });
+            return this.executeStepWithReview(step, plan)
+              .then(() => {
+                const inst = this.getLatestInstanceForStep(step.id, "error");
+                if (inst && isCritical) {
+                  failedCriticalSteps.add(step.id);
+                }
+              })
+              .catch(() => {
+                if (isCritical) failedCriticalSteps.add(step.id);
+              });
           }),
         );
       }
@@ -607,9 +667,8 @@ export class ClusterOrchestrator {
     step: ClusterStep,
     plan: ClusterPlan,
   ): Promise<void> {
-    const maxRetries = step.maxReviewRetries
-      ?? this.options.maxReviewRetries
-      ?? 2;
+    const maxRetries =
+      step.maxReviewRetries ?? this.options.maxReviewRetries ?? 2;
 
     let retries = 0;
     let lastFeedback: ReviewFeedback | null = null;
@@ -627,7 +686,12 @@ export class ClusterOrchestrator {
       const instanceForStep = this.getLatestInstanceForStep(step.id, "done");
       if (!instanceForStep) break;
 
-      this.emitProgress("step_review", { stepId: step.id, retries }, step.id, instanceForStep.id);
+      this.emitProgress(
+        "step_review",
+        { stepId: step.id, retries },
+        step.id,
+        instanceForStep.id,
+      );
       this.updateInstance(instanceForStep.id, { status: "reviewing" });
 
       const feedback = await this.reviewStep(step, stepResult);
@@ -647,19 +711,29 @@ export class ClusterOrchestrator {
         reviewCount: retries,
         status: "error",
       });
-      this.emitProgress("step_retry", { stepId: step.id, retries, feedback }, step.id);
+      this.emitProgress(
+        "step_retry",
+        { stepId: step.id, retries, feedback },
+        step.id,
+      );
     }
   }
 
   private throttledInstanceUpdate(instanceId: string): void {
     if (this.stepUpdateTimers.has(instanceId)) return;
-    this.stepUpdateTimers.set(instanceId, setTimeout(() => {
-      this.stepUpdateTimers.delete(instanceId);
-      const current = this.instances.get(instanceId);
-      if (current) {
-        this.options.onInstanceUpdate?.({ ...current, steps: [...current.steps] });
-      }
-    }, 500));
+    this.stepUpdateTimers.set(
+      instanceId,
+      setTimeout(() => {
+        this.stepUpdateTimers.delete(instanceId);
+        const current = this.instances.get(instanceId);
+        if (current) {
+          this.options.onInstanceUpdate?.({
+            ...current,
+            steps: [...current.steps],
+          });
+        }
+      }, 500),
+    );
   }
 
   private flushStepUpdates(): void {
@@ -668,7 +742,10 @@ export class ClusterOrchestrator {
       this.stepUpdateTimers.delete(id);
       const current = this.instances.get(id);
       if (current) {
-        this.options.onInstanceUpdate?.({ ...current, steps: [...current.steps] });
+        this.options.onInstanceUpdate?.({
+          ...current,
+          steps: [...current.steps],
+        });
       }
     }
   }
@@ -713,7 +790,12 @@ export class ClusterOrchestrator {
     };
     this.instances.set(instanceId, instance);
     this.options.onInstanceUpdate?.(instance);
-    this.emitProgress("step_started", { role: role.id, task: step.task }, step.id, instanceId);
+    this.emitProgress(
+      "step_started",
+      { role: role.id, task: step.task },
+      step.id,
+      instanceId,
+    );
 
     this.messageBus.publish({
       from: "orchestrator",
@@ -738,7 +820,8 @@ export class ClusterOrchestrator {
         if (val !== undefined) {
           if (isErrorResult(val)) {
             failedDeps.push(dep);
-            inputContext[depKey] = `[前置步骤 ${dep} 执行失败: ${(val as { error: string }).error}]`;
+            inputContext[depKey] =
+              `[前置步骤 ${dep} 执行失败: ${(val as { error: string }).error}]`;
           } else {
             inputContext[depKey] = val;
           }
@@ -746,15 +829,30 @@ export class ClusterOrchestrator {
       }
     }
 
-    if (failedDeps.length > 0 && failedDeps.length === step.dependencies.length) {
+    if (
+      failedDeps.length > 0 &&
+      failedDeps.length === step.dependencies.length
+    ) {
       const errMsg = `所有前置依赖均失败 (${failedDeps.join(", ")})，跳过执行`;
-      this.updateInstance(instanceId, { status: "error", error: errMsg, finishedAt: Date.now() });
+      this.updateInstance(instanceId, {
+        status: "error",
+        error: errMsg,
+        finishedAt: Date.now(),
+      });
       this.messageBus.setContext(step.outputKey ?? step.id, { error: errMsg });
-      this.emitProgress("step_completed", { error: errMsg }, step.id, instanceId);
+      this.emitProgress(
+        "step_completed",
+        { error: errMsg },
+        step.id,
+        instanceId,
+      );
       return;
     }
 
-    const allContext: Record<string, unknown> = { ...plan.sharedContext, ...inputContext };
+    const allContext: Record<string, unknown> = {
+      ...plan.sharedContext,
+      ...inputContext,
+    };
 
     if (this.runImages?.length) {
       allContext._images = this.runImages;
@@ -770,7 +868,13 @@ export class ClusterOrchestrator {
     }
 
     const remoteBridge = this.remoteBridges.get(step.role);
-    const bridge = remoteBridge ?? new LocalAgentBridge(instanceId, this.options.confirmDangerousAction, this.options.askUser);
+    const bridge =
+      remoteBridge ??
+      new LocalAgentBridge(
+        instanceId,
+        this.options.confirmDangerousAction,
+        this.options.askUser,
+      );
     this.bridges.set(instanceId, bridge);
 
     const modelOverride = this.resolveModel(step.role);
@@ -791,7 +895,9 @@ export class ClusterOrchestrator {
         largeProjectMode: this.options.largeProjectMode,
         openClawMode: this.options.openClawMode,
       });
-      const projectBlock = this.projectContext ? `\n\n${this.projectContext}` : "";
+      const projectBlock = this.projectContext
+        ? `\n\n${this.projectContext}`
+        : "";
       const prefix = [autonomyHint, codingHint].filter(Boolean).join("\n");
       task = `${prefix}${projectBlock}\n\n## 任务\n${task}`;
 
@@ -803,7 +909,10 @@ export class ClusterOrchestrator {
 
       if (reviewFeedback) {
         const issueList = reviewFeedback.issues
-          .map((i) => `- [${i.severity}] ${i.description}${i.fix ? ` (建议: ${i.fix})` : ""}`)
+          .map(
+            (i) =>
+              `- [${i.severity}] ${i.description}${i.fix ? ` (建议: ${i.fix})` : ""}`,
+          )
           .join("\n");
         task += `\n\n## 上一轮 Review 反馈\n审查未通过，请修复以下问题：\n${issueList}\n\n总结: ${reviewFeedback.summary}`;
       }
@@ -812,7 +921,10 @@ export class ClusterOrchestrator {
       const stepTimeoutMs = this.options.openClawMode
         ? STEP_EXECUTION_TIMEOUT_OPENCLAW_MS
         : STEP_EXECUTION_TIMEOUT_MS;
-      const stepTimer = setTimeout(() => stepAbort.abort("单步执行超时"), stepTimeoutMs);
+      const stepTimer = setTimeout(
+        () => stepAbort.abort("单步执行超时"),
+        stepTimeoutMs,
+      );
       const onGlobalAbort = () => stepAbort.abort(this.signal.reason);
       this.signal.addEventListener("abort", onGlobalAbort, { once: true });
 
@@ -837,7 +949,12 @@ export class ClusterOrchestrator {
               current.steps.push(s);
               this.options.onStep?.(instanceId, s);
               this.throttledInstanceUpdate(instanceId);
-              this.emitProgress("step_progress", { step: s }, step.id, instanceId);
+              this.emitProgress(
+                "step_progress",
+                { step: s },
+                step.id,
+                instanceId,
+              );
             }
           },
         });
@@ -880,10 +997,15 @@ export class ClusterOrchestrator {
         this.messageBus.setContext(step.outputKey ?? step.id, result.answer);
       }
 
-      this.emitProgress("step_completed", {
-        answer: result.answer?.slice(0, 200),
-        error: result.error,
-      }, step.id, instanceId);
+      this.emitProgress(
+        "step_completed",
+        {
+          answer: result.answer?.slice(0, 200),
+          error: result.error,
+        },
+        step.id,
+        instanceId,
+      );
 
       this.messageBus.publish({
         from: instanceId,
@@ -933,7 +1055,10 @@ export class ClusterOrchestrator {
     const role = ROLE_REVIEWER;
     const modelOverride = this.resolveModel("reviewer");
 
-    const bridge = new LocalAgentBridge(instanceId, this.options.confirmDangerousAction);
+    const bridge = new LocalAgentBridge(
+      instanceId,
+      this.options.confirmDangerousAction,
+    );
     this.bridges.set(instanceId, bridge);
 
     const reviewTask = `${ROLE_REVIEWER.systemPrompt}
@@ -961,26 +1086,45 @@ ${stepResult}
 }`;
 
     try {
-      const result = await bridge.run(reviewTask, {}, {
-        role: modelOverride ? { ...role, modelOverride } : role,
-        signal: this.signal,
-        maxIterations: getEnhancedClusterRoleIterations(
-          role.maxIterations,
-          role.id,
-          {
-            codingMode: this.options.codingMode,
-            largeProjectMode: this.options.largeProjectMode,
-            openClawMode: this.options.openClawMode,
+      const result = await bridge.run(
+        reviewTask,
+        {},
+        {
+          role: modelOverride ? { ...role, modelOverride } : role,
+          signal: this.signal,
+          maxIterations: getEnhancedClusterRoleIterations(
+            role.maxIterations,
+            role.id,
+            {
+              codingMode: this.options.codingMode,
+              largeProjectMode: this.options.largeProjectMode,
+              openClawMode: this.options.openClawMode,
+            },
+          ),
+          onStep: (s) => {
+            this.emitProgress(
+              "step_progress",
+              { step: s, reviewer: true },
+              step.id,
+              instanceId,
+            );
           },
-        ),
-        onStep: (s) => {
-          this.emitProgress("step_progress", { step: s, reviewer: true }, step.id, instanceId);
         },
-      });
+      );
 
       return this.parseReviewResult(result.answer);
     } catch (err) {
-      return { passed: false, issues: [{ severity: "warning", description: `审查 Agent 执行失败: ${err}`, fix: "请重新审查" }], summary: "审查执行异常，默认不通过" };
+      return {
+        passed: false,
+        issues: [
+          {
+            severity: "warning",
+            description: `审查 Agent 执行失败: ${err}`,
+            fix: "请重新审查",
+          },
+        ],
+        summary: "审查执行异常，默认不通过",
+      };
     } finally {
       this.bridges.delete(instanceId);
     }
@@ -1014,25 +1158,32 @@ ${stepResult}
 }
 只返回 JSON，不要附加其他内容。`;
 
-    const response = await retryChat(ai, {
-      messages: [
-        {
-          role: "system",
-          content: [
-            ROLE_REVIEWER.systemPrompt,
-            chatRuntimeContext.systemPromptBlock || "",
-          ]
-            .filter((block): block is string => typeof block === "string" && block.trim().length > 0)
-            .join("\n\n"),
-        },
-        ...chatRuntimeContext.contextMessages,
-        { role: "user", content: reviewPrompt },
-      ],
-      temperature: ROLE_REVIEWER.temperature,
-      signal: this.signal,
-      skipTools: true,
-      ...(modelOverride ? { model: modelOverride } : {}),
-    }, this.signal);
+    const response = await retryChat(
+      ai,
+      {
+        messages: [
+          {
+            role: "system",
+            content: [
+              ROLE_REVIEWER.systemPrompt,
+              chatRuntimeContext.systemPromptBlock || "",
+            ]
+              .filter(
+                (block): block is string =>
+                  typeof block === "string" && block.trim().length > 0,
+              )
+              .join("\n\n"),
+          },
+          ...chatRuntimeContext.contextMessages,
+          { role: "user", content: reviewPrompt },
+        ],
+        temperature: ROLE_REVIEWER.temperature,
+        signal: this.signal,
+        skipTools: true,
+        ...(modelOverride ? { model: modelOverride } : {}),
+      },
+      this.signal,
+    );
 
     return this.parseReviewResult(response.content);
   }
@@ -1041,7 +1192,17 @@ ${stepResult}
   private parseReviewResult(text: string): ReviewFeedback {
     const json = extractJson(text);
     if (!json) {
-      return { passed: false, issues: [{ severity: "warning", description: "审查结果解析失败，无法确认质量", fix: "请重新审查" }], summary: "审查结果解析失败，默认不通过" };
+      return {
+        passed: false,
+        issues: [
+          {
+            severity: "warning",
+            description: "审查结果解析失败，无法确认质量",
+            fix: "请重新审查",
+          },
+        ],
+        summary: "审查结果解析失败，默认不通过",
+      };
     }
     try {
       const parsed = JSON.parse(json) as ReviewFeedback;
@@ -1051,7 +1212,17 @@ ${stepResult}
         summary: parsed.summary || "无总结",
       };
     } catch {
-      return { passed: false, issues: [{ severity: "warning", description: "审查 JSON 解析失败", fix: "请重新审查" }], summary: "审查结果 JSON 解析失败，默认不通过" };
+      return {
+        passed: false,
+        issues: [
+          {
+            severity: "warning",
+            description: "审查 JSON 解析失败",
+            fix: "请重新审查",
+          },
+        ],
+        summary: "审查结果 JSON 解析失败，默认不通过",
+      };
     }
   }
 
@@ -1086,31 +1257,35 @@ ${stepResult}
     const coderStepCount = plan.steps.filter((s) => s.role === "coder").length;
     const otherStepCount = plan.steps.length - coderStepCount;
     // coder 步骤分配更多预算，非 coder 步骤用原始预算
-    const maxPerCoderStep = coderStepCount > 0
-      ? Math.max(1500, Math.floor(CODER_BUDGET / coderStepCount))
-      : 0;
-    const maxPerOtherStep = otherStepCount > 0
-      ? Math.max(800, Math.floor(TOTAL_BUDGET / Math.max(otherStepCount, 1)))
-      : 0;
+    const maxPerCoderStep =
+      coderStepCount > 0
+        ? Math.max(1500, Math.floor(CODER_BUDGET / coderStepCount))
+        : 0;
+    const maxPerOtherStep =
+      otherStepCount > 0
+        ? Math.max(800, Math.floor(TOTAL_BUDGET / Math.max(otherStepCount, 1)))
+        : 0;
 
-    const stepSummaries = plan.steps.map((step) => {
-      const key = step.outputKey ?? step.id;
-      const result = results[key];
-      let resultStr = typeof result === "string"
-        ? result
-        : JSON.stringify(result, null, 2);
-      const limit = step.role === "coder" ? maxPerCoderStep : maxPerOtherStep;
-      if (resultStr.length > limit) {
-        resultStr = resultStr.slice(0, limit) + "\n...(结果已截断)";
-      }
-      return `### ${step.id} (角色: ${step.role})\n任务: ${step.task}\n结果:\n${resultStr}`;
-    }).join("\n\n---\n\n");
+    const stepSummaries = plan.steps
+      .map((step) => {
+        const key = step.outputKey ?? step.id;
+        const result = results[key];
+        let resultStr =
+          typeof result === "string" ? result : JSON.stringify(result, null, 2);
+        const limit = step.role === "coder" ? maxPerCoderStep : maxPerOtherStep;
+        if (resultStr.length > limit) {
+          resultStr = resultStr.slice(0, limit) + "\n...(结果已截断)";
+        }
+        return `### ${step.id} (角色: ${step.role})\n任务: ${step.task}\n结果:\n${resultStr}`;
+      })
+      .join("\n\n---\n\n");
 
     const codingAggregateHint = this.options.codingMode
       ? `
 5. 如果涉及代码改动，必须清晰列出：修改文件路径、关键变更点、验证命令与结果、剩余风险`
       : "";
-    const chatRuntimeContext = await this.buildChatRuntimeContext(originalQuery);
+    const chatRuntimeContext =
+      await this.buildChatRuntimeContext(originalQuery);
 
     const aggregatePrompt = `你是一个结果汇总专家。多个 Agent 已经协作完成了用户的任务，请汇总所有结果，给出最终的、完整的答案。
 
@@ -1131,7 +1306,7 @@ ${stepSummaries}
 3. 不要重复各步骤的原始输出，而是提炼关键信息
 4. 用中文回答${codingAggregateHint}`;
 
-    const aggregateSystemPrompt = `你是 51ToolBox 智能助手集群的结果汇总 Agent。
+    const aggregateSystemPrompt = `你是 HiClow 智能助手集群的结果汇总 Agent。
 
 ## 职责
 综合多个子 Agent 的执行结果，为用户提供完整、连贯、高质量的最终答案。
@@ -1144,24 +1319,31 @@ ${stepSummaries}
 5. **代码变更保留细节**：如果涉及代码修改，保留具体的文件路径、修改内容等关键细节
 6. **用中文回答**`;
 
-    const response = await retryChat(ai, {
-      messages: [
-        {
-          role: "system",
-          content: [
-            aggregateSystemPrompt,
-            chatRuntimeContext.systemPromptBlock || "",
-          ]
-            .filter((block): block is string => typeof block === "string" && block.trim().length > 0)
-            .join("\n\n"),
-        },
-        ...chatRuntimeContext.contextMessages,
-        { role: "user", content: aggregatePrompt },
-      ],
-      temperature: 0.5,
-      signal: this.signal,
-      skipTools: true,
-    }, this.signal);
+    const response = await retryChat(
+      ai,
+      {
+        messages: [
+          {
+            role: "system",
+            content: [
+              aggregateSystemPrompt,
+              chatRuntimeContext.systemPromptBlock || "",
+            ]
+              .filter(
+                (block): block is string =>
+                  typeof block === "string" && block.trim().length > 0,
+              )
+              .join("\n\n"),
+          },
+          ...chatRuntimeContext.contextMessages,
+          { role: "user", content: aggregatePrompt },
+        ],
+        temperature: 0.5,
+        signal: this.signal,
+        skipTools: true,
+      },
+      this.signal,
+    );
 
     return response.content;
   }
@@ -1177,7 +1359,10 @@ ${stepSummaries}
 
   private supportsImageInput(modelOverride?: string): boolean {
     const config = useAIStore.getState().config;
-    return modelSupportsImageInput(modelOverride || config.model || "", config.protocol);
+    return modelSupportsImageInput(
+      modelOverride || config.model || "",
+      config.protocol,
+    );
   }
 
   // ── Abort ──
@@ -1210,14 +1395,21 @@ function repairJsonString(text: string): string | null {
   // Remove trailing commas before } or ]
   s = s.replace(/,\s*([}\]])/g, "$1");
   // Try parsing
-  try { JSON.parse(s); return s; } catch { return null; }
+  try {
+    JSON.parse(s);
+    return s;
+  } catch {
+    return null;
+  }
 }
 
 function extractJson(text: string): string | null {
   return parseFirstValidJsonObject<Record<string, unknown>>(text).json;
 }
 
-function parseFirstValidJsonObject<T = Record<string, unknown>>(text: string): {
+function parseFirstValidJsonObject<T = Record<string, unknown>>(
+  text: string,
+): {
   value: T | null;
   json: string | null;
   error?: string;
@@ -1270,7 +1462,10 @@ function collectJsonCandidates(text: string): string[] {
   return candidates;
 }
 
-function extractBalancedJsonObjects(text: string, maxCandidates = 12): string[] {
+function extractBalancedJsonObjects(
+  text: string,
+  maxCandidates = 12,
+): string[] {
   const results: string[] = [];
   let depth = 0;
   let start = -1;
@@ -1288,13 +1483,13 @@ function extractBalancedJsonObjects(text: string, maxCandidates = 12): string[] 
         escaped = true;
         continue;
       }
-      if (ch === "\"") {
+      if (ch === '"') {
         inString = false;
       }
       continue;
     }
 
-    if (ch === "\"") {
+    if (ch === '"') {
       inString = true;
       continue;
     }

@@ -32,7 +32,7 @@ fn should_force_rag_for_query(query: &str) -> bool {
     // 产品知识问答兜底：即便用户未开启自动检索，也先做一次预检索，避免模型遗漏工具调用。
     let name_lower = crate::branding::APP_NAME.to_lowercase();
     let has_product_name =
-        q.contains(&name_lower) || q.contains("51toolbox") || q.contains("mtools");
+        q.contains(&name_lower) || q.contains("HiClow") || q.contains("mtools");
     if !has_product_name {
         return false;
     }
@@ -112,7 +112,7 @@ mod tests {
     fn disable_force_rag_blocks_product_fallback() {
         let mut config = AIConfig::default();
         config.disable_force_rag = Some(true);
-        let query = "51ToolBox 如何配置团队插件";
+        let query = "HiClow 如何配置团队插件";
         assert!(!resolve_force_rag_enabled(&config, query));
     }
 }

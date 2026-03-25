@@ -1,10 +1,11 @@
 import { api } from "@/core/api/client";
 import {
-  DEFAULT_CLAWHUB_REGISTRY_URL,
-  DEFAULT_CLAWHUB_SITE_URL,
+  normalizeClawHubRegistryUrl,
+  normalizeClawHubSiteUrl,
 } from "./clawhub-config";
 import type {
   ClawHubInstallResult,
+  ClawHubSkillSearchEntry,
   ClawHubVerifyResult,
 } from "./clawhub-tauri";
 
@@ -19,11 +20,7 @@ export interface TeamClawHubConfig {
   updated_at?: string;
 }
 
-export interface TeamClawHubSearchEntry {
-  slug: string;
-  title?: string | null;
-  description?: string | null;
-}
+export interface TeamClawHubSearchEntry extends ClawHubSkillSearchEntry {}
 
 export interface TeamClawHubStatus {
   provider: "clawhub";
@@ -32,25 +29,9 @@ export interface TeamClawHubStatus {
   site_url?: string | null;
   registry_url?: string | null;
   updated_at?: string | null;
-  cli_installed: boolean;
-  cli_version?: string | null;
   can_search: boolean;
   can_install: boolean;
-}
-
-export interface TeamPublishedSkill {
-  id: string;
-  team_id: string;
-  provider: "clawhub";
-  slug: string;
-  version: string;
-  display_name: string;
-  description?: string | null;
-  is_active: boolean;
-  published_by: string;
-  updated_by: string;
-  created_at: string;
-  updated_at: string;
+  service_ready?: boolean;
 }
 
 export async function getTeamClawHubConfig(
@@ -65,8 +46,8 @@ export async function getTeamClawHubConfig(
   if (!config) return null;
   return {
     provider: "clawhub",
-    site_url: config.site_url?.trim() || DEFAULT_CLAWHUB_SITE_URL,
-    registry_url: config.registry_url?.trim() || DEFAULT_CLAWHUB_REGISTRY_URL,
+    site_url: normalizeClawHubSiteUrl(config.site_url),
+    registry_url: normalizeClawHubRegistryUrl(config.registry_url),
     is_active: config.is_active !== false,
     ...(config.id ? { id: config.id } : {}),
     ...(config.masked_token !== undefined ? { masked_token: config.masked_token } : {}),
@@ -85,29 +66,24 @@ export async function getTeamClawHubStatus(
     provider: "clawhub",
     configured: payload?.configured === true,
     active: payload?.active === true,
-    site_url: payload?.site_url?.trim() || null,
-    registry_url: payload?.registry_url?.trim() || null,
+    site_url: payload?.site_url ? normalizeClawHubSiteUrl(payload.site_url) : null,
+    registry_url: payload?.registry_url ? normalizeClawHubRegistryUrl(payload.registry_url) : null,
     updated_at: payload?.updated_at ?? null,
-    cli_installed: payload?.cli_installed === true,
-    cli_version: payload?.cli_version ?? null,
     can_search: payload?.can_search === true,
     can_install: payload?.can_install === true,
+    service_ready: payload?.service_ready === true,
   };
 }
 
 export async function saveTeamClawHubConfig(params: {
   teamId: string;
   id?: string;
-  site_url: string;
-  registry_url: string;
   token: string;
   is_active: boolean;
 }): Promise<void> {
   await api.put(`/teams/${params.teamId}/skill-marketplace-config`, {
     id: params.id,
     provider: "clawhub",
-    site_url: params.site_url,
-    registry_url: params.registry_url,
     api_token: params.token,
     is_active: params.is_active,
   });
@@ -151,48 +127,5 @@ export async function searchTeamClawHubSkills(params: {
       query: params.query,
       ...(typeof params.limit === "number" ? { limit: params.limit } : {}),
     },
-  );
-}
-
-export async function listTeamPublishedSkills(
-  teamId: string,
-): Promise<TeamPublishedSkill[]> {
-  const payload = await api.get<{ skills?: TeamPublishedSkill[] }>(
-    `/teams/${teamId}/published-skills`,
-  );
-  return payload?.skills ?? [];
-}
-
-export async function publishTeamClawHubSkill(params: {
-  teamId: string;
-  slug: string;
-  version?: string;
-}): Promise<{ skill: TeamPublishedSkill; stdout: string }> {
-  return api.post<{ skill: TeamPublishedSkill; stdout: string }>(
-    `/teams/${params.teamId}/published-skills`,
-    {
-      provider: "clawhub",
-      slug: params.slug,
-      ...(params.version ? { version: params.version } : {}),
-    },
-  );
-}
-
-export async function patchTeamPublishedSkill(params: {
-  teamId: string;
-  skillId: string;
-  is_active: boolean;
-}): Promise<void> {
-  await api.patch(`/teams/${params.teamId}/published-skills/${params.skillId}`, {
-    is_active: params.is_active,
-  });
-}
-
-export async function installTeamPublishedSkill(params: {
-  teamId: string;
-  skillId: string;
-}): Promise<ClawHubInstallResult> {
-  return api.post<ClawHubInstallResult>(
-    `/teams/${params.teamId}/published-skills/${params.skillId}/install`,
   );
 }

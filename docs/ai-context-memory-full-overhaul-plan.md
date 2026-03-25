@@ -1,11 +1,11 @@
 # AI 助手上下文与长期记忆全量改造方案
 
-基于当前 `51ToolBox` 实现、近期已完成的改动，以及对 `openclaw` 大型项目 Agent 处理方式的对比整理。
+基于当前 `HiClow` 实现、近期已完成的改动，以及对 `openclaw` 大型项目 Agent 处理方式的对比整理。
 
 相关文档：
-- [AI 助手三模式架构审查报告](./ai-assistant-architecture-review.md)
-- [AI 助手改进执行计划](./ai-assistant-improvement-plan.md)
+
 - [AI 长期记忆说明](./ai-long-term-memory.md)
+- [AI 助手对标 OpenClaw 体验开发总方案](./ai-openclaw-parity-development-roadmap.md)
 
 ---
 
@@ -143,7 +143,7 @@
 
 ## 4. 目标架构
 
-目标不是照抄 `openclaw`，而是在当前项目里形成一套更适合 `51ToolBox` 的轻量版上下文引擎。
+目标不是照抄 `openclaw`，而是在当前项目里形成一套更适合 `HiClow` 的轻量版上下文引擎。
 
 ### 4.1 目标链路
 
@@ -273,7 +273,10 @@ interface ContinuityDecision {
 interface RuntimeContextPack {
   workspaceRoot?: string;
   bootstrapPrompt?: string;
-  sessionSummaryMessages: Array<{ role: "user" | "assistant"; content: string }>;
+  sessionSummaryMessages: Array<{
+    role: "user" | "assistant";
+    content: string;
+  }>;
   recalledMemoryPrompt?: string;
   knowledgeMessages: Array<{ role: "user" | "assistant"; content: string }>;
   currentFiles: string[];

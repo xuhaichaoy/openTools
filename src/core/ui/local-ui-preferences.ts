@@ -19,8 +19,8 @@ export interface LocalWindowLayoutPreference {
 
 export const MIN_WINDOW_WIDTH = 800;
 export const MAX_WINDOW_WIDTH = 1680;
-export const MIN_EXPANDED_WINDOW_HEIGHT = 420;
-export const MIN_CHAT_WINDOW_HEIGHT = 520;
+export const MIN_EXPANDED_WINDOW_HEIGHT = 600;
+export const MIN_CHAT_WINDOW_HEIGHT = 600;
 export const MAX_WINDOW_HEIGHT = 1200;
 
 const DEFAULT_WINDOW_LAYOUT: LocalWindowLayoutPreference = {

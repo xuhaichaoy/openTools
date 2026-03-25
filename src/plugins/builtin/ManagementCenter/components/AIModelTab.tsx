@@ -1,4 +1,10 @@
-import React, { useState, useEffect, lazy, Suspense, type CSSProperties } from "react";
+import React, {
+  useState,
+  useEffect,
+  lazy,
+  Suspense,
+  type CSSProperties,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useAIStore } from "@/store/ai-store";
 import { useAppStore } from "@/store/app-store";
@@ -42,15 +48,29 @@ import {
   Radio,
 } from "lucide-react";
 
-const ChannelConfigPanel = lazy(() => import("@/plugins/builtin/SmartAgent/components/ChannelConfigPanel"));
+const ChannelConfigPanel = lazy(
+  () => import("@/plugins/builtin/SmartAgent/components/ChannelConfigPanel"),
+);
 
 type AIModelSource = "own_key" | "team" | "platform";
 type AIConfigPanel = "source" | "assistant" | "knowledge" | "channels";
-const AI_CENTER_MODES: HumanSelectableAIProductMode[] = ["explore", "build", "plan", "dialog"];
+const AI_CENTER_MODES: HumanSelectableAIProductMode[] = [
+  "explore",
+  "build",
+  "plan",
+  "dialog",
+];
 
 export function AIModelTab() {
-  const { config, setConfig, saveConfig, ownKeys, loadOwnKeys, saveOwnKeys, selectOwnKeyModel } =
-    useAIStore();
+  const {
+    config,
+    setConfig,
+    saveConfig,
+    ownKeys,
+    loadOwnKeys,
+    saveOwnKeys,
+    selectOwnKeyModel,
+  } = useAIStore();
   const setAICenterModelScope = useAppStore((s) => s.setAICenterModelScope);
   const [savedMemories, setSavedMemories] = useState<AIMemoryItem[]>([]);
   const [pendingMemoryCount, setPendingMemoryCount] = useState(0);
@@ -60,8 +80,7 @@ export function AIModelTab() {
   const [containerAvailability, setContainerAvailability] =
     useState<ContainerRuntimeAvailability | null>(null);
   const [checkingContainer, setCheckingContainer] = useState(false);
-  const nativeToolsSupported =
-    navigator.platform.toLowerCase().includes("mac");
+  const nativeToolsSupported = navigator.platform.toLowerCase().includes("mac");
   const promptRingStyle: CSSProperties & Record<"--tw-ring-color", string> = {
     "--tw-ring-color": `${BRAND}30`,
   };
@@ -227,7 +246,10 @@ export function AIModelTab() {
           高级工具：{config.enable_advanced_tools ? "开" : "关"}
         </span>
         <span className="px-2 py-1 rounded bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]">
-          长期记忆：{config.enable_long_term_memory ? `开 (${memorySubSwitchCount}/3)` : "关"}
+          长期记忆：
+          {config.enable_long_term_memory
+            ? `开 (${memorySubSwitchCount}/3)`
+            : "关"}
         </span>
         <span className="px-2 py-1 rounded bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]">
           Agent 运行：{runtimeModeLabelMap[config.agent_runtime_mode || "host"]}
@@ -235,8 +257,13 @@ export function AIModelTab() {
       </div>
 
       <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2.5 text-[10px] text-[var(--color-text-secondary)]">
-        管理中心负责维护模型池与全局执行基座；AI 助手顶部模型选择会按 Explore / Build / Plan / Dialog 分别记住默认模型，不会覆盖这里的能力开关。
-        <ScopePills items={AI_CENTER_MODES.map((mode) => `${getAICenterModeMeta(mode).label} 默认`)} />
+        管理中心负责维护模型池与全局执行基座；AI 助手顶部模型选择会按 Explore /
+        Build / Plan / Dialog 分别记住默认模型，不会覆盖这里的能力开关。
+        <ScopePills
+          items={AI_CENTER_MODES.map(
+            (mode) => `${getAICenterModeMeta(mode).label} 默认`,
+          )}
+        />
       </div>
 
       <div className="grid grid-cols-4 gap-2">
@@ -264,7 +291,9 @@ export function AIModelTab() {
       {activePanel === "source" && (
         <>
           <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2.5 text-[10px] text-[var(--color-text-secondary)]">
-            这里定义 AI 助手可选的模型来源与模型池。真正进入 Ask / Agent / Cluster / Dialog 后，顶部模型选择器会分别记住每个模式自己的默认模型。
+            这里定义 AI 助手可选的模型来源与模型池。真正进入 Ask / Agent /
+            Cluster / Dialog
+            后，顶部模型选择器会分别记住每个模式自己的默认模型。
             <ScopePills items={["模型池", "四模式默认模型"]} />
           </div>
 
@@ -355,7 +384,8 @@ export function AIModelTab() {
               />
               <p className="text-[10px] text-[var(--color-text-secondary)]">
                 当前来源由 {APP_NAME}
-                服务器集中管理。您的请求将通过服务器中转以实现计费或共享 Key 使用。
+                服务器集中管理。您的请求将通过服务器中转以实现计费或共享 Key
+                使用。
               </p>
             </div>
           )}
@@ -369,7 +399,8 @@ export function AIModelTab() {
             <span className="text-xs font-semibold">助手执行基座</span>
           </div>
           <p className="text-[10px] text-[var(--color-text-secondary)]">
-            这里配置 Ask / Agent / Cluster / Dialog 共用的执行基座，包括工具权限、长期记忆、调度重试和系统提示词。
+            这里配置 Ask / Agent / Cluster / Dialog
+            共用的执行基座，包括工具权限、长期记忆、调度重试和系统提示词。
           </p>
           <ScopePills items={["Ask", "Agent", "Cluster", "Dialog", "调度"]} />
 
@@ -379,7 +410,8 @@ export function AIModelTab() {
                 启用高级工具
               </span>
               <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
-                开启后 AI 可执行 shell 命令、读写本地文件、获取系统信息等。危险操作会弹窗确认；该开关仅保存在当前设备，不再被云同步覆盖。
+                开启后 AI 可执行 shell
+                命令、读写本地文件、获取系统信息等。危险操作会弹窗确认；该开关仅保存在当前设备，不再被云同步覆盖。
               </p>
               <ScopePills items={["Ask", "Agent", "Cluster", "Dialog"]} />
             </div>
@@ -503,7 +535,8 @@ export function AIModelTab() {
               </label>
             </div>
             <p className="text-[10px] text-[var(--color-text-secondary)]">
-              Host 为默认模式；Hybrid 会在容器可用时优先容器、否则自动回退 Host；Container Preferred 优先容器执行，按策略回退或拒绝。
+              Host 为默认模式；Hybrid 会在容器可用时优先容器、否则自动回退
+              Host；Container Preferred 优先容器执行，按策略回退或拒绝。
             </p>
             {(config.agent_runtime_mode || "host") !== "host" && (
               <div className="text-[10px] text-[var(--color-text-secondary)] flex items-center gap-2">
@@ -531,7 +564,9 @@ export function AIModelTab() {
               </p>
             )}
             <p className="text-[10px] text-[var(--color-text-secondary)]">
-              可选外部策略文件：~/.config/51toolbox/agent-policy.json（allowed_roots / force_readonly / block_mode / allow_unattended_host_fallback）。容器执行需配置 allowed_roots。
+              可选外部策略文件：~/.config/HiClow/agent-policy.json（allowed_roots
+              / force_readonly / block_mode /
+              allow_unattended_host_fallback）。容器执行需配置 allowed_roots。
             </p>
           </div>
 
@@ -545,7 +580,8 @@ export function AIModelTab() {
                   </span>
                 </div>
                 <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
-                  开启后 AI 可调用日历、提醒事项、备忘录、邮件、快捷指令、打开应用等本机能力。该开关仅保存在当前设备。
+                  开启后 AI
+                  可调用日历、提醒事项、备忘录、邮件、快捷指令、打开应用等本机能力。该开关仅保存在当前设备。
                 </p>
                 <ScopePills items={["Ask", "Agent", "Cluster", "Dialog"]} />
               </div>
@@ -584,7 +620,9 @@ export function AIModelTab() {
 
             <label className="flex items-center justify-between cursor-pointer">
               <div className="flex-1 pr-3">
-                <span className="text-xs text-[var(--color-text)]">启用长期记忆</span>
+                <span className="text-xs text-[var(--color-text)]">
+                  启用长期记忆
+                </span>
                 <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
                   允许 AI 记录你确认后的稳定偏好与长期事实，用于跨会话复用。
                 </p>
@@ -605,7 +643,9 @@ export function AIModelTab() {
               }`}
             >
               <div className="flex-1 pr-3">
-                <span className="text-xs text-[var(--color-text)]">自动召回记忆</span>
+                <span className="text-xs text-[var(--color-text)]">
+                  自动召回记忆
+                </span>
                 <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
                   发送消息前自动注入最相关的长期记忆。
                 </p>
@@ -615,7 +655,8 @@ export function AIModelTab() {
                 onChange={() => {
                   if (!config.enable_long_term_memory) return;
                   updateAndSave({
-                    enable_memory_auto_recall: !config.enable_memory_auto_recall,
+                    enable_memory_auto_recall:
+                      !config.enable_memory_auto_recall,
                   });
                 }}
               />
@@ -627,7 +668,9 @@ export function AIModelTab() {
               }`}
             >
               <div className="flex-1 pr-3">
-                <span className="text-xs text-[var(--color-text)]">自动提取候选</span>
+                <span className="text-xs text-[var(--color-text)]">
+                  自动提取候选
+                </span>
                 <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
                   明确且高置信的长期偏好会直接记住，其余候选进入后台队列，不再打断主流程。
                 </p>
@@ -649,7 +692,9 @@ export function AIModelTab() {
               }`}
             >
               <div className="flex-1 pr-3">
-                <span className="text-xs text-[var(--color-text)]">记忆参与云同步</span>
+                <span className="text-xs text-[var(--color-text)]">
+                  记忆参与云同步
+                </span>
                 <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
                   开启后长期记忆会随个人同步策略在多设备间同步。
                 </p>
@@ -667,7 +712,9 @@ export function AIModelTab() {
 
             <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-2.5 space-y-2">
               <div className="rounded-lg border border-dashed border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-2 text-[10px] text-[var(--color-text-secondary)]">
-                待确认候选 {pendingMemoryCount} 条。完整的候选确认、手动添加、搜索和编辑，请到左侧 `AI 记忆` 页面。
+                待确认候选 {pendingMemoryCount}{" "}
+                条。完整的候选确认、手动添加、搜索和编辑，请到左侧 `AI 记忆`
+                页面。
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
@@ -740,7 +787,8 @@ export function AIModelTab() {
               <span className="text-xs font-semibold">全局补充提示词</span>
             </div>
             <p className="text-[10px] text-[var(--color-text-secondary)]">
-              追加到默认系统提示词之后，会同步作用于 Ask / Agent / Cluster / Dialog。更适合放稳定规则，不适合放一次性任务。
+              追加到默认系统提示词之后，会同步作用于 Ask / Agent / Cluster /
+              Dialog。更适合放稳定规则，不适合放一次性任务。
             </p>
             <ScopePills items={["Ask", "Agent", "Cluster", "Dialog"]} />
             <textarea
@@ -764,7 +812,8 @@ export function AIModelTab() {
             <span className="text-xs font-semibold">知识库与检索基座</span>
           </div>
           <p className="text-[10px] text-[var(--color-text-secondary)]">
-            这里统一配置对话时的知识库自动检索，以及知识库索引阶段使用的 Embedding / Rerank / OCR 能力。它们独立于模型来源。
+            这里统一配置对话时的知识库自动检索，以及知识库索引阶段使用的
+            Embedding / Rerank / OCR 能力。它们独立于模型来源。
           </p>
           <ScopePills items={["Ask", "Agent", "Cluster", "Dialog"]} />
 
@@ -777,7 +826,8 @@ export function AIModelTab() {
                 </span>
               </div>
               <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
-                开启后，Ask / Agent / Cluster / Dialog 在发送请求前都会自动注入相关知识库内容。
+                开启后，Ask / Agent / Cluster / Dialog
+                在发送请求前都会自动注入相关知识库内容。
               </p>
             </div>
             <Toggle
@@ -795,8 +845,17 @@ export function AIModelTab() {
       )}
 
       {activePanel === "channels" && (
-        <div className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] overflow-hidden" style={{ minHeight: 300 }}>
-          <Suspense fallback={<div className="p-4 text-xs text-[var(--color-text-secondary)]">加载中...</div>}>
+        <div
+          className="bg-[var(--color-bg)] rounded-xl border border-[var(--color-border)] overflow-hidden"
+          style={{ minHeight: 300 }}
+        >
+          <Suspense
+            fallback={
+              <div className="p-4 text-xs text-[var(--color-text-secondary)]">
+                加载中...
+              </div>
+            }
+          >
             <ChannelConfigPanel />
           </Suspense>
         </div>

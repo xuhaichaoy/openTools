@@ -6,8 +6,8 @@
  * 静态文件需手动同步：package.json / tauri.conf.json / index.html / README.md
  */
 
-export const APP_NAME = "51ToolBox";
-export const APP_NAME_EN = "51ToolBox";
+export const APP_NAME = "HiClow";
+export const APP_NAME_EN = "HiClow";
 export const APP_NAME_CN = "51工具箱";
 export const APP_CLOUD_NAME = `${APP_NAME} Cloud`;
 export const APP_DESCRIPTION = "AI-First 桌面效率工具箱";

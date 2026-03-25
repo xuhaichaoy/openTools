@@ -64,7 +64,7 @@ type DirectoryEntry = {
   size?: number;
 };
 
-const ROOT_SEGMENTS = [".config", "51toolbox", "ai-memory"] as const;
+const ROOT_SEGMENTS = [".config", "HiClow", "ai-memory"] as const;
 const LONG_TERM_FILENAME = "MEMORY.md";
 const DAILY_DIRNAME = "memory";
 const DEFAULT_RECENT_DAYS = 5;
@@ -119,7 +119,9 @@ function formatTime(timestamp: number): string {
 }
 
 async function ensureDirectory(path: string): Promise<void> {
-  await invoke("create_directory", { path, recursive: true }).catch(() => undefined);
+  await invoke("create_directory", { path, recursive: true }).catch(
+    () => undefined,
+  );
 }
 
 async function readTextFile(path: string): Promise<string> {
@@ -179,7 +181,9 @@ export async function resolveDailyMemoryDir(): Promise<string> {
   return dailyDir;
 }
 
-export async function resolveDailyMemoryPath(timestamp = Date.now()): Promise<string> {
+export async function resolveDailyMemoryPath(
+  timestamp = Date.now(),
+): Promise<string> {
   const dailyDir = await resolveDailyMemoryDir();
   return join(dailyDir, `${formatDateKey(timestamp)}.md`);
 }
@@ -215,10 +219,11 @@ function groupLongTermRecords(records: readonly FileMemoryRecord[]): Array<{
   title: string;
   items: FileMemoryRecord[];
 }> {
-  const active = records.filter((record) =>
-    !record.deleted
-    && record.kind !== "session_note"
-    && record.kind !== "conversation_summary",
+  const active = records.filter(
+    (record) =>
+      !record.deleted &&
+      record.kind !== "session_note" &&
+      record.kind !== "conversation_summary",
   );
   const grouped = new Map<string, FileMemoryRecord[]>();
 
@@ -241,7 +246,7 @@ function groupLongTermRecords(records: readonly FileMemoryRecord[]): Array<{
 
 function renderLongTermMemory(records: readonly FileMemoryRecord[]): string {
   const lines: string[] = [
-    "# 51ToolBox AI Memory",
+    "# HiClow AI Memory",
     "",
     "> 这里保存已经确认生效的长期记忆。当前用户指令优先于这里的历史记忆。",
     `> 最后同步：${new Date().toLocaleString("zh-CN")}`,
@@ -257,9 +262,11 @@ function renderLongTermMemory(records: readonly FileMemoryRecord[]): string {
     lines.push("", `## ${group.title}`, "");
     for (const item of group.items) {
       const meta: string[] = [];
-      if (item.scope && item.scope !== "global") meta.push(`scope=${item.scope}`);
+      if (item.scope && item.scope !== "global")
+        meta.push(`scope=${item.scope}`);
       if (item.workspace_id) meta.push(`workspace=${item.workspace_id}`);
-      if (item.conversation_id) meta.push(`conversation=${item.conversation_id}`);
+      if (item.conversation_id)
+        meta.push(`conversation=${item.conversation_id}`);
       if (item.tags?.length) meta.push(`tags=${item.tags.join(",")}`);
 
       lines.push(`- ${item.content}`);
@@ -289,9 +296,7 @@ function renderDailyMemoryEntry(entry: DailyMemoryEntry): string {
 }
 
 function enqueueFileMemoryWrite(task: () => Promise<void>): Promise<void> {
-  fileMemoryWriteQueue = fileMemoryWriteQueue
-    .catch(() => undefined)
-    .then(task);
+  fileMemoryWriteQueue = fileMemoryWriteQueue.catch(() => undefined).then(task);
   return fileMemoryWriteQueue;
 }
 
@@ -305,7 +310,9 @@ export function queueSyncConfirmedMemoriesToFile(
   });
 }
 
-export function queueAppendDailyMemoryEntry(entry: DailyMemoryEntry): Promise<void> {
+export function queueAppendDailyMemoryEntry(
+  entry: DailyMemoryEntry,
+): Promise<void> {
   return enqueueFileMemoryWrite(async () => {
     const normalized = normalizeWhitespace(entry.content);
     if (!normalized) return;
@@ -313,8 +320,8 @@ export function queueAppendDailyMemoryEntry(entry: DailyMemoryEntry): Promise<vo
     const dailyPath = await resolveDailyMemoryPath(entry.timestamp);
     const existing = await readTextFile(dailyPath);
     if (
+      existing &&
       existing
-      && existing
         .split(/\n{2,}/)
         .some((block) => normalizeWhitespace(block).includes(normalized))
     ) {
@@ -329,7 +336,9 @@ export function queueAppendDailyMemoryEntry(entry: DailyMemoryEntry): Promise<vo
   });
 }
 
-export async function readRecentDailyMemoryText(days = DEFAULT_RECENT_DAYS): Promise<string> {
+export async function readRecentDailyMemoryText(
+  days = DEFAULT_RECENT_DAYS,
+): Promise<string> {
   const snapshot = await getFileMemorySnapshot({ recentDays: days });
   return snapshot.recentDailyFiles
     .map((file) => file.content.trim())
@@ -343,8 +352,12 @@ async function listAllDailyMemoryFiles(): Promise<FileMemoryRecentFile[]> {
   return (
     await Promise.all(
       dailyEntries
-        .filter((entry) => entry && !entry.is_dir && /\.md$/i.test(entry.name ?? ""))
-        .sort((a, b) => String(b.name ?? "").localeCompare(String(a.name ?? "")))
+        .filter(
+          (entry) => entry && !entry.is_dir && /\.md$/i.test(entry.name ?? ""),
+        )
+        .sort((a, b) =>
+          String(b.name ?? "").localeCompare(String(a.name ?? "")),
+        )
         .map(async (entry) => {
           const name = String(entry.name ?? "").trim();
           const path = await join(dailyDir, name);
@@ -358,13 +371,21 @@ async function listAllDailyMemoryFiles(): Promise<FileMemoryRecentFile[]> {
   ).filter((file) => file.content.trim());
 }
 
-function buildCitation(path: string, startLine: number, endLine: number): string {
+function buildCitation(
+  path: string,
+  startLine: number,
+  endLine: number,
+): string {
   return startLine === endLine
     ? `${path}#L${startLine}`
     : `${path}#L${startLine}-L${endLine}`;
 }
 
-function scoreSearchLine(line: string, query: string, tokens: string[]): number {
+function scoreSearchLine(
+  line: string,
+  query: string,
+  tokens: string[],
+): number {
   const normalizedLine = normalizeWhitespace(line).toLowerCase();
   const normalizedQuery = normalizeWhitespace(query).toLowerCase();
   if (!normalizedLine) return 0;
@@ -484,11 +505,17 @@ export async function readFileMemorySnippet(params: {
   const content = await readTextFile(absPath);
   const allLines = content.split(/\r?\n/);
   const maxLine = allLines.length > 0 ? allLines.length : 1;
-  const startLine = Math.min(maxLine, Math.max(1, Math.floor(params.from ?? 1)));
+  const startLine = Math.min(
+    maxLine,
+    Math.max(1, Math.floor(params.from ?? 1)),
+  );
   const defaultLineCount = maxLine;
   const lineCount = Math.max(
     1,
-    Math.min(MAX_MEMORY_READ_LINES, Math.floor(params.lines ?? defaultLineCount)),
+    Math.min(
+      MAX_MEMORY_READ_LINES,
+      Math.floor(params.lines ?? defaultLineCount),
+    ),
   );
   const endLine = Math.min(maxLine, startLine + lineCount - 1);
 
@@ -518,8 +545,12 @@ export async function getFileMemorySnapshot(options?: {
   const recentDailyFiles = (
     await Promise.all(
       dailyEntries
-        .filter((entry) => entry && !entry.is_dir && /\.md$/i.test(entry.name ?? ""))
-        .sort((a, b) => String(b.name ?? "").localeCompare(String(a.name ?? "")))
+        .filter(
+          (entry) => entry && !entry.is_dir && /\.md$/i.test(entry.name ?? ""),
+        )
+        .sort((a, b) =>
+          String(b.name ?? "").localeCompare(String(a.name ?? "")),
+        )
         .slice(0, recentDays)
         .map(async (entry) => {
           const name = String(entry.name ?? "").trim();

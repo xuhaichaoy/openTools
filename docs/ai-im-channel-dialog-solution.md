@@ -1,6 +1,6 @@
 # IM 通道 / Dialog 房间收敛方案
 
-面向当前 `51ToolBox` 在钉钉、飞书等 IM 通道接入后的产品与架构收敛方案。
+面向当前 `HiClow` 在钉钉、飞书等 IM 通道接入后的产品与架构收敛方案。
 
 这份方案重点回答 4 个问题：
 
@@ -259,10 +259,10 @@ displayKind:
 
 ```ts
 type IMExecutionProfile =
-  | "direct"          // 默认，单轮直答
-  | "tool_agent"      // 需要读写文件/命令时升级
+  | "direct" // 默认，单轮直答
+  | "tool_agent" // 需要读写文件/命令时升级
   | "background_task" // 长任务后台执行
-  | "collab"          // 明确进入协作/评审房间
+  | "collab"; // 明确进入协作/评审房间
 ```
 
 ### 默认规则

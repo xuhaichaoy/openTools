@@ -57,8 +57,9 @@ export interface AgentRunnerServiceOptions {
 function buildRunnerTools(): AgentTool[] {
   const ai = getMToolsAI("agent");
   const allActions = registry.getAllActions();
-  const tools: AgentTool[] = allActions.map(({ pluginId, pluginName, action }) =>
-    pluginActionToTool(pluginId, pluginName, action, ai),
+  const tools: AgentTool[] = allActions.map(
+    ({ pluginId, pluginName, action }) =>
+      pluginActionToTool(pluginId, pluginName, action, ai),
   );
 
   tools.push({
@@ -78,7 +79,10 @@ function buildRunnerTools(): AgentTool[] {
     },
     execute: async (params) => {
       try {
-        const expr = String(params.expression).replace(/[^0-9+\-*/().%\s]/g, "");
+        const expr = String(params.expression).replace(
+          /[^0-9+\-*/().%\s]/g,
+          "",
+        );
         if (!expr.trim()) return { error: "无效表达式" };
         const result = Function('"use strict"; return (' + expr + ")")();
         if (typeof result !== "number" || !isFinite(result)) {
@@ -155,9 +159,13 @@ function buildRunnerTools(): AgentTool[] {
           ? Math.floor(params.start_line)
           : undefined;
       const end_line =
-        typeof params.end_line === "number" ? Math.floor(params.end_line) : undefined;
+        typeof params.end_line === "number"
+          ? Math.floor(params.end_line)
+          : undefined;
       const max_lines =
-        typeof params.max_lines === "number" ? Math.floor(params.max_lines) : undefined;
+        typeof params.max_lines === "number"
+          ? Math.floor(params.max_lines)
+          : undefined;
       return invoke("read_text_file_range", {
         path,
         start_line,
@@ -195,13 +203,17 @@ function buildRunnerTools(): AgentTool[] {
       if (!path.trim()) return { error: "path 不能为空" };
       if (!query.trim()) return { error: "query 不能为空" };
       const case_sensitive =
-        typeof params.case_sensitive === "boolean" ? params.case_sensitive : undefined;
+        typeof params.case_sensitive === "boolean"
+          ? params.case_sensitive
+          : undefined;
       const max_results =
         typeof params.max_results === "number"
           ? Math.floor(params.max_results)
           : undefined;
       const file_pattern =
-        typeof params.file_pattern === "string" ? params.file_pattern : undefined;
+        typeof params.file_pattern === "string"
+          ? params.file_pattern
+          : undefined;
       return invoke("search_in_files", {
         path,
         query,
@@ -254,7 +266,10 @@ export class AgentRunnerService {
 
   private running = 0;
 
-  private executeTask: (task: AgentScheduledTask, attempt: number) => Promise<void>;
+  private executeTask: (
+    task: AgentScheduledTask,
+    attempt: number,
+  ) => Promise<void>;
 
   private readonly setTimeoutFn: typeof setTimeout;
 
@@ -275,15 +290,27 @@ export class AgentRunnerService {
   }
 
   private getConcurrency() {
-    return Math.max(1, Math.min(8, useAIStore.getState().config.agent_max_concurrency ?? 2));
+    return Math.max(
+      1,
+      Math.min(8, useAIStore.getState().config.agent_max_concurrency ?? 2),
+    );
   }
 
   private getRetryMax() {
-    return Math.max(0, Math.min(10, useAIStore.getState().config.agent_retry_max ?? 3));
+    return Math.max(
+      0,
+      Math.min(10, useAIStore.getState().config.agent_retry_max ?? 3),
+    );
   }
 
   private getRetryBackoffMs() {
-    return Math.max(500, Math.min(60000, useAIStore.getState().config.agent_retry_backoff_ms ?? 5000));
+    return Math.max(
+      500,
+      Math.min(
+        60000,
+        useAIStore.getState().config.agent_retry_backoff_ms ?? 5000,
+      ),
+    );
   }
 
   private drain() {
@@ -366,8 +393,11 @@ export class AgentRunnerService {
   }
 
   private async executeTaskInternal(task: AgentScheduledTask, attempt: number) {
-    const shouldDeliverDirectly = task.trigger_action === "deliver_message"
-      || (!task.trigger_action && (!!task.delivery_text?.trim() || !!inferDirectScheduledDelivery(task.query)));
+    const shouldDeliverDirectly =
+      task.trigger_action === "deliver_message" ||
+      (!task.trigger_action &&
+        (!!task.delivery_text?.trim() ||
+          !!inferDirectScheduledDelivery(task.query)));
     if (shouldDeliverDirectly) {
       await this.executeDirectDeliveryTask(task);
       return;
@@ -375,7 +405,10 @@ export class AgentRunnerService {
 
     const ai = getMToolsAI("agent");
     const aiConfig = useAIStore.getState().config;
-    const availableTools = filterAssistantToolsByConfig(buildRunnerTools(), aiConfig);
+    const availableTools = filterAssistantToolsByConfig(
+      buildRunnerTools(),
+      aiConfig,
+    );
 
     const store = useAgentStore.getState();
     let sessionId = task.session_id || store.currentSessionId;
@@ -406,7 +439,9 @@ export class AgentRunnerService {
         }
       }
       taskId = store.addTask(sessionId, task.query);
-      session = useAgentStore.getState().sessions.find((s) => s.id === sessionId) ?? session;
+      session =
+        useAgentStore.getState().sessions.find((s) => s.id === sessionId) ??
+        session;
     }
 
     if (!taskId) {
@@ -427,8 +462,13 @@ export class AgentRunnerService {
 
     const skillCtx = await loadAndResolveSkills(task.query);
     const skillsPrompt = skillCtx.mergedSystemPrompt || undefined;
-    const hasCodingWorkflowSkill = skillCtx.visibleSkillIds.includes("builtin-coding-workflow");
-    const toolsForRun = applySkillToolFilter(availableTools, skillCtx.mergedToolFilter);
+    const hasCodingWorkflowSkill = skillCtx.visibleSkillIds.includes(
+      "builtin-coding-workflow",
+    );
+    const toolsForRun = applySkillToolFilter(
+      availableTools,
+      skillCtx.mergedToolFilter,
+    );
     let userMemoryPrompt: string | undefined;
     if (shouldRecallAssistantMemory(aiConfig)) {
       let memorySnap = useAgentMemoryStore.getState();
@@ -440,14 +480,17 @@ export class AgentRunnerService {
           memorySnap = useAgentMemoryStore.getState();
         }
       }
-      userMemoryPrompt = await memorySnap.getMemoriesForQueryPromptAsync(task.query, {
-        topK: 6,
-        conversationId: sessionId,
-        workspaceId: session?.workspaceRoot,
-        preferSemantic: true,
-      }) || undefined;
+      userMemoryPrompt =
+        (await memorySnap.getMemoriesForQueryPromptAsync(task.query, {
+          topK: 6,
+          conversationId: sessionId,
+          workspaceId: session?.workspaceRoot,
+          preferSemantic: true,
+        })) || undefined;
     }
-    const knowledgeContextMessages = await buildKnowledgeContextMessages(task.query);
+    const knowledgeContextMessages = await buildKnowledgeContextMessages(
+      task.query,
+    );
     const executionContextPlan = await buildAgentExecutionContextPlan({
       query: task.query,
       currentSession: session,
@@ -462,14 +505,18 @@ export class AgentRunnerService {
         ? Date.now()
         : undefined,
     });
-    session = useAgentStore.getState().sessions.find((s) => s.id === sessionId) ?? session;
+    session =
+      useAgentStore.getState().sessions.find((s) => s.id === sessionId) ??
+      session;
     const assembledContext = await assembleAgentExecutionContext({
       session,
       query: task.query,
       executionContextPlan,
       userMemoryPrompt,
       skillsPrompt,
-      supplementalSystemPrompt: buildAssistantSupplementalPrompt(aiConfig.system_prompt),
+      supplementalSystemPrompt: buildAssistantSupplementalPrompt(
+        aiConfig.system_prompt,
+      ),
       knowledgeContextMessageCount: knowledgeContextMessages.length,
     });
 
@@ -478,7 +525,10 @@ export class AgentRunnerService {
       ai,
       toolsForRun,
       {
-        maxIterations: Math.max(5, Math.min(50, aiConfig.agent_max_iterations ?? 25)),
+        maxIterations: Math.max(
+          5,
+          Math.min(50, aiConfig.agent_max_iterations ?? 25),
+        ),
         verbose: true,
         fcCompatibilityKey,
         temperature: aiConfig.temperature ?? 0.7,
@@ -522,17 +572,19 @@ export class AgentRunnerService {
     });
   }
 
-  private async executeDirectDeliveryTask(task: AgentScheduledTask): Promise<void> {
+  private async executeDirectDeliveryTask(
+    task: AgentScheduledTask,
+  ): Promise<void> {
     const parsed = parsePersistentScheduledQuery(task.query);
     const inferred = inferDirectScheduledDelivery(task.query);
     const deliveryText =
-      task.delivery_text?.trim()
-      || inferred?.text
-      || (parsed.title.trim() ? `提醒：${parsed.title.trim()}` : "提醒时间到了。");
+      task.delivery_text?.trim() ||
+      inferred?.text ||
+      (parsed.title.trim() ? `提醒：${parsed.title.trim()}` : "提醒时间到了。");
 
     try {
       await invoke("agent_show_notification", {
-        title: "51ToolBox 提醒",
+        title: "HiClow 提醒",
         body: deliveryText,
       });
     } catch (error) {
@@ -581,17 +633,20 @@ export class AgentRunnerService {
     },
   ): Promise<AgentTaskStatusPatch | null> {
     try {
-      const patch = await invoke<AgentTaskStatusPatch>("agent_task_set_status", {
-        taskId,
-        status,
-        retryCount: extra.retryCount,
-        nextRunAt: extra.nextRunAt ?? null,
-        lastError: extra.lastError ?? null,
-        lastStartedAt: extra.lastStartedAt ?? null,
-        lastFinishedAt: extra.lastFinishedAt ?? null,
-        lastDurationMs: extra.lastDurationMs ?? null,
-        lastResultStatus: extra.lastResultStatus ?? null,
-      });
+      const patch = await invoke<AgentTaskStatusPatch>(
+        "agent_task_set_status",
+        {
+          taskId,
+          status,
+          retryCount: extra.retryCount,
+          nextRunAt: extra.nextRunAt ?? null,
+          lastError: extra.lastError ?? null,
+          lastStartedAt: extra.lastStartedAt ?? null,
+          lastFinishedAt: extra.lastFinishedAt ?? null,
+          lastDurationMs: extra.lastDurationMs ?? null,
+          lastResultStatus: extra.lastResultStatus ?? null,
+        },
+      );
       useAgentStore.getState().applyScheduledTaskPatch(patch);
       return patch;
     } catch (e) {

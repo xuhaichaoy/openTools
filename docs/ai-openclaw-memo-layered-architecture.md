@@ -1,16 +1,17 @@
-# 51ToolBox：OpenClaw 主体 + MEMO 增强层实施图
+# HiClow：OpenClaw 主体 + MEMO 增强层实施图
 
-基于当前 `51ToolBox` 的 AI 助手现状、既有改造文档，以及对 `openclaw` 和 MEMO 思路的对比整理。
+基于当前 `HiClow` 的 AI 助手现状、既有改造文档，以及对 `openclaw` 和 MEMO 思路的对比整理。
 
 这份文档回答一个核心问题：
 
 ```text
-如果要继续把 51ToolBox 做到更接近 OpenClaw 的产品体验，
+如果要继续把 HiClow 做到更接近 OpenClaw 的产品体验，
 同时吸收 MEMO 在记忆与稳定性上的优势，
 应该按什么分层来做，而不是把两者混成一团。
 ```
 
 相关文档：
+
 - [AI 助手对标 OpenClaw 体验开发总方案](./ai-openclaw-parity-development-roadmap.md)
 - [AI 助手上下文与长期记忆全量改造方案](./ai-context-memory-full-overhaul-plan.md)
 - [AI 长期记忆说明](./ai-long-term-memory.md)
@@ -19,7 +20,7 @@
 
 ## 1. 总结论
 
-对 `51ToolBox` 最合理的路线不是：
+对 `HiClow` 最合理的路线不是：
 
 - 只学 `openclaw`
 - 或只学 MEMO
@@ -57,7 +58,7 @@ MEMO 决定系统跑久了以后会不会越来越稳。
 4. 多 Agent 的主协调者 + 子任务执行流程
 5. 长会话恢复、上下文解释、桌面端交互体验
 
-这部分是 `51ToolBox` 当前最缺、也最该先补齐的主干。
+这部分是 `HiClow` 当前最缺、也最该先补齐的主干。
 
 ### 2.2 MEMO 更像增强层
 
@@ -70,7 +71,7 @@ MEMO 决定系统跑久了以后会不会越来越稳。
 
 这部分很重要，但前提是主干运行时已经成型。
 
-### 2.3 对 51ToolBox 的直接含义
+### 2.3 对 HiClow 的直接含义
 
 如果现在把 MEMO 当主线，会有两个问题：
 
@@ -295,7 +296,7 @@ src/core/agent/evaluation/
 
 ---
 
-## 4. 对 51ToolBox 的直接实施顺序
+## 4. 对 HiClow 的直接实施顺序
 
 建议分 4 波，而不是 6 层同时开工。
 
@@ -396,7 +397,7 @@ src/core/agent/evaluation/task-fingerprint.ts
 
 ## 7. 最终判断
 
-### 7.1 如果只问“哪个更适合拿来做 51ToolBox 主体”
+### 7.1 如果只问“哪个更适合拿来做 HiClow 主体”
 
 答案是：
 
@@ -416,7 +417,7 @@ MEMO 更适合作为增强层参考
 
 因为它真正把“记忆与稳定性”提升成了系统目标，而不是附属功能。
 
-### 7.3 对 51ToolBox 的最终路线
+### 7.3 对 HiClow 的最终路线
 
 最合理的路线不是二选一，而是：
 
@@ -427,7 +428,7 @@ MEMO 增强
 
 也就是：
 
-1. 用 OpenClaw 的思路把 `51ToolBox` 先做成一套稳的上下文与协作系统
+1. 用 OpenClaw 的思路把 `HiClow` 先做成一套稳的上下文与协作系统
 2. 再用 MEMO 的思路把它做成一套会积累经验、会优先回放关键经验、且可测稳定性的系统
 
 ---

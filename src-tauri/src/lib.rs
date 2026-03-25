@@ -579,6 +579,7 @@ pub fn run() {
             commands::data_export::data_export_confirm_csv_export,
             commands::skill_marketplace::skill_marketplace_clawhub_status,
             commands::skill_marketplace::skill_marketplace_clawhub_verify,
+            commands::skill_marketplace::skill_marketplace_clawhub_search,
             commands::skill_marketplace::skill_marketplace_clawhub_install,
             // ── Native Apps ──
             commands::native_apps::native_calendar_list,

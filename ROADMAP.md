@@ -1,6 +1,6 @@
-# mTools 后续维护与扩展方案
+# HiClow 后续维护与扩展方案
 
-> 基于 v0.1.0 代码全量审查，结合 Launcher（Spotlight 式）产品定位编写。
+> 基于当前仓库实现状态整理。本文保留长期路线价值，但“项目现状总结”已按 2026-03 的实际能力同步更新。
 > 按"必须修 → 短期优化 → 中期扩展 → 新功能扩展 → 远期方向"五层组织，每条附具体文件与改动范围。
 
 ---
@@ -9,13 +9,23 @@
 
 | 维度 | 现状 |
 |------|------|
-| 定位 | AI-First Launcher 效率工具（类 Raycast），窗口 800×60，无装饰、置顶、快捷键唤起 |
-| 阶段 | MVP 后期，核心功能可用，版本 0.1.0 |
-| 核心模块 | AI 对话（Ask）、智能 Agent、截图/OCR、翻译、插件系统 |
-| 已完成模块 | 工作流引擎、知识库 RAG、云同步、笔记中心、开发工具箱、二维码、以图搜图、取色 |
-| 半成品模块 | 数据工坊（骨架）、plugin-embed 模式（已实现但未接入主流程） |
+| 定位 | AI-First 桌面工作台：Launcher + AI 工作台 + Dialog 协作 + IM 渠道 + 数据查询导出 + MCP 扩展 |
+| 阶段 | 可用版本，已超出 MVP 启动器形态，正在向统一 session / mode / security truth 收口 |
+| AI 模式 | Explore / Build / Plan / Dialog 已可用，Review 已分层但仍在继续产品化 |
+| 协作内核 | 已有 `ExecutionContract`、`CollaborationSessionController`、child session、`contractDelegations` |
+| 渠道能力 | 已支持钉钉、飞书，IM runtime 使用 `im_conversation` 独立语义和持久化 |
+| 数据能力 | 已有数据库客户端、自然语言导出、`dbproto/v1` 元数据查询与 preview/confirm export 链路 |
+| 扩展能力 | 已有内置插件、技能系统、MCP 服务器管理与工具接入 |
 | 技术栈 | Tauri v2 + React 19 + TypeScript + Zustand + TailwindCSS v4 |
-| 插件体系 | 双轨：内置插件（React 组件 + registry）+ 外部插件（uTools/Rubick 兼容 + shim） |
+| 插件体系 | 双轨：内置插件（React 组件 + registry）+ 外部插件兼容层 + MCP + Skills |
+
+### 当前最重要的收口方向
+
+1. `SessionControlPlane`：统一 local dialog / IM / runtime-state / persistence 的 session 身份与恢复真相
+2. `AIProductMode`：让 Explore / Build / Plan / Review / Dialog / IM Conversation 成为真实产品模式
+3. `SurfaceSecurityPolicy`：统一 access / approval / tool policy / workspace / sandbox 继承
+4. `dialogExecutionPlan` 兼容尾巴清理：压到 migration-only
+5. compaction / maintenance 运维化：pre-flush、rotate/prune、archive retention、cleanup diagnostics
 
 ---
 

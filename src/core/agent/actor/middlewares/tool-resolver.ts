@@ -42,6 +42,17 @@ export class ToolResolverMiddleware implements ActorMiddleware {
     const builtinResult = createBuiltinAgentTools(
       async () => true,
       ctx.askUser,
+      {
+        getCurrentQuery: () => ctx.query,
+        scheduleClawHubResume: async (resumePrompt) => {
+          const { useActorSystemStore } = await import("@/store/actor-system-store");
+          useActorSystemStore.getState().enqueueFollowUp({
+            content: resumePrompt,
+            displayText: resumePrompt,
+            routingMode: "smart",
+          });
+        },
+      },
     );
     builtinResult.resetPerRunState();
 

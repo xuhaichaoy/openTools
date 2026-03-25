@@ -1,3 +1,6 @@
 /target
 .env
+.env.*
+!.env.example
 *.tar.gz
+*.tgz

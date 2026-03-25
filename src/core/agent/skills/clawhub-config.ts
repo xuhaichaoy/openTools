@@ -11,8 +11,16 @@ export interface ClawHubPersonalConfig {
   updatedAt: number;
 }
 
-export const DEFAULT_CLAWHUB_SITE_URL = "https://clawhub.com";
-export const DEFAULT_CLAWHUB_REGISTRY_URL = "https://registry.clawhub.com";
+export const DEFAULT_CLAWHUB_SITE_URL = "https://clawhub.ai";
+export const DEFAULT_CLAWHUB_REGISTRY_URL = "https://clawhub.ai";
+
+export function normalizeClawHubSiteUrl(_value?: string | null): string {
+  return DEFAULT_CLAWHUB_SITE_URL;
+}
+
+export function normalizeClawHubRegistryUrl(_value?: string | null): string {
+  return DEFAULT_CLAWHUB_REGISTRY_URL;
+}
 
 export function createDefaultClawHubPersonalConfig(): ClawHubPersonalConfig {
   return {
@@ -30,8 +38,8 @@ export async function loadClawHubPersonalConfig(): Promise<ClawHubPersonalConfig
     if (!raw) return createDefaultClawHubPersonalConfig();
     const parsed = JSON.parse(raw) as Partial<ClawHubPersonalConfig>;
     return {
-      siteUrl: parsed.siteUrl?.trim() || DEFAULT_CLAWHUB_SITE_URL,
-      registryUrl: parsed.registryUrl?.trim() || DEFAULT_CLAWHUB_REGISTRY_URL,
+      siteUrl: normalizeClawHubSiteUrl(parsed.siteUrl),
+      registryUrl: normalizeClawHubRegistryUrl(parsed.registryUrl),
       token: typeof parsed.token === "string" ? parsed.token : "",
       updatedAt: typeof parsed.updatedAt === "number" ? parsed.updatedAt : Date.now(),
     };
@@ -49,8 +57,8 @@ export async function saveClawHubPersonalConfig(
   config: Omit<ClawHubPersonalConfig, "updatedAt">,
 ): Promise<ClawHubPersonalConfig> {
   const next: ClawHubPersonalConfig = {
-    siteUrl: config.siteUrl.trim() || DEFAULT_CLAWHUB_SITE_URL,
-    registryUrl: config.registryUrl.trim() || DEFAULT_CLAWHUB_REGISTRY_URL,
+    siteUrl: DEFAULT_CLAWHUB_SITE_URL,
+    registryUrl: DEFAULT_CLAWHUB_REGISTRY_URL,
     token: config.token,
     updatedAt: Date.now(),
   };

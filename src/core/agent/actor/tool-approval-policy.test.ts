@@ -29,92 +29,118 @@ describe("tool-approval-policy", () => {
   });
 
   it("auto-allows workspace file edits in auto review mode", () => {
-    const assessment = assessToolApproval("write_file", {
-      path: "/Users/haichao/Desktop/work/51ToolBox/src/demo.ts",
-      content: "export const demo = true;",
-    }, {
-      workspace: "/Users/haichao/Desktop/work/51ToolBox",
-    });
+    const assessment = assessToolApproval(
+      "write_file",
+      {
+        path: "/Users/haichao/Desktop/work/HiClow/src/demo.ts",
+        content: "export const demo = true;",
+      },
+      {
+        workspace: "/Users/haichao/Desktop/work/HiClow",
+      },
+    );
 
     expect(assessment.decision).toBe("allow");
     expect(assessment.risk).toBe("low");
   });
 
   it("keeps sensitive path edits behind manual confirmation", () => {
-    const assessment = assessToolApproval("write_file", {
-      path: "/Users/haichao/.ssh/config",
-      content: "Host *",
-    }, {
-      workspace: "/Users/haichao/Desktop/work/51ToolBox",
-    });
+    const assessment = assessToolApproval(
+      "write_file",
+      {
+        path: "/Users/haichao/.ssh/config",
+        content: "Host *",
+      },
+      {
+        workspace: "/Users/haichao/Desktop/work/HiClow",
+      },
+    );
 
     expect(assessment.decision).toBe("ask");
     expect(assessment.risk).toBe("high");
   });
 
   it("uses identical cache keys for repeated shell approvals", () => {
-    expect(buildToolApprovalCacheKey("run_shell_command", {
-      command: "pwd",
-      workdir: "/tmp/demo",
-    })).toBe(buildToolApprovalCacheKey("run_shell_command", {
-      command: "pwd",
-      workdir: "/tmp/demo",
-    }));
+    expect(
+      buildToolApprovalCacheKey("run_shell_command", {
+        command: "pwd",
+        workdir: "/tmp/demo",
+      }),
+    ).toBe(
+      buildToolApprovalCacheKey("run_shell_command", {
+        command: "pwd",
+        workdir: "/tmp/demo",
+      }),
+    );
   });
 
   it("keeps strict mode available for medium-risk validation commands", () => {
-    const assessment = assessToolApproval("run_shell_command", {
-      command: "npm test -- --runInBand",
-    }, {
-      approvalLevel: "strict",
-    });
+    const assessment = assessToolApproval(
+      "run_shell_command",
+      {
+        command: "npm test -- --runInBand",
+      },
+      {
+        approvalLevel: "strict",
+      },
+    );
 
     expect(assessment.decision).toBe("ask");
     expect(assessment.risk).toBe("medium");
   });
 
   it("treats approvalMode as the first-class fallback before legacy approvalLevel", () => {
-    const assessment = assessToolApproval("run_shell_command", {
-      command: "npm test -- --runInBand",
-    }, {
-      approvalMode: "strict",
-    });
+    const assessment = assessToolApproval(
+      "run_shell_command",
+      {
+        command: "npm test -- --runInBand",
+      },
+      {
+        approvalMode: "strict",
+      },
+    );
 
     expect(assessment.decision).toBe("ask");
     expect(assessment.risk).toBe("medium");
   });
 
   it("denies mutating tools under read-only access mode before human approval", () => {
-    const assessment = assessToolApproval("write_file", {
-      path: "/Users/haichao/Desktop/work/51ToolBox/src/demo.ts",
-      content: "export const demo = true;",
-    }, {
-      executionPolicy: {
-        accessMode: "read_only",
-        approvalMode: "off",
+    const assessment = assessToolApproval(
+      "write_file",
+      {
+        path: "/Users/haichao/Desktop/work/HiClow/src/demo.ts",
+        content: "export const demo = true;",
       },
-      workspace: "/Users/haichao/Desktop/work/51ToolBox",
-    });
+      {
+        executionPolicy: {
+          accessMode: "read_only",
+          approvalMode: "off",
+        },
+        workspace: "/Users/haichao/Desktop/work/HiClow",
+      },
+    );
 
     expect(assessment.decision).toBe("deny");
     expect(assessment.layer).toBe("policy");
   });
 
   it("clamps child execution policy so it cannot widen parent permissions", () => {
-    expect(resolveExecutionPolicyInheritance({
-      parentPolicy: {
-        accessMode: "auto",
-        approvalMode: "permissive",
-      },
-      boundaryPolicy: {
-        accessMode: "read_only",
-        approvalMode: "strict",
-      },
-      overridePolicy: {
-        accessMode: "full_access",
-        approvalMode: "off",
-      },
-    })).toEqual({
+    expect(
+      resolveExecutionPolicyInheritance({
+        parentPolicy: {
+          accessMode: "auto",
+          approvalMode: "permissive",
+        },
+        boundaryPolicy: {
+          accessMode: "read_only",
+          approvalMode: "strict",
+        },
+        overridePolicy: {
+          accessMode: "full_access",
+          approvalMode: "off",
+        },
+      }),
+    ).toEqual({
       accessMode: "read_only",
       approvalMode: "strict",
     });

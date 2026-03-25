@@ -31,7 +31,7 @@ function isSupportedNode(version) {
 
 if (!isSupportedNode(process.version)) {
   console.error("");
-  console.error("Unsupported Node.js version for 51ToolBox.");
+  console.error("Unsupported Node.js version for HiClow.");
   console.error(`Current: ${process.version}`);
   console.error("Required: ^20.19.0 || >=22.12.0");
   console.error("Recommended: nvm use 20.19.6");

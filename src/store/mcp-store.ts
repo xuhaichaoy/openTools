@@ -50,7 +50,10 @@ export function buildMcpServerAlias(serverId: string): string {
   return `s${hashToBase36(serverId).slice(0, 6)}`;
 }
 
-export function buildMcpToolName(serverId: string, realToolName: string): string {
+export function buildMcpToolName(
+  serverId: string,
+  realToolName: string,
+): string {
   return `mcp_${buildMcpServerAlias(serverId)}_${realToolName}`;
 }
 
@@ -74,7 +77,9 @@ export function parseMcpToolName(
   if (!parts) return null;
 
   const [, alias, realToolName] = parts;
-  const matchedServer = servers.find((server) => buildMcpServerAlias(server.id) === alias);
+  const matchedServer = servers.find(
+    (server) => buildMcpServerAlias(server.id) === alias,
+  );
   if (!matchedServer) return null;
 
   return {
@@ -96,7 +101,10 @@ interface McpState {
   saveServers: (servers?: McpServerConfig[]) => Promise<void>;
   addServer: (config: McpServerConfig) => Promise<void>;
   removeServer: (id: string) => Promise<void>;
-  updateServer: (id: string, partial: Partial<McpServerConfig>) => Promise<void>;
+  updateServer: (
+    id: string,
+    partial: Partial<McpServerConfig>,
+  ) => Promise<void>;
   startServer: (id: string) => Promise<void>;
   stopServer: (id: string) => Promise<void>;
   refreshTools: (id: string) => Promise<void>;
@@ -210,26 +218,38 @@ export const useMcpStore = create<McpState>((set, get) => ({
         configs.map(async (config) => {
           if (!config.enabled) return [config.id, "offline"] as const;
           try {
-            const running = await invoke<boolean>("mcp_get_server_status", { serverId: config.id });
+            const running = await invoke<boolean>("mcp_get_server_status", {
+              serverId: config.id,
+            });
             return [config.id, running ? "online" : "offline"] as const;
           } catch {
             return [config.id, "offline"] as const;
           }
         }),
       );
-      const serverStatus = Object.fromEntries(statusEntries) as Record<string, "online" | "offline" | "starting">;
+      const serverStatus = Object.fromEntries(statusEntries) as Record<
+        string,
+        "online" | "offline" | "starting"
+      >;
 
       set({ servers: configs, serverStatus });
 
       await Promise.allSettled(
         configs
-          .filter((config) => config.enabled && serverStatus[config.id] === "online")
+          .filter(
+            (config) => config.enabled && serverStatus[config.id] === "online",
+          )
           .map((config) => get().refreshTools(config.id)),
       );
 
       await Promise.allSettled(
         configs
-          .filter((config) => config.enabled && config.auto_start && serverStatus[config.id] !== "online")
+          .filter(
+            (config) =>
+              config.enabled &&
+              config.auto_start &&
+              serverStatus[config.id] !== "online",
+          )
           .map((config) => get().startServer(config.id)),
       );
     } catch (e) {
@@ -255,7 +275,10 @@ export const useMcpStore = create<McpState>((set, get) => ({
       try {
         await get().startServer(config.id);
       } catch (e) {
-        handleError(e, { context: `启动 MCP 服务器 (${config.name})`, silent: true });
+        handleError(e, {
+          context: `启动 MCP 服务器 (${config.name})`,
+          silent: true,
+        });
       }
     }
   },
@@ -263,7 +286,9 @@ export const useMcpStore = create<McpState>((set, get) => ({
   removeServer: async (id) => {
     try {
       await invoke("stop_mcp_server", { serverId: id }).catch(() => {});
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     const next = get().servers.filter((s) => s.id !== id);
     const { serverStatus, serverTools, serverResources, serverPrompts } = get();
     const newStatus = { ...serverStatus };
@@ -295,7 +320,11 @@ export const useMcpStore = create<McpState>((set, get) => ({
   startServer: async (id) => {
     const server = get().servers.find((s) => s.id === id);
     if (!server) return;
-    if (get().serverStatus[id] === "online" || get().serverStatus[id] === "starting") return;
+    if (
+      get().serverStatus[id] === "online" ||
+      get().serverStatus[id] === "starting"
+    )
+      return;
 
     set((s) => ({
       serverStatus: { ...s.serverStatus, [id]: "starting" },
@@ -313,7 +342,7 @@ export const useMcpStore = create<McpState>((set, get) => ({
         await sendRpc(id, "initialize", {
           protocolVersion: "2024-11-05",
           capabilities: {},
-          clientInfo: { name: "51ToolBox", version: "0.1.0" },
+          clientInfo: { name: "HiClow", version: "0.1.0" },
         });
         await sendNotification(
           id,
@@ -342,7 +371,9 @@ export const useMcpStore = create<McpState>((set, get) => ({
   stopServer: async (id) => {
     try {
       await invoke("stop_mcp_server", { serverId: id });
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     set((s) => ({
       serverStatus: { ...s.serverStatus, [id]: "offline" },
       serverTools: { ...s.serverTools, [id]: [] },
@@ -391,7 +422,9 @@ export const useMcpStore = create<McpState>((set, get) => ({
             [id]: resourcesResult?.resources ?? [],
           },
         }));
-      } catch { /* server may not support resources */ }
+      } catch {
+        /* server may not support resources */
+      }
 
       // Try prompts/list (optional)
       try {
@@ -409,7 +442,9 @@ export const useMcpStore = create<McpState>((set, get) => ({
             [id]: promptsResult?.prompts ?? [],
           },
         }));
-      } catch { /* server may not support prompts */ }
+      } catch {
+        /* server may not support prompts */
+      }
     } catch (e) {
       handleError(e, { context: `刷新 MCP 工具列表 (${id})`, silent: true });
     }
@@ -420,7 +455,9 @@ export const useMcpStore = create<McpState>((set, get) => ({
     const onlineServers = servers.filter(
       (s) => s.enabled && serverStatus[s.id] === "online",
     );
-    await Promise.allSettled(onlineServers.map((s) => get().refreshTools(s.id)));
+    await Promise.allSettled(
+      onlineServers.map((s) => get().refreshTools(s.id)),
+    );
   },
 
   testConnection: async (id) => {
@@ -460,11 +497,13 @@ export async function executeMcpTool(
 ): Promise<{ success: boolean; result: string }> {
   const mcpState = useMcpStore.getState();
   const parsedTool = parseMcpToolName(toolName, mcpState.servers);
-  if (!parsedTool) return { success: false, result: `无法解析工具名: ${toolName}` };
+  if (!parsedTool)
+    return { success: false, result: `无法解析工具名: ${toolName}` };
 
   const { serverId, realToolName } = parsedTool;
   const server = mcpState.servers.find((s) => s.id === serverId);
-  if (!server) return { success: false, result: `MCP 服务器 ${serverId} 未找到` };
+  if (!server)
+    return { success: false, result: `MCP 服务器 ${serverId} 未找到` };
 
   try {
     const args = JSON.parse(argsJson || "{}");

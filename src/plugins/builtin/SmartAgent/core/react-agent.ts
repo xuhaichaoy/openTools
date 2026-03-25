@@ -19,7 +19,10 @@ import type {
 import type { ExecutionPolicy, ThinkingLevel } from "@/core/agent/actor/types";
 import { inferCodingExecutionProfile } from "@/core/agent/coding-profile";
 import type { PluginAction } from "@/core/plugin-system/plugin-interface";
-import { applyContextBudget, type PromptSection } from "@/core/agent/context-budget";
+import {
+  applyContextBudget,
+  type PromptSection,
+} from "@/core/agent/context-budget";
 import { mergeStreamChunk } from "@/core/ai/stream-chunk-merge";
 import { parseToolCallArguments } from "./tool-call-arguments";
 
@@ -64,11 +67,22 @@ export interface AgentTool {
   readonly?: boolean;
   /** 单工具执行超时（毫秒），不设则无超时 */
   timeout?: number;
-  execute: (params: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>;
+  execute: (
+    params: Record<string, unknown>,
+    signal?: AbortSignal,
+  ) => Promise<unknown>;
 }
 
 export interface AgentStep {
-  type: "thought" | "action" | "observation" | "answer" | "error" | "thinking" | "tool_streaming" | "checkpoint";
+  type:
+    | "thought"
+    | "action"
+    | "observation"
+    | "answer"
+    | "error"
+    | "thinking"
+    | "tool_streaming"
+    | "checkpoint";
   content: string;
   toolName?: string;
   toolInput?: Record<string, unknown>;
@@ -123,7 +137,14 @@ export interface AgentConfig {
   /** 运行时思考深度（由 Actor/Dialog 透传） */
   thinkingLevel?: ThinkingLevel;
   /** Actor 收件箱排空回调：每次 iteration 间隙调用，返回待处理消息（空数组 = 无新消息） */
-  inboxDrain?: () => { id: string; from: string; content: string; expectReply?: boolean; replyTo?: string; images?: string[] }[];
+  inboxDrain?: () => {
+    id: string;
+    from: string;
+    content: string;
+    expectReply?: boolean;
+    replyTo?: string;
+    images?: string[];
+  }[];
   /** 对话历史上下文：作为多轮 messages 注入（system 之后、当前 query 之前），用于 Actor 会话连续性 */
   contextMessages?: Array<{ role: "user" | "assistant"; content: string }>;
 }
@@ -170,7 +191,9 @@ function formatIterationStopHeadline(
   }
 }
 
-function formatRepeatedToolPattern(toolCalls: AIToolCall[]): string | undefined {
+function formatRepeatedToolPattern(
+  toolCalls: AIToolCall[],
+): string | undefined {
   const counts = new Map<string, number>();
   for (const toolCall of toolCalls) {
     const name = toolCall.function.name?.trim();
@@ -191,7 +214,9 @@ function buildRepeatedToolCallCorrectionMessage(toolPattern?: string): string {
     "请先基于当前已有结果说明卡点在哪里。",
     "如果还要继续，必须至少改变其中一项：工具、参数、目标对象，或直接给出结论。",
     "若这是有副作用的工具（如创建页面、写文件、发请求），默认视为上一次已经生效，不要盲目重试。",
-  ].filter(Boolean).join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 const DEFAULT_CONFIG: AgentConfig = {
@@ -215,19 +240,33 @@ function inferMcpParamFromUserInput(
   userInput: string,
 ): string | null {
   // URL 类参数
-  if (paramKey === "url" || paramDesc.includes("url") || paramDesc.includes("navigate")) {
+  if (
+    paramKey === "url" ||
+    paramDesc.includes("url") ||
+    paramDesc.includes("navigate")
+  ) {
     const match = userInput.match(URL_PATTERN);
     if (match) return match[0];
   }
   // 文件路径类参数
-  if (paramKey === "path" || paramKey === "filepath" || paramKey === "file_path"
-    || paramDesc.includes("file") || paramDesc.includes("path")) {
+  if (
+    paramKey === "path" ||
+    paramKey === "filepath" ||
+    paramKey === "file_path" ||
+    paramDesc.includes("file") ||
+    paramDesc.includes("path")
+  ) {
     const match = userInput.match(FILE_PATH_PATTERN);
     if (match) return match[0];
   }
   // 搜索 / 查询类参数：提取引号中的内容或 URL 去除后的关键文本
-  if (paramKey === "query" || paramKey === "search" || paramKey === "keyword"
-    || paramDesc.includes("search") || paramDesc.includes("query")) {
+  if (
+    paramKey === "query" ||
+    paramKey === "search" ||
+    paramKey === "keyword" ||
+    paramDesc.includes("search") ||
+    paramDesc.includes("query")
+  ) {
     // 先尝试提取引号中的内容
     const quotedMatch = userInput.match(/["'「」""]([^"'「」""]+)["'「」""]/);
     if (quotedMatch) return quotedMatch[1].trim();
@@ -303,7 +342,10 @@ function extractNumericIntentTokens(input: string): string[] {
   return [...new Set(matches.map((item) => item.toLowerCase()))];
 }
 
-function countExactTokenMatches(tokens: readonly string[], candidate?: string): number {
+function countExactTokenMatches(
+  tokens: readonly string[],
+  candidate?: string,
+): number {
   if (!candidate || tokens.length === 0) return 0;
   const normalized = candidate.toLowerCase();
   let score = 0;
@@ -320,13 +362,15 @@ function isFCCompatibilityErrorMessage(message: string): boolean {
   if (!normalized) return false;
   if (normalized.startsWith("FC_INCOMPATIBLE")) return true;
 
-  return /(?:function calling|tool(?:_calls?| calling| use| choice)?).{0,48}(?:not supported|unsupported|unavailable|disabled|invalid|forbidden)|does not support.{0,48}(?:tools|tool use|function calling)|unknown parameter.{0,48}(?:tools|tool_choice)|extra inputs? are not permitted.{0,48}(?:tools|tool_choice)|tool_choice.{0,32}(?:not supported|unsupported|invalid)/i
-    .test(normalized);
+  return /(?:function calling|tool(?:_calls?| calling| use| choice)?).{0,48}(?:not supported|unsupported|unavailable|disabled|invalid|forbidden)|does not support.{0,48}(?:tools|tool use|function calling)|unknown parameter.{0,48}(?:tools|tool_choice)|extra inputs? are not permitted.{0,48}(?:tools|tool_choice)|tool_choice.{0,32}(?:not supported|unsupported|invalid)/i.test(
+    normalized,
+  );
 }
 
 function isTransportOrTimeoutErrorMessage(message: string): boolean {
-  return /(timeout|timed out|超时|卡住|请求失败|网络|network|econn|socket hang up|connection reset|流读取错误|503|504|502|rate limit|overloaded|temporarily unavailable)/i
-    .test(message);
+  return /(timeout|timed out|超时|卡住|请求失败|网络|network|econn|socket hang up|connection reset|流读取错误|503|504|502|rate limit|overloaded|temporarily unavailable)/i.test(
+    message,
+  );
 }
 
 // ── Context 管理 ──
@@ -336,20 +380,29 @@ import { estimateTokens, estimateMessagesTokens } from "@/core/ai/token-utils";
 const DEFAULT_CONTEXT_LIMIT = 100_000;
 const CONTEXT_COMPACT_THRESHOLD = 0.75;
 const PROCESSED_HISTORY_IMAGE_MARKER = "[历史图片已处理，无需重复发送原图]";
-const TOOL_CONTEXT_TRUNCATION_NOTICE = "[工具输出已按上下文预算压缩，如需细节请缩小范围或重新读取目标片段]";
-const TOOL_CONTEXT_COMPACTION_PLACEHOLDER = "[较早工具输出已移出上下文以节省空间，必要时请重新执行该工具查看详情]";
+const TOOL_CONTEXT_TRUNCATION_NOTICE =
+  "[工具输出已按上下文预算压缩，如需细节请缩小范围或重新读取目标片段]";
+const TOOL_CONTEXT_COMPACTION_PLACEHOLDER =
+  "[较早工具输出已移出上下文以节省空间，必要时请重新执行该工具查看详情]";
 const SINGLE_TOOL_RESULT_CONTEXT_SHARE = 0.18;
 const TOTAL_TOOL_RESULT_CONTEXT_SHARE = 0.35;
 const PRESERVED_IMAGE_CONTEXT_COUNT = 1;
 
 function summarizeDiscardedMiddle<
-  T extends { role: string; content: string | null; tool_calls?: unknown; [k: string]: unknown },
+  T extends {
+    role: string;
+    content: string | null;
+    tool_calls?: unknown;
+    [k: string]: unknown;
+  },
 >(middle: T[]): string {
   const toolNames: string[] = [];
   const keyFindings: string[] = [];
   for (const m of middle) {
     if (m.role === "assistant" && m.tool_calls && Array.isArray(m.tool_calls)) {
-      for (const tc of m.tool_calls as Array<{ function?: { name?: string } }>) {
+      for (const tc of m.tool_calls as Array<{
+        function?: { name?: string };
+      }>) {
         if (tc.function?.name) toolNames.push(tc.function.name);
       }
     }
@@ -362,7 +415,9 @@ function summarizeDiscardedMiddle<
   const parts: string[] = ["[上下文压缩摘要]"];
   if (toolNames.length > 0) {
     const unique = [...new Set(toolNames)];
-    parts.push(`已执行工具: ${unique.join(", ")} (共${toolNames.length}次调用)`);
+    parts.push(
+      `已执行工具: ${unique.join(", ")} (共${toolNames.length}次调用)`,
+    );
   }
   if (keyFindings.length > 0) {
     parts.push(`关键步骤: ${keyFindings.slice(-3).join(" → ")}`);
@@ -412,14 +467,18 @@ function compactMessages<
     // 保留最近3组工具调用
     const keepCount = Math.min(3, toolCallGroups.length);
     const recentGroups = toolCallGroups.slice(-keepCount);
-    const discardedGroups = toolCallGroups.slice(0, toolCallGroups.length - keepCount);
+    const discardedGroups = toolCallGroups.slice(
+      0,
+      toolCallGroups.length - keepCount,
+    );
 
     // 保留最后一条纯文本 assistant，其余 nonGroupMessages 视为可丢弃
     const keptNonGroup = new Set<T>();
     const assistantTexts = nonGroupMessages.filter(
       (m) => m.role === "assistant" && !m.tool_calls,
     );
-    if (assistantTexts.length > 0) keptNonGroup.add(assistantTexts[assistantTexts.length - 1]);
+    if (assistantTexts.length > 0)
+      keptNonGroup.add(assistantTexts[assistantTexts.length - 1]);
 
     const discardedMessages = [
       ...discardedGroups.flat(),
@@ -428,7 +487,10 @@ function compactMessages<
     if (discardedMessages.length > 0) {
       const summary = summarizeDiscardedMiddle(discardedMessages);
       result.push({ role: "user", content: summary } as unknown as T);
-      result.push({ role: "assistant", content: "好的，我已了解之前的执行历史，继续当前任务。" } as unknown as T);
+      result.push({
+        role: "assistant",
+        content: "好的，我已了解之前的执行历史，继续当前任务。",
+      } as unknown as T);
     }
 
     const compactedGroups = recentGroups.map((group) =>
@@ -436,7 +498,13 @@ function compactMessages<
         if (m.role === "tool") {
           const content = m.content || "";
           if (content.length > 500) {
-            return { ...m, content: content.slice(0, 200) + "\n... [已压缩] ...\n" + content.slice(-150) };
+            return {
+              ...m,
+              content:
+                content.slice(0, 200) +
+                "\n... [已压缩] ...\n" +
+                content.slice(-150),
+            };
           }
         }
         return m;
@@ -471,7 +539,12 @@ function cloneMessages<
 }
 
 function pruneProcessedHistoryImages<
-  T extends { role: string; content: string | null; images?: string[]; [k: string]: unknown },
+  T extends {
+    role: string;
+    content: string | null;
+    images?: string[];
+    [k: string]: unknown;
+  },
 >(messages: T[]): T[] {
   const imageMessageIndexes: number[] = [];
   for (let i = 0; i < messages.length; i++) {
@@ -481,7 +554,8 @@ function pruneProcessedHistoryImages<
     }
   }
 
-  if (imageMessageIndexes.length <= PRESERVED_IMAGE_CONTEXT_COUNT) return messages;
+  if (imageMessageIndexes.length <= PRESERVED_IMAGE_CONTEXT_COUNT)
+    return messages;
 
   const preservedIndexes = new Set(
     imageMessageIndexes.slice(-PRESERVED_IMAGE_CONTEXT_COUNT),
@@ -495,7 +569,10 @@ function pruneProcessedHistoryImages<
 
     nextMessages[i] = {
       ...nextMessages[i],
-      content: appendContextMarker(nextMessages[i].content, PROCESSED_HISTORY_IMAGE_MARKER),
+      content: appendContextMarker(
+        nextMessages[i].content,
+        PROCESSED_HISTORY_IMAGE_MARKER,
+      ),
     };
     delete nextMessages[i].images;
   }
@@ -533,7 +610,11 @@ function findSliceStartByTokenBudget(text: string, maxTokens: number): number {
   return low;
 }
 
-function truncateTextToTokenBudget(text: string, maxTokens: number, notice: string): string {
+function truncateTextToTokenBudget(
+  text: string,
+  maxTokens: number,
+  notice: string,
+): string {
   if (!text) return text;
   if (estimateTokens(text) <= maxTokens) return text;
 
@@ -555,15 +636,25 @@ function truncateTextToTokenBudget(text: string, maxTokens: number, notice: stri
   if (estimateTokens(combined) <= normalizedBudget) return combined;
 
   let adjustedTailStart = tailStart;
-  while (adjustedTailStart < text.length && estimateTokens(combined) > normalizedBudget) {
-    adjustedTailStart = Math.min(text.length, adjustedTailStart + Math.max(16, Math.floor((text.length - adjustedTailStart) * 0.15)));
+  while (
+    adjustedTailStart < text.length &&
+    estimateTokens(combined) > normalizedBudget
+  ) {
+    adjustedTailStart = Math.min(
+      text.length,
+      adjustedTailStart +
+        Math.max(16, Math.floor((text.length - adjustedTailStart) * 0.15)),
+    );
     const nextTail = text.slice(adjustedTailStart).trimStart();
     combined = [head, notice, nextTail].filter(Boolean).join("\n\n");
   }
 
   if (estimateTokens(combined) <= normalizedBudget) return combined;
 
-  const reducedHeadEnd = findSliceEndByTokenBudget(head, Math.max(16, normalizedBudget - noticeTokens));
+  const reducedHeadEnd = findSliceEndByTokenBudget(
+    head,
+    Math.max(16, normalizedBudget - noticeTokens),
+  );
   const reducedHead = head.slice(0, reducedHeadEnd).trimEnd();
   return [reducedHead, notice].filter(Boolean).join("\n\n");
 }
@@ -582,18 +673,37 @@ function buildToolContextNotice(toolName?: string): string {
 }
 
 function enforceToolResultContextBudget<
-  T extends { role: string; content: string | null; name?: string; [k: string]: unknown },
+  T extends {
+    role: string;
+    content: string | null;
+    name?: string;
+    [k: string]: unknown;
+  },
 >(messages: T[], contextLimit: number): T[] {
-  const threshold = Math.max(512, Math.floor(contextLimit * CONTEXT_COMPACT_THRESHOLD));
-  const singleToolBudget = Math.max(192, Math.floor(threshold * SINGLE_TOOL_RESULT_CONTEXT_SHARE));
-  const totalToolBudget = Math.max(singleToolBudget, Math.floor(threshold * TOTAL_TOOL_RESULT_CONTEXT_SHARE));
+  const threshold = Math.max(
+    512,
+    Math.floor(contextLimit * CONTEXT_COMPACT_THRESHOLD),
+  );
+  const singleToolBudget = Math.max(
+    192,
+    Math.floor(threshold * SINGLE_TOOL_RESULT_CONTEXT_SHARE),
+  );
+  const totalToolBudget = Math.max(
+    singleToolBudget,
+    Math.floor(threshold * TOTAL_TOOL_RESULT_CONTEXT_SHARE),
+  );
 
   let nextMessages: T[] | null = null;
   const toolIndexes: number[] = [];
 
   for (let i = 0; i < messages.length; i++) {
     const message = messages[i];
-    if (message.role !== "tool" || typeof message.content !== "string" || !message.content) continue;
+    if (
+      message.role !== "tool" ||
+      typeof message.content !== "string" ||
+      !message.content
+    )
+      continue;
     toolIndexes.push(i);
     const truncated = truncateTextToTokenBudget(
       message.content,
@@ -643,7 +753,13 @@ function enforceToolResultContextBudget<
 }
 
 function prepareMessagesForModel<
-  T extends { role: string; content: string | null; images?: string[]; name?: string; [k: string]: unknown },
+  T extends {
+    role: string;
+    content: string | null;
+    images?: string[];
+    name?: string;
+    [k: string]: unknown;
+  },
 >(messages: T[], contextLimit: number): T[] {
   const pruned = pruneProcessedHistoryImages(messages);
   const compacted = compactMessages(pruned, contextLimit);
@@ -665,15 +781,23 @@ function truncateToolOutput(output: string, toolName?: string): string {
   // 根据工具类型提供可操作的恢复指引
   let recoveryHint = "";
   if (toolName === "read_file" || toolName === "read_text_file") {
-    recoveryHint = "\n<NOTE>输出已截断。请使用 read_file_range 指定 start_line/end_line 分段读取需要的部分。</NOTE>";
+    recoveryHint =
+      "\n<NOTE>输出已截断。请使用 read_file_range 指定 start_line/end_line 分段读取需要的部分。</NOTE>";
   } else if (toolName === "search_in_files") {
-    recoveryHint = "\n<NOTE>搜索结果已截断。请缩小搜索范围：添加 file_pattern 过滤文件类型，或减小 max_results，或使用更精确的 query。</NOTE>";
-  } else if (toolName === "run_shell_command" || toolName === "persistent_shell") {
-    recoveryHint = "\n<NOTE>命令输出已截断。请在命令中配合 grep/head/tail 过滤输出，或将输出重定向到文件后用 read_file_range 分段读取。</NOTE>";
+    recoveryHint =
+      "\n<NOTE>搜索结果已截断。请缩小搜索范围：添加 file_pattern 过滤文件类型，或减小 max_results，或使用更精确的 query。</NOTE>";
+  } else if (
+    toolName === "run_shell_command" ||
+    toolName === "persistent_shell"
+  ) {
+    recoveryHint =
+      "\n<NOTE>命令输出已截断。请在命令中配合 grep/head/tail 过滤输出，或将输出重定向到文件后用 read_file_range 分段读取。</NOTE>";
   } else if (toolName === "list_directory") {
-    recoveryHint = "\n<NOTE>目录列表已截断。请指定更深层的子目录路径来缩小范围。</NOTE>";
+    recoveryHint =
+      "\n<NOTE>目录列表已截断。请指定更深层的子目录路径来缩小范围。</NOTE>";
   } else {
-    recoveryHint = "\n<NOTE>输出已截断。请尝试缩小请求范围以获取完整结果。</NOTE>";
+    recoveryHint =
+      "\n<NOTE>输出已截断。请尝试缩小请求范围以获取完整结果。</NOTE>";
   }
 
   return `${head}\n\n... [已省略 ${omitted} 字符] ...${recoveryHint}\n\n${tail}`;
@@ -697,7 +821,14 @@ class ToolTimeoutError extends Error {
 export interface TrajectoryEntry {
   step: number;
   timestamp: number;
-  type: "llm_call" | "tool_call" | "tool_result" | "mode_switch" | "error" | "reflection" | "answer";
+  type:
+    | "llm_call"
+    | "tool_call"
+    | "tool_result"
+    | "mode_switch"
+    | "error"
+    | "reflection"
+    | "answer";
   mode?: AgentMode;
   toolName?: string;
   toolParams?: Record<string, unknown>;
@@ -717,11 +848,20 @@ const CONSECUTIVE_LIMIT_TOOLS = new Set(["sequential_thinking"]);
 const SYSTEM_INFO_LOG_PREFIX = "[ReActAgent][get_system_info]";
 const FILE_REGEN_LOG_PREFIX = "[ReActAgent][file_regen]";
 const FILE_REGEN_PARSE_LOG_PREFIX = "[ReActAgent][file_regen_parse]";
-const FILE_WRITE_TOOL_NAMES = new Set(["write_file", "str_replace_edit", "json_edit"]);
+const FILE_WRITE_TOOL_NAMES = new Set([
+  "write_file",
+  "str_replace_edit",
+  "json_edit",
+]);
 const LOOP_DETECT_EXEMPT_TOOLS = new Set([
-  "get_current_time", "get_system_info", "calculate",
-  "native_calendar_list", "native_reminder_lists", "native_shortcuts_list",
-  "native_app_list", "native_app_list_interactive",
+  "get_current_time",
+  "get_system_info",
+  "calculate",
+  "native_calendar_list",
+  "native_reminder_lists",
+  "native_shortcuts_list",
+  "native_app_list",
+  "native_app_list_interactive",
 ]);
 
 interface FileMutationTrace {
@@ -745,7 +885,10 @@ class LoopDetector {
     }
 
     if (toolName === this.lastToolName) {
-      this.consecutiveToolCounts.set(toolName, (this.consecutiveToolCounts.get(toolName) ?? 1) + 1);
+      this.consecutiveToolCounts.set(
+        toolName,
+        (this.consecutiveToolCounts.get(toolName) ?? 1) + 1,
+      );
     } else {
       this.consecutiveToolCounts.set(toolName, 1);
       this.lastToolName = toolName;
@@ -771,10 +914,17 @@ class LoopDetector {
     return { looping: false };
   }
 
-  detectConsecutiveSameTool(): { looping: boolean; tool?: string; count?: number } {
+  detectConsecutiveSameTool(): {
+    looping: boolean;
+    tool?: string;
+    count?: number;
+  } {
     if (!this.lastToolName) return { looping: false };
     const count = this.consecutiveToolCounts.get(this.lastToolName) ?? 0;
-    if (count >= SAME_TOOL_CONSECUTIVE_LIMIT && CONSECUTIVE_LIMIT_TOOLS.has(this.lastToolName)) {
+    if (
+      count >= SAME_TOOL_CONSECUTIVE_LIMIT &&
+      CONSECUTIVE_LIMIT_TOOLS.has(this.lastToolName)
+    ) {
       return { looping: true, tool: this.lastToolName, count };
     }
     return { looping: false };
@@ -896,13 +1046,20 @@ export class ReActAgent {
   private isQuickMathQuery(userInput: string): boolean {
     const q = userInput.trim();
     if (!q || q.length > 80) return false;
-    if (inferCodingExecutionProfile({ query: q }).profile.codingMode) return false;
-    if (/网页|页面|html|代码|文件|保存|实现|生成|修复|下载|artifact|write|create|build/i.test(q)) {
+    if (inferCodingExecutionProfile({ query: q }).profile.codingMode)
+      return false;
+    if (
+      /网页|页面|html|代码|文件|保存|实现|生成|修复|下载|artifact|write|create|build/i.test(
+        q,
+      )
+    ) {
       return false;
     }
     const directExpression = /^[-+*/%().\d\s=xX]+$/i.test(q);
-    const askMath = /^(请)?(帮我)?(计算|算一下|求|evaluate|what is|是多少|等于多少)/i.test(q)
-      && /[-+*/%().\d\s=xX]+/.test(q);
+    const askMath =
+      /^(请)?(帮我)?(计算|算一下|求|evaluate|what is|是多少|等于多少)/i.test(
+        q,
+      ) && /[-+*/%().\d\s=xX]+/.test(q);
     return directExpression || askMath;
   }
 
@@ -941,7 +1098,11 @@ export class ReActAgent {
       return `现在时间是 ${new Date().toLocaleString("zh-CN")}。`;
     }
 
-    if (toolName === "calculate" && toolOutput && typeof toolOutput === "object") {
+    if (
+      toolName === "calculate" &&
+      toolOutput &&
+      typeof toolOutput === "object"
+    ) {
       if (!this.isQuickMathQuery(userInput)) {
         return null;
       }
@@ -954,7 +1115,11 @@ export class ReActAgent {
       }
     }
 
-    if (toolName === "generate_suggestions" && toolOutput && typeof toolOutput === "object") {
+    if (
+      toolName === "generate_suggestions" &&
+      toolOutput &&
+      typeof toolOutput === "object"
+    ) {
       const output = toolOutput as { display?: unknown };
       if (typeof output.display === "string" && output.display.trim()) {
         const baseAnswer = this.getLatestAnswerSnapshot();
@@ -969,7 +1134,10 @@ export class ReActAgent {
     return null;
   }
 
-  private logSystemInfoToolResult(source: "cache" | "execute" | "error", payload: Record<string, unknown>): void {
+  private logSystemInfoToolResult(
+    source: "cache" | "execute" | "error",
+    payload: Record<string, unknown>,
+  ): void {
     console.log(SYSTEM_INFO_LOG_PREFIX, {
       source,
       at: new Date().toISOString(),
@@ -978,15 +1146,22 @@ export class ReActAgent {
   }
 
   private normalizeMutationPath(path: unknown): string {
-    return String(path ?? "").trim().replace(/\\/g, "/");
+    return String(path ?? "")
+      .trim()
+      .replace(/\\/g, "/");
   }
 
   private extractPathGuessFromRawArgs(rawArguments: string): string {
-    const match = rawArguments.match(/["']path["']\s*:?\s*["']([^"'\n\r]+)["']/i);
+    const match = rawArguments.match(
+      /["']path["']\s*:?\s*["']([^"'\n\r]+)["']/i,
+    );
     return this.normalizeMutationPath(match?.[1] ?? "");
   }
 
-  private extractWriteSignature(toolName: string, toolParams: Record<string, unknown>): string {
+  private extractWriteSignature(
+    toolName: string,
+    toolParams: Record<string, unknown>,
+  ): string {
     if (toolName === "write_file") {
       return `write_file::${String(toolParams.content ?? "")}`;
     }
@@ -1041,14 +1216,22 @@ export class ReActAgent {
       repeatCount: count,
       toolName,
       previousToolName: previous?.lastToolName,
-      sameContentAsPrevious: previous ? previous.lastSignature === signature : false,
+      sameContentAsPrevious: previous
+        ? previous.lastSignature === signature
+        : false,
       userInputPreview: userInput.slice(0, 300),
       toolParams: {
         path,
         command: toolParams.command,
         insert_line: toolParams.insert_line,
-        contentChars: typeof toolParams.content === "string" ? toolParams.content.length : undefined,
-        newStrChars: typeof toolParams.new_str === "string" ? toolParams.new_str.length : undefined,
+        contentChars:
+          typeof toolParams.content === "string"
+            ? toolParams.content.length
+            : undefined,
+        newStrChars:
+          typeof toolParams.new_str === "string"
+            ? toolParams.new_str.length
+            : undefined,
       },
       outputPreview: outputStr.slice(0, 300),
       output,
@@ -1057,7 +1240,10 @@ export class ReActAgent {
         type: entry.type,
         toolName: entry.toolName,
         durationMs: entry.durationMs,
-        resultPreview: typeof entry.result === "string" ? entry.result.slice(0, 160) : entry.result,
+        resultPreview:
+          typeof entry.result === "string"
+            ? entry.result.slice(0, 160)
+            : entry.result,
       })),
     });
   }
@@ -1070,7 +1256,8 @@ export class ReActAgent {
   ): void {
     if (!FILE_WRITE_TOOL_NAMES.has(toolName)) return;
 
-    const pathGuess = this.extractPathGuessFromRawArgs(rawArguments) || "(unknown)";
+    const pathGuess =
+      this.extractPathGuessFromRawArgs(rawArguments) || "(unknown)";
     const traceKey = `${toolName}::${pathGuess}`;
     const count = (this.fileMutationParseTrace.get(traceKey) ?? 0) + 1;
     this.fileMutationParseTrace.set(traceKey, count);
@@ -1090,7 +1277,10 @@ export class ReActAgent {
         type: entry.type,
         toolName: entry.toolName,
         durationMs: entry.durationMs,
-        resultPreview: typeof entry.result === "string" ? entry.result.slice(0, 160) : entry.result,
+        resultPreview:
+          typeof entry.result === "string"
+            ? entry.result.slice(0, 160)
+            : entry.result,
       })),
     });
   }
@@ -1122,11 +1312,36 @@ export class ReActAgent {
 
   private hasSaveLikeIntent(userInput: string): boolean {
     const text = userInput.toLowerCase();
-    const writeVerbs = ["写入", "保存", "另存", "覆盖", "修改文件", "更新文件", "写到", "编辑文件", "插入", "write_file", "str_replace", "save", "edit"];
+    const writeVerbs = [
+      "写入",
+      "保存",
+      "另存",
+      "覆盖",
+      "修改文件",
+      "更新文件",
+      "写到",
+      "编辑文件",
+      "插入",
+      "write_file",
+      "str_replace",
+      "save",
+      "edit",
+    ];
     if (writeVerbs.some((k) => text.includes(k))) return true;
     const targets = [".md", ".txt", ".json", ".csv", ".yaml", ".yml"];
-    const writeContextWords = ["改成", "改为", "替换", "更新", "创建", "生成", "导出"];
-    if (targets.some((t) => text.includes(t)) && writeContextWords.some((w) => text.includes(w))) {
+    const writeContextWords = [
+      "改成",
+      "改为",
+      "替换",
+      "更新",
+      "创建",
+      "生成",
+      "导出",
+    ];
+    if (
+      targets.some((t) => text.includes(t)) &&
+      writeContextWords.some((w) => text.includes(w))
+    ) {
       return true;
     }
     return false;
@@ -1163,7 +1378,7 @@ export class ReActAgent {
       return [
         "- **严禁在回复文本中向用户提问**。需要用户输入时，必须调用 ask_user 工具（会弹出交互对话框让用户选择/输入）",
         "- 以下情况必须调用 ask_user 工具：",
-        "  · 任务目标模糊（如\"帮我处理文件\"但未指定哪个文件）",
+        '  · 任务目标模糊（如"帮我处理文件"但未指定哪个文件）',
         "  · 有多个合理方案需要用户选择（如保存格式、目标路径）",
         "  · 操作不可逆且影响范围不明确（如批量删除、覆盖文件）",
         "  · 缺少必要的参数（如收件人、密码、具体日期等）",
@@ -1225,7 +1440,11 @@ export class ReActAgent {
     ) {
       return "不要假设用户已经拒绝授权。仅可基于真实工具调用结果给出结论；若未触发确认，请继续执行并给出结果。";
     }
-    if (canUseInteractiveAskUser && !this.hasAnyToolAction() && this.isLikelyAskingUser(answer)) {
+    if (
+      canUseInteractiveAskUser &&
+      !this.hasAnyToolAction() &&
+      this.isLikelyAskingUser(answer)
+    ) {
       return "严禁在回复文本中向用户提问。如果需要用户提供信息，必须调用 ask_user 工具（会弹出交互对话框）。请调用 ask_user 工具来提问，不要用文字回复提问。";
     }
     const toolCallInText = this.detectToolCallInText(answer);
@@ -1278,7 +1497,10 @@ export class ReActAgent {
   private detectToolCallInText(text: string): string | null {
     const toolNames = this.getAvailableTools().map((t) => t.name);
     for (const name of toolNames) {
-      const pattern = new RegExp(`(?:调用工具|Action|tool_call)[:\\s]*${name}\\s*\\(`, "i");
+      const pattern = new RegExp(
+        `(?:调用工具|Action|tool_call)[:\\s]*${name}\\s*\\(`,
+        "i",
+      );
       if (pattern.test(text)) return name;
       const callPattern = new RegExp(`${name}\\(\\s*\\{`, "i");
       if (callPattern.test(text)) return name;
@@ -1304,10 +1526,7 @@ export class ReActAgent {
     this.fcCompatibilityKey = normalizeFCCompatibilityKey(
       this.config.fcCompatibilityKey,
     );
-    if (
-      this.fcCompatibilityKey &&
-      isFCCacheValid(this.fcCompatibilityKey)
-    ) {
+    if (this.fcCompatibilityKey && isFCCacheValid(this.fcCompatibilityKey)) {
       this.fcAvailable = false;
     }
     this.mode = this.config.initialMode ?? "execute";
@@ -1416,8 +1635,15 @@ export class ReActAgent {
         execute: async () => {
           if (this.mode === "plan") return { status: "already_in_plan_mode" };
           this.mode = "plan";
-          this.addStep({ type: "observation", content: "[模式切换] 进入 Plan 模式（只读分析）", timestamp: Date.now() });
-          return { status: "plan_mode_active", hint: "现在仅可使用只读工具，完成规划后调用 exit_plan_mode" };
+          this.addStep({
+            type: "observation",
+            content: "[模式切换] 进入 Plan 模式（只读分析）",
+            timestamp: Date.now(),
+          });
+          return {
+            status: "plan_mode_active",
+            hint: "现在仅可使用只读工具，完成规划后调用 exit_plan_mode",
+          };
         },
       },
       {
@@ -1425,10 +1651,18 @@ export class ReActAgent {
         description: "退出 Plan 模式，切换回 Execute 模式（可执行所有工具）。",
         readonly: true,
         execute: async () => {
-          if (this.mode === "execute") return { status: "already_in_execute_mode" };
+          if (this.mode === "execute")
+            return { status: "already_in_execute_mode" };
           this.mode = "execute";
-          this.addStep({ type: "observation", content: "[模式切换] 进入 Execute 模式（完整权限）", timestamp: Date.now() });
-          return { status: "execute_mode_active", hint: "现在可以使用所有工具执行操作" };
+          this.addStep({
+            type: "observation",
+            content: "[模式切换] 进入 Execute 模式（完整权限）",
+            timestamp: Date.now(),
+          });
+          return {
+            status: "execute_mode_active",
+            hint: "现在可以使用所有工具执行操作",
+          };
         },
       },
     ];
@@ -1445,11 +1679,14 @@ export class ReActAgent {
   }
 
   private buildMemoryPolicyBlock(): string {
-    const availableToolNames = new Set(this.getAvailableTools().map((tool) => tool.name));
+    const availableToolNames = new Set(
+      this.getAvailableTools().map((tool) => tool.name),
+    );
     const hasMemorySearch = availableToolNames.has("memory_search");
     const hasMemoryGet = availableToolNames.has("memory_get");
     const hasMemorySave =
-      availableToolNames.has("memory_save") || availableToolNames.has("save_user_memory");
+      availableToolNames.has("memory_save") ||
+      availableToolNames.has("save_user_memory");
 
     if (!hasMemorySearch && !hasMemoryGet && !hasMemorySave) {
       return "";
@@ -1476,30 +1713,35 @@ export class ReActAgent {
       lines.push(
         "- 当用户明确表达长期偏好、稳定约束、重要事实或持续目标时，使用 memory_save（或兼容别名 save_user_memory）记录候选。",
       );
-      lines.push(
-        "- 不要把一次性指令、临时状态或会过期的信息写成长久记忆。",
-      );
+      lines.push("- 不要把一次性指令、临时状态或会过期的信息写成长久记忆。");
     }
 
     return lines.join("\n");
   }
 
   private shouldEnforceMemoryRecall(userInput: string): boolean {
-    const availableToolNames = new Set(this.getAvailableTools().map((tool) => tool.name));
-    if (!availableToolNames.has("memory_search") || !availableToolNames.has("memory_get")) {
+    const availableToolNames = new Set(
+      this.getAvailableTools().map((tool) => tool.name),
+    );
+    if (
+      !availableToolNames.has("memory_search") ||
+      !availableToolNames.has("memory_get")
+    ) {
       return false;
     }
     const normalized = extractPrimaryUserIntent(userInput);
     if (!normalized) return false;
-    return MEMORY_RECALL_QUERY_PATTERNS.some((pattern) => pattern.test(normalized));
+    return MEMORY_RECALL_QUERY_PATTERNS.some((pattern) =>
+      pattern.test(normalized),
+    );
   }
 
   private hasPerformedMemoryRecall(): boolean {
     return [...this.history, ...this.steps].some(
       (step) =>
-        step.type === "action"
-        && !!step.toolName
-        && MEMORY_RECALL_TOOL_NAMES.has(step.toolName),
+        step.type === "action" &&
+        !!step.toolName &&
+        MEMORY_RECALL_TOOL_NAMES.has(step.toolName),
     );
   }
 
@@ -1518,7 +1760,8 @@ export class ReActAgent {
     candidates: Array<string | null | undefined>,
   ): string | undefined {
     const validCandidates = candidates.filter(
-      (candidate): candidate is string => typeof candidate === "string" && candidate.trim().length > 0,
+      (candidate): candidate is string =>
+        typeof candidate === "string" && candidate.trim().length > 0,
     );
     if (validCandidates.length === 0) return undefined;
 
@@ -1555,7 +1798,10 @@ export class ReActAgent {
 
     // 创建组合 AbortController：超时或父级 abort 都会触发
     const toolAbort = new AbortController();
-    const timer = setTimeout(() => toolAbort.abort(new ToolTimeoutError(tool.name, timeout)), timeout);
+    const timer = setTimeout(
+      () => toolAbort.abort(new ToolTimeoutError(tool.name, timeout)),
+      timeout,
+    );
 
     const onParentAbort = () => toolAbort.abort(new Error("Aborted"));
     signal?.addEventListener("abort", onParentAbort, { once: true });
@@ -1564,7 +1810,10 @@ export class ReActAgent {
       const result = await tool.execute(params, toolAbort.signal);
       return result;
     } catch (err) {
-      if (toolAbort.signal.aborted && toolAbort.signal.reason instanceof ToolTimeoutError) {
+      if (
+        toolAbort.signal.aborted &&
+        toolAbort.signal.reason instanceof ToolTimeoutError
+      ) {
         throw toolAbort.signal.reason;
       }
       throw err;
@@ -1574,7 +1823,9 @@ export class ReActAgent {
     }
   }
 
-  private buildIterationExhaustedSummary(diagnostics?: IterationStopDiagnostics): string {
+  private buildIterationExhaustedSummary(
+    diagnostics?: IterationStopDiagnostics,
+  ): string {
     const toolsCalled = this.steps
       .filter((s) => s.type === "action" && s.toolName)
       .map((s) => s.toolName!);
@@ -1590,10 +1841,14 @@ export class ReActAgent {
     const stopReason = diagnostics?.stopReason ?? "iteration_limit_reached";
     const repeatedToolPattern = diagnostics?.repeatedToolPattern?.trim();
 
-    let summary = formatIterationStopHeadline(stopReason, this.config.maxIterations);
+    let summary = formatIterationStopHeadline(
+      stopReason,
+      this.config.maxIterations,
+    );
     summary += "\n执行诊断：";
     summary += `\n- 实际运行轮数：${iterationsUsed} / ${this.config.maxIterations}`;
-    summary += "\n- 轮数定义：1 轮 = 1 次模型决策（返回回答或 tool_calls），不等于 1 次工具执行";
+    summary +=
+      "\n- 轮数定义：1 轮 = 1 次模型决策（返回回答或 tool_calls），不等于 1 次工具执行";
     summary += `\n- 停止原因：${formatIterationStopReason(stopReason)}`;
     summary += `\n- 工具执行次数：${toolsCalled.length}`;
     if (toolsCalled.length > 0) {
@@ -1633,7 +1888,11 @@ export class ReActAgent {
    * 共享工具执行管道：危险检查 → 用户确认 → 执行 → 快捷回答 → 结果返回
    * 返回 { output, outputStr, quickAnswer, rejected, error }
    */
-  private reflectOnError(toolName: string, toolParams: Record<string, unknown>, error: string): string {
+  private reflectOnError(
+    toolName: string,
+    toolParams: Record<string, unknown>,
+    error: string,
+  ): string {
     const paramSummary = Object.keys(toolParams).join(", ");
     return `工具 ${toolName}(${paramSummary}) 执行失败: ${error}。请分析错误原因，尝试修正参数或改用其他方式。`;
   }
@@ -1645,6 +1904,7 @@ export class ReActAgent {
     signal?: AbortSignal,
   ): Promise<{
     outputStr: string;
+    rawOutput?: unknown;
     quickAnswer?: string;
     rejected?: boolean;
     error?: string;
@@ -1655,26 +1915,57 @@ export class ReActAgent {
     const tool = this.tools.find((t) => t.name === toolName);
 
     if (!tool) {
-      const available = this.getAvailableTools().map((t) => t.name).join(", ");
+      const available = this.getAvailableTools()
+        .map((t) => t.name)
+        .join(", ");
       const msg = `未知工具: ${toolName}，可用工具: ${available}`;
-      const errResult: ToolErrorResult = { type: ToolErrorType.NotFound, tool: toolName, message: msg, recoverable: true };
-      this.addStep({ type: "error", content: `未知工具: ${toolName}`, timestamp: Date.now() });
+      const errResult: ToolErrorResult = {
+        type: ToolErrorType.NotFound,
+        tool: toolName,
+        message: msg,
+        recoverable: true,
+      };
+      this.addStep({
+        type: "error",
+        content: `未知工具: ${toolName}`,
+        timestamp: Date.now(),
+      });
       this.recordTrajectory({ type: "error", toolName, error: errResult });
       return { outputStr: `错误: ${msg}`, error: msg, errorResult: errResult };
     }
 
     if (this.mode === "plan" && !tool.readonly) {
       const msg = `[Plan 模式] 工具 ${toolName} 不是只读工具，Plan 模式下禁止执行。请先调用 exit_plan_mode 切换到 Execute 模式。`;
-      const errResult: ToolErrorResult = { type: ToolErrorType.PlanModeBlocked, tool: toolName, message: msg, recoverable: true };
-      this.addStep({ type: "error", content: msg, toolName, timestamp: Date.now() });
+      const errResult: ToolErrorResult = {
+        type: ToolErrorType.PlanModeBlocked,
+        tool: toolName,
+        message: msg,
+        recoverable: true,
+      };
+      this.addStep({
+        type: "error",
+        content: msg,
+        toolName,
+        timestamp: Date.now(),
+      });
       this.recordTrajectory({ type: "error", toolName, error: errResult });
       return { outputStr: msg, error: msg, errorResult: errResult };
     }
 
     if (this.loopDetector.isDisabled(toolName)) {
       const msg = `[Doom Loop] 工具 ${toolName} 已被禁用（连续失败 ${DOOM_LOOP_CONSECUTIVE_FAILURES} 次）。请改用其他工具或方式完成任务。`;
-      const errResult: ToolErrorResult = { type: ToolErrorType.LoopDetected, tool: toolName, message: msg, recoverable: false };
-      this.addStep({ type: "error", content: msg, toolName, timestamp: Date.now() });
+      const errResult: ToolErrorResult = {
+        type: ToolErrorType.LoopDetected,
+        tool: toolName,
+        message: msg,
+        recoverable: false,
+      };
+      this.addStep({
+        type: "error",
+        content: msg,
+        toolName,
+        timestamp: Date.now(),
+      });
       this.recordTrajectory({ type: "error", toolName, error: errResult });
       return { outputStr: msg, error: msg, errorResult: errResult };
     }
@@ -1682,7 +1973,10 @@ export class ReActAgent {
     if (tool.parameters) {
       const missing: string[] = [];
       for (const [key, param] of Object.entries(tool.parameters)) {
-        if (param.required !== false && (toolParams[key] === undefined || toolParams[key] === null)) {
+        if (
+          param.required !== false &&
+          (toolParams[key] === undefined || toolParams[key] === null)
+        ) {
           missing.push(key);
         }
       }
@@ -1692,7 +1986,11 @@ export class ReActAgent {
         for (const key of [...missing]) {
           const desc = (tool.parameters[key]?.description ?? "").toLowerCase();
           const keyLower = key.toLowerCase();
-          const inferred = inferMcpParamFromUserInput(keyLower, desc, userInput);
+          const inferred = inferMcpParamFromUserInput(
+            keyLower,
+            desc,
+            userInput,
+          );
           if (inferred !== null) {
             toolParams[key] = inferred;
             missing.splice(missing.indexOf(key), 1);
@@ -1707,12 +2005,30 @@ export class ReActAgent {
 
       if (missing.length > 0) {
         const schema = Object.entries(tool.parameters)
-          .map(([k, v]) => `  ${k}: ${v.type}${v.required === false ? " (可选)" : " (必需)"}${v.description ? ` - ${v.description}` : ""}`)
+          .map(
+            ([k, v]) =>
+              `  ${k}: ${v.type}${v.required === false ? " (可选)" : " (必需)"}${v.description ? ` - ${v.description}` : ""}`,
+          )
           .join("\n");
         const msg = `参数校验失败: ${toolName} 缺少必需参数 [${missing.join(", ")}]。收到的参数: ${JSON.stringify(toolParams)}。期望的参数格式:\n${schema}`;
-        const errResult: ToolErrorResult = { type: ToolErrorType.ValidationError, tool: toolName, message: msg, recoverable: true };
-        this.addStep({ type: "error", content: msg, toolName, timestamp: Date.now() });
-        this.recordTrajectory({ type: "error", toolName, toolParams, error: errResult });
+        const errResult: ToolErrorResult = {
+          type: ToolErrorType.ValidationError,
+          tool: toolName,
+          message: msg,
+          recoverable: true,
+        };
+        this.addStep({
+          type: "error",
+          content: msg,
+          toolName,
+          timestamp: Date.now(),
+        });
+        this.recordTrajectory({
+          type: "error",
+          toolName,
+          toolParams,
+          error: errResult,
+        });
         return { outputStr: msg, error: msg, errorResult: errResult };
       }
     }
@@ -1724,26 +2040,52 @@ export class ReActAgent {
       toolInput: toolParams,
       timestamp: Date.now(),
     });
-    this.recordTrajectory({ type: "tool_call", toolName, toolParams, mode: this.mode });
+    this.recordTrajectory({
+      type: "tool_call",
+      toolName,
+      toolParams,
+      mode: this.mode,
+    });
 
     this.loopDetector.record(toolName, toolParams);
     const loopCheck = this.loopDetector.detect();
     if (loopCheck.looping) {
       const msg = `[循环检测] 工具 ${loopCheck.tool} 被重复调用（相同参数 ${LOOP_DETECTOR_THRESHOLD}+ 次）。请换一种方式或使用其他工具完成任务。`;
-      const errResult: ToolErrorResult = { type: ToolErrorType.LoopDetected, tool: toolName, message: msg, recoverable: false };
-      this.addStep({ type: "error", content: msg, toolName, timestamp: Date.now() });
+      const errResult: ToolErrorResult = {
+        type: ToolErrorType.LoopDetected,
+        tool: toolName,
+        message: msg,
+        recoverable: false,
+      };
+      this.addStep({
+        type: "error",
+        content: msg,
+        toolName,
+        timestamp: Date.now(),
+      });
       this.recordTrajectory({ type: "error", toolName, error: errResult });
       return { outputStr: msg, error: msg, errorResult: errResult };
     }
 
     const consecutiveCheck = this.loopDetector.detectConsecutiveSameTool();
     if (consecutiveCheck.looping) {
-      const toolHint = consecutiveCheck.tool === "ask_user"
-        ? "ask_user 连续调用过多。请用 extra_questions 参数把多个问题合并到一次调用中，减少对用户的打扰。先根据已有信息执行任务，需要更多信息时再合并提问。"
-        : "请立即使用 read_file、list_directory、search_in_files 等工具获取实际信息，不要继续空转思考。";
+      const toolHint =
+        consecutiveCheck.tool === "ask_user"
+          ? "ask_user 连续调用过多。请用 extra_questions 参数把多个问题合并到一次调用中，减少对用户的打扰。先根据已有信息执行任务，需要更多信息时再合并提问。"
+          : "请立即使用 read_file、list_directory、search_in_files 等工具获取实际信息，不要继续空转思考。";
       const msg = `[循环检测] 工具 ${consecutiveCheck.tool} 已连续调用 ${consecutiveCheck.count} 次。${toolHint}`;
-      const errResult: ToolErrorResult = { type: ToolErrorType.LoopDetected, tool: toolName, message: msg, recoverable: true };
-      this.addStep({ type: "error", content: msg, toolName, timestamp: Date.now() });
+      const errResult: ToolErrorResult = {
+        type: ToolErrorType.LoopDetected,
+        tool: toolName,
+        message: msg,
+        recoverable: true,
+      };
+      this.addStep({
+        type: "error",
+        content: msg,
+        toolName,
+        timestamp: Date.now(),
+      });
       this.recordTrajectory({ type: "error", toolName, error: errResult });
       return { outputStr: msg, error: msg, errorResult: errResult };
     }
@@ -1759,9 +2101,20 @@ export class ReActAgent {
           preview: cachedResult.slice(0, 300),
         });
       }
-      this.addStep({ type: "observation", content: hint, toolName, toolOutput: cachedResult, timestamp: Date.now() });
-      this.recordTrajectory({ type: "tool_result", toolName, result: "(cached)", durationMs: 0 });
-      return { outputStr: hint };
+      this.addStep({
+        type: "observation",
+        content: hint,
+        toolName,
+        toolOutput: cachedResult,
+        timestamp: Date.now(),
+      });
+      this.recordTrajectory({
+        type: "tool_result",
+        toolName,
+        result: "(cached)",
+        durationMs: 0,
+      });
+      return { outputStr: hint, rawOutput: cachedResult };
     }
 
     const isDangerous =
@@ -1772,16 +2125,39 @@ export class ReActAgent {
     if (isDangerous && this.config.confirmDangerousAction) {
       const dangerousKey = `${toolName}::${JSON.stringify(toolParams)}`;
       if (this.approvedDangerousKeys.has(dangerousKey)) {
-        this.addStep({ type: "observation", content: "已自动放行（同参数已确认过）", toolName, timestamp: Date.now() });
+        this.addStep({
+          type: "observation",
+          content: "已自动放行（同参数已确认过）",
+          toolName,
+          timestamp: Date.now(),
+        });
       } else {
-        this.addStep({ type: "observation", content: `等待用户确认执行 ${toolName}`, toolName, timestamp: Date.now() });
-        const confirmed = await this.config.confirmDangerousAction(toolName, toolParams);
+        this.addStep({
+          type: "observation",
+          content: `等待用户确认执行 ${toolName}`,
+          toolName,
+          timestamp: Date.now(),
+        });
+        const confirmed = await this.config.confirmDangerousAction(
+          toolName,
+          toolParams,
+        );
         if (!confirmed) {
-          this.addStep({ type: "observation", content: "用户拒绝执行此操作", toolName, timestamp: Date.now() });
+          this.addStep({
+            type: "observation",
+            content: "用户拒绝执行此操作",
+            toolName,
+            timestamp: Date.now(),
+          });
           return { outputStr: "用户拒绝执行此操作", rejected: true };
         }
         this.approvedDangerousKeys.add(dangerousKey);
-        this.addStep({ type: "observation", content: "用户已确认执行此操作", toolName, timestamp: Date.now() });
+        this.addStep({
+          type: "observation",
+          content: "用户已确认执行此操作",
+          toolName,
+          timestamp: Date.now(),
+        });
       }
     }
 
@@ -1790,7 +2166,11 @@ export class ReActAgent {
       const output = await this.executeWithTimeout(tool, toolParams, signal);
       if (signal?.aborted) throw new Error("Aborted");
 
-      const hasToolError = output && typeof output === "object" && "error" in output && typeof (output as Record<string, unknown>).error === "string";
+      const hasToolError =
+        output &&
+        typeof output === "object" &&
+        "error" in output &&
+        typeof (output as Record<string, unknown>).error === "string";
       if (hasToolError) {
         this.loopDetector.recordFailure(toolName);
       } else {
@@ -1798,20 +2178,41 @@ export class ReActAgent {
         this.config.onToolExecuted?.(toolName);
       }
 
-      const quickAnswer = this.buildQuickAnswerFromTool(userInput, toolName, output);
+      const quickAnswer = this.buildQuickAnswerFromTool(
+        userInput,
+        toolName,
+        output,
+      );
       if (quickAnswer) {
-        this.addStep({ type: "answer", content: quickAnswer, timestamp: Date.now() });
-        this.recordTrajectory({ type: "tool_result", toolName, result: "(quick_answer)", durationMs: Date.now() - startTime });
-        return { outputStr: "", quickAnswer };
+        this.addStep({
+          type: "answer",
+          content: quickAnswer,
+          timestamp: Date.now(),
+        });
+        this.recordTrajectory({
+          type: "tool_result",
+          toolName,
+          result: "(quick_answer)",
+          durationMs: Date.now() - startTime,
+        });
+        return { outputStr: "", rawOutput: output, quickAnswer };
       }
 
-      const rawStr = typeof output === "string" ? output : JSON.stringify(output, null, 2);
+      const rawStr =
+        typeof output === "string" ? output : JSON.stringify(output, null, 2);
       const outputStr = truncateToolOutput(rawStr, toolName);
-      this.maybeLogRepeatedFileMutation(toolName, toolParams, output, outputStr, userInput);
+      this.maybeLogRepeatedFileMutation(
+        toolName,
+        toolParams,
+        output,
+        outputStr,
+        userInput,
+      );
       if (toolName === "get_system_info") {
-        const outputObj = output && typeof output === "object"
-          ? output as Record<string, unknown>
-          : undefined;
+        const outputObj =
+          output && typeof output === "object"
+            ? (output as Record<string, unknown>)
+            : undefined;
         this.logSystemInfoToolResult("execute", {
           hasToolError,
           hasData: Boolean(outputStr.trim()),
@@ -1835,9 +2236,20 @@ export class ReActAgent {
         }
       }
 
-      this.addStep({ type: "observation", content: outputStr, toolName, toolOutput: output, timestamp: Date.now() });
-      this.recordTrajectory({ type: "tool_result", toolName, result: outputStr.slice(0, 200), durationMs: Date.now() - startTime });
-      return { outputStr };
+      this.addStep({
+        type: "observation",
+        content: outputStr,
+        toolName,
+        toolOutput: output,
+        timestamp: Date.now(),
+      });
+      this.recordTrajectory({
+        type: "tool_result",
+        toolName,
+        result: outputStr.slice(0, 200),
+        durationMs: Date.now() - startTime,
+      });
+      return { outputStr, rawOutput: output };
     } catch (e) {
       if ((e as Error).message === "Aborted") throw e;
       if (e instanceof ClarificationInterrupt) throw e;
@@ -1847,13 +2259,37 @@ export class ReActAgent {
         });
       }
       const isTimeout = e instanceof ToolTimeoutError;
-      const errorType = isTimeout ? ToolErrorType.Timeout : ToolErrorType.RuntimeError;
-      const errorStr = isTimeout ? (e as ToolTimeoutError).message : `工具执行失败: ${e}`;
-      const errResult: ToolErrorResult = { type: errorType, tool: toolName, message: errorStr, recoverable: !isTimeout };
-      this.addStep({ type: "error", content: errorStr, toolName, timestamp: Date.now() });
+      const errorType = isTimeout
+        ? ToolErrorType.Timeout
+        : ToolErrorType.RuntimeError;
+      const errorStr = isTimeout
+        ? (e as ToolTimeoutError).message
+        : `工具执行失败: ${e}`;
+      const errResult: ToolErrorResult = {
+        type: errorType,
+        tool: toolName,
+        message: errorStr,
+        recoverable: !isTimeout,
+      };
+      this.addStep({
+        type: "error",
+        content: errorStr,
+        toolName,
+        timestamp: Date.now(),
+      });
       this.loopDetector.recordFailure(toolName);
-      this.recordTrajectory({ type: "error", toolName, error: errResult, durationMs: Date.now() - startTime });
-      return { outputStr: errorStr, error: errorStr, errorResult: errResult, reflection: this.reflectOnError(toolName, toolParams, errorStr) };
+      this.recordTrajectory({
+        type: "error",
+        toolName,
+        error: errResult,
+        durationMs: Date.now() - startTime,
+      });
+      return {
+        outputStr: errorStr,
+        error: errorStr,
+        errorResult: errResult,
+        reflection: this.reflectOnError(toolName, toolParams, errorStr),
+      };
     }
   }
 
@@ -1861,7 +2297,8 @@ export class ReActAgent {
 
   private buildSystemPrompt(userInput?: string): string {
     const s = this.buildSharedPromptSections(userInput);
-    const textModeUserInteractionRules = this.buildTextModeUserInteractionRules();
+    const textModeUserInteractionRules =
+      this.buildTextModeUserInteractionRules();
 
     const availableTools = this.getAvailableTools();
     const toolDescriptions = availableTools
@@ -1875,15 +2312,18 @@ export class ReActAgent {
       })
       .join("\n\n");
 
-    const modeHint = this.mode === "plan"
-      ? "\n\n**当前为 Plan 模式（只读），仅可使用只读工具。完成分析后调用 exit_plan_mode 切换到执行模式。**"
-      : "";
+    const modeHint =
+      this.mode === "plan"
+        ? "\n\n**当前为 Plan 模式（只读），仅可使用只读工具。完成分析后调用 exit_plan_mode 切换到执行模式。**"
+        : "";
     const disabledSection = s.disabledHint ? `\n\n${s.disabledHint}` : "";
 
-    const codingHint = s.isCoding ? `## 编程任务工作流
+    const codingHint = s.isCoding
+      ? `## 编程任务工作流
 1. 理解需求 → 2. 用 read_file / search_in_files 探索代码 → 3. 复现问题 → 4. 定位根因 → 5. 用 str_replace_edit 修改 → 6. 用 run_lint 验证 → 7. 总结
 - 修改文件优先用 str_replace_edit，创建新文件用 str_replace_edit(create)
-- 输出被截断时用 read_file_range 分段读取` : "";
+- 输出被截断时用 read_file_range 分段读取`
+      : "";
 
     const identityAndRules = `${s.identityBlock}
 你是一个高能力智能助手 Agent，使用 ReAct (Reasoning + Acting) 框架来自主回答问题和执行复杂任务。${modeHint}${disabledSection}
@@ -1922,12 +2362,37 @@ ${s.taskStrategy}
 
     const sections: PromptSection[] = [
       { name: "identity_rules", content: identityAndRules, priority: 10 },
-      { name: "extraSystem", content: s.extraSystemBlock, priority: 20, maxTokens: 500 },
-      { name: "codingBlock", content: codingHint, priority: 30, maxTokens: 400 },
+      {
+        name: "extraSystem",
+        content: s.extraSystemBlock,
+        priority: 20,
+        maxTokens: 500,
+      },
+      {
+        name: "codingBlock",
+        content: codingHint,
+        priority: 30,
+        maxTokens: 400,
+      },
       { name: "skills", content: s.skillsBlock, priority: 40, maxTokens: 600 },
-      { name: "memoryPolicy", content: s.memoryPolicyBlock, priority: 50, maxTokens: 500 },
-      { name: "memoryContext", content: s.memoryBlock, priority: 60, maxTokens: 500 },
-      { name: "codingHint", content: s.codingHintBlock, priority: 70, maxTokens: 500 },
+      {
+        name: "memoryPolicy",
+        content: s.memoryPolicyBlock,
+        priority: 50,
+        maxTokens: 500,
+      },
+      {
+        name: "memoryContext",
+        content: s.memoryBlock,
+        priority: 60,
+        maxTokens: 500,
+      },
+      {
+        name: "codingHint",
+        content: s.codingHintBlock,
+        priority: 70,
+        maxTokens: 500,
+      },
     ];
 
     const budget = this.config.contextBudget ?? 0;
@@ -2073,21 +2538,43 @@ ${s.taskStrategy}
    * 避免在纯 Q&A / 翻译 / 总结等场景中注入编程指令。
    */
   private detectCodingContext(userInput: string): boolean {
-    const strongPatterns = /(?:代码|编程|编码|修复|debug|fix\b|bug|重构|refactor|编译|compile|str_replace_edit|read_file|write_file|run_lint|persistent_shell|json_edit|search_in_files|代码审查|code review|package\.json|tsconfig|Cargo\.toml|requirements\.txt)/i;
+    const strongPatterns =
+      /(?:代码|编程|编码|修复|debug|fix\b|bug|重构|refactor|编译|compile|str_replace_edit|read_file|write_file|run_lint|persistent_shell|json_edit|search_in_files|代码审查|code review|package\.json|tsconfig|Cargo\.toml|requirements\.txt)/i;
     if (strongPatterns.test(userInput)) return true;
     const weakPatterns = [
-      /(?:写一个|实现|创建)/i, /(?:函数|function|class|组件|component|接口|interface)/i,
-      /(?:构建|部署|deploy|测试|test|脚本|script)/i, /(?:数据库|database|SQL|迁移|migration)/i,
-      /(?:npm|yarn|pip|cargo)/i, /(?:git|commit|merge|branch|PR|pull request)/i,
-      /(?:\.py|\.ts|\.js|\.rs|\.go|\.java|\.cpp|\.vue)\b/i, /(?:API|build)\b/i,
+      /(?:写一个|实现|创建)/i,
+      /(?:函数|function|class|组件|component|接口|interface)/i,
+      /(?:构建|部署|deploy|测试|test|脚本|script)/i,
+      /(?:数据库|database|SQL|迁移|migration)/i,
+      /(?:npm|yarn|pip|cargo)/i,
+      /(?:git|commit|merge|branch|PR|pull request)/i,
+      /(?:\.py|\.ts|\.js|\.rs|\.go|\.java|\.cpp|\.vue)\b/i,
+      /(?:API|build)\b/i,
       /(?:项目路径|工作上下文)/i,
     ];
     const weakCount = weakPatterns.filter((p) => p.test(userInput)).length;
     if (weakCount >= 2) return true;
     const recentHistory = this.history.slice(-6);
-    const codingTools = new Set(["str_replace_edit", "write_file", "json_edit", "run_lint", "persistent_shell", "read_file", "read_file_range", "search_in_files", "list_directory", "ckg_search_function", "ckg_search_class"]);
+    const codingTools = new Set([
+      "str_replace_edit",
+      "write_file",
+      "json_edit",
+      "run_lint",
+      "persistent_shell",
+      "read_file",
+      "read_file_range",
+      "search_in_files",
+      "list_directory",
+      "ckg_search_function",
+      "ckg_search_class",
+    ]);
     for (const step of recentHistory) {
-      if (step.type === "action" && step.toolName && codingTools.has(step.toolName)) return true;
+      if (
+        step.type === "action" &&
+        step.toolName &&
+        codingTools.has(step.toolName)
+      )
+        return true;
     }
     return false;
   }
@@ -2099,15 +2586,18 @@ ${s.taskStrategy}
   private buildSharedPromptSections(userInput?: string) {
     const identityBlock = this.config.roleOverride
       ? `${this.config.roleOverride}\n禁止自称 Claude、GPT 或任何第三方厂商的助手。`
-      : `你是 51ToolBox 内置的智能助手 Agent。禁止自称 Claude、GPT 或任何第三方厂商的助手。被问"你是谁"时，回答：你是 51ToolBox 内置助手。`;
+      : `你是 HiClow 内置的智能助手 Agent。禁止自称 Claude、GPT 或任何第三方厂商的助手。被问"你是谁"时，回答：你是 HiClow 内置助手。`;
 
     const disabledTools = this.loopDetector.getDisabledTools();
-    const disabledHint = disabledTools.length > 0
-      ? `已禁用的工具（连续失败过多）: ${disabledTools.join(", ")} — 请改用其他方式。`
-      : "";
+    const disabledHint =
+      disabledTools.length > 0
+        ? `已禁用的工具（连续失败过多）: ${disabledTools.join(", ")} — 请改用其他方式。`
+        : "";
 
-    const isCoding = !this.config.skipInternalCodingBlock && userInput
-      ? this.detectCodingContext(userInput) : false;
+    const isCoding =
+      !this.config.skipInternalCodingBlock && userInput
+        ? this.detectCodingContext(userInput)
+        : false;
 
     const modeSwitching = `## 模式切换
 - 面对复杂任务时，可先调用 enter_plan_mode 进入只读分析模式，收集信息和制定方案
@@ -2120,7 +2610,8 @@ ${s.taskStrategy}
 4. **结果验证**：完成关键操作后，通过读取或查询验证结果是否正确
 5. **错误恢复**：工具失败时分析根因，尝试替代方案而非简单重试`;
 
-    const codingBlock = isCoding ? `## 编程任务工作流（7 步法）
+    const codingBlock = isCoding
+      ? `## 编程任务工作流（7 步法）
 当任务涉及代码编写、修改、调试时，遵循以下流程：
 1. **理解需求**：仔细分析任务目标，明确要修改什么、为什么修改
 2. **探索代码**：用 read_file / read_file_range / search_in_files / list_directory 了解项目结构和相关代码
@@ -2143,7 +2634,8 @@ ${s.taskStrategy}
 如果工具返回的内容被截断（出现"已省略"提示），不要猜测被省略的内容：
 - 文件内容被截断 → 用 read_file_range 指定行号范围读取具体部分
 - 搜索结果被截断 → 用 search_in_files 缩小搜索范围或添加 file_pattern 过滤
-- 命令输出被截断 → 用 run_shell_command 配合 grep/head/tail 过滤输出` : "";
+- 命令输出被截断 → 用 run_shell_command 配合 grep/head/tail 过滤输出`
+      : "";
 
     const skillsBlock = this.config.skillsPrompt || "";
     const memoryPolicyBlock = this.buildMemoryPolicyBlock();
@@ -2170,9 +2662,10 @@ ${s.taskStrategy}
     const s = this.buildSharedPromptSections(userInput);
     const userInteractionRules = this.buildUserInteractionRules();
 
-    const modeHint = this.mode === "plan"
-      ? `\n\n## 当前模式: Plan（只读分析）\n你正处于 Plan 模式，只能使用只读工具（信息收集、搜索、读取）。不能执行修改操作。\n完成分析后调用 exit_plan_mode 切换到 Execute 模式再执行修改。`
-      : "";
+    const modeHint =
+      this.mode === "plan"
+        ? `\n\n## 当前模式: Plan（只读分析）\n你正处于 Plan 模式，只能使用只读工具（信息收集、搜索、读取）。不能执行修改操作。\n完成分析后调用 exit_plan_mode 切换到 Execute 模式再执行修改。`
+        : "";
     const disabledSection = s.disabledHint ? `\n\n## ${s.disabledHint}` : "";
 
     const identityAndRules = `${s.identityBlock}
@@ -2194,6 +2687,7 @@ ${s.taskStrategy}
 - **工具返回成功结果后，禁止用相同参数再次调用同一工具**。结果已经拿到了，直接使用它来回答
 - 不要在没有使用工具的情况下编造信息
 - 涉及文件操作时，必须调用对应工具
+- ClawHub 相关工具仅当当前用户消息**明确提到 ClawHub**时才可调用；未明确提到时，禁止自动搜索、自动推荐或自动安装 skill
 - 如有 delegate_subtask 工具可用，可将独立子问题委派给子 Agent 并行处理
 - **所有文件路径必须使用绝对路径**，不要使用 ~ 或相对路径
 - **sequential_thinking 仅用于梳理复杂逻辑，禁止连续调用超过 3 次**
@@ -2205,12 +2699,37 @@ ${s.taskStrategy}
 
     const sections: PromptSection[] = [
       { name: "identity_rules", content: identityAndRules, priority: 10 },
-      { name: "extraSystem", content: s.extraSystemBlock, priority: 20, maxTokens: 500 },
-      { name: "codingBlock", content: s.codingBlock, priority: 30, maxTokens: 800 },
+      {
+        name: "extraSystem",
+        content: s.extraSystemBlock,
+        priority: 20,
+        maxTokens: 500,
+      },
+      {
+        name: "codingBlock",
+        content: s.codingBlock,
+        priority: 30,
+        maxTokens: 800,
+      },
       { name: "skills", content: s.skillsBlock, priority: 40, maxTokens: 600 },
-      { name: "memoryPolicy", content: s.memoryPolicyBlock, priority: 50, maxTokens: 500 },
-      { name: "memoryContext", content: s.memoryBlock, priority: 60, maxTokens: 500 },
-      { name: "codingHint", content: s.codingHintBlock, priority: 70, maxTokens: 500 },
+      {
+        name: "memoryPolicy",
+        content: s.memoryPolicyBlock,
+        priority: 50,
+        maxTokens: 500,
+      },
+      {
+        name: "memoryContext",
+        content: s.memoryBlock,
+        priority: 60,
+        maxTokens: 500,
+      },
+      {
+        name: "codingHint",
+        content: s.codingHintBlock,
+        priority: 70,
+        maxTokens: 500,
+      },
     ];
 
     const budget = this.config.contextBudget ?? 0;
@@ -2258,7 +2777,10 @@ ${s.taskStrategy}
         const merged = mergeStreamChunk(accumulated, chunk);
         accumulated = merged.full;
         const current = accumulated.trim();
-        if (current && (merged.mode === "reset" || current.length > lastPushedLen + 10)) {
+        if (
+          current &&
+          (merged.mode === "reset" || current.length > lastPushedLen + 10)
+        ) {
           this.onStep?.({
             type: "answer",
             content: current,
@@ -2289,7 +2811,11 @@ ${s.taskStrategy}
         const merged = mergeStreamChunk(toolArgsAccum, chunk);
         toolArgsAccum = merged.full;
 
-        if (toolArgsAccum && (merged.mode === "reset" || toolArgsAccum.length > lastToolArgsPushedLen + 5)) {
+        if (
+          toolArgsAccum &&
+          (merged.mode === "reset" ||
+            toolArgsAccum.length > lastToolArgsPushedLen + 5)
+        ) {
           this.onStep?.({
             type: "tool_streaming",
             content: toolArgsAccum || " ",
@@ -2348,7 +2874,13 @@ ${s.taskStrategy}
   }
 
   private buildPlanningHint(userInput: string): string {
-    const hiddenInHint = new Set(["sequential_thinking", "save_user_memory", "task_done", "enter_plan_mode", "exit_plan_mode"]);
+    const hiddenInHint = new Set([
+      "sequential_thinking",
+      "save_user_memory",
+      "task_done",
+      "enter_plan_mode",
+      "exit_plan_mode",
+    ]);
     const toolNames = this.getAvailableTools()
       .filter((t) => !t.name.startsWith("native_") && !hiddenInHint.has(t.name))
       .map((t) => t.name)
@@ -2365,24 +2897,37 @@ ${s.taskStrategy}
     if (recentCalls.length < 2) return null;
 
     const READ_TOOLS = new Set([
-      "read_file", "read_file_range", "list_directory", "search_in_files",
-      "web_search", "fetch_url", "read_url",
+      "read_file",
+      "read_file_range",
+      "list_directory",
+      "search_in_files",
+      "web_search",
+      "fetch_url",
+      "read_url",
     ]);
     const WRITE_TOOLS = new Set([
-      "write_file", "write_to_file", "edit_file", "patch_file",
-      "create_file", "delete_file", "move_file",
+      "write_file",
+      "write_to_file",
+      "edit_file",
+      "patch_file",
+      "create_file",
+      "delete_file",
+      "move_file",
     ]);
     const COMMAND_TOOLS = new Set([
-      "run_shell_command", "persistent_shell", "execute_command",
+      "run_shell_command",
+      "persistent_shell",
+      "execute_command",
     ]);
-    const SEARCH_TOOLS = new Set([
-      "web_search", "search_in_files",
-    ]);
-    const DELEGATE_TOOLS = new Set([
-      "delegate_subtask", "send_message",
-    ]);
+    const SEARCH_TOOLS = new Set(["web_search", "search_in_files"]);
+    const DELEGATE_TOOLS = new Set(["delegate_subtask", "send_message"]);
 
-    let reads = 0, writes = 0, commands = 0, searches = 0, delegates = 0, others = 0;
+    let reads = 0,
+      writes = 0,
+      commands = 0,
+      searches = 0,
+      delegates = 0,
+      others = 0;
     let errors = 0;
     for (const call of recentCalls) {
       const name = call.toolName;
@@ -2413,7 +2958,11 @@ ${s.taskStrategy}
   /**
    * Function Calling 模式的执行循环
    */
-  private async runFC(userInput: string, signal?: AbortSignal, images?: string[]): Promise<string> {
+  private async runFC(
+    userInput: string,
+    signal?: AbortSignal,
+    images?: string[],
+  ): Promise<string> {
     type FCMessage = {
       role: string;
       content: string | null;
@@ -2437,22 +2986,36 @@ ${s.taskStrategy}
       const historyParts: string[] = [];
       for (const step of this.history) {
         if (step.type === "action") {
-          historyParts.push(`[执行] ${step.toolName}(${step.toolInput ? JSON.stringify(step.toolInput) : ""})`);
+          historyParts.push(
+            `[执行] ${step.toolName}(${step.toolInput ? JSON.stringify(step.toolInput) : ""})`,
+          );
         } else if (step.type === "observation") {
-          const obs = step.content.length > 300 ? step.content.slice(0, 300) + "..." : step.content;
+          const obs =
+            step.content.length > 300
+              ? step.content.slice(0, 300) + "..."
+              : step.content;
           historyParts.push(`[结果] ${obs}`);
         } else if (step.type === "answer") {
           historyParts.push(`[回答] ${step.content}`);
         }
       }
       if (historyParts.length > 0) {
-        messages.push({ role: "user", content: `[历史执行记录]\n${historyParts.join("\n")}` });
-        messages.push({ role: "assistant", content: "好的，我已了解之前的执行历史，继续处理当前任务。" });
+        messages.push({
+          role: "user",
+          content: `[历史执行记录]\n${historyParts.join("\n")}`,
+        });
+        messages.push({
+          role: "assistant",
+          content: "好的，我已了解之前的执行历史，继续处理当前任务。",
+        });
       }
     }
 
-    const isComplex = this.isComplexQuery(userInput) && this.history.length === 0;
-    const effectiveInput = isComplex ? this.buildPlanningHint(userInput) : userInput;
+    const isComplex =
+      this.isComplexQuery(userInput) && this.history.length === 0;
+    const effectiveInput = isComplex
+      ? this.buildPlanningHint(userInput)
+      : userInput;
     const lastUserMsg: FCMessage = { role: "user", content: effectiveInput };
     if (images?.length) lastUserMsg.images = images;
     messages.push(lastUserMsg);
@@ -2492,7 +3055,9 @@ ${s.taskStrategy}
               ...(m.images?.length ? { images: m.images } : {}),
             });
           }
-          const hasAgentMsg = pending.some((m) => m.from !== "用户" && m.from !== "user");
+          const hasAgentMsg = pending.some(
+            (m) => m.from !== "用户" && m.from !== "user",
+          );
           const replyGuide = hasAgentMsg
             ? "如果有其他 Agent 的消息需要回应，使用 send_message 回复。然后继续当前任务。"
             : "请根据消息内容继续当前任务。";
@@ -2509,7 +3074,10 @@ ${s.taskStrategy}
         const disabledChanged = currentDisabled !== (lastDisabledKey ?? "");
         const modeChanged = this.mode !== lastMode;
         if (disabledChanged || modeChanged) {
-          messages[0] = { role: "system", content: this.buildFCSystemPrompt(userInput) };
+          messages[0] = {
+            role: "system",
+            content: this.buildFCSystemPrompt(userInput),
+          };
           lastDisabledKey = currentDisabled;
           lastMode = this.mode;
         }
@@ -2535,8 +3103,16 @@ ${s.taskStrategy}
         messages,
         this.config.contextLimit ?? DEFAULT_CONTEXT_LIMIT,
       );
-      this.recordTrajectory({ type: "llm_call", mode: this.mode, tokenEstimate: estimateMessagesTokens(preparedMessages) });
-      const result = await this.streamFCLLM(preparedMessages, signal, isFinalWarningTurn);
+      this.recordTrajectory({
+        type: "llm_call",
+        mode: this.mode,
+        tokenEstimate: estimateMessagesTokens(preparedMessages),
+      });
+      const result = await this.streamFCLLM(
+        preparedMessages,
+        signal,
+        isFinalWarningTurn,
+      );
 
       if (signal?.aborted) throw new Error("Aborted");
 
@@ -2555,7 +3131,11 @@ ${s.taskStrategy}
           }
           const guardRailCorrection =
             guardRailRetryCount < MAX_GUARD_RAIL_RETRIES
-              ? this.checkAnswerGuardRails(answer, userInput, rejectedDangerousActionCount)
+              ? this.checkAnswerGuardRails(
+                  answer,
+                  userInput,
+                  rejectedDangerousActionCount,
+                )
               : null;
           if (guardRailCorrection) {
             guardRailRetryCount++;
@@ -2576,7 +3156,11 @@ ${s.taskStrategy}
             iterationsUsed: i + 1,
             stopReason: "empty_model_output",
           });
-          this.addStep({ type: "answer", content: fallback, timestamp: Date.now() });
+          this.addStep({
+            type: "answer",
+            content: fallback,
+            timestamp: Date.now(),
+          });
           return fallback;
         }
         messages.push({ role: "assistant", content: "" });
@@ -2612,7 +3196,8 @@ ${s.taskStrategy}
           });
           messages.push({
             role: "user",
-            content: buildRepeatedToolCallCorrectionMessage(repeatedToolPattern),
+            content:
+              buildRepeatedToolCallCorrectionMessage(repeatedToolPattern),
           });
           continue;
         }
@@ -2622,7 +3207,11 @@ ${s.taskStrategy}
             stopReason: "repeated_tool_calls",
             repeatedToolPattern: formatRepeatedToolPattern(validToolCalls),
           });
-          this.addStep({ type: "answer", content: fallback, timestamp: Date.now() });
+          this.addStep({
+            type: "answer",
+            content: fallback,
+            timestamp: Date.now(),
+          });
           return fallback;
         }
       } else {
@@ -2632,7 +3221,9 @@ ${s.taskStrategy}
       prevToolCallsKey = curToolCallsKey;
 
       const parsedCalls = validToolCalls.map((tc) => {
-        const { params: toolParams, parseError } = parseToolCallArguments(tc.function.arguments || "{}");
+        const { params: toolParams, parseError } = parseToolCallArguments(
+          tc.function.arguments || "{}",
+        );
         return { tc, toolName: tc.function.name, toolParams, parseError };
       });
 
@@ -2640,58 +3231,83 @@ ${s.taskStrategy}
         if (!this.tools.find((t) => t.name === toolName)) {
           unknownToolCount++;
           if (unknownToolCount >= 3) {
-            throw new Error("FC_INCOMPATIBLE: too many unknown tool calls, model may not be compatible with FC");
+            throw new Error(
+              "FC_INCOMPATIBLE: too many unknown tool calls, model may not be compatible with FC",
+            );
           }
         } else {
           unknownToolCount = 0;
         }
       }
 
-      const canParallel = parsedCalls.length > 1 && parsedCalls.every(({ toolName }) => {
-        const tool = this.tools.find((t) => t.name === toolName);
-        if (!tool) return false;
-        if (toolName === "ask_clarification") return false;
-        if (tool.readonly) return true;
-        return !tool.dangerous && !this.config.dangerousToolPatterns?.some(
-          (p) => toolName.toLowerCase().includes(p.toLowerCase()),
-        );
-      });
+      const canParallel =
+        parsedCalls.length > 1 &&
+        parsedCalls.every(({ toolName }) => {
+          const tool = this.tools.find((t) => t.name === toolName);
+          if (!tool) return false;
+          if (toolName === "ask_clarification") return false;
+          if (tool.readonly) return true;
+          return (
+            !tool.dangerous &&
+            !this.config.dangerousToolPatterns?.some((p) =>
+              toolName.toLowerCase().includes(p.toLowerCase()),
+            )
+          );
+        });
 
-      type PipelineResult = Awaited<ReturnType<ReActAgent["executeToolPipeline"]>>;
-      type CallResult = { tc: AIToolCall; toolName: string; result: PipelineResult };
+      type PipelineResult = Awaited<
+        ReturnType<ReActAgent["executeToolPipeline"]>
+      >;
+      type CallResult = {
+        tc: AIToolCall;
+        toolName: string;
+        result: PipelineResult;
+      };
 
       let callResults: CallResult[];
       if (canParallel) {
         callResults = await Promise.all(
-          parsedCalls.map(async ({ tc, toolName, toolParams, parseError }): Promise<CallResult> => {
-            if (parseError) {
-              this.maybeLogRepeatedMalformedWriteToolCall(
-                toolName,
-                tc.function.arguments || "{}",
-                parseError,
-                userInput,
-              );
+          parsedCalls.map(
+            async ({
+              tc,
+              toolName,
+              toolParams,
+              parseError,
+            }): Promise<CallResult> => {
+              if (parseError) {
+                this.maybeLogRepeatedMalformedWriteToolCall(
+                  toolName,
+                  tc.function.arguments || "{}",
+                  parseError,
+                  userInput,
+                );
+                return {
+                  tc,
+                  toolName,
+                  result: {
+                    outputStr: parseError,
+                    error: parseError,
+                    errorResult: {
+                      type: ToolErrorType.ParseError,
+                      tool: toolName,
+                      message: parseError,
+                      recoverable: true,
+                    },
+                  },
+                };
+              }
               return {
                 tc,
                 toolName,
-                result: {
-                  outputStr: parseError,
-                  error: parseError,
-                  errorResult: {
-                    type: ToolErrorType.ParseError,
-                    tool: toolName,
-                    message: parseError,
-                    recoverable: true,
-                  },
-                },
+                result: await this.executeToolPipeline(
+                  toolName,
+                  toolParams,
+                  userInput,
+                  signal,
+                ),
               };
-            }
-            return {
-              tc,
-              toolName,
-              result: await this.executeToolPipeline(toolName, toolParams, userInput, signal),
-            };
-          }),
+            },
+          ),
         );
       } else {
         callResults = [];
@@ -2718,13 +3334,22 @@ ${s.taskStrategy}
                     recoverable: true,
                   },
                 }
-              : await this.executeToolPipeline(toolName, toolParams, userInput, signal),
+              : await this.executeToolPipeline(
+                  toolName,
+                  toolParams,
+                  userInput,
+                  signal,
+                ),
           });
         }
       }
       let quickAnswerFound: string | undefined;
 
-      messages.push({ role: "assistant", content: null, tool_calls: callResults.map((r) => r.tc) });
+      messages.push({
+        role: "assistant",
+        content: null,
+        tool_calls: callResults.map((r) => r.tc),
+      });
 
       let taskDoneResult: string | undefined;
       /** task_done params.summary（纯文本，比 JSON outputStr 更适合展示） */
@@ -2740,9 +3365,33 @@ ${s.taskStrategy}
           taskDoneResult = pipelineResult.outputStr || "任务已完成。";
           // 尝试从工具调用参数中提取 summary 文本（人类可读，非 JSON）
           try {
-            const doneParams = parseToolCallArguments(tc.function.arguments || "{}").params as { summary?: string };
+            const doneParams = parseToolCallArguments(
+              tc.function.arguments || "{}",
+            ).params as { summary?: string };
             if (doneParams.summary) taskDoneSummary = doneParams.summary.trim();
-          } catch { /* ignore */ }
+          } catch {
+            /* ignore */
+          }
+        }
+
+        if (
+          toolName === "install_clawhub_skill"
+          && pipelineResult.rawOutput
+          && typeof pipelineResult.rawOutput === "object"
+        ) {
+          const installOutput = pipelineResult.rawOutput as {
+            installed?: unknown;
+            resumeRequired?: unknown;
+            resumePrompt?: unknown;
+          };
+          if (installOutput.installed === true && installOutput.resumeRequired === true) {
+            taskDoneSummary =
+              typeof installOutput.resumePrompt === "string" && installOutput.resumePrompt.trim()
+                ? installOutput.resumePrompt.trim()
+                : "已安装所需 ClawHub skill，已自动排入后续续跑任务。";
+            taskDoneResult =
+              "ClawHub skill 安装完成。当前 run 到此结束，系统会在下一次 run 中基于新 skill 继续处理刚才任务。";
+          }
         }
 
         if (pipelineResult.error) {
@@ -2755,22 +3404,39 @@ ${s.taskStrategy}
           if (pipelineResult.reflection) {
             outputWithHint += `\n\n[反思] ${pipelineResult.reflection}`;
           }
-          messages.push({ role: "tool", content: outputWithHint, tool_call_id: tc.id, name: toolName });
+          messages.push({
+            role: "tool",
+            content: outputWithHint,
+            tool_call_id: tc.id,
+            name: toolName,
+          });
         } else {
           toolFailCounts.delete(toolName);
-          messages.push({ role: "tool", content: pipelineResult.outputStr, tool_call_id: tc.id, name: toolName });
+          messages.push({
+            role: "tool",
+            content: pipelineResult.outputStr,
+            tool_call_id: tc.id,
+            name: toolName,
+          });
         }
       }
 
       // ── Checkpoint: 阶段性进度总结 ──
       for (const r of callResults) {
-        fcCheckpointBuffer.push({ toolName: r.toolName, error: !!r.result.error });
+        fcCheckpointBuffer.push({
+          toolName: r.toolName,
+          error: !!r.result.error,
+        });
       }
       toolCallsSinceCheckpoint += callResults.length;
       if (toolCallsSinceCheckpoint >= CHECKPOINT_INTERVAL) {
         const summary = this.buildCheckpointSummary(fcCheckpointBuffer);
         if (summary) {
-          this.addStep({ type: "checkpoint", content: summary, timestamp: Date.now() });
+          this.addStep({
+            type: "checkpoint",
+            content: summary,
+            timestamp: Date.now(),
+          });
         }
         toolCallsSinceCheckpoint = 0;
         fcCheckpointBuffer.length = 0;
@@ -2779,13 +3445,18 @@ ${s.taskStrategy}
       if (quickAnswerFound) return quickAnswerFound;
 
       if (taskDoneResult) {
-        const lastAnswerStep = [...this.steps].reverse().find((s) => s.type === "answer");
-        const answer = this.pickBestFinalAnswer(userInput, [
-          lastAnswerStep?.content,
-          this.lastStreamingAnswer.length > 50 ? this.lastStreamingAnswer : undefined,
-          taskDoneSummary,
-          taskDoneResult,
-        ]) || taskDoneResult;
+        const lastAnswerStep = [...this.steps]
+          .reverse()
+          .find((s) => s.type === "answer");
+        const answer =
+          this.pickBestFinalAnswer(userInput, [
+            lastAnswerStep?.content,
+            this.lastStreamingAnswer.length > 50
+              ? this.lastStreamingAnswer
+              : undefined,
+            taskDoneSummary,
+            taskDoneResult,
+          ]) || taskDoneResult;
         const memoryRecallCorrection =
           memoryRecallCorrectionCount < 2
             ? this.buildMemoryRecallCorrection(userInput)
@@ -2797,7 +3468,11 @@ ${s.taskStrategy}
           continue;
         }
         if (!lastAnswerStep) {
-          this.addStep({ type: "answer", content: answer, timestamp: Date.now() });
+          this.addStep({
+            type: "answer",
+            content: answer,
+            timestamp: Date.now(),
+          });
         }
         return answer;
       }
@@ -2817,11 +3492,21 @@ ${s.taskStrategy}
 
   // ── 文本 ReAct 模式的执行循环 ──
 
-  private async runText(userInput: string, signal?: AbortSignal, images?: string[]): Promise<string> {
+  private async runText(
+    userInput: string,
+    signal?: AbortSignal,
+    images?: string[],
+  ): Promise<string> {
     const messages = this.buildTextConversation(userInput);
-    const isComplex = this.isComplexQuery(userInput) && this.history.length === 0;
-    const effectiveTextInput = isComplex ? this.buildPlanningHint(userInput) : userInput;
-    const userMsg: { role: "user"; content: string; images?: string[] } = { role: "user", content: effectiveTextInput };
+    const isComplex =
+      this.isComplexQuery(userInput) && this.history.length === 0;
+    const effectiveTextInput = isComplex
+      ? this.buildPlanningHint(userInput)
+      : userInput;
+    const userMsg: { role: "user"; content: string; images?: string[] } = {
+      role: "user",
+      content: effectiveTextInput,
+    };
     if (images?.length) userMsg.images = images;
     messages.push(userMsg);
     let rejectedDangerousActionCount = 0;
@@ -2831,7 +3516,8 @@ ${s.taskStrategy}
     const textToolFailCounts = new Map<string, number>();
     let textToolCallsSinceCheckpoint = 0;
     const TEXT_CHECKPOINT_INTERVAL = 3;
-    const textCheckpointBuffer: Array<{ toolName: string; error: boolean }> = [];
+    const textCheckpointBuffer: Array<{ toolName: string; error: boolean }> =
+      [];
 
     let textIterationWarningIdx = -1;
     let prevResponseContent = "";
@@ -2861,9 +3547,16 @@ ${s.taskStrategy}
         messages,
         this.config.contextLimit ?? DEFAULT_CONTEXT_LIMIT,
       );
-      this.recordTrajectory({ type: "llm_call", mode: this.mode, tokenEstimate: estimateMessagesTokens(compactedTextMessages) });
+      this.recordTrajectory({
+        type: "llm_call",
+        mode: this.mode,
+        tokenEstimate: estimateMessagesTokens(compactedTextMessages),
+      });
       try {
-        responseContent = await this.streamTextLLM(compactedTextMessages, signal);
+        responseContent = await this.streamTextLLM(
+          compactedTextMessages,
+          signal,
+        );
       } catch (e) {
         if ((e as Error).message === "Aborted") throw e;
         const response = await this.ai.chat({
@@ -2879,12 +3572,17 @@ ${s.taskStrategy}
       const trimmed = responseContent.trim();
       const prevTrimmed = prevResponseContent.trim();
       const compareLen = Math.min(300, trimmed.length, prevTrimmed.length);
-      const isSimilar = compareLen > 20 &&
+      const isSimilar =
+        compareLen > 20 &&
         trimmed.slice(0, compareLen) === prevTrimmed.slice(0, compareLen);
       if (isSimilar) {
         staleCount++;
         if (staleCount >= 2) {
-          this.addStep({ type: "answer", content: trimmed, timestamp: Date.now() });
+          this.addStep({
+            type: "answer",
+            content: trimmed,
+            timestamp: Date.now(),
+          });
           return trimmed;
         }
       } else {
@@ -2915,7 +3613,11 @@ ${s.taskStrategy}
         }
         const guardRailCorrection =
           guardRailRetryCount < MAX_GUARD_RAIL_RETRIES
-            ? this.checkAnswerGuardRails(parsed.finalAnswer, userInput, rejectedDangerousActionCount)
+            ? this.checkAnswerGuardRails(
+                parsed.finalAnswer,
+                userInput,
+                rejectedDangerousActionCount,
+              )
             : null;
         if (guardRailCorrection) {
           guardRailRetryCount++;
@@ -2960,12 +3662,19 @@ ${s.taskStrategy}
         messages.push({ role: "user", content: `Observation: ${observation}` });
 
         // Checkpoint for text ReAct
-        textCheckpointBuffer.push({ toolName: parsed.action, error: !!pipelineResult.error });
+        textCheckpointBuffer.push({
+          toolName: parsed.action,
+          error: !!pipelineResult.error,
+        });
         textToolCallsSinceCheckpoint++;
         if (textToolCallsSinceCheckpoint >= TEXT_CHECKPOINT_INTERVAL) {
           const summary = this.buildCheckpointSummary(textCheckpointBuffer);
           if (summary) {
-            this.addStep({ type: "checkpoint", content: summary, timestamp: Date.now() });
+            this.addStep({
+              type: "checkpoint",
+              content: summary,
+              timestamp: Date.now(),
+            });
           }
           textToolCallsSinceCheckpoint = 0;
           textCheckpointBuffer.length = 0;
@@ -2999,7 +3708,11 @@ ${s.taskStrategy}
    * 优先使用结构化 Function Calling（消除格式解析失败），
    * 只有在明确确认 FC 不兼容时才降级为文本 ReAct。
    */
-  async run(userInput: string, signal?: AbortSignal, images?: string[]): Promise<string> {
+  async run(
+    userInput: string,
+    signal?: AbortSignal,
+    images?: string[],
+  ): Promise<string> {
     if (this.running) throw new Error("Agent is already running");
     this.running = true;
     this.currentSignal = signal;
@@ -3014,74 +3727,80 @@ ${s.taskStrategy}
     this.mode = this.config.initialMode ?? "execute";
 
     try {
-    // 判断是否可以使用 Function Calling
-    const canUseFC =
-      !this.config.forceTextMode &&
-      typeof this.ai.streamWithTools === "function";
+      // 判断是否可以使用 Function Calling
+      const canUseFC =
+        !this.config.forceTextMode &&
+        typeof this.ai.streamWithTools === "function";
 
-    if (canUseFC && this.fcAvailable !== false) {
-      const FC_MAX_TRANSPORT_RETRIES = 2;
-      for (let fcRetryCount = 0; ; fcRetryCount++) {
-        try {
-          const result = await this.runFC(userInput, signal, images);
-          this.fcAvailable = true;
-          return result;
-        } catch (e) {
-          if ((e as Error).message === "Aborted") throw e;
+      if (canUseFC && this.fcAvailable !== false) {
+        const FC_MAX_TRANSPORT_RETRIES = 2;
+        for (let fcRetryCount = 0; ; fcRetryCount++) {
+          try {
+            const result = await this.runFC(userInput, signal, images);
+            this.fcAvailable = true;
+            return result;
+          } catch (e) {
+            if ((e as Error).message === "Aborted") throw e;
 
-          const errMsg = (e as Error).message || "";
-          const isFCIncompatible = isFCCompatibilityErrorMessage(errMsg);
-          const isTransportOrTimeout = isTransportOrTimeoutErrorMessage(errMsg);
-          const shouldDowngrade = isFCIncompatible;
+            const errMsg = (e as Error).message || "";
+            const isFCIncompatible = isFCCompatibilityErrorMessage(errMsg);
+            const isTransportOrTimeout =
+              isTransportOrTimeoutErrorMessage(errMsg);
+            const shouldDowngrade = isFCIncompatible;
 
-          if (isFCIncompatible) {
-            this.fcAvailable = false;
-            if (this.fcCompatibilityKey) {
-              fcIncompatibleCache.set(this.fcCompatibilityKey, Date.now());
-              pruneFCCache();
+            if (isFCIncompatible) {
+              this.fcAvailable = false;
+              if (this.fcCompatibilityKey) {
+                fcIncompatibleCache.set(this.fcCompatibilityKey, Date.now());
+                pruneFCCache();
+              }
             }
-          }
 
-          if (shouldDowngrade) {
-            handleError(e, {
-              context: "ReAct Agent Function Calling 降级为文本模式",
-              level: ErrorLevel.Warning,
-              silent: true,
-            });
-            this.addStep({
-              type: "observation",
-              content: "Function Calling 模式不可用，已自动切换至文本 ReAct 模式。",
-              timestamp: Date.now(),
-            });
-            return await this.runText(userInput, signal, images);
-          }
+            if (shouldDowngrade) {
+              handleError(e, {
+                context: "ReAct Agent Function Calling 降级为文本模式",
+                level: ErrorLevel.Warning,
+                silent: true,
+              });
+              this.addStep({
+                type: "observation",
+                content:
+                  "Function Calling 模式不可用，已自动切换至文本 ReAct 模式。",
+                timestamp: Date.now(),
+              });
+              return await this.runText(userInput, signal, images);
+            }
 
-          // 传输/stall 类错误：自动重试最多 FC_MAX_TRANSPORT_RETRIES 次
-          if (isTransportOrTimeout && fcRetryCount < FC_MAX_TRANSPORT_RETRIES) {
-            const delay = (fcRetryCount + 1) * 3000;
-            this.addStep({
-              type: "observation",
-              content: `网络/流传输错误，${delay / 1000}秒后自动重试（第${fcRetryCount + 1}次）...`,
-              timestamp: Date.now(),
-            });
-            await new Promise((r) => setTimeout(r, delay));
-            continue;
-          }
+            // 传输/stall 类错误：自动重试最多 FC_MAX_TRANSPORT_RETRIES 次
+            if (
+              isTransportOrTimeout &&
+              fcRetryCount < FC_MAX_TRANSPORT_RETRIES
+            ) {
+              const delay = (fcRetryCount + 1) * 3000;
+              this.addStep({
+                type: "observation",
+                content: `网络/流传输错误，${delay / 1000}秒后自动重试（第${fcRetryCount + 1}次）...`,
+                timestamp: Date.now(),
+              });
+              await new Promise((r) => setTimeout(r, delay));
+              continue;
+            }
 
-          if (!isTransportOrTimeout) {
-            handleError(e, {
-              context: "ReAct Agent Function Calling 执行失败（保留结构化模式）",
-              level: ErrorLevel.Warning,
-              silent: true,
-            });
+            if (!isTransportOrTimeout) {
+              handleError(e, {
+                context:
+                  "ReAct Agent Function Calling 执行失败（保留结构化模式）",
+                level: ErrorLevel.Warning,
+                silent: true,
+              });
+            }
+            throw e;
           }
-          throw e;
         }
       }
-    }
 
-    // 文本 ReAct 模式
-    return this.runText(userInput, signal, images);
+      // 文本 ReAct 模式
+      return this.runText(userInput, signal, images);
     } finally {
       this.running = false;
       this.currentSignal = undefined;
@@ -3100,7 +3819,9 @@ ${s.taskStrategy}
     return this.mode;
   }
 
-  private recordTrajectory(entry: Omit<TrajectoryEntry, "step" | "timestamp">): void {
+  private recordTrajectory(
+    entry: Omit<TrajectoryEntry, "step" | "timestamp">,
+  ): void {
     this.trajectory.push({
       step: this.trajectory.length + 1,
       timestamp: Date.now(),

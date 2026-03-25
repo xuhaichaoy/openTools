@@ -1,5 +1,5 @@
 # ── Stage 1: Build ──────────────────────────────────────────────────────────
-FROM rust:1.87-bookworm AS builder
+FROM rust:1.90-bookworm AS builder
 
 WORKDIR /app
 
@@ -17,18 +17,12 @@ COPY migrations ./migrations
 RUN touch src/main.rs src/lib.rs && cargo build --release
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────
-FROM node:22-bookworm-slim
+FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     && rm -rf /var/lib/apt/lists/*
-
-# Install ClawHub CLI for team marketplace proxy/search/sync/publish flows
-ARG CLAWHUB_VERSION=latest
-RUN npm i -g "clawhub@${CLAWHUB_VERSION}" \
-    && clawhub --version \
-    && npm cache clean --force
 
 # Install ONNX Runtime
 ARG ORT_VERSION=1.22.0
@@ -46,7 +40,6 @@ COPY --from=builder /app/migrations ./migrations
 COPY ocr-models ./ocr-models
 
 ENV OCR_MODEL_DIR=./ocr-models
-ENV CLAWHUB_DISABLE_TELEMETRY=1
 
 EXPOSE 3000
 

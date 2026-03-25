@@ -1,6 +1,6 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "51ToolBox",
+  "productName": "HiClow",
   "version": "0.1.0",
   "identifier": "com.51cto.toolbox",
   "build": {
@@ -15,7 +15,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "51ToolBox",
+        "title": "HiClow",
         "width": 800,
         "height": 60,
         "minWidth": 800,
@@ -54,7 +54,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDhDQjUyRkExMjRENzJEREUKUldUZUxkY2tvUysxakNEcFE5bnFpemtYS0E3ZnFJeUtSTEIyYVBZRXV3clQzenAwNzl1b240WmwK",
       "endpoints": [
-        "https://your-51toolbox-server.com/v1/app/update"
+        "https://your-HiClow-server.com/v1/app/update"
       ]
     }
   }

@@ -1,17 +1,15 @@
 # AI 助手对标 OpenClaw 体验开发总方案
 
-基于当前 `51ToolBox` 实现、现有改造文档，以及本地 `openclaw` 代码和文档整理出的后续开发主施工单。
+基于当前 `HiClow` 实现、现有改造文档，以及本地 `openclaw` 代码和文档整理出的后续开发主施工单。
 
 相关文档：
+
 - [AI 助手上下文与长期记忆全量改造方案](./ai-context-memory-full-overhaul-plan.md)
-- [AI 助手三模式架构审查报告](./ai-assistant-architecture-review.md)
-- [AI 助手改进执行计划](./ai-assistant-improvement-plan.md)
 - [IM 通道 / Dialog 房间收敛方案](./ai-im-channel-dialog-solution.md)
 - [Dialog 模式稳内核重构与下一波改造清单](./dialog-mode-refactor-status-and-next-wave.md)
 - [数据查询协议与 MCP 状态](./data-export-query-and-mcp-status.md)
 - [AI 长期记忆说明](./ai-long-term-memory.md)
 - [OpenClaw 主体 + MEMO 增强层实施图](./ai-openclaw-memo-layered-architecture.md)
-- [Agent Cluster 架构审查](./agent-cluster-architecture-review.md)
 
 ---
 
@@ -50,7 +48,7 @@
 
 ## 1. 文档目标
 
-这份文档要解决的不是“补几个功能点”，而是把 `51ToolBox` 的 AI 助手系统持续推进到接近 `openclaw` 的整体体验：
+这份文档要解决的不是“补几个功能点”，而是把 `HiClow` 的 AI 助手系统持续推进到接近 `openclaw` 的整体体验：
 
 1. 大项目连续开发时，上下文稳定、不乱串、不频繁回到“重新分析项目”。
 2. 无关新任务进入时，系统能及时切换上下文边界，而不是继续沿用旧项目。
@@ -176,9 +174,9 @@ Agent 路径已经进入上下文运行时雏形阶段，
 
 按阶段上线，每个阶段都可验证、可回退。
 
-### 4.10 Preserve 51ToolBox Identity
+### 4.10 Preserve HiClow Identity
 
-借鉴 `openclaw` 的上下文和记忆体系，但保留 `51ToolBox` 原有的多模式中心、管理中心、本地工具和桌面产品心智。
+借鉴 `openclaw` 的上下文和记忆体系，但保留 `HiClow` 原有的多模式中心、管理中心、本地工具和桌面产品心智。
 
 ---
 
@@ -298,19 +296,19 @@ Agent 路径已经进入上下文运行时雏形阶段，
 
 当前实施进度（2026-03-17）：
 
-1. 已新增 [context-assembler.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/context-runtime/context-assembler.ts)，统一输出 bootstrap、session summary、prompt context、effective files。
-2. 已将 [use-agent-execution.ts](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/hooks/use-agent-execution.ts) 中最重的 assemble 逻辑切到 assembler，Hook 不再直接拼 bootstrap / summary / prompt context。
-3. 已补充 [context-assembler.test.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/context-runtime/context-assembler.test.ts)，覆盖 continuity 对 files / handoff / prompt 的影响。
-4. 已将 [prompt-build-middleware.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/actor/middlewares/prompt-build-middleware.ts)、[local-agent-bridge.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/cluster/local-agent-bridge.ts)、[agent-runner-service.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/agent-runner-service.ts) 接到 assembler，减少 `Actor / Cluster / 后台任务` 的分散 prompt 装配。
+1. 已新增 [context-assembler.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/context-runtime/context-assembler.ts)，统一输出 bootstrap、session summary、prompt context、effective files。
+2. 已将 [use-agent-execution.ts](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/hooks/use-agent-execution.ts) 中最重的 assemble 逻辑切到 assembler，Hook 不再直接拼 bootstrap / summary / prompt context。
+3. 已补充 [context-assembler.test.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/context-runtime/context-assembler.test.ts)，覆盖 continuity 对 files / handoff / prompt 的影响。
+4. 已将 [prompt-build-middleware.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/actor/middlewares/prompt-build-middleware.ts)、[local-agent-bridge.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/cluster/local-agent-bridge.ts)、[agent-runner-service.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/agent-runner-service.ts) 接到 assembler，减少 `Actor / Cluster / 后台任务` 的分散 prompt 装配。
 5. 已补充 `Actor / Cluster` 侧接入测试，确保后续继续重构时不会退回到多套 assemble 逻辑。
-6. 已将 [cluster-orchestrator.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/cluster/cluster-orchestrator.ts) 的 `plan / review / aggregate` 三段接入 assembled context，`Cluster` 主编排链也开始共享同一套 runtime prompt 组装。
-7. 已补充 [cluster-orchestrator.test.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/cluster/cluster-orchestrator.test.ts)，验证 planner / reviewer / aggregator 都会注入 assembled context。
-8. 已新增 [runtime-state.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/context-runtime/runtime-state.ts)，把 `Agent / Cluster / Ask / Dialog` 共享的前台会话、面板可见性、等待阶段和 abort 句柄抽成统一本地运行态。
-9. 已将 [agent-running-store.ts](/Users/haichao/Desktop/work/51ToolBox/src/store/agent-running-store.ts)、[active-orchestrator.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/cluster/active-orchestrator.ts)、[ai-store.ts](/Users/haichao/Desktop/work/51ToolBox/src/store/ai-store.ts)、[actor-system-store.ts](/Users/haichao/Desktop/work/51ToolBox/src/store/actor-system-store.ts) 接入 shared runtime-state，补齐 `Ask / Agent / Cluster / Dialog` 的 active runtime metadata。
-10. 已在 [ChatView.tsx](/Users/haichao/Desktop/work/51ToolBox/src/components/ai/ChatView.tsx)、[index.tsx](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/index.tsx)、[ActorChatPanel.tsx](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/components/actor/ActorChatPanel.tsx)、[ClusterPanel.tsx](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/components/cluster/ClusterPanel.tsx) 同步 panel visibility / foreground session，为后续页面离开再进入时的恢复打底。
-11. 已将 [ClusterFloatingIndicator.tsx](/Users/haichao/Desktop/work/51ToolBox/src/components/cluster/ClusterFloatingIndicator.tsx) 改为统一读取 shared runtime-state，右下角全局提示现在能覆盖 `Ask / Agent / Cluster / Dialog`，停止按钮也统一走 runtime abort handler。
-12. 已新增 [runtime-indicator.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/context-runtime/runtime-indicator.ts) 与 [runtime-indicator.test.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/context-runtime/runtime-indicator.test.ts)，把运行态标签、等待态文案、悬浮提示细节抽成可测试的共享逻辑。
-13. 已在 [agent-store.ts](/Users/haichao/Desktop/work/51ToolBox/src/store/agent-store.ts)、[scope-resolver.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/context-runtime/scope-resolver.ts)、[continuity-policy.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/context-runtime/continuity-policy.ts) 与 [context-runtime-manager.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/context-runtime/context-runtime-manager.ts) 补齐 `repoRoot / lastActivePaths / lastTaskIntent / workspaceLocked / lastSoftResetAt` 这一组会话边界字段。
+6. 已将 [cluster-orchestrator.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/cluster/cluster-orchestrator.ts) 的 `plan / review / aggregate` 三段接入 assembled context，`Cluster` 主编排链也开始共享同一套 runtime prompt 组装。
+7. 已补充 [cluster-orchestrator.test.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/cluster/cluster-orchestrator.test.ts)，验证 planner / reviewer / aggregator 都会注入 assembled context。
+8. 已新增 [runtime-state.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/context-runtime/runtime-state.ts)，把 `Agent / Cluster / Ask / Dialog` 共享的前台会话、面板可见性、等待阶段和 abort 句柄抽成统一本地运行态。
+9. 已将 [agent-running-store.ts](/Users/haichao/Desktop/work/HiClow/src/store/agent-running-store.ts)、[active-orchestrator.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/cluster/active-orchestrator.ts)、[ai-store.ts](/Users/haichao/Desktop/work/HiClow/src/store/ai-store.ts)、[actor-system-store.ts](/Users/haichao/Desktop/work/HiClow/src/store/actor-system-store.ts) 接入 shared runtime-state，补齐 `Ask / Agent / Cluster / Dialog` 的 active runtime metadata。
+10. 已在 [ChatView.tsx](/Users/haichao/Desktop/work/HiClow/src/components/ai/ChatView.tsx)、[index.tsx](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/index.tsx)、[ActorChatPanel.tsx](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/components/actor/ActorChatPanel.tsx)、[ClusterPanel.tsx](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/components/cluster/ClusterPanel.tsx) 同步 panel visibility / foreground session，为后续页面离开再进入时的恢复打底。
+11. 已将 [ClusterFloatingIndicator.tsx](/Users/haichao/Desktop/work/HiClow/src/components/cluster/ClusterFloatingIndicator.tsx) 改为统一读取 shared runtime-state，右下角全局提示现在能覆盖 `Ask / Agent / Cluster / Dialog`，停止按钮也统一走 runtime abort handler。
+12. 已新增 [runtime-indicator.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/context-runtime/runtime-indicator.ts) 与 [runtime-indicator.test.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/context-runtime/runtime-indicator.test.ts)，把运行态标签、等待态文案、悬浮提示细节抽成可测试的共享逻辑。
+13. 已在 [agent-store.ts](/Users/haichao/Desktop/work/HiClow/src/store/agent-store.ts)、[scope-resolver.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/context-runtime/scope-resolver.ts)、[continuity-policy.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/context-runtime/continuity-policy.ts) 与 [context-runtime-manager.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/context-runtime/context-runtime-manager.ts) 补齐 `repoRoot / lastActivePaths / lastTaskIntent / workspaceLocked / lastSoftResetAt` 这一组会话边界字段。
 14. 已支持手动 `锁定当前工作区`，并在没有新路径/附件/handoff 信号时优先沿用当前工作区；如果 query 自带明确绝对路径，仍允许切换，不会被锁死。
 15. 已新增“同工作区但路径焦点切换”的连续性判定：当新请求明确指向同仓库下另一组路径时，系统会退到 `inherit_summary_only`，保留摘要但不再继承旧的 live files / handoff，直接减少“大项目分析后做无关子目录任务”时的上下文污染。
 16. 当前优先继续处理 `统一 ingest 风格`、`Dialog/Ask 的等待态恢复`，以及把共享 runtime-state 接到更完整的恢复入口，而不只是状态展示。
@@ -420,11 +418,11 @@ src/core/agent/context-runtime/
 
 ### 直接改造文件
 
-1. [use-agent-execution.ts](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/hooks/use-agent-execution.ts)
-2. [context-runtime-manager.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/context-runtime/context-runtime-manager.ts)
-3. [context-ingest.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/context-runtime/context-ingest.ts)
-4. [ask-context-ingest.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/context-runtime/ask-context-ingest.ts)
-5. [cluster-context-ingest.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/context-runtime/cluster-context-ingest.ts)
+1. [use-agent-execution.ts](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/hooks/use-agent-execution.ts)
+2. [context-runtime-manager.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/context-runtime/context-runtime-manager.ts)
+3. [context-ingest.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/context-runtime/context-ingest.ts)
+4. [ask-context-ingest.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/context-runtime/ask-context-ingest.ts)
+5. [cluster-context-ingest.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/context-runtime/cluster-context-ingest.ts)
 
 ### 验收标准
 
@@ -440,20 +438,20 @@ src/core/agent/context-runtime/
 
 ### 当前实施进度（2026-03-17）
 
-1. 会话级边界字段已落到 [agent-store.ts](/Users/haichao/Desktop/work/51ToolBox/src/store/agent-store.ts)，并随持久化 / fork / migrate 一起保留。
-2. [scope-resolver.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/context-runtime/scope-resolver.ts) 已能识别 query 中的绝对路径提示，并写入 `queryPathHints / workspaceSource`。
-3. [context-runtime-manager.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/context-runtime/context-runtime-manager.ts) 已支持工作区锁定：没有外部路径信号时沿用当前工作区，有明确路径信号时允许切走。
-4. [continuity-policy.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/context-runtime/continuity-policy.ts) 已覆盖：
+1. 会话级边界字段已落到 [agent-store.ts](/Users/haichao/Desktop/work/HiClow/src/store/agent-store.ts)，并随持久化 / fork / migrate 一起保留。
+2. [scope-resolver.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/context-runtime/scope-resolver.ts) 已能识别 query 中的绝对路径提示，并写入 `queryPathHints / workspaceSource`。
+3. [context-runtime-manager.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/context-runtime/context-runtime-manager.ts) 已支持工作区锁定：没有外部路径信号时沿用当前工作区，有明确路径信号时允许切走。
+4. [continuity-policy.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/context-runtime/continuity-policy.ts) 已覆盖：
    - 工作区切换
    - 明确新任务
    - query topic switch
    - 同工作区路径焦点切换
-5. [AgentSessionContextStrip.tsx](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/components/AgentSessionContextStrip.tsx) 已显示当前连续性策略、原因和工作区锁定状态。
+5. [AgentSessionContextStrip.tsx](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/components/AgentSessionContextStrip.tsx) 已显示当前连续性策略、原因和工作区锁定状态。
 6. 这一流目前剩下的重点不是基础判定，而是把同样的边界心智继续接到 `Ask / Dialog / Cluster`，并补更细的子目录相关性评分。
 
 ### 需要新增的会话字段
 
-在 [agent-store.ts](/Users/haichao/Desktop/work/51ToolBox/src/store/agent-store.ts) 中增加：
+在 [agent-store.ts](/Users/haichao/Desktop/work/HiClow/src/store/agent-store.ts) 中增加：
 
 1. `repoRoot?: string`
 2. `lastActivePaths?: string[]`
@@ -477,10 +475,10 @@ src/core/agent/context-runtime/
 
 ### 直接改造文件
 
-1. [scope-resolver.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/context-runtime/scope-resolver.ts)
-2. [continuity-policy.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/context-runtime/continuity-policy.ts)
-3. [agent-store.ts](/Users/haichao/Desktop/work/51ToolBox/src/store/agent-store.ts)
-4. [bootstrap-context.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/ai/bootstrap-context.ts)
+1. [scope-resolver.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/context-runtime/scope-resolver.ts)
+2. [continuity-policy.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/context-runtime/continuity-policy.ts)
+3. [agent-store.ts](/Users/haichao/Desktop/work/HiClow/src/store/agent-store.ts)
+4. [bootstrap-context.ts](/Users/haichao/Desktop/work/HiClow/src/core/ai/bootstrap-context.ts)
 5. Agent 相关会话列表与条带 UI
 
 ### 验收标准
@@ -497,17 +495,17 @@ src/core/agent/context-runtime/
 
 ### 当前实施进度（2026-03-17）
 
-1. [bootstrap-context.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/ai/bootstrap-context.ts) 已新增 bootstrap diagnostics，当前会记录：
+1. [bootstrap-context.ts](/Users/haichao/Desktop/work/HiClow/src/core/ai/bootstrap-context.ts) 已新增 bootstrap diagnostics，当前会记录：
    - 单文件预算
    - 总预算
    - 已使用字符数
    - 截断文件数
    - 超预算未注入文件数
    - 未找到文件数
-2. 同一份 diagnostics 已透传到 [context-assembler.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/context-runtime/context-assembler.ts) 与 [prompt-context.ts](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/core/prompt-context.ts)，进入统一的 `current context` 快照。
-3. [AgentPromptContextCard.tsx](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/components/AgentPromptContextCard.tsx) 已显示 `Bootstrap / 截断 / 略过` 标签，展开后可直接看到预算、被截断文件、未注入文件和缺失文件。
-4. [debug-report.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/context-runtime/debug-report.ts) 已纳入 bootstrap budget 指标，后续排查上下文不全时可以直接看报告。
-5. 已补充 [bootstrap-context.test.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/ai/bootstrap-context.test.ts)、[prompt-context.test.ts](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/core/prompt-context.test.ts) 与 [context-assembler.test.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/context-runtime/context-assembler.test.ts) 覆盖这条链路。
+2. 同一份 diagnostics 已透传到 [context-assembler.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/context-runtime/context-assembler.ts) 与 [prompt-context.ts](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/core/prompt-context.ts)，进入统一的 `current context` 快照。
+3. [AgentPromptContextCard.tsx](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/components/AgentPromptContextCard.tsx) 已显示 `Bootstrap / 截断 / 略过` 标签，展开后可直接看到预算、被截断文件、未注入文件和缺失文件。
+4. [debug-report.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/context-runtime/debug-report.ts) 已纳入 bootstrap budget 指标，后续排查上下文不全时可以直接看报告。
+5. 已补充 [bootstrap-context.test.ts](/Users/haichao/Desktop/work/HiClow/src/core/ai/bootstrap-context.test.ts)、[prompt-context.test.ts](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/core/prompt-context.test.ts) 与 [context-assembler.test.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/context-runtime/context-assembler.test.ts) 覆盖这条链路。
 6. 这一流剩下的重点是：
    - monorepo extra bootstrap patterns
    - 更细的 section-level truncation diagnosis
@@ -523,7 +521,7 @@ src/core/agent/context-runtime/
 
 ### 具体要求
 
-1. 给 [bootstrap-context.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/ai/bootstrap-context.ts) 增加预算分析结果
+1. 给 [bootstrap-context.ts](/Users/haichao/Desktop/work/HiClow/src/core/ai/bootstrap-context.ts) 增加预算分析结果
 2. 当前上下文卡片增加：
    - 哪些 bootstrap 文件被注入
    - 哪些被截断
@@ -547,41 +545,44 @@ src/core/agent/context-runtime/
 
 ### 当前实施进度（2026-03-17）
 
-1. [assistant-memory.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/ai/assistant-memory.ts) 已把召回结果升级为 bundle，除 prompt 外还会返回：
+1. [assistant-memory.ts](/Users/haichao/Desktop/work/HiClow/src/core/ai/assistant-memory.ts) 已把召回结果升级为 bundle，除 prompt 外还会返回：
    - `searched`
    - `hitCount`
    - `memoryIds`
    - `memoryPreview`
-2. [agent-memory-store.ts](/Users/haichao/Desktop/work/51ToolBox/src/store/agent-memory-store.ts) 已新增 `getMemoryRecallBundleAsync(...)`，Agent 链路不再只能拿到一段不可解释的 prompt 字符串。
-3. [use-agent-execution.ts](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/hooks/use-agent-execution.ts) 已在执行前记录：
+2. [agent-memory-store.ts](/Users/haichao/Desktop/work/HiClow/src/store/agent-memory-store.ts) 已新增 `getMemoryRecallBundleAsync(...)`，Agent 链路不再只能拿到一段不可解释的 prompt 字符串。
+3. [use-agent-execution.ts](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/hooks/use-agent-execution.ts) 已在执行前记录：
    - 本轮是否发起长期记忆检索
    - 命中的 memory ids
    - 命中预览文本
-   并把这些信息回写到 task / session / prompt snapshot。
-4. [agent-store.ts](/Users/haichao/Desktop/work/51ToolBox/src/store/agent-store.ts) 已持久化：
+     并把这些信息回写到 task / session / prompt snapshot。
+4. [agent-store.ts](/Users/haichao/Desktop/work/HiClow/src/store/agent-store.ts) 已持久化：
    - task 级 `memoryRecallAttempted / appliedMemoryIds / appliedMemoryPreview`
    - session 级 `lastMemoryRecallAttempted / lastMemoryRecallPreview`
    - session 级 `lastTranscriptRecallAttempted / lastTranscriptRecallHitCount / lastTranscriptRecallPreview`
-5. [prompt-context.ts](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/core/prompt-context.ts)、[AgentPromptContextCard.tsx](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/components/AgentPromptContextCard.tsx)、[AgentTaskBlock.tsx](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/components/AgentTaskBlock.tsx) 已支持两类解释：
+5. [prompt-context.ts](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/core/prompt-context.ts)、[AgentPromptContextCard.tsx](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/components/AgentPromptContextCard.tsx)、[AgentTaskBlock.tsx](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/components/AgentTaskBlock.tsx) 已支持两类解释：
    - 已检索但本轮未命中
    - 本轮用了哪些记忆的预览
-6. [assistant-memory.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/ai/assistant-memory.ts) 已新增 `session transcript recall` 第一版：
+6. [assistant-memory.ts](/Users/haichao/Desktop/work/HiClow/src/core/ai/assistant-memory.ts) 已新增 `session transcript recall` 第一版：
    - 仅在 Agent 侧启用
    - 只在长期记忆不足时回补
    - 当前会从 `Ask / Agent / Cluster / Dialog` 的本地会话轨迹里抓取相关片段并生成独立 transcript prompt block
-7. [use-agent-execution.ts](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/hooks/use-agent-execution.ts)、[index.tsx](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/index.tsx) 与 [debug-report.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/context-runtime/debug-report.ts) 已把 transcript fallback 的命中数和预览接到 prompt snapshot / debug report。
-8. [AgentTaskBlock.tsx](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/components/AgentTaskBlock.tsx) 已开始在任务卡片里直接显示“已回补会话轨迹 N 条”和命中预览，Agent 页不再只能去上下文卡片里间接查看。
-9. [MessageBubble.tsx](/Users/haichao/Desktop/work/51ToolBox/src/components/ai/MessageBubble.tsx)、[ai-store.ts](/Users/haichao/Desktop/work/51ToolBox/src/store/ai-store.ts) 与 [ask-context-snapshot.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/ai/ask-context-snapshot.ts) 已把 transcript fallback 接到 Ask 回答区与 Ask 上下文快照，Ask 侧也能直接看到本轮回补了哪些会话轨迹。
-10. 已补充 [assistant-memory.test.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/ai/assistant-memory.test.ts)、[use-agent-execution.test.tsx](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/hooks/use-agent-execution.test.tsx)、[prompt-context.test.ts](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/core/prompt-context.test.ts) 与 [ask-context-snapshot.test.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/ai/ask-context-snapshot.test.ts)，覆盖 transcript fallback + 记忆可解释性链路。
-11. [local-agent-bridge.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/cluster/local-agent-bridge.ts)、[cluster-context-snapshot.ts](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/core/cluster-context-snapshot.ts)、[ClusterContextStrip.tsx](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/components/cluster/ClusterContextStrip.tsx) 已把 Cluster 子 Agent 的长期记忆检索与 transcript fallback 命中数/预览回写到会话上下文说明里，Cluster 不再只是“暗中用了回补”。
-12. [memory-middleware.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/actor/middlewares/memory-middleware.ts)、[actor-system-store.ts](/Users/haichao/Desktop/work/51ToolBox/src/store/actor-system-store.ts)、[dialog-context-snapshot.ts](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/core/dialog-context-snapshot.ts) 与 [DialogContextStrip.tsx](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/components/actor/DialogContextStrip.tsx) 已把 Dialog 房间内 Actor 最近一次记忆召回/轨迹回补状态接到房间 context strip 与上下文说明面板。
-13. [actor-system.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/actor/actor-system.ts)、[types.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/actor/types.ts) 与 [ActorChatPanel.tsx](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/components/actor/ActorChatPanel.tsx) 已进一步把 recall explainability 下沉到消息级：
-   - `agent_message / agent_result` 会自动携带本轮 recall 元数据
-   - Dialog 房间里可以直接在具体消息下看到“已用记忆 / 已回补轨迹”和命中预览
-14. 已补充 [local-agent-bridge.test.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/cluster/local-agent-bridge.test.ts)、[memory-middleware.test.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/actor/middlewares/memory-middleware.test.ts)、[cluster-context-snapshot.test.ts](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/core/cluster-context-snapshot.test.ts)、[dialog-context-snapshot.test.ts](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/core/dialog-context-snapshot.test.ts) 与 [actor-system.test.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/actor/actor-system.test.ts)，覆盖这轮 Cluster / Dialog explainability 改造。
+7. [use-agent-execution.ts](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/hooks/use-agent-execution.ts)、[index.tsx](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/index.tsx) 与 [debug-report.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/context-runtime/debug-report.ts) 已把 transcript fallback 的命中数和预览接到 prompt snapshot / debug report。
+8. [AgentTaskBlock.tsx](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/components/AgentTaskBlock.tsx) 已开始在任务卡片里直接显示“已回补会话轨迹 N 条”和命中预览，Agent 页不再只能去上下文卡片里间接查看。
+9. [MessageBubble.tsx](/Users/haichao/Desktop/work/HiClow/src/components/ai/MessageBubble.tsx)、[ai-store.ts](/Users/haichao/Desktop/work/HiClow/src/store/ai-store.ts) 与 [ask-context-snapshot.ts](/Users/haichao/Desktop/work/HiClow/src/core/ai/ask-context-snapshot.ts) 已把 transcript fallback 接到 Ask 回答区与 Ask 上下文快照，Ask 侧也能直接看到本轮回补了哪些会话轨迹。
+10. 已补充 [assistant-memory.test.ts](/Users/haichao/Desktop/work/HiClow/src/core/ai/assistant-memory.test.ts)、[use-agent-execution.test.tsx](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/hooks/use-agent-execution.test.tsx)、[prompt-context.test.ts](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/core/prompt-context.test.ts) 与 [ask-context-snapshot.test.ts](/Users/haichao/Desktop/work/HiClow/src/core/ai/ask-context-snapshot.test.ts)，覆盖 transcript fallback + 记忆可解释性链路。
+11. [local-agent-bridge.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/cluster/local-agent-bridge.ts)、[cluster-context-snapshot.ts](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/core/cluster-context-snapshot.ts)、[ClusterContextStrip.tsx](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/components/cluster/ClusterContextStrip.tsx) 已把 Cluster 子 Agent 的长期记忆检索与 transcript fallback 命中数/预览回写到会话上下文说明里，Cluster 不再只是“暗中用了回补”。
+12. [memory-middleware.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/actor/middlewares/memory-middleware.ts)、[actor-system-store.ts](/Users/haichao/Desktop/work/HiClow/src/store/actor-system-store.ts)、[dialog-context-snapshot.ts](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/core/dialog-context-snapshot.ts) 与 [DialogContextStrip.tsx](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/components/actor/DialogContextStrip.tsx) 已把 Dialog 房间内 Actor 最近一次记忆召回/轨迹回补状态接到房间 context strip 与上下文说明面板。
+13. [actor-system.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/actor/actor-system.ts)、[types.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/actor/types.ts) 与 [ActorChatPanel.tsx](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/components/actor/ActorChatPanel.tsx) 已进一步把 recall explainability 下沉到消息级：
+
+- `agent_message / agent_result` 会自动携带本轮 recall 元数据
+- Dialog 房间里可以直接在具体消息下看到“已用记忆 / 已回补轨迹”和命中预览
+
+14. 已补充 [local-agent-bridge.test.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/cluster/local-agent-bridge.test.ts)、[memory-middleware.test.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/actor/middlewares/memory-middleware.test.ts)、[cluster-context-snapshot.test.ts](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/core/cluster-context-snapshot.test.ts)、[dialog-context-snapshot.test.ts](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/core/dialog-context-snapshot.test.ts) 与 [actor-system.test.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/actor/actor-system.test.ts)，覆盖这轮 Cluster / Dialog explainability 改造。
 15. 这一流目前还没完全对齐 `openclaw` 的地方，重点剩在：
-   - 更强的 durable memory 自动提炼规则
-   - 让 `Cluster / Dialog` 的 explainability 继续接到统一 debug report / runtime recovery
+
+- 更强的 durable memory 自动提炼规则
+- 让 `Cluster / Dialog` 的 explainability 继续接到统一 debug report / runtime recovery
 
 ### 需要强化的层次
 
@@ -606,11 +607,11 @@ src/core/agent/context-runtime/
 
 ### 直接改造文件
 
-1. [memory-store.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/ai/memory-store.ts)
-2. [file-memory.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/ai/file-memory.ts)
-3. [actor-memory.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/actor/actor-memory.ts)
-4. [react-agent.ts](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/core/react-agent.ts)
-5. [ai-store.ts](/Users/haichao/Desktop/work/51ToolBox/src/store/ai-store.ts)
+1. [memory-store.ts](/Users/haichao/Desktop/work/HiClow/src/core/ai/memory-store.ts)
+2. [file-memory.ts](/Users/haichao/Desktop/work/HiClow/src/core/ai/file-memory.ts)
+3. [actor-memory.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/actor/actor-memory.ts)
+4. [react-agent.ts](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/core/react-agent.ts)
+5. [ai-store.ts](/Users/haichao/Desktop/work/HiClow/src/store/ai-store.ts)
 6. 记忆管理页和上下文条带 UI
 
 ### 验收标准
@@ -651,10 +652,10 @@ src/core/agent/context-runtime/
 
 ### 直接改造文件
 
-1. [session-compaction.ts](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/core/session-compaction.ts)
-2. [compaction-orchestrator.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/context-runtime/compaction-orchestrator.ts)
-3. [bootstrap-context.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/ai/bootstrap-context.ts)
-4. [use-agent-execution.ts](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/hooks/use-agent-execution.ts)
+1. [session-compaction.ts](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/core/session-compaction.ts)
+2. [compaction-orchestrator.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/context-runtime/compaction-orchestrator.ts)
+3. [bootstrap-context.ts](/Users/haichao/Desktop/work/HiClow/src/core/ai/bootstrap-context.ts)
+4. [use-agent-execution.ts](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/hooks/use-agent-execution.ts)
 5. 相关测试文件
 
 ### 验收标准
@@ -671,7 +672,7 @@ src/core/agent/context-runtime/
 
 ### 当前主要问题
 
-当前 [agent-running-store.ts](/Users/haichao/Desktop/work/51ToolBox/src/store/agent-running-store.ts) 只保存内存态 `abortFn`，页面层恢复能力有限。
+当前 [agent-running-store.ts](/Users/haichao/Desktop/work/HiClow/src/store/agent-running-store.ts) 只保存内存态 `abortFn`，页面层恢复能力有限。
 
 ### 需要新增的能力
 
@@ -795,21 +796,21 @@ src/core/agent/context-runtime/
 
 ### 第一优先级
 
-1. [use-agent-execution.ts](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/hooks/use-agent-execution.ts)
-2. [context-runtime-manager.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/context-runtime/context-runtime-manager.ts)
-3. [continuity-policy.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/context-runtime/continuity-policy.ts)
-4. [bootstrap-context.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/ai/bootstrap-context.ts)
-5. [memory-store.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/ai/memory-store.ts)
-6. [session-compaction.ts](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/core/session-compaction.ts)
+1. [use-agent-execution.ts](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/hooks/use-agent-execution.ts)
+2. [context-runtime-manager.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/context-runtime/context-runtime-manager.ts)
+3. [continuity-policy.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/context-runtime/continuity-policy.ts)
+4. [bootstrap-context.ts](/Users/haichao/Desktop/work/HiClow/src/core/ai/bootstrap-context.ts)
+5. [memory-store.ts](/Users/haichao/Desktop/work/HiClow/src/core/ai/memory-store.ts)
+6. [session-compaction.ts](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/core/session-compaction.ts)
 
 ### 第二优先级
 
-1. [file-memory.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/ai/file-memory.ts)
-2. [actor-memory.ts](/Users/haichao/Desktop/work/51ToolBox/src/core/agent/actor/actor-memory.ts)
-3. [react-agent.ts](/Users/haichao/Desktop/work/51ToolBox/src/plugins/builtin/SmartAgent/core/react-agent.ts)
-4. [agent-store.ts](/Users/haichao/Desktop/work/51ToolBox/src/store/agent-store.ts)
-5. [ai-store.ts](/Users/haichao/Desktop/work/51ToolBox/src/store/ai-store.ts)
-6. [agent-running-store.ts](/Users/haichao/Desktop/work/51ToolBox/src/store/agent-running-store.ts)
+1. [file-memory.ts](/Users/haichao/Desktop/work/HiClow/src/core/ai/file-memory.ts)
+2. [actor-memory.ts](/Users/haichao/Desktop/work/HiClow/src/core/agent/actor/actor-memory.ts)
+3. [react-agent.ts](/Users/haichao/Desktop/work/HiClow/src/plugins/builtin/SmartAgent/core/react-agent.ts)
+4. [agent-store.ts](/Users/haichao/Desktop/work/HiClow/src/store/agent-store.ts)
+5. [ai-store.ts](/Users/haichao/Desktop/work/HiClow/src/store/ai-store.ts)
+6. [agent-running-store.ts](/Users/haichao/Desktop/work/HiClow/src/store/agent-running-store.ts)
 
 ### 第三优先级
 
@@ -962,4 +963,4 @@ Ask -> Agent -> Cluster -> Dialog 来回切。
 5. 离开页面后再回来状态稳定
 6. 四模式上下文和权限心智基本统一
 
-后续开发建议以本文件为总施工单，以 [ai-context-memory-full-overhaul-plan.md](/Users/haichao/Desktop/work/51ToolBox/docs/ai-context-memory-full-overhaul-plan.md) 作为上下文与记忆专项文档，不再分散式修补单点问题。
+后续开发建议以本文件为总施工单，以 [ai-context-memory-full-overhaul-plan.md](./ai-context-memory-full-overhaul-plan.md) 作为上下文与记忆专项文档，不再分散式修补单点问题。

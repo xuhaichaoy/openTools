@@ -1,6 +1,10 @@
 import { agentRuntimeManager, type RuntimeFallbackContext } from "@/core/agent/runtime";
 import type { AgentTool } from "./react-agent";
 import { createMemoryTools } from "@/core/agent/actor/actor-memory";
+import {
+  CLAWHUB_EXPLICIT_REQUEST_REFUSAL,
+  clawHubRuntimeService,
+} from "@/core/agent/skills/clawhub-runtime-service";
 
 /**
  * 安全的数学表达式解析器（递归下降），不使用 eval/Function。
@@ -993,9 +997,15 @@ export interface BuiltinToolsResult {
   notifyToolCalled: (toolName: string) => void;
 }
 
+export interface BuiltinToolsRuntimeOptions {
+  getCurrentQuery?: () => string;
+  scheduleClawHubResume?: (resumePrompt: string) => void | Promise<void>;
+}
+
 export function createBuiltinAgentTools(
   confirmHostFallback: (context: RuntimeFallbackContext) => Promise<boolean>,
   askUser?: (questions: AskUserQuestion[]) => Promise<AskUserAnswers>,
+  runtimeOptions?: BuiltinToolsRuntimeOptions,
 ): BuiltinToolsResult {
   const tools: AgentTool[] = [
     {
@@ -1156,6 +1166,115 @@ export function createBuiltinAgentTools(
       },
     });
   }
+
+  tools.push(
+    {
+      name: "search_clawhub_skills",
+      description:
+        "在 ClawHub 中搜索可安装 skill。仅当当前用户消息明确提到 ClawHub 时才可调用；禁止因为缺能力而自动搜索、自动推荐或自动安装。",
+      readonly: true,
+      parameters: {
+        goal: {
+          type: "string",
+          description: "希望在 ClawHub 搜索的目标能力，如 mysql 导出、dingtalk、sql",
+        },
+        limit: {
+          type: "integer",
+          description: "最多返回候选数量（默认 8，最大 20）",
+          required: false,
+        },
+      },
+      execute: async (params) => {
+        const currentMessage = runtimeOptions?.getCurrentQuery?.() ?? "";
+        const goal = String(params.goal || "").trim();
+        const limit = typeof params.limit === "number" ? Math.floor(params.limit) : undefined;
+        if (!goal) return { error: "goal 不能为空" };
+        try {
+          const entries = await clawHubRuntimeService.searchSkills(goal, {
+            currentMessage,
+            requireExplicit: true,
+            limit,
+          });
+          return {
+            entries: entries.map((entry) => ({
+              slug: entry.slug,
+              title: entry.title ?? null,
+              description: entry.description ?? null,
+              version: entry.version ?? null,
+              source: entry.source,
+              installable: entry.installable,
+              reason: entry.reason ?? "",
+            })),
+          };
+        } catch (error) {
+          return {
+            error:
+              error instanceof Error
+                ? error.message
+                : CLAWHUB_EXPLICIT_REQUEST_REFUSAL,
+          };
+        }
+      },
+    },
+    {
+      name: "install_clawhub_skill",
+      description:
+        "安装指定的 ClawHub skill 到当前用户本地。安装前必须得到用户确认，并且当前消息必须明确提到 ClawHub。",
+      parameters: {
+        slug: {
+          type: "string",
+          description: "要安装的 skill slug",
+        },
+        version: {
+          type: "string",
+          description: "可选，指定版本",
+          required: false,
+        },
+        source: {
+          type: "string",
+          description: "来源：team_proxy | personal_registry | public_registry",
+        },
+      },
+      dangerous: true,
+      execute: async (params) => {
+        const currentMessage = runtimeOptions?.getCurrentQuery?.() ?? "";
+        const slug = String(params.slug || "").trim();
+        const version = String(params.version || "").trim();
+        const source = String(params.source || "").trim() as
+          | "team_proxy"
+          | "personal_registry"
+          | "public_registry";
+        if (!slug) return { error: "slug 不能为空" };
+        if (!["team_proxy", "personal_registry", "public_registry"].includes(source)) {
+          return { error: "source 必须是 team_proxy | personal_registry | public_registry" };
+        }
+        try {
+          const result = await clawHubRuntimeService.installSkill(
+            {
+              slug,
+              source,
+              ...(version ? { version } : {}),
+            },
+            {
+              currentMessage,
+              requireExplicit: true,
+            },
+          );
+          if (result.resumeRequired && result.resumePrompt) {
+            await runtimeOptions?.scheduleClawHubResume?.(result.resumePrompt);
+          }
+          return result;
+        } catch (error) {
+          return {
+            error:
+              error instanceof Error
+                ? error.message
+                : "安装 ClawHub skill 失败",
+          };
+        }
+      },
+    },
+  );
 
   const sequentialThinkingState = {
     history: [] as Array<{ thought: string; number: number; total: number; isRevision?: boolean; revisesThought?: number; branchId?: string }>,

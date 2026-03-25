@@ -5,9 +5,10 @@ const BUILTIN_TIMESTAMP = 0;
 export const SKILL_FRONTEND_DEV: AgentSkill = {
   id: "builtin-frontend-dev",
   name: "前端开发",
-  description: "React/Vue/TypeScript 前端开发最佳实践，组件设计、状态管理、性能优化指引",
+  description:
+    "React/Vue/TypeScript 前端开发最佳实践，组件设计、状态管理、性能优化指引",
   version: "1.0.0",
-  author: "51ToolBox",
+  author: "HiClow",
   enabled: true,
   autoActivate: true,
   triggerPatterns: [
@@ -41,7 +42,7 @@ export const SKILL_BACKEND_DEV: AgentSkill = {
   name: "后端开发",
   description: "Rust/Node.js/Python 后端开发，API 设计、数据库、错误处理指引",
   version: "1.0.0",
-  author: "51ToolBox",
+  author: "HiClow",
   enabled: true,
   autoActivate: true,
   triggerPatterns: [
@@ -75,7 +76,7 @@ export const SKILL_DEVOPS: AgentSkill = {
   name: "DevOps",
   description: "Docker、CI/CD、部署、监控等运维工程实践",
   version: "1.0.0",
-  author: "51ToolBox",
+  author: "HiClow",
   enabled: true,
   autoActivate: true,
   triggerPatterns: [
@@ -109,7 +110,7 @@ export const SKILL_WRITING: AgentSkill = {
   name: "技术写作",
   description: "文档撰写、技术博客、README 编写指引",
   version: "1.0.0",
-  author: "51ToolBox",
+  author: "HiClow",
   enabled: true,
   autoActivate: true,
   triggerPatterns: [
@@ -139,7 +140,7 @@ export const SKILL_DATA_ANALYSIS: AgentSkill = {
   name: "数据分析",
   description: "数据处理、分析、可视化，Python/SQL 数据工程实践",
   version: "1.0.0",
-  author: "51ToolBox",
+  author: "HiClow",
   enabled: true,
   autoActivate: true,
   triggerPatterns: [
@@ -169,9 +170,10 @@ export const SKILL_DATA_ANALYSIS: AgentSkill = {
 export const SKILL_DATA_EXPORT: AgentSkill = {
   id: "builtin-data-export",
   name: "数据导出",
-  description: "面向运营场景的自然语言查数与 CSV 导出约束，强调只读、先探查后导出",
+  description:
+    "面向运营场景的自然语言查数与 CSV 导出约束，强调只读、先探查后导出",
   version: "1.0.0",
-  author: "51ToolBox",
+  author: "HiClow",
   enabled: true,
   autoActivate: true,
   triggerPatterns: [
@@ -200,9 +202,10 @@ export const SKILL_DATA_EXPORT: AgentSkill = {
 export const SKILL_CODING_WORKFLOW: AgentSkill = {
   id: "builtin-coding-workflow",
   name: "编程工作流",
-  description: "通用编程任务的 7 步工作流（探索→定位→修改→验证），自动检测编程类查询并注入",
+  description:
+    "通用编程任务的 7 步工作流（探索→定位→修改→验证），自动检测编程类查询并注入",
   version: "1.0.0",
-  author: "51ToolBox",
+  author: "HiClow",
   enabled: true,
   autoActivate: true,
   triggerPatterns: [

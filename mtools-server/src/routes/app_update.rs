@@ -55,7 +55,7 @@ fn get_latest_release() -> Option<UpdateManifest> {
             "darwin-aarch64".to_string(),
             PlatformUpdate {
                 signature: sig,
-                url: format!("{}/51ToolBox_{}_aarch64.dmg.tar.gz", base_url, version),
+                url: format!("{}/HiClow_{}_aarch64.dmg.tar.gz", base_url, version),
             },
         );
     }
@@ -66,7 +66,7 @@ fn get_latest_release() -> Option<UpdateManifest> {
             "darwin-x86_64".to_string(),
             PlatformUpdate {
                 signature: sig,
-                url: format!("{}/51ToolBox_{}_x64.dmg.tar.gz", base_url, version),
+                url: format!("{}/HiClow_{}_x64.dmg.tar.gz", base_url, version),
             },
         );
     }
@@ -77,7 +77,7 @@ fn get_latest_release() -> Option<UpdateManifest> {
             "windows-x86_64".to_string(),
             PlatformUpdate {
                 signature: sig,
-                url: format!("{}/51ToolBox_{}_x64-setup.nsis.zip", base_url, version),
+                url: format!("{}/HiClow_{}_x64-setup.nsis.zip", base_url, version),
             },
         );
     }
@@ -88,7 +88,7 @@ fn get_latest_release() -> Option<UpdateManifest> {
             "linux-x86_64".to_string(),
             PlatformUpdate {
                 signature: sig,
-                url: format!("{}/51ToolBox_{}_amd64.AppImage.tar.gz", base_url, version),
+                url: format!("{}/HiClow_{}_amd64.AppImage.tar.gz", base_url, version),
             },
         );
     }

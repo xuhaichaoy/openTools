@@ -1,7 +1,7 @@
 [package]
 name = "toolbox"
 version = "0.1.0"
-description = "51ToolBox - AI-First Desktop Toolbox"
+description = "HiClow - AI-First Desktop Toolbox"
 authors = ["51CTO"]
 license = "MIT"
 edition = "2021"

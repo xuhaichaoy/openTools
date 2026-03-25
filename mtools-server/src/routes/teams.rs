@@ -8,13 +8,14 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::sync::Arc;
 use std::{
-    collections::HashMap,
-    fs,
-    path::{Path as FsPath, PathBuf},
-    process::Command,
+    collections::{HashMap, HashSet},
     sync::Mutex,
     time::{Duration, Instant},
 };
@@ -115,30 +116,6 @@ pub fn routes_no_layer() -> Router<Arc<AppState>> {
             "/{id}/skill-marketplace-search",
             post(search_skill_marketplace_skills),
         )
-        .route(
-            "/{id}/skill-marketplace-sync",
-            post(sync_skill_marketplace_cache),
-        )
-        .route(
-            "/{id}/skill-marketplace-cache",
-            get(list_skill_marketplace_cache),
-        )
-        .route(
-            "/{id}/published-skills",
-            get(list_team_published_skills).post(publish_team_skill),
-        )
-        .route(
-            "/{id}/published-skills/{sid}",
-            axum::routing::patch(patch_team_published_skill),
-        )
-        .route(
-            "/{id}/published-skills/{sid}/install-logs",
-            get(list_team_published_skill_install_logs),
-        )
-        .route(
-            "/{id}/published-skills/{sid}/install",
-            post(install_team_published_skill),
-        )
         .route("/{id}/ai-models", get(get_team_ai_models))
         .route("/{id}/ai-usage", get(get_team_ai_usage))
         .merge(crate::routes::team_quota_routes::quota_routes())
@@ -213,75 +190,6 @@ async fn check_admin_active(db: &sqlx::PgPool, team_id: Uuid, user_id: Uuid) -> 
 
 fn parse_user_id(claims: &Claims) -> Result<Uuid> {
     Uuid::parse_str(&claims.sub).map_err(|_| Error::BadRequest("Invalid user ID".into()))
-}
-
-fn team_skill_marketplace_cache_to_json(row: TeamSkillMarketplaceCacheRow) -> serde_json::Value {
-    serde_json::json!({
-        "id": row.id,
-        "team_id": row.team_id,
-        "provider": row.provider,
-        "slug": row.slug,
-        "name": row.name,
-        "description": row.description,
-        "latest_version": row.latest_version,
-        "versions": row.versions_json.0,
-        "author": row.author,
-        "tags": row.tags_json.0,
-        "icon_url": row.icon_url,
-        "raw_metadata": row.raw_metadata_json.0,
-        "last_synced_at": row.last_synced_at,
-        "created_at": row.created_at,
-        "updated_at": row.updated_at,
-    })
-}
-
-async fn record_team_skill_install_log(
-    db: &sqlx::PgPool,
-    team_id: Uuid,
-    user_id: Uuid,
-    published_skill_id: Uuid,
-    action: &str,
-    status: &str,
-    error_message: Option<&str>,
-) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO team_skill_install_logs (
-            team_id, user_id, published_skill_id, action, status, error_message
-         ) VALUES ($1, $2, $3, $4, $5, $6)",
-    )
-    .bind(team_id)
-    .bind(user_id)
-    .bind(published_skill_id)
-    .bind(action)
-    .bind(status)
-    .bind(error_message)
-    .execute(db)
-    .await?;
-    Ok(())
-}
-
-async fn record_team_skill_install_log_best_effort(
-    db: &sqlx::PgPool,
-    team_id: Uuid,
-    user_id: Uuid,
-    published_skill_id: Uuid,
-    action: &str,
-    status: &str,
-    error_message: Option<&str>,
-) {
-    if let Err(error) = record_team_skill_install_log(
-        db,
-        team_id,
-        user_id,
-        published_skill_id,
-        action,
-        status,
-        error_message,
-    )
-    .await
-    {
-        tracing::warn!("team skill install log failed: {error}");
-    }
 }
 
 async fn record_team_skill_audit_log(
@@ -922,7 +830,11 @@ async fn get_skill_marketplace_config(
     Query(query): Query<GetTeamSkillMarketplaceConfigQuery>,
 ) -> Result<Json<serde_json::Value>> {
     let user_id = parse_user_id(&claims)?;
-    check_membership_active(&state.db, team_id, user_id).await?;
+    if query.resolve.unwrap_or(false) {
+        check_admin_active(&state.db, team_id, user_id).await?;
+    } else {
+        check_membership_active(&state.db, team_id, user_id).await?;
+    }
 
     let provider = normalize_skill_marketplace_provider(query.provider.as_deref())?;
     let row = sqlx::query_as::<_, TeamSkillMarketplaceConfigRow>(
@@ -940,12 +852,13 @@ async fn get_skill_marketplace_config(
     let config = row.map(|record| {
         let decrypted = crate::crypto::maybe_decrypt(&record.api_token);
         let masked = crate::crypto::mask_key(&decrypted);
+        let context = resolve_server_http_context(&record.site_url, &record.registry_url);
         serde_json::json!({
             "id": record.id,
             "team_id": record.team_id,
             "provider": record.provider,
-            "site_url": record.site_url,
-            "registry_url": record.registry_url,
+            "site_url": context.site_url,
+            "registry_url": context.registry_url,
             "is_active": record.is_active,
             "masked_token": masked,
             "updated_at": record.updated_at,
@@ -978,36 +891,24 @@ async fn get_skill_marketplace_status(
     .fetch_optional(&state.db)
     .await?;
 
-    let (cli_installed, cli_version) = match find_clawhub_binary() {
-        Some((_, version)) => (true, Some(version)),
-        None => (false, None),
-    };
-    let cache_stats = sqlx::query_as::<_, TeamSkillMarketplaceCacheStats>(
-        "SELECT
-            COUNT(*)::bigint AS cached_count,
-            MAX(last_synced_at) AS last_synced_at
-         FROM team_skill_marketplace_cache
-         WHERE team_id = $1 AND provider = $2",
-    )
-    .bind(team_id)
-    .bind(provider)
-    .fetch_one(&state.db)
-    .await?;
-
+    let resolved_context = config
+        .as_ref()
+        .map(|item| resolve_server_http_context(&item.site_url, &item.registry_url));
+    let token_available = config
+        .as_ref()
+        .map(|item| !crate::crypto::maybe_decrypt(&item.api_token).trim().is_empty())
+        .unwrap_or(false);
+    let service_ready = config.as_ref().map(|item| item.is_active).unwrap_or(false) && token_available;
     Ok(Json(serde_json::json!({
         "provider": provider,
         "configured": config.is_some(),
         "active": config.as_ref().map(|item| item.is_active).unwrap_or(false),
-        "site_url": config.as_ref().map(|item| item.site_url.clone()),
-        "registry_url": config.as_ref().map(|item| item.registry_url.clone()),
+        "site_url": resolved_context.as_ref().map(|item| item.site_url.clone()),
+        "registry_url": resolved_context.as_ref().map(|item| item.registry_url.clone()),
         "updated_at": config.as_ref().map(|item| item.updated_at),
-        "cli_installed": cli_installed,
-        "cli_version": cli_version,
-        "can_search": cli_installed && config.as_ref().map(|item| item.is_active).unwrap_or(false),
-        "can_install": cli_installed && config.as_ref().map(|item| item.is_active).unwrap_or(false),
-        "can_sync": cli_installed && config.as_ref().map(|item| item.is_active).unwrap_or(false),
-        "cached_count": cache_stats.cached_count,
-        "last_synced_at": cache_stats.last_synced_at,
+        "service_ready": service_ready,
+        "can_search": service_ready,
+        "can_install": service_ready,
     })))
 }
 
@@ -1021,15 +922,9 @@ async fn set_skill_marketplace_config(
     check_admin_active(&state.db, team_id, user_id).await?;
 
     let provider = normalize_skill_marketplace_provider(payload.provider.as_deref())?;
-    let site_url = payload.site_url.trim();
-    let registry_url = payload.registry_url.trim();
-    if site_url.is_empty() || registry_url.is_empty() {
-        return Err(Error::bad_request_code(
-            "INVALID_SKILL_MARKETPLACE_CONFIG",
-            "site_url and registry_url are required",
-            None,
-        ));
-    }
+    let context = resolve_server_http_context("", "");
+    let site_url = context.site_url;
+    let registry_url = context.registry_url;
 
     let encrypted_token = if payload.api_token.trim().is_empty() {
         String::new()
@@ -1051,8 +946,8 @@ async fn set_skill_marketplace_config(
              WHERE id = $7 AND team_id = $8",
         )
         .bind(provider)
-        .bind(site_url)
-        .bind(registry_url)
+        .bind(site_url.as_str())
+        .bind(registry_url.as_str())
         .bind(&encrypted_token)
         .bind(is_active)
         .bind(user_id)
@@ -1078,8 +973,8 @@ async fn set_skill_marketplace_config(
         )
         .bind(team_id)
         .bind(provider)
-        .bind(site_url)
-        .bind(registry_url)
+        .bind(site_url.as_str())
+        .bind(registry_url.as_str())
         .bind(&encrypted_token)
         .bind(is_active)
         .bind(user_id)
@@ -1132,16 +1027,12 @@ async fn verify_skill_marketplace_config(
         ));
     }
 
-    let site_url = config.site_url;
-    let registry_url = config.registry_url;
-    let token = token.trim().to_string();
-    let result = tokio::task::spawn_blocking(move || {
-        run_server_clawhub_verify(site_url.as_str(), registry_url.as_str(), token.as_str())
-    })
-    .await
-    .map_err(|error| {
-        Error::Internal(anyhow::anyhow!("验证团队 ClawHub 配置任务失败: {error}"))
-    })??;
+    let result = run_server_clawhub_verify_http(
+        config.site_url.as_str(),
+        config.registry_url.as_str(),
+        token.trim(),
+    )
+    .await?;
 
     record_team_skill_audit_log_best_effort(
         &state.db,
@@ -1193,26 +1084,18 @@ async fn install_skill_marketplace_skill(
         ));
     }
 
-    let site_url = config.site_url;
-    let registry_url = config.registry_url;
-    let token = token.trim().to_string();
     let slug = slug.to_string();
     let version = payload.version;
     let audit_slug = slug.clone();
     let audit_version = version.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        run_server_clawhub_install(
-            site_url.as_str(),
-            registry_url.as_str(),
-            token.as_str(),
-            slug.as_str(),
-            version.as_deref(),
-        )
-    })
-    .await
-    .map_err(|error| {
-        Error::Internal(anyhow::anyhow!("安装团队 ClawHub skill 任务失败: {error}"))
-    })??;
+    let result = run_server_clawhub_install_http(
+        config.site_url.as_str(),
+        config.registry_url.as_str(),
+        token.trim(),
+        slug.as_str(),
+        version.as_deref(),
+    )
+    .await?;
 
     record_team_skill_audit_log_best_effort(
         &state.db,
@@ -1226,6 +1109,8 @@ async fn install_skill_marketplace_skill(
         serde_json::json!({
             "installed_spec": result.installed_spec,
             "detected_skill_path": result.detected_skill_path,
+            "installed_version": result.installed_version,
+            "origin_url": result.origin_url,
         }),
     )
     .await;
@@ -1235,184 +1120,11 @@ async fn install_skill_marketplace_skill(
         "stdout": result.stdout,
         "installed_spec": result.installed_spec,
         "detected_skill_path": result.detected_skill_path,
-    })))
-}
-
-async fn sync_skill_marketplace_cache(
-    State(state): State<Arc<AppState>>,
-    Extension(claims): Extension<Claims>,
-    Path(team_id): Path<Uuid>,
-    Json(payload): Json<SyncTeamSkillMarketplaceRequest>,
-) -> Result<Json<serde_json::Value>> {
-    let user_id = parse_user_id(&claims)?;
-    check_admin_active(&state.db, team_id, user_id).await?;
-
-    let provider = normalize_skill_marketplace_provider(payload.provider.as_deref())?;
-    let query = payload.query.trim();
-    if query.is_empty() {
-        return Err(Error::bad_request_code(
-            "INVALID_SKILL_SYNC_QUERY",
-            "同步关键词不能为空",
-            None,
-        ));
-    }
-
-    let config = get_active_skill_marketplace_config(&state.db, team_id, provider).await?;
-    let token = crate::crypto::maybe_decrypt(&config.api_token);
-    let site_url = config.site_url;
-    let registry_url = config.registry_url;
-    let query_string = query.to_string();
-    let token = token.trim().to_string();
-    let limit = payload.limit.unwrap_or(50).clamp(1, 100);
-
-    let result = tokio::task::spawn_blocking(move || {
-        run_server_clawhub_search(
-            site_url.as_str(),
-            registry_url.as_str(),
-            token.as_str(),
-            query_string.as_str(),
-            limit as usize,
-        )
-    })
-    .await
-    .map_err(|error| Error::Internal(anyhow::anyhow!("同步团队技能市场缓存任务失败: {error}")))??;
-
-    let synced_at = chrono::Utc::now();
-    let mut tx = state
-        .db
-        .begin()
-        .await
-        .map_err(|e| Error::Internal(e.into()))?;
-    let mut items = Vec::new();
-    for entry in result.entries {
-        let title = entry.title.clone().unwrap_or_else(|| entry.slug.clone());
-        let row: TeamSkillMarketplaceCacheRow = sqlx::query_as(
-            "INSERT INTO team_skill_marketplace_cache (
-                team_id, provider, slug, name, description, latest_version, versions_json,
-                author, tags_json, icon_url, raw_metadata_json, last_synced_at
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-             ON CONFLICT (team_id, provider, slug) DO UPDATE SET
-                name = EXCLUDED.name,
-                description = EXCLUDED.description,
-                latest_version = EXCLUDED.latest_version,
-                versions_json = EXCLUDED.versions_json,
-                author = EXCLUDED.author,
-                tags_json = EXCLUDED.tags_json,
-                icon_url = EXCLUDED.icon_url,
-                raw_metadata_json = EXCLUDED.raw_metadata_json,
-                last_synced_at = EXCLUDED.last_synced_at,
-                updated_at = NOW()
-             RETURNING
-                id, team_id, provider, slug, name, description, latest_version, versions_json,
-                author, tags_json, icon_url, raw_metadata_json, last_synced_at, created_at, updated_at",
-        )
-        .bind(team_id)
-        .bind(provider)
-        .bind(&entry.slug)
-        .bind(&title)
-        .bind(&entry.description)
-        .bind(Option::<String>::None)
-        .bind(sqlx::types::Json(serde_json::Value::Array(vec![])))
-        .bind(Option::<String>::None)
-        .bind(sqlx::types::Json(serde_json::Value::Array(vec![])))
-        .bind(Option::<String>::None)
-        .bind(sqlx::types::Json(serde_json::json!({
-            "title": entry.title,
-            "description": entry.description,
-            "query": query,
-            "source": "clawhub_search_sync",
-        })))
-        .bind(synced_at)
-        .fetch_one(&mut *tx)
-        .await?;
-        items.push(team_skill_marketplace_cache_to_json(row));
-    }
-    tx.commit().await.map_err(|e| Error::Internal(e.into()))?;
-    let item_count = items.len();
-
-    record_team_skill_audit_log_best_effort(
-        &state.db,
-        team_id,
-        user_id,
-        "skill_marketplace_cache_synced",
-        Some(provider),
-        None,
-        None,
-        None,
-        serde_json::json!({
-            "query": query,
-            "limit": limit,
-            "count": item_count,
-        }),
-    )
-    .await;
-
-    Ok(Json(serde_json::json!({
-        "items": items,
-        "count": item_count,
-        "query": query,
-        "synced_at": synced_at,
-        "raw_output": result.raw_output,
-    })))
-}
-
-async fn list_skill_marketplace_cache(
-    State(state): State<Arc<AppState>>,
-    Extension(claims): Extension<Claims>,
-    Path(team_id): Path<Uuid>,
-    Query(query): Query<GetTeamSkillMarketplaceCacheQuery>,
-) -> Result<Json<serde_json::Value>> {
-    let user_id = parse_user_id(&claims)?;
-    check_admin_active(&state.db, team_id, user_id).await?;
-
-    let provider = normalize_skill_marketplace_provider(query.provider.as_deref())?;
-    let search_text = query.query.unwrap_or_default().trim().to_string();
-    let limit = query.limit.unwrap_or(100).clamp(1, 200) as i64;
-    let rows = if search_text.is_empty() {
-        sqlx::query_as::<_, TeamSkillMarketplaceCacheRow>(
-            "SELECT
-                id, team_id, provider, slug, name, description, latest_version, versions_json,
-                author, tags_json, icon_url, raw_metadata_json, last_synced_at, created_at, updated_at
-             FROM team_skill_marketplace_cache
-             WHERE team_id = $1 AND provider = $2
-             ORDER BY last_synced_at DESC, updated_at DESC
-             LIMIT $3",
-        )
-        .bind(team_id)
-        .bind(provider)
-        .bind(limit)
-        .fetch_all(&state.db)
-        .await?
-    } else {
-        let like = format!("%{search_text}%");
-        sqlx::query_as::<_, TeamSkillMarketplaceCacheRow>(
-            "SELECT
-                id, team_id, provider, slug, name, description, latest_version, versions_json,
-                author, tags_json, icon_url, raw_metadata_json, last_synced_at, created_at, updated_at
-             FROM team_skill_marketplace_cache
-             WHERE team_id = $1
-               AND provider = $2
-               AND (slug ILIKE $3 OR name ILIKE $3 OR COALESCE(description, '') ILIKE $3)
-             ORDER BY last_synced_at DESC, updated_at DESC
-             LIMIT $4",
-        )
-        .bind(team_id)
-        .bind(provider)
-        .bind(like)
-        .bind(limit)
-        .fetch_all(&state.db)
-        .await?
-    };
-
-    let count = rows.len();
-    let items = rows
-        .into_iter()
-        .map(team_skill_marketplace_cache_to_json)
-        .collect::<Vec<_>>();
-
-    Ok(Json(serde_json::json!({
-        "items": items,
-        "count": count,
+        "bundle_base64": result.bundle_base64,
+        "installed_version": result.installed_version,
+        "origin_url": result.origin_url,
+        "site_url": result.site_url,
+        "registry_url": result.registry_url,
     })))
 }
 
@@ -1437,10 +1149,14 @@ async fn search_skill_marketplace_skills(
 
     let config = get_active_skill_marketplace_config(&state.db, team_id, provider).await?;
     let token = crate::crypto::maybe_decrypt(&config.api_token);
-    let site_url = config.site_url;
-    let registry_url = config.registry_url;
+    if token.trim().is_empty() {
+        return Err(Error::bad_request_code(
+            "SKILL_MARKETPLACE_TOKEN_MISSING",
+            "当前团队尚未配置可用的 ClawHub Token",
+            None,
+        ));
+    }
     let query = query.to_string();
-    let token = token.trim().to_string();
     let limit = payload.limit.unwrap_or(20).clamp(1, 50);
     let cache_key = TeamSkillMarketplaceSearchCacheKey {
         team_id,
@@ -1457,19 +1173,14 @@ async fn search_skill_marketplace_skills(
         })));
     }
 
-    let result = tokio::task::spawn_blocking(move || {
-        run_server_clawhub_search(
-            site_url.as_str(),
-            registry_url.as_str(),
-            token.as_str(),
-            query.as_str(),
-            limit as usize,
-        )
-    })
-    .await
-    .map_err(|error| {
-        Error::Internal(anyhow::anyhow!("搜索团队 ClawHub skill 任务失败: {error}"))
-    })??;
+    let result = run_server_clawhub_search_http(
+        config.site_url.as_str(),
+        config.registry_url.as_str(),
+        token.trim(),
+        query.as_str(),
+        limit as usize,
+    )
+    .await?;
 
     cache_skill_marketplace_search(
         cache_key,
@@ -1484,375 +1195,6 @@ async fn search_skill_marketplace_skills(
         "entries": result.entries,
         "raw_output": result.raw_output,
         "cached": false,
-    })))
-}
-
-async fn list_team_published_skills(
-    State(state): State<Arc<AppState>>,
-    Extension(claims): Extension<Claims>,
-    Path(team_id): Path<Uuid>,
-) -> Result<Json<serde_json::Value>> {
-    let user_id = parse_user_id(&claims)?;
-    check_membership_active(&state.db, team_id, user_id).await?;
-    let role = get_team_member_role(&state.db, team_id, user_id).await?;
-    let include_inactive = matches!(role.as_deref(), Some("owner") | Some("admin"));
-
-    let rows = if include_inactive {
-        sqlx::query_as::<_, TeamPublishedSkillRow>(
-            "SELECT
-                id, team_id, provider, slug, version, display_name, description,
-                skill_md, is_active, published_by, updated_by, created_at, updated_at
-             FROM team_published_skills
-             WHERE team_id = $1
-             ORDER BY is_active DESC, updated_at DESC, created_at DESC",
-        )
-        .bind(team_id)
-        .fetch_all(&state.db)
-        .await?
-    } else {
-        sqlx::query_as::<_, TeamPublishedSkillRow>(
-            "SELECT
-                id, team_id, provider, slug, version, display_name, description,
-                skill_md, is_active, published_by, updated_by, created_at, updated_at
-             FROM team_published_skills
-             WHERE team_id = $1 AND is_active = true
-             ORDER BY updated_at DESC, created_at DESC",
-        )
-        .bind(team_id)
-        .fetch_all(&state.db)
-        .await?
-    };
-
-    let skills = rows
-        .into_iter()
-        .map(|row| {
-            serde_json::json!({
-                "id": row.id,
-                "team_id": row.team_id,
-                "provider": row.provider,
-                "slug": row.slug,
-                "version": row.version,
-                "display_name": row.display_name,
-                "description": row.description,
-                "is_active": row.is_active,
-                "published_by": row.published_by,
-                "updated_by": row.updated_by,
-                "created_at": row.created_at,
-                "updated_at": row.updated_at,
-            })
-        })
-        .collect::<Vec<_>>();
-
-    Ok(Json(serde_json::json!({ "skills": skills })))
-}
-
-async fn publish_team_skill(
-    State(state): State<Arc<AppState>>,
-    Extension(claims): Extension<Claims>,
-    Path(team_id): Path<Uuid>,
-    Json(payload): Json<PublishTeamSkillRequest>,
-) -> Result<Json<serde_json::Value>> {
-    let user_id = parse_user_id(&claims)?;
-    check_admin_active(&state.db, team_id, user_id).await?;
-
-    let provider = normalize_skill_marketplace_provider(payload.provider.as_deref())?;
-    let slug = payload.slug.trim();
-    if slug.is_empty() {
-        return Err(Error::bad_request_code(
-            "INVALID_PUBLISHED_SKILL_SLUG",
-            "发布到团队的 skill slug 不能为空",
-            None,
-        ));
-    }
-
-    let config = get_active_skill_marketplace_config(&state.db, team_id, provider).await?;
-    let token = crate::crypto::maybe_decrypt(&config.api_token);
-    if token.trim().is_empty() {
-        return Err(Error::bad_request_code(
-            "SKILL_MARKETPLACE_TOKEN_MISSING",
-            "当前团队尚未配置可用的 ClawHub Token",
-            None,
-        ));
-    }
-
-    let site_url = config.site_url;
-    let registry_url = config.registry_url;
-    let token = token.trim().to_string();
-    let slug_string = slug.to_string();
-    let version = payload.version.clone();
-    let install_result = tokio::task::spawn_blocking(move || {
-        run_server_clawhub_install(
-            site_url.as_str(),
-            registry_url.as_str(),
-            token.as_str(),
-            slug_string.as_str(),
-            version.as_deref(),
-        )
-    })
-    .await
-    .map_err(|error| Error::Internal(anyhow::anyhow!("发布团队 skill 任务失败: {error}")))??;
-
-    let metadata = extract_skill_md_metadata(&install_result.skill_md, slug);
-    let requested_version = payload
-        .version
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-    let detected_version = metadata
-        .version
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-    if let (Some(requested), Some(detected)) =
-        (requested_version.as_deref(), detected_version.as_deref())
-    {
-        if requested != detected {
-            return Err(Error::bad_request_code(
-                "TEAM_PUBLISHED_SKILL_VERSION_MISMATCH",
-                format!("安装得到的 skill 版本为 {detected}，与请求版本 {requested} 不一致"),
-                Some(serde_json::json!({
-                    "team_id": team_id,
-                    "slug": slug,
-                    "requested_version": requested,
-                    "detected_version": detected,
-                })),
-            ));
-        }
-    }
-    let version_value = requested_version.or(detected_version).ok_or_else(|| {
-        Error::bad_request_code(
-            "TEAM_PUBLISHED_SKILL_VERSION_UNRESOLVED",
-            "无法解析 skill 实际版本，请在发布时明确填写版本，或确保 SKILL.md 中包含 version 字段",
-            Some(serde_json::json!({
-                "team_id": team_id,
-                "slug": slug,
-            })),
-        )
-    })?;
-    let row: TeamPublishedSkillRow = sqlx::query_as(
-        "INSERT INTO team_published_skills (
-            team_id, provider, slug, version, display_name, description, skill_md, is_active, published_by, updated_by
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $8)
-         ON CONFLICT (team_id, provider, slug, version) DO UPDATE SET
-            display_name = EXCLUDED.display_name,
-            description = EXCLUDED.description,
-            skill_md = EXCLUDED.skill_md,
-            is_active = true,
-            updated_by = EXCLUDED.updated_by,
-            updated_at = NOW()
-         RETURNING
-            id, team_id, provider, slug, version, display_name, description,
-            skill_md, is_active, published_by, updated_by, created_at, updated_at",
-    )
-    .bind(team_id)
-    .bind(provider)
-    .bind(slug)
-    .bind(&version_value)
-    .bind(&metadata.display_name)
-    .bind(&metadata.description)
-    .bind(&install_result.skill_md)
-    .bind(user_id)
-    .fetch_one(&state.db)
-    .await?;
-
-    record_team_skill_audit_log_best_effort(
-        &state.db,
-        team_id,
-        user_id,
-        "team_skill_published",
-        Some(provider),
-        Some(slug),
-        Some(&version_value),
-        Some(row.id),
-        serde_json::json!({
-            "display_name": row.display_name.clone(),
-            "description": row.description.clone(),
-        }),
-    )
-    .await;
-
-    Ok(Json(serde_json::json!({
-        "skill": {
-            "id": row.id,
-            "team_id": row.team_id,
-            "provider": row.provider,
-            "slug": row.slug,
-            "version": row.version,
-            "display_name": row.display_name,
-            "description": row.description,
-            "is_active": row.is_active,
-            "published_by": row.published_by,
-            "updated_by": row.updated_by,
-            "created_at": row.created_at,
-            "updated_at": row.updated_at,
-        },
-        "stdout": install_result.stdout,
-    })))
-}
-
-async fn patch_team_published_skill(
-    State(state): State<Arc<AppState>>,
-    Extension(claims): Extension<Claims>,
-    Path((team_id, skill_id)): Path<(Uuid, Uuid)>,
-    Json(payload): Json<PatchTeamPublishedSkillRequest>,
-) -> Result<Json<serde_json::Value>> {
-    let user_id = parse_user_id(&claims)?;
-    check_admin_active(&state.db, team_id, user_id).await?;
-    let existing = sqlx::query_scalar::<_, Option<bool>>(
-        "SELECT is_active FROM team_published_skills WHERE id = $1 AND team_id = $2",
-    )
-    .bind(skill_id)
-    .bind(team_id)
-    .fetch_optional(&state.db)
-    .await?
-    .flatten();
-
-    let result = sqlx::query(
-        "UPDATE team_published_skills
-         SET
-            is_active = COALESCE($1, is_active),
-            updated_by = $2,
-            updated_at = NOW()
-         WHERE id = $3 AND team_id = $4",
-    )
-    .bind(payload.is_active)
-    .bind(user_id)
-    .bind(skill_id)
-    .bind(team_id)
-    .execute(&state.db)
-    .await?;
-    if result.rows_affected() == 0 {
-        return Err(Error::not_found_code(
-            "TEAM_PUBLISHED_SKILL_NOT_FOUND",
-            "团队技能不存在",
-            Some(serde_json::json!({ "team_id": team_id, "skill_id": skill_id })),
-        ));
-    }
-
-    record_team_skill_audit_log_best_effort(
-        &state.db,
-        team_id,
-        user_id,
-        "team_skill_updated",
-        Some("clawhub"),
-        None,
-        None,
-        Some(skill_id),
-        serde_json::json!({
-            "previous_is_active": existing,
-            "next_is_active": payload.is_active,
-        }),
-    )
-    .await;
-
-    Ok(Json(
-        serde_json::json!({ "message": "Team published skill updated" }),
-    ))
-}
-
-async fn install_team_published_skill(
-    State(state): State<Arc<AppState>>,
-    Extension(claims): Extension<Claims>,
-    Path((team_id, skill_id)): Path<(Uuid, Uuid)>,
-) -> Result<Json<serde_json::Value>> {
-    let user_id = parse_user_id(&claims)?;
-    check_membership_active(&state.db, team_id, user_id).await?;
-
-    let row = sqlx::query_as::<_, TeamPublishedSkillRow>(
-        "SELECT
-            id, team_id, provider, slug, version, display_name, description,
-            skill_md, is_active, published_by, updated_by, created_at, updated_at
-         FROM team_published_skills
-         WHERE id = $1 AND team_id = $2 AND is_active = true
-         LIMIT 1",
-    )
-    .bind(skill_id)
-    .bind(team_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| {
-        Error::not_found_code(
-            "TEAM_PUBLISHED_SKILL_NOT_FOUND",
-            "团队技能不存在或未启用",
-            Some(serde_json::json!({ "team_id": team_id, "skill_id": skill_id })),
-        )
-    })?;
-
-    record_team_skill_install_log_best_effort(
-        &state.db, team_id, user_id, row.id, "install", "success", None,
-    )
-    .await;
-    record_team_skill_audit_log_best_effort(
-        &state.db,
-        team_id,
-        user_id,
-        "team_skill_installed",
-        Some(&row.provider),
-        Some(&row.slug),
-        Some(&row.version),
-        Some(row.id),
-        serde_json::json!({
-            "display_name": row.display_name.clone(),
-        }),
-    )
-    .await;
-
-    Ok(Json(serde_json::json!({
-        "skill_md": row.skill_md,
-        "stdout": format!("已从团队技能库安装：{}", row.display_name),
-        "installed_spec": if row.version.trim().is_empty() {
-            row.slug.clone()
-        } else {
-            format!("{}@{}", row.slug, row.version)
-        },
-        "display_name": row.display_name,
-        "slug": row.slug,
-        "version": row.version,
-    })))
-}
-
-async fn list_team_published_skill_install_logs(
-    State(state): State<Arc<AppState>>,
-    Extension(claims): Extension<Claims>,
-    Path((team_id, skill_id)): Path<(Uuid, Uuid)>,
-    Query(query): Query<GetTeamPublishedSkillInstallLogsQuery>,
-) -> Result<Json<serde_json::Value>> {
-    let user_id = parse_user_id(&claims)?;
-    check_admin_active(&state.db, team_id, user_id).await?;
-
-    let limit = query.limit.unwrap_or(50).clamp(1, 200) as i64;
-    let rows = sqlx::query_as::<_, TeamSkillInstallLogRow>(
-        "SELECT
-            logs.id, logs.team_id, logs.user_id, logs.published_skill_id, logs.action,
-            logs.status, logs.error_message, logs.created_at, users.username
-         FROM team_skill_install_logs logs
-         LEFT JOIN users ON users.id = logs.user_id
-         WHERE logs.team_id = $1 AND logs.published_skill_id = $2
-         ORDER BY logs.created_at DESC
-         LIMIT $3",
-    )
-    .bind(team_id)
-    .bind(skill_id)
-    .bind(limit)
-    .fetch_all(&state.db)
-    .await?;
-
-    Ok(Json(serde_json::json!({
-        "logs": rows.into_iter().map(|row| {
-            serde_json::json!({
-                "id": row.id,
-                "team_id": row.team_id,
-                "user_id": row.user_id,
-                "published_skill_id": row.published_skill_id,
-                "action": row.action,
-                "status": row.status,
-                "error_message": row.error_message,
-                "created_at": row.created_at,
-                "username": row.username,
-            })
-        }).collect::<Vec<_>>(),
     })))
 }
 
@@ -1944,29 +1286,8 @@ fn clear_skill_marketplace_search_cache_for_team(team_id: Uuid) {
     }
 }
 
-const CLAWHUB_SITE_ENV: &str = "CLAWHUB_SITE";
-const CLAWHUB_REGISTRY_ENV: &str = "CLAWHUB_REGISTRY";
-const CLAWHUB_CONFIG_PATH_ENV: &str = "CLAWHUB_CONFIG_PATH";
-const CLAWHUB_WORKDIR_ENV: &str = "CLAWHUB_WORKDIR";
-const CLAWHUB_DISABLE_TELEMETRY_ENV: &str = "CLAWHUB_DISABLE_TELEMETRY";
-
-struct ServerClawHubContext {
-    root: PathBuf,
-    config_path: PathBuf,
-    workdir: PathBuf,
-    site_url: String,
-    registry_url: String,
-}
-
-impl Drop for ServerClawHubContext {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
-    }
-}
-
 struct ServerCommandRunResult {
     stdout: String,
-    stderr: String,
 }
 
 struct ServerClawHubInstallResult {
@@ -1974,6 +1295,11 @@ struct ServerClawHubInstallResult {
     stdout: String,
     installed_spec: String,
     detected_skill_path: Option<String>,
+    bundle_base64: Option<String>,
+    installed_version: Option<String>,
+    origin_url: Option<String>,
+    site_url: Option<String>,
+    registry_url: Option<String>,
 }
 
 struct ServerClawHubSearchResult {
@@ -1986,508 +1312,541 @@ struct ServerClawHubSearchEntry {
     slug: String,
     title: Option<String>,
     description: Option<String>,
+    version: Option<String>,
+    origin_url: Option<String>,
+    site_url: Option<String>,
+    registry_url: Option<String>,
+    source_kind: Option<String>,
 }
 
-fn run_server_clawhub_verify(
+#[derive(Debug, Clone)]
+struct ServerHttpClawHubContext {
+    site_url: String,
+    registry_url: String,
+}
+
+#[derive(Debug)]
+struct ServerHttpClawHubBundle {
+    bytes: Vec<u8>,
+    version: Option<String>,
+    origin_url: Option<String>,
+}
+
+fn resolve_server_http_context(site_url: &str, registry_url: &str) -> ServerHttpClawHubContext {
+    ServerHttpClawHubContext {
+        site_url: normalize_marketplace_url(site_url, "https://clawhub.ai"),
+        registry_url: normalize_marketplace_url(registry_url, "https://clawhub.ai"),
+    }
+}
+
+fn normalize_marketplace_url(value: &str, default_url: &str) -> String {
+    let trimmed = value.trim().trim_end_matches('/');
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case(default_url) {
+        default_url.to_string()
+    } else {
+        default_url.to_string()
+    }
+}
+
+fn build_server_clawhub_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .build()
+        .map_err(|error| Error::Internal(error.into()))
+}
+
+fn server_apply_auth(
+    request: reqwest::RequestBuilder,
+    token: Option<&str>,
+) -> reqwest::RequestBuilder {
+    let request = request
+        .header(
+            ACCEPT,
+            "application/json, application/zip, application/octet-stream;q=0.9, */*;q=0.8",
+        )
+        .header(USER_AGENT, "mtools-server/ClawHubProxy");
+    match token {
+        Some(token) if !token.trim().is_empty() => {
+            request.header(AUTHORIZATION, format!("Bearer {}", token.trim()))
+        }
+        _ => request,
+    }
+}
+
+fn server_json_string(value: Option<&Value>) -> Option<String> {
+    match value {
+        Some(Value::String(text)) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        Some(Value::Number(number)) => Some(number.to_string()),
+        Some(Value::Bool(flag)) => Some(flag.to_string()),
+        _ => None,
+    }
+}
+
+fn server_looks_like_skill_slug(value: &str) -> bool {
+    let trimmed = value.trim().trim_matches('/');
+    let Some((owner, skill)) = trimmed.split_once('/') else {
+        return false;
+    };
+    !owner.is_empty()
+        && !skill.is_empty()
+        && owner
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+        && skill
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+}
+
+fn resolve_marketplace_relative_url(base: &str, value: &str) -> Option<String> {
+    if value.starts_with("http://") || value.starts_with("https://") {
+        return Some(value.to_string());
+    }
+    let base = Url::parse(base).ok()?;
+    base.join(value).ok().map(|url| url.to_string())
+}
+
+fn server_extract_url_from_json(value: &Value, keys: &[&str], bases: &[&str]) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            for key in keys {
+                if let Some(candidate) = server_json_string(map.get(*key)) {
+                    for base in bases {
+                        if let Some(url) = resolve_marketplace_relative_url(base, candidate.as_str()) {
+                            return Some(url);
+                        }
+                    }
+                }
+            }
+            for child in map.values() {
+                if let Some(url) = server_extract_url_from_json(child, keys, bases) {
+                    return Some(url);
+                }
+            }
+            None
+        }
+        Value::Array(items) => items
+            .iter()
+            .find_map(|item| server_extract_url_from_json(item, keys, bases)),
+        _ => None,
+    }
+}
+
+fn server_extract_string_from_json(value: &Value, keys: &[&str]) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            for key in keys {
+                if let Some(candidate) = server_json_string(map.get(*key)) {
+                    return Some(candidate);
+                }
+            }
+            for child in map.values() {
+                if let Some(text) = server_extract_string_from_json(child, keys) {
+                    return Some(text);
+                }
+            }
+            None
+        }
+        Value::Array(items) => items
+            .iter()
+            .find_map(|item| server_extract_string_from_json(item, keys)),
+        _ => None,
+    }
+}
+
+fn server_extract_version_from_json(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(map) => server_json_string(map.get("version"))
+            .or_else(|| server_json_string(map.get("latest_version")))
+            .or_else(|| server_json_string(map.get("installed_version")))
+            .or_else(|| map.values().find_map(server_extract_version_from_json)),
+        Value::Array(items) => items.iter().find_map(server_extract_version_from_json),
+        _ => None,
+    }
+}
+
+fn server_parse_http_search_entries(
+    value: &Value,
+    limit: usize,
+    site_url: &str,
+    registry_url: &str,
+    source_kind: Option<&str>,
+) -> Vec<ServerClawHubSearchEntry> {
+    fn visit(
+        value: &Value,
+        entries: &mut Vec<ServerClawHubSearchEntry>,
+        seen: &mut HashSet<String>,
+        limit: usize,
+        site_url: &str,
+        registry_url: &str,
+        source_kind: Option<&str>,
+    ) {
+        if entries.len() >= limit {
+            return;
+        }
+        match value {
+            Value::Object(map) => {
+                let slug = server_json_string(map.get("slug"))
+                    .or_else(|| server_json_string(map.get("skill_slug")))
+                    .or_else(|| server_json_string(map.get("id")))
+                    .filter(|candidate| server_looks_like_skill_slug(candidate));
+
+                if let Some(slug) = slug {
+                    if seen.insert(slug.clone()) {
+                        entries.push(ServerClawHubSearchEntry {
+                            slug,
+                            title: server_json_string(map.get("title"))
+                                .or_else(|| server_json_string(map.get("name")))
+                                .or_else(|| server_json_string(map.get("display_name"))),
+                            description: server_json_string(map.get("description"))
+                                .or_else(|| server_json_string(map.get("summary"))),
+                            version: server_json_string(map.get("version"))
+                                .or_else(|| server_json_string(map.get("latest_version"))),
+                            origin_url: server_extract_url_from_json(
+                                value,
+                                &["origin_url", "originUrl", "url", "site_url", "siteUrl"],
+                                &[site_url, registry_url],
+                            ),
+                            site_url: Some(site_url.to_string()),
+                            registry_url: Some(registry_url.to_string()),
+                            source_kind: source_kind.map(str::to_string),
+                        });
+                    }
+                }
+                for child in map.values() {
+                    visit(child, entries, seen, limit, site_url, registry_url, source_kind);
+                }
+            }
+            Value::Array(items) => {
+                for child in items {
+                    visit(child, entries, seen, limit, site_url, registry_url, source_kind);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut entries = Vec::new();
+    let mut seen = HashSet::new();
+    visit(
+        value,
+        &mut entries,
+        &mut seen,
+        limit,
+        site_url,
+        registry_url,
+        source_kind,
+    );
+    entries
+}
+
+async fn server_fetch_json(
+    client: &reqwest::Client,
+    url: Url,
+    token: Option<&str>,
+) -> Result<Value> {
+    let response = server_apply_auth(client.get(url.clone()), token)
+        .send()
+        .await
+        .map_err(|error| Error::Internal(error.into()))?;
+    if !response.status().is_success() {
+        return Err(Error::bad_request_code(
+            "CLAWHUB_HTTP_REQUEST_FAILED",
+            format!("ClawHub 接口返回 {} ({url})", response.status()),
+            None,
+        ));
+    }
+    response
+        .json::<Value>()
+        .await
+        .map_err(|error| Error::Internal(error.into()))
+}
+
+async fn run_server_clawhub_verify_http(
     site_url: &str,
     registry_url: &str,
     token: &str,
 ) -> Result<ServerCommandRunResult> {
-    let (binary, _) = find_clawhub_binary().ok_or_else(|| {
-        Error::bad_request_code(
-            "CLAWHUB_CLI_NOT_AVAILABLE",
-            "服务端未安装 clawhub CLI，无法验证团队配置",
-            None,
-        )
-    })?;
-    let context = prepare_server_clawhub_context(site_url, registry_url, "verify")?;
-    run_clawhub_login(&binary, &context, token)?;
-    run_clawhub_command(&binary, &["whoami"], &context)
-}
-
-fn run_server_clawhub_install(
-    site_url: &str,
-    registry_url: &str,
-    token: &str,
-    slug: &str,
-    version: Option<&str>,
-) -> Result<ServerClawHubInstallResult> {
-    let (binary, _) = find_clawhub_binary().ok_or_else(|| {
-        Error::bad_request_code(
-            "CLAWHUB_CLI_NOT_AVAILABLE",
-            "服务端未安装 clawhub CLI，无法执行团队技能安装",
-            None,
-        )
-    })?;
-    let context = prepare_server_clawhub_context(site_url, registry_url, "install")?;
-    let mut logs = Vec::new();
-    logs.push(run_clawhub_login(&binary, &context, token)?);
-
-    let installed_spec = match version.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(version) => format!("{slug}@{version}"),
-        None => slug.to_string(),
-    };
-
-    let mut args = vec![
-        "install".to_string(),
-        slug.to_string(),
-        "--workdir".to_string(),
-        context.workdir.to_string_lossy().to_string(),
-        "--dir".to_string(),
-        "skills".to_string(),
+    let context = resolve_server_http_context(site_url, registry_url);
+    let client = build_server_clawhub_client()?;
+    let candidates = [
+        format!("{}/api/v1/auth/whoami", context.registry_url),
+        format!("{}/api/v1/auth/whoami", context.site_url),
+        format!("{}/api/v1/me", context.registry_url),
+        format!("{}/api/v1/profile", context.site_url),
     ];
-    if let Some(version) = version.map(str::trim).filter(|value| !value.is_empty()) {
-        args.push("--version".to_string());
-        args.push(version.to_string());
+    let mut last_error = None;
+    for url in candidates {
+        let response = server_apply_auth(client.get(&url), Some(token))
+            .send()
+            .await
+            .map_err(|error| Error::Internal(error.into()))?;
+        if !response.status().is_success() {
+            last_error = Some(format!("ClawHub 验证接口返回 {} ({url})", response.status()));
+            continue;
+        }
+        let body = response
+            .text()
+            .await
+            .map_err(|error| Error::Internal(error.into()))?;
+        return Ok(ServerCommandRunResult {
+            stdout: if body.trim().is_empty() {
+                "ClawHub token 验证成功".to_string()
+            } else {
+                body
+            },
+        });
     }
-
-    let string_args = args.iter().map(String::as_str).collect::<Vec<_>>();
-    logs.push(run_clawhub_command(&binary, &string_args, &context)?);
-
-    let skills_root = context.workdir.join("skills");
-    let skill_md_path = find_installed_skill_md(&skills_root, slug).ok_or_else(|| {
-        Error::bad_request_code(
-            "CLAWHUB_SKILL_MD_NOT_FOUND",
-            format!(
-                "服务端已完成安装，但未在 {} 中找到 SKILL.md",
-                skills_root.display()
-            ),
-            None,
-        )
-    })?;
-
-    let skill_md = fs::read_to_string(&skill_md_path).map_err(|error| {
-        Error::bad_request_code(
-            "CLAWHUB_SKILL_MD_READ_FAILED",
-            format!(
-                "读取服务端 SKILL.md 失败 ({}): {error}",
-                skill_md_path.display()
-            ),
-            None,
-        )
-    })?;
-
-    Ok(ServerClawHubInstallResult {
-        skill_md,
-        stdout: collect_command_logs(&logs),
-        installed_spec,
-        detected_skill_path: skill_md_path
-            .parent()
-            .map(|path| path.display().to_string()),
-    })
+    Err(Error::bad_request_code(
+        "CLAWHUB_HTTP_VERIFY_FAILED",
+        last_error.unwrap_or_else(|| "ClawHub token 验证失败".to_string()),
+        None,
+    ))
 }
 
-fn run_server_clawhub_search(
+async fn run_server_clawhub_search_http(
     site_url: &str,
     registry_url: &str,
     token: &str,
     query: &str,
     limit: usize,
 ) -> Result<ServerClawHubSearchResult> {
-    let (binary, _) = find_clawhub_binary().ok_or_else(|| {
-        Error::bad_request_code(
-            "CLAWHUB_CLI_NOT_AVAILABLE",
-            "服务端未安装 clawhub CLI，无法搜索团队技能",
-            None,
-        )
-    })?;
-    let context = prepare_server_clawhub_context(site_url, registry_url, "search")?;
-    if !token.trim().is_empty() {
-        let _ = run_clawhub_login(&binary, &context, token)?;
-    }
-    let result = run_clawhub_command(&binary, &["search", query], &context)?;
-    let raw_output = collect_command_logs(&[result]);
-    let entries = parse_clawhub_search_output(&raw_output, limit);
-    Ok(ServerClawHubSearchResult {
-        entries,
-        raw_output,
-    })
-}
+    let context = resolve_server_http_context(site_url, registry_url);
+    let client = build_server_clawhub_client()?;
+    let mut candidates = Vec::new();
+    let mut search_url = Url::parse(&format!("{}/api/v1/search", context.registry_url))
+        .map_err(|error| Error::Internal(error.into()))?;
+    search_url
+        .query_pairs_mut()
+        .append_pair("q", query)
+        .append_pair("limit", &limit.to_string());
+    candidates.push(search_url);
 
-fn find_clawhub_binary() -> Option<(String, String)> {
-    for candidate in ["clawhub", "clawhub.cmd", "clawhub.exe"] {
-        let Ok(output) = Command::new(candidate).arg("--version").output() else {
-            continue;
-        };
-        if !output.status.success() {
-            continue;
+    let mut search_url_alt = Url::parse(&format!("{}/api/v1/search", context.registry_url))
+        .map_err(|error| Error::Internal(error.into()))?;
+    search_url_alt
+        .query_pairs_mut()
+        .append_pair("query", query)
+        .append_pair("limit", &limit.to_string());
+    candidates.push(search_url_alt);
+
+    let mut site_search_url = Url::parse(&format!("{}/api/v1/search", context.site_url))
+        .map_err(|error| Error::Internal(error.into()))?;
+    site_search_url
+        .query_pairs_mut()
+        .append_pair("q", query)
+        .append_pair("limit", &limit.to_string());
+    candidates.push(site_search_url);
+
+    let mut last_error = None;
+    for url in candidates {
+        match server_fetch_json(&client, url.clone(), Some(token)).await {
+            Ok(payload) => {
+                let entries = server_parse_http_search_entries(
+                    &payload,
+                    limit,
+                    context.site_url.as_str(),
+                    context.registry_url.as_str(),
+                    Some("team_proxy"),
+                );
+                if !entries.is_empty() {
+                    return Ok(ServerClawHubSearchResult {
+                        entries,
+                        raw_output: serde_json::to_string(&payload).unwrap_or_default(),
+                    });
+                }
+                last_error = Some(format!("ClawHub 搜索返回成功但未解析到 skill ({url})"));
+            }
+            Err(error) => last_error = Some(error.to_string()),
         }
-
-        return Some((
-            candidate.to_string(),
-            normalized_output_text(&output.stdout, &output.stderr),
-        ));
     }
-    None
+
+    Err(Error::bad_request_code(
+        "CLAWHUB_HTTP_SEARCH_FAILED",
+        last_error.unwrap_or_else(|| "ClawHub 搜索失败".to_string()),
+        None,
+    ))
 }
 
-fn prepare_server_clawhub_context(
+async fn run_server_clawhub_install_http(
     site_url: &str,
     registry_url: &str,
-    purpose: &str,
-) -> Result<ServerClawHubContext> {
-    let root = std::env::temp_dir()
-        .join("mtools-server-skill-marketplace")
-        .join("clawhub")
-        .join(format!("{purpose}-{}", Uuid::new_v4()));
-    let workdir = root.join("workspace");
-    fs::create_dir_all(workdir.join("skills")).map_err(|error| {
-        Error::bad_request_code(
-            "CLAWHUB_WORKDIR_CREATE_FAILED",
-            format!("创建服务端 ClawHub 工作目录失败: {error}"),
-            None,
-        )
-    })?;
-
-    Ok(ServerClawHubContext {
-        root: root.clone(),
-        config_path: root.join("config.json"),
-        workdir,
-        site_url: site_url.trim().to_string(),
-        registry_url: registry_url.trim().to_string(),
-    })
-}
-
-fn run_clawhub_login(
-    binary: &str,
-    context: &ServerClawHubContext,
     token: &str,
-) -> Result<ServerCommandRunResult> {
-    run_clawhub_command(binary, &["login", "--token", token], context)
-}
-
-fn run_clawhub_command(
-    binary: &str,
-    args: &[&str],
-    context: &ServerClawHubContext,
-) -> Result<ServerCommandRunResult> {
-    let mut command = Command::new(binary);
-    command.args(args);
-    command.current_dir(&context.workdir);
-    command.env(CLAWHUB_CONFIG_PATH_ENV, &context.config_path);
-    command.env(CLAWHUB_WORKDIR_ENV, &context.workdir);
-    command.env(CLAWHUB_DISABLE_TELEMETRY_ENV, "1");
-    command.env(CLAWHUB_SITE_ENV, &context.site_url);
-    command.env(CLAWHUB_REGISTRY_ENV, &context.registry_url);
-
-    let output = command.output().map_err(|error| {
-        Error::bad_request_code(
-            "CLAWHUB_COMMAND_EXEC_FAILED",
-            format!("执行 clawhub {} 失败: {error}", args.join(" ")),
-            None,
-        )
-    })?;
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-
-    if !output.status.success() {
-        let message = if stderr.is_empty() {
-            stdout.clone()
-        } else if stdout.is_empty() {
-            stderr.clone()
-        } else {
-            format!("{stdout}\n{stderr}")
-        };
-        return Err(Error::bad_request_code(
-            "CLAWHUB_COMMAND_FAILED",
-            format!(
-                "clawhub {} 执行失败{}",
-                args.join(" "),
-                if message.is_empty() {
-                    String::new()
-                } else {
-                    format!(": {message}")
-                }
-            ),
-            None,
-        ));
-    }
-
-    Ok(ServerCommandRunResult { stdout, stderr })
-}
-
-fn normalized_output_text(stdout: &[u8], stderr: &[u8]) -> String {
-    let stdout = String::from_utf8_lossy(stdout).trim().to_string();
-    if !stdout.is_empty() {
-        return stdout;
-    }
-    String::from_utf8_lossy(stderr).trim().to_string()
-}
-
-fn collect_command_logs(results: &[ServerCommandRunResult]) -> String {
-    results
-        .iter()
-        .flat_map(|item| {
-            [item.stdout.trim(), item.stderr.trim()]
-                .into_iter()
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn parse_clawhub_search_output(output: &str, limit: usize) -> Vec<ServerClawHubSearchEntry> {
-    let cleaned = strip_ansi_codes(output);
-    let mut entries = Vec::new();
-
-    for line in cleaned.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        if let Some(entry) = parse_clawhub_search_line(line) {
-            if entries
-                .iter()
-                .any(|existing: &ServerClawHubSearchEntry| existing.slug == entry.slug)
-            {
-                continue;
-            }
-            entries.push(entry);
-            if entries.len() >= limit {
-                break;
-            }
-        }
-    }
-
-    entries
-}
-
-fn parse_clawhub_search_line(line: &str) -> Option<ServerClawHubSearchEntry> {
-    let slug = extract_slug_candidate(line)?;
-    let title = line
-        .split_whitespace()
-        .take_while(|part| !part.contains('/'))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let description = line
-        .split_once(&slug)
-        .map(|(_, rest)| rest.trim().trim_matches('-').trim().to_string())
-        .filter(|text| !text.is_empty());
-
-    Some(ServerClawHubSearchEntry {
-        slug,
-        title: if title.is_empty() { None } else { Some(title) },
-        description,
+    slug: &str,
+    version: Option<&str>,
+) -> Result<ServerClawHubInstallResult> {
+    let context = resolve_server_http_context(site_url, registry_url);
+    let bundle = resolve_server_bundle_http(&context, slug, version, token).await?;
+    let skill_md = String::from_utf8(bundle.bytes.clone())
+        .ok()
+        .filter(|text| text.trim_start().starts_with("---"))
+        .unwrap_or_default();
+    Ok(ServerClawHubInstallResult {
+        skill_md,
+        stdout: "已通过服务端 HTTP 代理获取 ClawHub bundle".to_string(),
+        installed_spec: match version {
+            Some(version) => format!("{slug}@{version}"),
+            None => slug.to_string(),
+        },
+        detected_skill_path: None,
+        bundle_base64: Some(STANDARD.encode(&bundle.bytes)),
+        installed_version: bundle.version.or_else(|| version.map(str::to_string)),
+        origin_url: bundle.origin_url,
+        site_url: Some(context.site_url),
+        registry_url: Some(context.registry_url),
     })
 }
 
-fn extract_slug_candidate(line: &str) -> Option<String> {
-    line.split_whitespace()
-        .map(|token| token.trim_matches(|ch: char| ",;|[]()".contains(ch)))
-        .find(|token| {
-            let Some((owner, skill)) = token.split_once('/') else {
-                return false;
-            };
-            !owner.is_empty()
-                && !skill.is_empty()
-                && owner
-                    .chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
-                && skill
-                    .chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
-        })
-        .map(str::to_string)
-}
-
-fn strip_ansi_codes(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' {
-            while let Some(next) = chars.next() {
-                if matches!(next, 'A'..='Z' | 'a'..='z') {
-                    break;
-                }
-            }
-            continue;
-        }
-        out.push(ch);
-    }
-    out
-}
-
-struct SkillMdMetadata {
-    display_name: String,
-    description: Option<String>,
-    version: Option<String>,
-}
-
-fn extract_skill_md_metadata(content: &str, fallback_slug: &str) -> SkillMdMetadata {
-    let mut name: Option<String> = None;
-    let mut description: Option<String> = None;
-    let mut version: Option<String> = None;
-
-    let mut lines = content.lines();
-    if matches!(lines.next().map(str::trim), Some("---")) {
-        for line in lines {
-            let trimmed = line.trim();
-            if trimmed == "---" {
-                break;
-            }
-            if let Some(value) = trimmed.strip_prefix("name:") {
-                let next = value.trim().trim_matches('"').trim_matches('\'');
-                if !next.is_empty() {
-                    name = Some(next.to_string());
-                }
-            } else if let Some(value) = trimmed.strip_prefix("description:") {
-                let next = value.trim().trim_matches('"').trim_matches('\'');
-                if !next.is_empty() {
-                    description = Some(next.to_string());
-                }
-            } else if let Some(value) = trimmed.strip_prefix("version:") {
-                let next = value.trim().trim_matches('"').trim_matches('\'');
-                if !next.is_empty() {
-                    version = Some(next.to_string());
-                }
-            }
-        }
-    }
-
-    SkillMdMetadata {
-        display_name: name.unwrap_or_else(|| fallback_slug.to_string()),
-        description,
-        version,
-    }
-}
-
-fn find_installed_skill_md(root: &FsPath, slug: &str) -> Option<PathBuf> {
-    if !root.exists() {
-        return None;
-    }
+async fn resolve_server_bundle_http(
+    context: &ServerHttpClawHubContext,
+    slug: &str,
+    version: Option<&str>,
+    token: &str,
+) -> Result<ServerHttpClawHubBundle> {
+    let client = build_server_clawhub_client()?;
     let mut candidates = Vec::new();
-    collect_skill_md_files(root, &mut candidates);
-    if candidates.is_empty() {
-        return None;
+
+    let mut skill_url = Url::parse(&format!("{}/api/v1/skills/{}", context.registry_url, slug))
+        .map_err(|error| Error::Internal(error.into()))?;
+    if let Some(version) = version {
+        skill_url.query_pairs_mut().append_pair("version", version);
     }
+    candidates.push(skill_url);
 
-    let slug_parts = slug
-        .split('/')
-        .map(|part| part.trim().to_ascii_lowercase())
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    candidates.sort_by(|left, right| {
-        let left_score = skill_md_candidate_score(left, &slug_parts);
-        let right_score = skill_md_candidate_score(right, &slug_parts);
-        left_score
-            .cmp(&right_score)
-            .then_with(|| left.to_string_lossy().cmp(&right.to_string_lossy()))
-    });
-    candidates.into_iter().next()
-}
+    let mut download_url = Url::parse(&format!("{}/api/v1/download", context.registry_url))
+        .map_err(|error| Error::Internal(error.into()))?;
+    download_url.query_pairs_mut().append_pair("slug", slug);
+    if let Some(version) = version {
+        download_url.query_pairs_mut().append_pair("version", version);
+    }
+    candidates.push(download_url);
 
-fn skill_md_candidate_score(path: &FsPath, slug_parts: &[String]) -> (u8, usize) {
-    let components = path
-        .components()
-        .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
-        .collect::<Vec<_>>();
-    let depth = components.len();
-    if slug_parts.len() >= 2 {
-        let owner = &slug_parts[0];
-        let skill = &slug_parts[1];
-        if depth >= 3 && components[depth - 2] == *skill && components[depth - 3] == *owner {
-            return (0, depth);
+    let mut download_slug_url =
+        Url::parse(&format!("{}/api/v1/download/{}", context.registry_url, slug))
+            .map_err(|error| Error::Internal(error.into()))?;
+    if let Some(version) = version {
+        download_slug_url
+            .query_pairs_mut()
+            .append_pair("version", version);
+    }
+    candidates.push(download_slug_url);
+
+    let mut download_skill_url =
+        Url::parse(&format!("{}/api/v1/skills/{}/download", context.registry_url, slug))
+            .map_err(|error| Error::Internal(error.into()))?;
+    if let Some(version) = version {
+        download_skill_url
+            .query_pairs_mut()
+            .append_pair("version", version);
+    }
+    candidates.push(download_skill_url);
+
+    let mut last_error = None;
+    for url in candidates {
+        let response = server_apply_auth(client.get(url.clone()), Some(token))
+            .send()
+            .await
+            .map_err(|error| Error::Internal(error.into()))?;
+        if !response.status().is_success() {
+            last_error = Some(format!("ClawHub 下载接口返回 {} ({url})", response.status()));
+            continue;
         }
-        if depth >= 4 && components[depth - 3] == *skill && components[depth - 4] == *owner {
-            return (1, depth);
-        }
-    }
-    if !slug_parts.is_empty()
-        && components
-            .windows(slug_parts.len())
-            .any(|window| window == slug_parts)
-    {
-        return (2, depth);
-    }
-    if slug_parts
-        .iter()
-        .all(|part| components.iter().any(|component| component == part))
-    {
-        return (3, depth);
-    }
-    (4, depth)
-}
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|error| Error::Internal(error.into()))?
+            .to_vec();
 
-fn collect_skill_md_files(dir: &FsPath, results: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    let mut sorted_entries = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .collect::<Vec<_>>();
-    sorted_entries.sort_by(|left, right| {
-        let left = left.to_string_lossy();
-        let right = right.to_string_lossy();
-        left.cmp(&right)
-    });
-    for path in sorted_entries {
-        if path.is_file() {
-            if path
-                .file_name()
-                .map(|name| name.to_string_lossy() == "SKILL.md")
-                == Some(true)
-            {
-                results.push(path);
+        if content_type.contains("application/json")
+            || body.first() == Some(&b'{')
+            || body.first() == Some(&b'[')
+        {
+            let payload = serde_json::from_slice::<Value>(&body)
+                .map_err(|error| Error::Internal(error.into()))?;
+            if let Some(download_url) = server_extract_url_from_json(
+                &payload,
+                &[
+                    "download_url",
+                    "downloadUrl",
+                    "bundle_url",
+                    "bundleUrl",
+                    "archive_url",
+                    "archiveUrl",
+                    "url",
+                ],
+                &[context.registry_url.as_str(), context.site_url.as_str()],
+            ) {
+                let followup_response = server_apply_auth(client.get(&download_url), Some(token))
+                    .send()
+                    .await
+                    .map_err(|error| Error::Internal(error.into()))?;
+                if !followup_response.status().is_success() {
+                    last_error = Some(format!(
+                        "ClawHub bundle 下载返回 {} ({download_url})",
+                        followup_response.status()
+                    ));
+                    continue;
+                }
+                let bytes = followup_response
+                    .bytes()
+                    .await
+                    .map_err(|error| Error::Internal(error.into()))?
+                    .to_vec();
+                return Ok(ServerHttpClawHubBundle {
+                    bytes,
+                    version: server_extract_version_from_json(&payload)
+                        .or_else(|| version.map(str::to_string)),
+                    origin_url: server_extract_url_from_json(
+                        &payload,
+                        &["origin_url", "originUrl", "url", "site_url", "siteUrl"],
+                        &[context.site_url.as_str(), context.registry_url.as_str()],
+                    )
+                    .or(Some(download_url)),
+                });
             }
+            if let Some(skill_md) = server_extract_string_from_json(&payload, &["skill_md", "skillMd"]) {
+                return Ok(ServerHttpClawHubBundle {
+                    bytes: skill_md.into_bytes(),
+                    version: server_extract_version_from_json(&payload)
+                        .or_else(|| version.map(str::to_string)),
+                    origin_url: server_extract_url_from_json(
+                        &payload,
+                        &["origin_url", "originUrl", "url", "site_url", "siteUrl"],
+                        &[context.site_url.as_str(), context.registry_url.as_str()],
+                    )
+                    .or(Some(url.to_string())),
+                });
+            }
+            last_error = Some(format!("ClawHub 下载接口返回 JSON，但未找到 bundle URL ({url})"));
             continue;
         }
 
-        if path.is_dir() {
-            collect_skill_md_files(&path, results);
-        }
+        return Ok(ServerHttpClawHubBundle {
+            bytes: body,
+            version: version.map(str::to_string),
+            origin_url: Some(url.to_string()),
+        });
     }
+
+    Err(Error::bad_request_code(
+        "CLAWHUB_HTTP_INSTALL_FAILED",
+        last_error.unwrap_or_else(|| "ClawHub bundle 下载失败".to_string()),
+        None,
+    ))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn extract_skill_md_metadata_reads_version_field() {
-        let metadata = extract_skill_md_metadata(
-            r#"---
-name: SQL Export
-description: Export data
-version: 2.3.4
----
-# Body
-"#,
-            "team/sql-export",
-        );
-
-        assert_eq!(metadata.display_name, "SQL Export");
-        assert_eq!(metadata.description.as_deref(), Some("Export data"));
-        assert_eq!(metadata.version.as_deref(), Some("2.3.4"));
-    }
-
-    #[test]
-    fn find_installed_skill_md_prefers_slug_matched_path() {
-        let root = std::env::temp_dir()
-            .join("mtools-server-skill-marketplace-tests")
-            .join(Uuid::new_v4().to_string());
-        let expected = root
-            .join("team")
-            .join("sql-export")
-            .join("2.3.4")
-            .join("SKILL.md");
-        let distractor = root.join("other").join("misc").join("SKILL.md");
-
-        fs::create_dir_all(expected.parent().expect("expected parent")).expect("create expected");
-        fs::create_dir_all(distractor.parent().expect("distractor parent"))
-            .expect("create distractor");
-        fs::write(&expected, "---\nname: expected\n---").expect("write expected");
-        fs::write(&distractor, "---\nname: distractor\n---").expect("write distractor");
-
-        let selected = find_installed_skill_md(&root, "team/sql-export").expect("select skill");
-        assert_eq!(selected, expected);
-
-        let _ = fs::remove_dir_all(root);
-    }
-}
 
 // ── 类型 ──
 
@@ -2564,13 +1923,6 @@ struct GetTeamSkillMarketplaceStatusQuery {
     provider: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Default)]
-struct GetTeamSkillMarketplaceCacheQuery {
-    provider: Option<String>,
-    query: Option<String>,
-    limit: Option<u32>,
-}
-
 #[derive(Debug, sqlx::FromRow)]
 struct TeamSkillMarketplaceConfigRow {
     id: Uuid,
@@ -2587,8 +1939,6 @@ struct TeamSkillMarketplaceConfigRow {
 struct SetTeamSkillMarketplaceConfigRequest {
     id: Option<Uuid>,
     provider: Option<String>,
-    site_url: String,
-    registry_url: String,
     api_token: String,
     is_active: Option<bool>,
 }
@@ -2609,84 +1959,5 @@ struct InstallTeamSkillMarketplaceRequest {
 struct SearchTeamSkillMarketplaceRequest {
     provider: Option<String>,
     query: String,
-    limit: Option<u32>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SyncTeamSkillMarketplaceRequest {
-    provider: Option<String>,
-    query: String,
-    limit: Option<u32>,
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct TeamPublishedSkillRow {
-    id: Uuid,
-    team_id: Uuid,
-    provider: String,
-    slug: String,
-    version: String,
-    display_name: String,
-    description: Option<String>,
-    skill_md: String,
-    is_active: bool,
-    published_by: Uuid,
-    updated_by: Uuid,
-    created_at: chrono::DateTime<chrono::Utc>,
-    updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct TeamSkillMarketplaceCacheRow {
-    id: Uuid,
-    team_id: Uuid,
-    provider: String,
-    slug: String,
-    name: String,
-    description: Option<String>,
-    latest_version: Option<String>,
-    versions_json: sqlx::types::Json<serde_json::Value>,
-    author: Option<String>,
-    tags_json: sqlx::types::Json<serde_json::Value>,
-    icon_url: Option<String>,
-    raw_metadata_json: sqlx::types::Json<serde_json::Value>,
-    last_synced_at: chrono::DateTime<chrono::Utc>,
-    created_at: chrono::DateTime<chrono::Utc>,
-    updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct TeamSkillMarketplaceCacheStats {
-    cached_count: i64,
-    last_synced_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct TeamSkillInstallLogRow {
-    id: Uuid,
-    team_id: Uuid,
-    user_id: Uuid,
-    published_skill_id: Uuid,
-    action: String,
-    status: String,
-    error_message: Option<String>,
-    created_at: chrono::DateTime<chrono::Utc>,
-    username: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PublishTeamSkillRequest {
-    provider: Option<String>,
-    slug: String,
-    version: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PatchTeamPublishedSkillRequest {
-    is_active: Option<bool>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct GetTeamPublishedSkillInstallLogsQuery {
     limit: Option<u32>,
 }

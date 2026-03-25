@@ -1273,7 +1273,7 @@ pub async fn agent_show_notification(
     app.notification()
         .builder()
         .title(if normalized_title.is_empty() {
-            "51ToolBox"
+            "HiClow"
         } else {
             normalized_title
         })

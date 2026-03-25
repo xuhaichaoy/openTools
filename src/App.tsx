@@ -115,8 +115,9 @@ function MainApp() {
 
   // ── Window size management ──
   useEffect(() => {
+    if (!windowFocused) return;
     updateWindowSize(view, searchValue, getFilteredResults, setWindowExpanded);
-  }, [view, mode, searchValue, getFilteredResults, setWindowExpanded]);
+  }, [view, mode, searchValue, getFilteredResults, setWindowExpanded, windowFocused]);
 
   // ── Submit handler ──
   const handleSubmit = useCallback(

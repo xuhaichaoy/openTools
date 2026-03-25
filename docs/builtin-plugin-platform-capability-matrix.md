@@ -29,6 +29,6 @@
 
 ## 发布验收使用方式
 
-1. 先按 `docs/release-manual-checklist-win-mac.md` 完成双平台 Smoke。
+1. 先完成一次双平台 Smoke（至少覆盖启动、托盘、主窗口、AI 助手、截图/OCR、插件中心）。
 2. 对矩阵中 `partial` 项逐项走差异路径（特别是 `color`、`system-actions`、`ai-center`）。
 3. 出现平台偏差时，先确认是否符合“隐藏不支持能力”的既定策略，再决定是否阻断发布。

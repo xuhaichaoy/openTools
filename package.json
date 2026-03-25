@@ -1,7 +1,8 @@
 {
-  "name": "51ToolBox",
+  "name": "HiClow",
   "private": true,
   "version": "0.1.0",
+  "description": "AI-first desktop workspace with launcher, AI modes, dialog collaboration, IM channels, database export, and MCP tooling.",
   "type": "module",
   "engines": {
     "node": "^20.19.0 || >=22.12.0"

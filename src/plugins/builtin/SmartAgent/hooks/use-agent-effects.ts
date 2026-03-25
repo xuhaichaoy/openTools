@@ -2,7 +2,7 @@ import { useEffect, type Dispatch, type SetStateAction } from "react";
 import { pluginActionToTool, type AgentTool } from "../core/react-agent";
 import { registry } from "@/core/plugin-system/registry";
 import type { MToolsAI } from "@/core/plugin-system/plugin-interface";
-import type { AgentTask } from "@/store/agent-store";
+import { useAgentStore, type AgentTask } from "@/store/agent-store";
 import type { RuntimeFallbackContext } from "@/core/agent/runtime";
 import {
   createBuiltinAgentTools,
@@ -96,7 +96,19 @@ export function useAgentEffects({
       const tools: AgentTool[] = allActions.map(({ pluginId, pluginName, action }) =>
         pluginActionToTool(pluginId, pluginName, action, ai),
       );
-      const builtinResult: BuiltinToolsResult = createBuiltinAgentTools(confirmHostFallback, askUser);
+      const builtinResult: BuiltinToolsResult = createBuiltinAgentTools(
+        confirmHostFallback,
+        askUser,
+        {
+          getCurrentQuery: () =>
+            useAgentStore.getState().getCurrentSession()?.tasks.at(-1)?.query ?? "",
+          scheduleClawHubResume: async (resumePrompt) => {
+            const state = useAgentStore.getState();
+            if (!state.currentSessionId) return;
+            state.enqueueFollowUp(state.currentSessionId, { query: resumePrompt });
+          },
+        },
+      );
       tools.push(...builtinResult.tools);
 
       const mcpState = useMcpStore.getState();

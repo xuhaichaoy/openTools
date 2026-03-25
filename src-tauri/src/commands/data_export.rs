@@ -760,7 +760,7 @@ fn build_export_file_path(entity_name: &str) -> Result<std::path::PathBuf, Strin
             }
         })
         .collect::<String>();
-    let dir = std::env::temp_dir().join("51toolbox-exports");
+    let dir = std::env::temp_dir().join("HiClow-exports");
     std::fs::create_dir_all(&dir).map_err(|e| format!("Create export directory failed: {}", e))?;
     Ok(dir.join(format!(
         "{}-{}.csv",

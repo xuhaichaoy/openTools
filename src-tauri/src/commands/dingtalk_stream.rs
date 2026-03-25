@@ -17,7 +17,7 @@ use tokio_tungstenite::{connect_async, tungstenite::protocol::Message, MaybeTlsS
 
 const DINGTALK_STREAM_OPEN_URL: &str = "https://api.dingtalk.com/v1.0/gateway/connections/open";
 const DINGTALK_BOT_MESSAGE_TOPIC: &str = "/v1.0/im/bot/messages/get";
-const DINGTALK_STREAM_UA: &str = "51toolbox-dingtalk-stream/1.0.0";
+const DINGTALK_STREAM_UA: &str = "HiClow-dingtalk-stream/1.0.0";
 const INITIAL_CONNECT_TIMEOUT_SECS: u64 = 20;
 const RECONNECT_DELAY_SECS: u64 = 3;
 const DINGTALK_HTTP_CONNECT_TIMEOUT_SECS: u64 = 15;
@@ -481,7 +481,7 @@ pub async fn dingtalk_download_files(
         query_dingtalk_download_urls(&client_ctx, &access_token, &robot_code, &download_codes)
             .await?;
 
-    let media_dir = std::env::temp_dir().join("51toolbox-dingtalk-media");
+    let media_dir = std::env::temp_dir().join("HiClow-dingtalk-media");
     tokio::fs::create_dir_all(&media_dir)
         .await
         .map_err(|e| format!("创建钉钉媒体缓存目录失败: {}", e))?;

@@ -15,7 +15,7 @@ function clampLimit(value: number): number {
  *
  * Inspired by deer-flow's SubagentLimitMiddleware which truncates excess
  * `task` tool calls from model output. This achieves the same goal in
- * 51ToolBox's ReAct loop by intercepting tool execution.
+ * HiClow's ReAct loop by intercepting tool execution.
  *
  * Benefits over the current ActorSystem.MAX_CHILDREN_PER_AGENT check:
  * - Rejects immediately with a clear explanation (saves an LLM iteration)
@@ -48,7 +48,10 @@ export class SpawnLimitMiddleware implements ActorMiddleware {
         if (activeCount >= limit) {
           const activeTasks = actorSystem.getActiveSpawnedTasks(actorId);
           const taskNames = activeTasks
-            .map((t) => actorSystem.get(t.targetActorId)?.role.name ?? t.targetActorId)
+            .map(
+              (t) =>
+                actorSystem.get(t.targetActorId)?.role.name ?? t.targetActorId,
+            )
             .join(", ");
           return {
             spawned: false,

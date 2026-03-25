@@ -33,7 +33,7 @@ function normalizePolicy(raw: unknown): AgentExecutionPolicy {
 
 async function resolvePolicyPath() {
   const home = await homeDir();
-  return join(home, ".config", "51toolbox", "agent-policy.json");
+  return join(home, ".config", "HiClow", "agent-policy.json");
 }
 
 export async function loadAgentExecutionPolicy(force = false) {

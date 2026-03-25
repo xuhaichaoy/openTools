@@ -887,16 +887,17 @@ function ConnectionFormModal({
     "w-full bg-[var(--color-bg-secondary)] border-0 rounded-lg px-3 py-2 text-xs text-[var(--color-text)] focus:ring-2 focus:ring-[#F28F3640] transition-all outline-none";
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-      <div className="bg-[var(--color-bg)] w-[420px] rounded-xl p-4 border border-[var(--color-border)] shadow-xl space-y-2">
-        <div className="flex items-center justify-between">
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-black/50 backdrop-blur-sm">
+      <div className="flex min-h-full items-start justify-center p-4 sm:items-center">
+        <div className="flex w-full max-w-[420px] max-h-[calc(100vh-2rem)] flex-col overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-xl">
+        <div className="flex shrink-0 items-center justify-between px-4 pb-2 pt-4">
           <h3 className="text-sm font-semibold">新建数据库连接</h3>
           <button onClick={onCancel} className="p-1 rounded hover:bg-[var(--color-bg-secondary)]">
             <X className="w-4 h-4 text-[var(--color-text-secondary)]" />
           </button>
         </div>
 
-        <div className="space-y-2">
+        <div className="min-h-0 flex-1 space-y-2 overflow-y-auto px-4 pb-2">
           <div>
             <label className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase">名称</label>
             <input value={name} onChange={(e) => setName(e.target.value)} placeholder="My Database" className={inputCls + " mt-1"} autoFocus />
@@ -1006,7 +1007,7 @@ function ConnectionFormModal({
           </div>
         </div>
 
-        <div className="flex gap-2 pt-2">
+        <div className="flex shrink-0 gap-2 border-t border-[var(--color-border)] px-4 pb-4 pt-3">
           <button onClick={onCancel} className="flex-1 py-2 rounded-lg border border-[var(--color-border)] hover:bg-[var(--color-bg-secondary)] text-xs font-medium">
             取消
           </button>
@@ -1020,6 +1021,7 @@ function ConnectionFormModal({
             添加
           </button>
         </div>
+      </div>
       </div>
     </div>
   );
@@ -1148,9 +1150,10 @@ function DatasetDraftModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-      <div className="bg-[var(--color-bg)] w-[860px] max-h-[84vh] overflow-y-auto rounded-xl p-4 border border-[var(--color-border)] shadow-xl space-y-3">
-        <div className="flex items-center justify-between">
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-black/50 backdrop-blur-sm">
+      <div className="flex min-h-full items-start justify-center p-4 sm:items-center">
+        <div className="flex w-full max-w-[860px] max-h-[calc(100vh-2rem)] flex-col overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-xl">
+        <div className="flex shrink-0 items-center justify-between px-4 pb-2 pt-4">
           <div>
             <h3 className="text-sm font-semibold">生成本地数据集草稿</h3>
             <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
@@ -1162,6 +1165,7 @@ function DatasetDraftModal({
           </button>
         </div>
 
+        <div className="min-h-0 flex-1 overflow-y-auto space-y-3 px-4 pb-3">
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase">数据集名称</label>
@@ -1492,7 +1496,9 @@ function DatasetDraftModal({
           )}
         </div>
 
-        <div className="flex gap-2 pt-1">
+        </div>
+
+        <div className="flex shrink-0 gap-2 border-t border-[var(--color-border)] px-4 pb-4 pt-3">
           <button onClick={onCancel} className="flex-1 py-2 rounded-lg border border-[var(--color-border)] hover:bg-[var(--color-bg-secondary)] text-xs font-medium">
             取消
           </button>
@@ -1506,6 +1512,7 @@ function DatasetDraftModal({
             保存数据集
           </button>
         </div>
+      </div>
       </div>
     </div>
   );

@@ -1,6 +1,6 @@
 /**
  * Session 持久化增强模块
- * 
+ *
  * 对标 OpenClaw 的 session 持久化系统：
  * - 写入锁机制（防止并发写入）
  * - 原子写入（防止数据损坏）
@@ -52,7 +52,9 @@ export const DEFAULT_PERSISTENCE_CONFIG: PersistenceConfig = {
 
 let globalConfig: PersistenceConfig = { ...DEFAULT_PERSISTENCE_CONFIG };
 
-export function updatePersistenceConfig(updates: Partial<PersistenceConfig>): void {
+export function updatePersistenceConfig(
+  updates: Partial<PersistenceConfig>,
+): void {
   globalConfig = { ...globalConfig, ...updates };
 }
 
@@ -69,10 +71,12 @@ let baseDir: string | null = null;
 async function resolveBaseDir(): Promise<string> {
   if (!baseDir) {
     const home = await homeDir();
-    baseDir = await join(home, ".config", "51toolbox", SESSION_DIR);
+    baseDir = await join(home, ".config", "HiClow", SESSION_DIR);
     try {
       await invoke("create_directory", { path: baseDir, recursive: true });
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
   return baseDir!;
 }
@@ -116,7 +120,9 @@ async function writeTextFile(path: string, content: string): Promise<void> {
 async function deleteFile(path: string): Promise<void> {
   try {
     await invoke("delete_file", { path });
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
 }
 
 async function fileExists(path: string): Promise<boolean> {
@@ -128,10 +134,16 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
-async function listDirectory(path: string): Promise<Array<{ name: string; is_dir: boolean; size: number }>> {
+async function listDirectory(
+  path: string,
+): Promise<Array<{ name: string; is_dir: boolean; size: number }>> {
   try {
     const result = await invoke<string>("list_directory", { path });
-    return JSON.parse(result) as Array<{ name: string; is_dir: boolean; size: number }>;
+    return JSON.parse(result) as Array<{
+      name: string;
+      is_dir: boolean;
+      size: number;
+    }>;
   } catch {
     return [];
   }
@@ -150,7 +162,10 @@ interface LockInfo {
 const activeLocks = new Map<string, LockInfo>();
 const lockWaitQueue = new Map<string, Array<() => void>>();
 
-async function acquireLock(sessionId: string, timeoutMs = 5000): Promise<boolean> {
+async function acquireLock(
+  sessionId: string,
+  timeoutMs = 5000,
+): Promise<boolean> {
   const lockPath = await resolveLockPath(sessionId);
   const now = Date.now();
   const expiresAt = now + timeoutMs;
@@ -161,10 +176,15 @@ async function acquireLock(sessionId: string, timeoutMs = 5000): Promise<boolean
     return new Promise((resolve) => {
       let settled = false;
       const queue = lockWaitQueue.get(sessionId) ?? [];
-      const callback = () => { if (!settled) { settled = true; resolve(true); } };
+      const callback = () => {
+        if (!settled) {
+          settled = true;
+          resolve(true);
+        }
+      };
       queue.push(callback);
       lockWaitQueue.set(sessionId, queue);
-      
+
       setTimeout(() => {
         if (settled) return;
         settled = true;
@@ -177,7 +197,11 @@ async function acquireLock(sessionId: string, timeoutMs = 5000): Promise<boolean
 
   // 尝试获取锁（写入锁文件）
   try {
-    const lockContent = JSON.stringify({ sessionId, acquiredAt: now, expiresAt });
+    const lockContent = JSON.stringify({
+      sessionId,
+      acquiredAt: now,
+      expiresAt,
+    });
     await writeTextFile(lockPath, lockContent);
     activeLocks.set(sessionId, { sessionId, acquiredAt: now, expiresAt });
     return true;
@@ -188,7 +212,7 @@ async function acquireLock(sessionId: string, timeoutMs = 5000): Promise<boolean
 
 function releaseLock(sessionId: string): void {
   activeLocks.delete(sessionId);
-  
+
   // 通知等待队列中的下一个
   const queue = lockWaitQueue.get(sessionId);
   if (queue?.length) {
@@ -197,7 +221,10 @@ function releaseLock(sessionId: string): void {
   }
 }
 
-async function withLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
+async function withLock<T>(
+  sessionId: string,
+  fn: () => Promise<T>,
+): Promise<T> {
   if (!globalConfig.enableWriteLock) {
     return fn();
   }
@@ -223,20 +250,22 @@ async function withLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T> 
 async function atomicWrite<T>(path: string, data: T): Promise<void> {
   const tempPath = `${path}.tmp.${Date.now()}`;
   const content = JSON.stringify(data, null, 2);
-  
+
   try {
     // 写入临时文件
     await writeTextFile(tempPath, content);
-    
+
     // 读取验证
     const verify = await readTextFile(tempPath);
     JSON.parse(verify); // 验证 JSON 有效
-    
+
     // 删除原文件（如果存在）
     try {
       await deleteFile(path);
-    } catch { /* ignore */ }
-    
+    } catch {
+      /* ignore */
+    }
+
     // 重命名临时文件为目标文件
     await invoke("move_file", { source: tempPath, destination: path });
   } catch (err) {
@@ -251,14 +280,17 @@ async function atomicWrite<T>(path: string, data: T): Promise<void> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export interface SessionIndex {
-  sessions: Record<string, {
-    sessionId: string;
-    createdAt: number;
-    updatedAt: number;
-    entryCount: number;
-    fileSize: number;
-    archived: boolean;
-  }>;
+  sessions: Record<
+    string,
+    {
+      sessionId: string;
+      createdAt: number;
+      updatedAt: number;
+      entryCount: number;
+      fileSize: number;
+      archived: boolean;
+    }
+  >;
   lastUpdated: number;
 }
 
@@ -266,17 +298,19 @@ let sessionIndexCache: SessionIndex | null = null;
 
 async function loadIndex(): Promise<SessionIndex> {
   if (sessionIndexCache) return sessionIndexCache;
-  
+
   const path = await resolveIndexPath();
   const content = await readTextFile(path);
-  
+
   if (content) {
     try {
       sessionIndexCache = JSON.parse(content) as SessionIndex;
       return sessionIndexCache!;
-    } catch { /* corrupt */ }
+    } catch {
+      /* corrupt */
+    }
   }
-  
+
   sessionIndexCache = { sessions: {}, lastUpdated: Date.now() };
   return sessionIndexCache;
 }
@@ -294,7 +328,7 @@ async function updateIndexEntry(
 ): Promise<void> {
   const index = await loadIndex();
   const existing = index.sessions[sessionId];
-  
+
   if (existing) {
     index.sessions[sessionId] = { ...existing, ...updates };
   } else {
@@ -308,7 +342,7 @@ async function updateIndexEntry(
       ...updates,
     };
   }
-  
+
   await saveIndex(index);
 }
 
@@ -331,7 +365,7 @@ export interface DiskBudgetResult {
 async function calculateDiskUsage(): Promise<number> {
   const base = await resolveBaseDir();
   const entries = await listDirectory(base);
-  
+
   let total = 0;
   for (const entry of entries) {
     if (!entry.is_dir && !entry.name.startsWith(".")) {
@@ -341,26 +375,30 @@ async function calculateDiskUsage(): Promise<number> {
   return total;
 }
 
-async function enforceDiskBudget(activeSessionId?: string): Promise<DiskBudgetResult> {
+async function enforceDiskBudget(
+  activeSessionId?: string,
+): Promise<DiskBudgetResult> {
   if (!globalConfig.enableDiskBudget) {
     return { freedBytes: 0, deletedSessions: [], warnings: [] };
   }
 
   const currentUsage = await calculateDiskUsage();
-  
+
   if (currentUsage < globalConfig.highWaterBytes) {
     return { freedBytes: 0, deletedSessions: [], warnings: [] };
   }
 
   const warnings: string[] = [];
   if (currentUsage >= globalConfig.maxDiskBytes) {
-    warnings.push(`Disk usage ${currentUsage} bytes exceeds max ${globalConfig.maxDiskBytes} bytes`);
+    warnings.push(
+      `Disk usage ${currentUsage} bytes exceeds max ${globalConfig.maxDiskBytes} bytes`,
+    );
   }
 
   // 加载索引并按更新时间排序
   const index = await loadIndex();
   const sessions = Object.values(index.sessions)
-    .filter(s => !s.archived && s.sessionId !== activeSessionId)
+    .filter((s) => !s.archived && s.sessionId !== activeSessionId)
     .sort((a, b) => a.updatedAt - b.updatedAt);
 
   let freedBytes = 0;
@@ -369,7 +407,7 @@ async function enforceDiskBudget(activeSessionId?: string): Promise<DiskBudgetRe
 
   for (const session of sessions) {
     if (currentUsage - freedBytes <= globalConfig.highWaterBytes) break;
-    
+
     // 检查是否过期
     const age = now - session.updatedAt;
     if (age < globalConfig.sessionTtlMs) continue;
@@ -378,7 +416,7 @@ async function enforceDiskBudget(activeSessionId?: string): Promise<DiskBudgetRe
     const sessionPath = await resolveSessionPath(session.sessionId);
     await deleteFile(sessionPath);
     await removeIndexEntry(session.sessionId);
-    
+
     freedBytes += session.fileSize;
     deletedSessions.push(session.sessionId);
   }
@@ -391,11 +429,11 @@ async function enforceDiskBudget(activeSessionId?: string): Promise<DiskBudgetRe
 
     for (const [id, archive] of archives) {
       if (currentUsage - freedBytes <= globalConfig.highWaterBytes) break;
-      
+
       const sessionPath = await resolveSessionPath(id);
       await deleteFile(sessionPath);
       await removeIndexEntry(id);
-      
+
       freedBytes += archive.fileSize;
       deletedSessions.push(id);
     }
@@ -409,7 +447,13 @@ async function enforceDiskBudget(activeSessionId?: string): Promise<DiskBudgetRe
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export interface TranscriptEntry {
-  type: "message" | "tool_call" | "tool_result" | "system" | "spawn" | "announce";
+  type:
+    | "message"
+    | "tool_call"
+    | "tool_result"
+    | "system"
+    | "spawn"
+    | "announce";
   timestamp: number;
   sessionId: string;
   data: Record<string, unknown>;
@@ -456,7 +500,10 @@ interface CacheEntry<T> {
 const sessionCache = new Map<string, CacheEntry<TranscriptSession>>();
 const archiveCache = new Map<string, CacheEntry<ArchivedSession[]>>();
 
-function getCached<T>(cache: Map<string, CacheEntry<T>>, key: string): T | null {
+function getCached<T>(
+  cache: Map<string, CacheEntry<T>>,
+  key: string,
+): T | null {
   const entry = cache.get(key);
   if (!entry) return null;
   if (Date.now() > entry.expiresAt) {
@@ -466,7 +513,12 @@ function getCached<T>(cache: Map<string, CacheEntry<T>>, key: string): T | null 
   return entry.value;
 }
 
-function setCached<T>(cache: Map<string, CacheEntry<T>>, key: string, value: T, ttl: number): void {
+function setCached<T>(
+  cache: Map<string, CacheEntry<T>>,
+  key: string,
+  value: T,
+  ttl: number,
+): void {
   cache.set(key, { value, expiresAt: Date.now() + ttl });
 }
 
@@ -491,20 +543,25 @@ export async function saveSession(session: TranscriptSession): Promise<void> {
   // 原子写入
   const path = await resolveSessionPath(session.sessionId);
   await withLock(session.sessionId, () => atomicWrite(path, session));
-  
+
   // 更新缓存
   setCached(sessionCache, session.sessionId, session, globalConfig.cacheTtlMs);
-  
+
   // 检查磁盘预算
   if (globalConfig.enableDiskBudget) {
     const budgetResult = await enforceDiskBudget(session.sessionId);
     if (budgetResult.warnings.length) {
-      console.warn("[SessionPersistence] Disk budget warnings:", budgetResult.warnings);
+      console.warn(
+        "[SessionPersistence] Disk budget warnings:",
+        budgetResult.warnings,
+      );
     }
   }
 }
 
-export async function loadSession(sessionId: string): Promise<TranscriptSession | null> {
+export async function loadSession(
+  sessionId: string,
+): Promise<TranscriptSession | null> {
   // 检查缓存
   const cached = getCached(sessionCache, sessionId);
   if (cached) return cached;
@@ -512,9 +569,9 @@ export async function loadSession(sessionId: string): Promise<TranscriptSession 
   // 从磁盘加载
   const path = await resolveSessionPath(sessionId);
   const content = await readTextFile(path);
-  
+
   if (!content) return null;
-  
+
   try {
     const session = JSON.parse(content) as TranscriptSession;
     setCached(sessionCache, sessionId, session, globalConfig.cacheTtlMs);
@@ -558,7 +615,7 @@ export async function archiveSession(
     archivedAt: Date.now(),
     entryCount: session.entries.length,
     summary,
-    actorNames: session.actorConfigs.map(a => a.name),
+    actorNames: session.actorConfigs.map((a) => a.name),
   };
 
   // 加载现有归档
@@ -568,7 +625,9 @@ export async function archiveSession(
   if (content) {
     try {
       archives = JSON.parse(content) as ArchivedSession[];
-    } catch { /* corrupt */ }
+    } catch {
+      /* corrupt */
+    }
   }
 
   // 添加新归档
@@ -608,10 +667,10 @@ export async function getDiskUsage(): Promise<{
 }> {
   const index = await loadIndex();
   const sessions = Object.values(index.sessions);
-  
+
   return {
     totalBytes: sessions.reduce((sum, s) => sum + s.fileSize, 0),
-    sessionCount: sessions.filter(s => !s.archived).length,
-    archivedCount: sessions.filter(s => s.archived).length,
+    sessionCount: sessions.filter((s) => !s.archived).length,
+    archivedCount: sessions.filter((s) => s.archived).length,
   };
 }
