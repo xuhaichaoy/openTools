@@ -1,5 +1,6 @@
 import type { AgentStep } from "@/plugins/builtin/SmartAgent/core/react-agent";
 import type { AgentRole } from "@/core/agent/cluster/types";
+import type { TimeoutReason } from "./timeout-policy";
 
 // ── Actor Lifecycle ──
 
@@ -304,8 +305,10 @@ export interface ActorConfig {
   toolPolicy?: ToolPolicy;
   /** 一等执行策略：访问权限 + 审批模式 */
   executionPolicy?: ExecutionPolicy;
-  /** 全局超时（秒），超时后 assignTask 自动 abort */
+  /** 总预算（秒）；超过预算后 assignTask 自动 abort */
   timeoutSeconds?: number;
+  /** 空闲租约（秒）；超过该时长无有效进展时自动 abort */
+  idleLeaseSeconds?: number;
   /** Agent 工作目录（独立 workspace，shell 执行时使用） */
   workspace?: string;
   /** 上下文 Token 预算，用于智能裁剪对话历史 */
@@ -328,6 +331,10 @@ export interface ActorConfig {
 export interface SpawnTaskOverrides {
   /** 覆盖 subagent 使用的 LLM 模型 */
   model?: string;
+  /** 覆盖单次运行总预算（秒） */
+  timeoutSeconds?: number;
+  /** 覆盖单次运行空闲租约（秒） */
+  idleLeaseSeconds?: number;
   /** 覆盖最大迭代次数 */
   maxIterations?: number;
   /** 覆盖工具策略（白名单/黑名单） */
@@ -386,6 +393,13 @@ export interface SpawnedTaskEventDetail {
   targetActorId: string;
   targetName: string;
   spawnerName: string;
+  contractId?: string;
+  plannedDelegationId?: string;
+  dispatchSource?: SpawnedTaskRecord["dispatchSource"];
+  parentRunId?: string;
+  rootRunId?: string;
+  mode?: SpawnMode;
+  roleBoundary?: SpawnedTaskRoleBoundary;
   label?: string;
   task: string;
   status: SpawnedTaskStatus;
@@ -399,6 +413,26 @@ export interface SpawnedTaskEventDetail {
   result?: string;
   /** Error message (only for failed/timeout) */
   error?: string;
+  /** Total budget override in seconds */
+  budgetSeconds?: number;
+  /** Idle lease in seconds */
+  idleLeaseSeconds?: number;
+  /** Timeout reason when status is aborted due to timeout */
+  timeoutReason?: TimeoutReason;
+}
+
+export type SpawnedTaskLifecycleEventType = Extract<
+  ActorEventType,
+  | "spawned_task_started"
+  | "spawned_task_running"
+  | "spawned_task_completed"
+  | "spawned_task_failed"
+  | "spawned_task_timeout"
+>;
+
+export interface SpawnedTaskLifecycleEvent extends SpawnedTaskEventDetail {
+  eventType: SpawnedTaskLifecycleEventType;
+  timestamp: number;
 }
 
 // ── Actor Task ──
@@ -487,6 +521,11 @@ export interface SpawnedTaskRecord {
   completedAt?: number;
   result?: string;
   error?: string;
+  timeoutReason?: TimeoutReason;
+  /** 本次 spawned task 使用的总预算（秒） */
+  budgetSeconds?: number;
+  /** 本次 spawned task 使用的空闲租约（秒） */
+  idleLeaseSeconds?: number;
   timeoutId?: ReturnType<typeof setTimeout>;
   /** Spawn 模式：run=一次性任务，session=保持会话 */
   mode: SpawnMode;

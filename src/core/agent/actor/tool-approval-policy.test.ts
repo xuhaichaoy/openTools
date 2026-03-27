@@ -8,6 +8,28 @@ import {
 } from "./tool-approval-policy";
 
 describe("tool-approval-policy", () => {
+  it("auto-allows memory_get in auto review mode", () => {
+    const assessment = assessToolApproval("memory_get", {
+      path: "memory/2026-03-26.md",
+      from: 1,
+      lines: 50,
+    });
+
+    expect(assessment.decision).toBe("allow");
+    expect(assessment.risk).toBe("safe");
+    expect(assessment.layer).toBe("policy");
+  });
+
+  it("auto-allows read_document in auto review mode", () => {
+    const assessment = assessToolApproval("read_document", {
+      path: "/Users/haichao/Downloads/report.xlsx",
+    });
+
+    expect(assessment.decision).toBe("allow");
+    expect(assessment.risk).toBe("safe");
+    expect(assessment.layer).toBe("policy");
+  });
+
   it("auto-allows read-only shell commands in auto review mode", () => {
     const assessment = assessToolApproval("run_shell_command", {
       command: "cd /repo && find src -type f | sort | sed -n '1,40p'",
@@ -34,6 +56,22 @@ describe("tool-approval-policy", () => {
       {
         path: "/Users/haichao/Desktop/work/HiClow/src/demo.ts",
         content: "export const demo = true;",
+      },
+      {
+        workspace: "/Users/haichao/Desktop/work/HiClow",
+      },
+    );
+
+    expect(assessment.decision).toBe("allow");
+    expect(assessment.risk).toBe("low");
+  });
+
+  it("auto-allows workspace document exports in auto review mode", () => {
+    const assessment = assessToolApproval(
+      "export_document",
+      {
+        path: "/Users/haichao/Desktop/work/HiClow/output/report.docx",
+        content: "# 报告",
       },
       {
         workspace: "/Users/haichao/Desktop/work/HiClow",

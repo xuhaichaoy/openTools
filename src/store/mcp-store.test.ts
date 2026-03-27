@@ -143,4 +143,48 @@ describe("mcp-store tool naming", () => {
       message: expect.stringContaining("\"method\":\"notifications/initialized\""),
     });
   });
+
+  it("loadServers does not block on auto-starting offline MCP servers", async () => {
+    useMcpStore.setState((state) => ({
+      ...state,
+      servers: [],
+      serverStatus: {},
+      serverTools: {},
+      serverResources: {},
+      serverPrompts: {},
+      isLoading: false,
+      hasLoaded: false,
+    }));
+
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "mcp_load_config") {
+        return [
+          {
+            id: "mcp-chrome",
+            name: "Chrome DevTools MCP",
+            transport: "stdio",
+            command: "npx",
+            args: ["-y", "chrome-devtools-mcp@latest"],
+            enabled: true,
+            auto_start: true,
+          },
+        ];
+      }
+      if (command === "mcp_get_server_status") {
+        return false;
+      }
+      if (command === "start_mcp_stdio_server") {
+        return new Promise(() => {});
+      }
+      return null;
+    });
+
+    await useMcpStore.getState().loadServers();
+
+    const state = useMcpStore.getState();
+    expect(state.hasLoaded).toBe(true);
+    expect(state.isLoading).toBe(false);
+    expect(state.servers).toHaveLength(1);
+    expect(state.serverStatus["mcp-chrome"]).toBe("starting");
+  });
 });

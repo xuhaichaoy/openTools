@@ -569,8 +569,8 @@ function MessageBubbleBase({
       }`}>
         {isUser ? <User className="w-3.5 h-3.5" /> : <Bot className="w-3.5 h-3.5" />}
       </div>
-      <div className={`max-w-[88%] min-w-0 lg:max-w-[78%] ${isUser ? "flex flex-col items-end text-right" : ""}`}>
-        <div className={`text-[10px] mb-0.5 ${isUser ? "text-[var(--color-accent)]" : color!.text}`}>
+      <div className={`max-w-[88%] min-w-0 lg:max-w-[78%] ${isUser ? "flex flex-col items-end" : ""}`}>
+        <div className={`text-[10px] mb-0.5 ${isUser ? "self-end text-right text-[var(--color-accent)]" : color!.text}`}>
           {actorName}
           {targetName && (
             <span className="text-[var(--color-text-tertiary)] ml-1">→ {targetName}</span>
@@ -579,7 +579,7 @@ function MessageBubbleBase({
             {new Date(message.timestamp).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
           </span>
         </div>
-        <div className={`inline-block w-fit text-[13px] leading-relaxed max-w-full ${bubbleClassName} ${isStructuredApproval ? "" : "rounded-xl px-3 py-2"}`}>
+        <div className={`inline-block w-fit max-w-full text-left text-[13px] leading-relaxed ${bubbleClassName} ${isStructuredApproval ? "" : "rounded-xl px-3 py-2"}`}>
           {!isStructuredApproval && structuredDisplay.images && structuredDisplay.images.length > 0 && (
             <div className="flex gap-1.5 flex-wrap mb-1.5">
               {structuredDisplay.images.map((imgPath: string, i: number) => (
@@ -599,7 +599,7 @@ function MessageBubbleBase({
             />
           ) : (
             <>
-              <div className={`prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-headings:mt-2 prose-headings:mb-1 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_code]:break-words [&_p]:whitespace-pre-wrap [&_li]:whitespace-pre-wrap ${isUser ? "[&_p]:text-right [&_li]:text-right [&_ol]:text-right [&_ul]:text-right" : ""}`}>
+              <div className="prose prose-sm dark:prose-invert max-w-none text-left prose-p:my-1 prose-headings:mt-2 prose-headings:mb-1 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_code]:break-words [&_p]:whitespace-pre-wrap [&_li]:whitespace-pre-wrap">
                 <ReactMarkdown remarkPlugins={MARKDOWN_REMARK_PLUGINS}>
                   {structuredDisplay.text}
                 </ReactMarkdown>

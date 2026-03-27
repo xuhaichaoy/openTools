@@ -1,5 +1,6 @@
 import { inferCodingExecutionProfile } from "@/core/agent/coding-profile";
 import type { AgentStep } from "@/plugins/builtin/SmartAgent/core/react-agent";
+import { isLikelyExecutionPlanReply, taskExplicitlyRequestsPlan } from "./result-shape-detection";
 import type { DialogArtifactRecord, SpawnedTaskRecord } from "./types";
 
 export interface SpawnedTaskResultValidation {
@@ -11,6 +12,7 @@ export interface SpawnedTaskResultValidation {
 const CONCRETE_OUTPUT_PATTERNS = [
   /网页|页面|html|react|vue|组件|前端|ui|css|样式/i,
   /代码|文件|脚本|函数|模块|接口|实现|修复|重构|build|create|implement|write|fix/i,
+  /文档|报告|方案|课程|课纲|提案|word|docx|rtf|pdf|ppt|excel|xlsx|导出|保存|下载/i,
 ];
 
 const RESULT_EVIDENCE_PATTERNS = [
@@ -20,6 +22,18 @@ const RESULT_EVIDENCE_PATTERNS = [
   /\/[\w./-]+\.(?:tsx?|jsx?|vue|html|css|scss|less|json|rs|py|go|java|kt|swift)/i,
   /\b(?:tsx?|jsx?|vue|html|css|scss|less|json|rs|py|go|java)\b/i,
   /已创建|已生成|已修改|已修复|文件|路径|产物|artifact|patch|diff|lint|test|验证/i,
+];
+
+const COORDINATION_META_SUMMARY_PATTERNS = [
+  /已确认源文件/u,
+  /已完成\s*\d+\s*个(?:分段|子)?任务/u,
+  /当前(?:真实)?缺口|剩余缺口|尚缺|补未齐/u,
+  /产物位置[:：]/u,
+  /建议作为正式交付说明/u,
+  /历史文档产物/u,
+  /已收到详细文本/u,
+  /仅确认完成状态/u,
+  /wait_for_spawned_tasks|memory_search|agents/u,
 ];
 
 const SCHEDULE_MUTATION_TASK_PATTERNS = [
@@ -40,6 +54,13 @@ const SCHEDULE_MUTATION_TOOL_NAMES = new Set([
   "native_reminder_create",
 ]);
 
+type OutputContract = {
+  kind: "spreadsheet";
+  label: string;
+  extensions: string[];
+  toolNames: string[];
+};
+
 function normalizeText(input?: string | null): string {
   return String(input ?? "").replace(/\s+/g, " ").trim();
 }
@@ -59,6 +80,62 @@ function requiresConcreteOutput(task: string): boolean {
   return CONCRETE_OUTPUT_PATTERNS.some((pattern) => pattern.test(task));
 }
 
+function resolveOutputContract(task: string): OutputContract | null {
+  const normalized = normalizeText(task);
+  const requestsSpreadsheetOutput = [
+    /(?:最终|最后|输出|导出|保存|生成|给我|给出|返回).{0,18}(?:excel|xlsx|xls|csv|表格|工作簿)(?:文件|表格|工作簿)?/iu,
+    /(?:excel|xlsx|xls|csv|表格|工作簿)(?:文件|表格|工作簿).{0,12}(?:输出|导出|保存|生成|给我|给出|返回|最终|最后)/iu,
+  ].some((pattern) => pattern.test(normalized));
+
+  if (!requestsSpreadsheetOutput) return null;
+  return {
+    kind: "spreadsheet",
+    label: "Excel/表格文件",
+    extensions: ["xlsx", "xls", "csv"],
+    toolNames: ["export_spreadsheet"],
+  };
+}
+
+function hasExtension(path: string | undefined, extensions: readonly string[]): boolean {
+  if (!path) return false;
+  const normalized = path.trim().toLowerCase();
+  return extensions.some((extension) => normalized.endsWith(`.${extension}`));
+}
+
+function resultShowsOutputContract(result: string, contract: OutputContract): boolean {
+  if (contract.kind === "spreadsheet") {
+    if (/(已导出|导出为|保存到|输出到|生成).{0,24}(?:excel|xlsx|xls|csv|表格)/iu.test(result)) {
+      return true;
+    }
+    return /\/[\w./-]+\.(?:xlsx|xls|csv)\b/i.test(result)
+      && /(文件|路径|产物|附件|下载|导出|保存|输出)/iu.test(result);
+  }
+  return false;
+}
+
+function artifactsMatchOutputContract(
+  artifacts: readonly DialogArtifactRecord[],
+  contract: OutputContract,
+): boolean {
+  return artifacts.some((artifact) => hasExtension(artifact.path || artifact.fileName, contract.extensions));
+}
+
+function hasToolOutputEvidenceForContract(
+  steps: readonly AgentStep[] | undefined,
+  contract: OutputContract,
+): boolean {
+  if (!steps?.length) return false;
+  return steps.some((step) =>
+    step.type === "observation"
+    && typeof step.toolName === "string"
+    && contract.toolNames.includes(step.toolName)
+    && resultShowsOutputContract(
+      normalizeText(typeof step.toolOutput === "string" ? step.toolOutput : JSON.stringify(step.toolOutput)),
+      contract,
+    )
+  );
+}
+
 function isScheduleMutationTask(task: string): boolean {
   return SCHEDULE_MUTATION_TASK_PATTERNS.some((pattern) => pattern.test(task));
 }
@@ -74,6 +151,23 @@ function hasScheduleMutationToolEvidence(steps: readonly AgentStep[] | undefined
       && typeof step.toolName === "string"
       && SCHEDULE_MUTATION_TOOL_NAMES.has(step.toolName),
   );
+}
+
+function isLikelyCoordinationMetaSummary(result: string): boolean {
+  if (result.length < 120) return false;
+
+  let score = 0;
+  for (const pattern of COORDINATION_META_SUMMARY_PATTERNS) {
+    if (pattern.test(result)) score += 1;
+  }
+
+  const numberedSectionCount = (result.match(/(?:^|\n)\s*[一二三四五六七八九十]+、/g) ?? []).length;
+  if (numberedSectionCount >= 3) score += 2;
+
+  const checklistCount = (result.match(/(?:^|\n)\s*(?:主题|步骤|工具|依赖|输出|结论)[:：]/g) ?? []).length;
+  if (checklistCount >= 3) score += 1;
+
+  return score >= 4;
 }
 
 function collectRelatedArtifacts(
@@ -118,6 +212,7 @@ export function validateSpawnedTaskResult(params: {
   artifacts?: readonly DialogArtifactRecord[];
 }): SpawnedTaskResultValidation {
   const taskText = normalizeText(`${params.task.label || ""}\n${params.task.task}`);
+  const rawResultText = String(params.result ?? "");
   const resultText = normalizeText(params.result);
   const needsConcreteOutput = requiresConcreteOutput(taskText);
 
@@ -147,7 +242,35 @@ export function validateSpawnedTaskResult(params: {
   const relatedArtifacts = collectRelatedArtifacts(params.task, params.artifacts ?? []);
   const hasArtifactEvidence = relatedArtifacts.length > 0;
   const hasResultEvidence = RESULT_EVIDENCE_PATTERNS.some((pattern) => pattern.test(resultText));
+  const outputContract = resolveOutputContract(taskText);
+  const matchesOutputContract = outputContract
+    ? artifactsMatchOutputContract(relatedArtifacts, outputContract) || resultShowsOutputContract(resultText, outputContract)
+    : true;
   const veryShort = resultText.length < 40;
+
+  if (!taskExplicitlyRequestsPlan(taskText) && isLikelyExecutionPlanReply(rawResultText)) {
+    return {
+      accepted: false,
+      requiresConcreteOutput: true,
+      reason: "子任务返回内容更像执行计划/任务拆解，而不是实际完成后的可交付结果。",
+    };
+  }
+
+  if (outputContract && !matchesOutputContract) {
+    return {
+      accepted: false,
+      requiresConcreteOutput: true,
+      reason: `子任务没有交付符合要求的${outputContract.label}，当前结果缺少对应格式的文件或导出证据。`,
+    };
+  }
+
+  if (!hasArtifactEvidence && isLikelyCoordinationMetaSummary(resultText)) {
+    return {
+      accepted: false,
+      requiresConcreteOutput: true,
+      reason: "最终答复更像协作过程总结/状态盘点，而不是实际可交付结果。",
+    };
+  }
 
   if (!hasArtifactEvidence && !hasResultEvidence && veryShort) {
     return {
@@ -173,6 +296,7 @@ export function validateActorTaskResult(params: {
   steps?: readonly AgentStep[];
 }): SpawnedTaskResultValidation {
   const taskText = normalizeText(params.taskText);
+  const rawResultText = String(params.result ?? "");
   const resultText = normalizeText(params.result);
   const needsConcreteOutput = requiresConcreteOutput(taskText);
   const scheduleMutationTask = isScheduleMutationTask(taskText);
@@ -220,7 +344,37 @@ export function validateActorTaskResult(params: {
   });
   const hasArtifactEvidence = relatedArtifacts.length > 0;
   const hasResultEvidence = RESULT_EVIDENCE_PATTERNS.some((pattern) => pattern.test(resultText));
+  const outputContract = resolveOutputContract(taskText);
+  const matchesOutputContract = outputContract
+    ? artifactsMatchOutputContract(relatedArtifacts, outputContract)
+      || resultShowsOutputContract(resultText, outputContract)
+      || hasToolOutputEvidenceForContract(params.steps, outputContract)
+    : true;
   const veryShort = resultText.length < 40;
+
+  if (!taskExplicitlyRequestsPlan(taskText) && isLikelyExecutionPlanReply(rawResultText)) {
+    return {
+      accepted: false,
+      requiresConcreteOutput: true,
+      reason: "最终答复更像执行计划/任务拆解，而不是实际完成后的可交付结果。",
+    };
+  }
+
+  if (outputContract && !matchesOutputContract) {
+    return {
+      accepted: false,
+      requiresConcreteOutput: true,
+      reason: `最终答复没有交付符合要求的${outputContract.label}，当前结果缺少对应格式的文件或导出证据。`,
+    };
+  }
+
+  if (!hasArtifactEvidence && isLikelyCoordinationMetaSummary(resultText)) {
+    return {
+      accepted: false,
+      requiresConcreteOutput: true,
+      reason: "最终答复更像协作过程总结/状态盘点，而不是实际可交付结果。",
+    };
+  }
 
   if (!hasArtifactEvidence && !hasResultEvidence && veryShort) {
     return {

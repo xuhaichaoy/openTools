@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AIConfig } from "./types";
+import type { AIConfig, AIRequestMessage } from "./types";
 import { api } from "@/core/api/client";
 import { getServerUrl } from "@/store/server-store";
 import { useAuthStore } from "@/store/auth-store";
@@ -7,11 +7,11 @@ import { useAuthStore } from "@/store/auth-store";
 export type AISource = "own_key" | "team" | "platform";
 
 export interface RouteOptions {
-  messages: any[];
+  messages: AIRequestMessage[];
   config: AIConfig;
   conversationId: string;
   token?: string | null;
-  extraTools?: any[];
+  extraTools?: unknown[];
 }
 
 interface TeamModelInfo {
@@ -26,6 +26,7 @@ const teamModelCache = new Map<
   { expiresAt: number; models: TeamModelInfo[] }
 >();
 const teamModelRequests = new Map<string, Promise<TeamModelInfo[]>>();
+let authRefreshPromise: Promise<string | null> | null = null;
 const AI_AUTH_ERROR_PATTERNS = [
   /\b401\b/,
   /unauthorized/i,
@@ -191,33 +192,43 @@ function promptReLogin(): void {
 }
 
 export async function refreshAIAuthToken(): Promise<string | null> {
-  const auth = useAuthStore.getState();
-  if (!auth.refreshToken) return null;
-
-  try {
-    const res = await fetch(`${getServerUrl()}/v1/auth/refresh`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refresh_token: auth.refreshToken }),
-    });
-
-    if (!res.ok) {
-      auth.logout?.();
-      promptReLogin();
-      return null;
-    }
-
-    const data = await res.json();
-    if (!data?.access_token || !data?.user) {
-      return null;
-    }
-
-    auth.login?.(data.user, data.access_token, data.refresh_token);
-    return data.access_token;
-  } catch (error) {
-    console.warn("[AI Router] failed to refresh auth token:", error);
-    return null;
+  if (authRefreshPromise) {
+    return authRefreshPromise;
   }
+
+  authRefreshPromise = (async () => {
+    const auth = useAuthStore.getState();
+    if (!auth.refreshToken) return null;
+
+    try {
+      const res = await fetch(`${getServerUrl()}/v1/auth/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: auth.refreshToken }),
+      });
+
+      if (!res.ok) {
+        auth.logout?.();
+        promptReLogin();
+        return null;
+      }
+
+      const data = await res.json();
+      if (!data?.access_token || !data?.user) {
+        return null;
+      }
+
+      auth.login?.(data.user, data.access_token, data.refresh_token);
+      return data.access_token;
+    } catch (error) {
+      console.warn("[AI Router] failed to refresh auth token:", error);
+      return null;
+    } finally {
+      authRefreshPromise = null;
+    }
+  })();
+
+  return authRefreshPromise;
 }
 
 export async function withRoutedAIConfig<T>(
@@ -230,11 +241,14 @@ export async function withRoutedAIConfig<T>(
 ): Promise<T> {
   const allowRetry = options?.retryOnAuth !== false;
   const source = (config.source || "own_key") as AISource;
-  const initialToken = options?.token;
+  const preferredToken = options?.token;
+  const initialRouted = await resolveRoutedConfig(config, preferredToken);
+  const initialManagedToken = shouldUseManagedAuth(source)
+    ? String(initialRouted.api_key || "").trim()
+    : String(preferredToken ?? "").trim();
 
   try {
-    const routed = await resolveRoutedConfig(config, initialToken);
-    return await runner(routed);
+    return await runner(initialRouted);
   } catch (error) {
     if (
       !allowRetry ||
@@ -244,8 +258,14 @@ export async function withRoutedAIConfig<T>(
       throw error;
     }
 
+    const latestStoreToken = String(useAuthStore.getState().token || "").trim();
+    if (latestStoreToken && latestStoreToken !== initialManagedToken) {
+      const retriedConfig = await resolveRoutedConfig(config, latestStoreToken);
+      return runner(retriedConfig);
+    }
+
     const refreshedToken = await refreshAIAuthToken();
-    if (!refreshedToken || refreshedToken === initialToken) {
+    if (!refreshedToken || refreshedToken === initialManagedToken) {
       throw error;
     }
 

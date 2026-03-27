@@ -6,6 +6,7 @@ const ADVANCED_TOOL_PATTERNS = [
   /^read_file_range$/,
   /^search_in_files$/,
   /^write_file$/,
+  /^export_document$/,
   /^export_spreadsheet$/,
   /^str_replace_edit$/,
   /^json_edit$/,

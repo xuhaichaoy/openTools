@@ -26,6 +26,7 @@ describe("actor-follow-up-prompt", () => {
     expect(descriptor.summary.failedTaskLabels).toEqual(["生成多 Agent 协作房间网页"]);
     expect(descriptor.prompt).toContain("直接接管主任务");
     expect(descriptor.prompt).toContain("不要回到泛化分析循环");
+    expect(descriptor.prompt).toContain("禁止只输出过程纪要");
   });
 
   it("uses synthesis prompt for pure completion follow-ups", () => {
@@ -70,5 +71,6 @@ describe("actor-follow-up-prompt", () => {
     expect(prompt).toContain("至少有一个子任务失败");
     expect(prompt).toContain("接管并完成主任务");
     expect(prompt).toContain("生成网页");
+    expect(prompt).toContain("禁止只输出过程纪要");
   });
 });

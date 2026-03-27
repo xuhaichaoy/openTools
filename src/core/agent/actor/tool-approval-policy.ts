@@ -48,8 +48,11 @@ export interface AssessToolApprovalOptions {
 const SAFE_TOOLS = new Set([
   "read_file",
   "read_file_range",
+  "read_document",
   "list_directory",
   "search_in_files",
+  "memory_search",
+  "memory_get",
   "web_search",
   "web_fetch",
   "get_system_info",
@@ -60,6 +63,7 @@ const SAFE_TOOLS = new Set([
   "ask_user",
   "ask_clarification",
   "spawn_task",
+  "wait_for_spawned_tasks",
   "task_done",
 ]);
 
@@ -350,6 +354,7 @@ function isToolDeniedByReadOnlyAccess(
 ): string | null {
   if (
     toolName === "write_file"
+    || toolName === "export_document"
     || toolName === "str_replace_edit"
     || toolName === "json_edit"
     || toolName === "delete_file"
@@ -401,7 +406,7 @@ function assessByToolName(
   if (SHELL_TOOL_NAMES.has(toolName)) {
     return assessShellCommand(toDisplayString(params.command ?? params.cmd));
   }
-  if (toolName === "write_file" || toolName === "str_replace_edit" || toolName === "json_edit") {
+  if (toolName === "write_file" || toolName === "export_document" || toolName === "str_replace_edit" || toolName === "json_edit") {
     return assessPathMutation(toDisplayString(params.path ?? params.filePath), workspace);
   }
   if (toolName === "open_path") {

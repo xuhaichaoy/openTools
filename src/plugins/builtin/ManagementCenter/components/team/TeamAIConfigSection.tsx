@@ -631,7 +631,7 @@ export function TeamAIConfigSection({
                 <button
                   onClick={handleSaveClawHub}
                   disabled={clawHubSaving}
-                  className="w-full py-1.5 rounded-lg bg-[#F28F36] text-white text-xs font-semibold disabled:opacity-40 transition-all flex items-center justify-center gap-1.5"
+                  className="w-full py-1.5 rounded-lg bg-[#F28F36] text-white text-xs font-semibold disabled:opacity-40 transition-colors flex items-center justify-center gap-1.5"
                 >
                   {clawHubSaving && <Loader2 className="w-3 h-3 animate-spin" />}
                   保存团队 ClawHub 配置
@@ -640,7 +640,7 @@ export function TeamAIConfigSection({
                 <button
                   onClick={handleVerifyClawHub}
                   disabled={clawHubVerifying || !clawHubConfig?.is_active}
-                  className="w-full py-1.5 rounded-lg bg-[var(--color-bg-secondary)] text-[var(--color-text)] text-xs font-semibold disabled:opacity-40 transition-all flex items-center justify-center gap-1.5"
+                  className="w-full py-1.5 rounded-lg bg-[var(--color-bg-secondary)] text-[var(--color-text)] text-xs font-semibold disabled:opacity-40 transition-colors flex items-center justify-center gap-1.5"
                 >
                   {clawHubVerifying && <Loader2 className="w-3 h-3 animate-spin" />}
                   验证团队 ClawHub 配置

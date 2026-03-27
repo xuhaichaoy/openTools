@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { handleError } from "@/core/errors";
 import { materializeMcpToolResult } from "@/core/mcp/mcp-tool-result";
+import { createLogger } from "@/core/logger";
 
 export interface McpServerConfig {
   id: string;
@@ -115,12 +116,32 @@ interface McpState {
 
 let jsonRpcId = 1000;
 let ensureMcpServersLoadedPromise: Promise<void> | null = null;
+const log = createLogger("MCPStore");
+const MCP_LOAD_SOFT_TIMEOUT_MS = 1_500;
+
+async function waitWithSoftTimeout(
+  promise: Promise<void>,
+  timeoutMs: number,
+): Promise<boolean> {
+  return Promise.race<boolean>([
+    promise.then(() => true),
+    new Promise<boolean>((resolve) => {
+      setTimeout(() => resolve(false), timeoutMs);
+    }),
+  ]);
+}
 
 export async function ensureMcpServersLoaded(force = false): Promise<void> {
   const state = useMcpStore.getState();
   if (!force && state.hasLoaded) return;
   if (!force && state.isLoading && ensureMcpServersLoadedPromise) {
-    await ensureMcpServersLoadedPromise;
+    const loaded = await waitWithSoftTimeout(
+      ensureMcpServersLoadedPromise,
+      MCP_LOAD_SOFT_TIMEOUT_MS,
+    );
+    if (!loaded) {
+      log.warn("ensureMcpServersLoaded timed out while waiting existing load; continuing without MCP tools");
+    }
     return;
   }
 
@@ -130,7 +151,13 @@ export async function ensureMcpServersLoaded(force = false): Promise<void> {
     });
   }
 
-  await ensureMcpServersLoadedPromise;
+  const loaded = await waitWithSoftTimeout(
+    ensureMcpServersLoadedPromise,
+    MCP_LOAD_SOFT_TIMEOUT_MS,
+  );
+  if (!loaded) {
+    log.warn("ensureMcpServersLoaded timed out; continuing without MCP tools");
+  }
 }
 
 async function sendRpc(
@@ -232,26 +259,48 @@ export const useMcpStore = create<McpState>((set, get) => ({
         "online" | "offline" | "starting"
       >;
 
-      set({ servers: configs, serverStatus });
+      set({
+        servers: configs,
+        serverStatus,
+        isLoading: false,
+        hasLoaded: loaded,
+      });
 
-      await Promise.allSettled(
-        configs
-          .filter(
-            (config) => config.enabled && serverStatus[config.id] === "online",
-          )
-          .map((config) => get().refreshTools(config.id)),
+      const onlineConfigs = configs.filter(
+        (config) => config.enabled && serverStatus[config.id] === "online",
       );
+      if (onlineConfigs.length > 0) {
+        void Promise.allSettled(
+          onlineConfigs.map((config) => get().refreshTools(config.id)),
+        ).then((results) => {
+          const rejected = results.filter((item) => item.status === "rejected");
+          if (rejected.length > 0) {
+            log.warn("background MCP tool refresh completed with failures", {
+              failedCount: rejected.length,
+            });
+          }
+        });
+      }
 
-      await Promise.allSettled(
-        configs
-          .filter(
-            (config) =>
-              config.enabled &&
-              config.auto_start &&
-              serverStatus[config.id] !== "online",
-          )
-          .map((config) => get().startServer(config.id)),
+      const autoStartConfigs = configs.filter(
+        (config) =>
+          config.enabled &&
+          config.auto_start &&
+          serverStatus[config.id] !== "online",
       );
+      if (autoStartConfigs.length > 0) {
+        void Promise.allSettled(
+          autoStartConfigs.map((config) => get().startServer(config.id)),
+        ).then((results) => {
+          const rejected = results.filter((item) => item.status === "rejected");
+          if (rejected.length > 0) {
+            log.warn("background MCP auto-start completed with failures", {
+              failedCount: rejected.length,
+            });
+          }
+        });
+      }
+      return;
     } catch (e) {
       handleError(e, { context: "加载 MCP 配置" });
     }

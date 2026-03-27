@@ -13,6 +13,9 @@ import { filterAssistantToolsByConfig } from "@/core/ai/assistant-config";
 import { useAIStore } from "@/store/ai-store";
 import { ensureMcpServersLoaded } from "@/store/mcp-store";
 import type { ActorMiddleware, ActorRunContext } from "../actor-middleware";
+import { createLogger } from "@/core/logger";
+
+const log = createLogger("ToolResolver");
 
 function getPluginTools(mode: "dialog" | "review" = "dialog"): AgentTool[] {
   const ai = getMToolsAI(mode);
@@ -38,7 +41,14 @@ export class ToolResolverMiddleware implements ActorMiddleware {
   readonly name = "ToolResolver";
 
   async apply(ctx: ActorRunContext): Promise<void> {
+    log.info("tool resolution start", {
+      actorId: ctx.actorId,
+      actorName: ctx.role.name,
+      queryPreview: String(ctx.query ?? "").slice(0, 80),
+      hasWorkspace: Boolean(ctx.workspace),
+    });
     const productMode = ctx.actorSystem?.defaultProductMode ?? "dialog";
+    const pluginTools = getPluginTools(productMode);
     const builtinResult = createBuiltinAgentTools(
       async () => true,
       ctx.askUser,
@@ -63,6 +73,14 @@ export class ToolResolverMiddleware implements ActorMiddleware {
       })
       : [];
     const memoryTools = createActorMemoryTools(ctx.actorId, ctx.workspace);
+    log.info("tool resolution base tools ready", {
+      actorId: ctx.actorId,
+      pluginToolCount: pluginTools.length,
+      builtinToolCount: builtinResult.tools.length,
+      extraToolCount: ctx.extraTools.length,
+      commToolCount: commTools.length,
+      memoryToolCount: memoryTools.length,
+    });
 
     let codeSearchTools: AgentTool[] = [];
     if (ctx.workspace) {
@@ -71,11 +89,19 @@ export class ToolResolverMiddleware implements ActorMiddleware {
         codeSearchTools = createCodeSearchTools(projectId, ctx.workspace);
       } catch { /* code index not available */ }
     }
+    log.info("tool resolution before MCP load", {
+      actorId: ctx.actorId,
+      codeSearchToolCount: codeSearchTools.length,
+    });
     await ensureMcpServersLoaded();
     const mcpTools = getEnabledMcpAgentTools();
+    log.info("tool resolution after MCP load", {
+      actorId: ctx.actorId,
+      mcpToolCount: mcpTools.length,
+    });
 
     const allTools = dedupeToolsByName([
-      ...getPluginTools(productMode),
+      ...pluginTools,
       ...builtinResult.tools,
       ...ctx.extraTools,
       ...commTools,
@@ -86,5 +112,10 @@ export class ToolResolverMiddleware implements ActorMiddleware {
     ctx.tools = filterAssistantToolsByConfig(allTools, useAIStore.getState().config);
 
     ctx.notifyToolCalled = builtinResult.notifyToolCalled;
+    log.info("tool resolution complete", {
+      actorId: ctx.actorId,
+      dedupedToolCount: allTools.length,
+      enabledToolCount: ctx.tools.length,
+    });
   }
 }

@@ -32,6 +32,7 @@ export interface DialogPresetParticipant {
   executionPolicy?: ExecutionPolicy;
   middlewareOverrides?: MiddlewareOverrides;
   timeoutSeconds?: number;
+  idleLeaseSeconds?: number;
   contextTokens?: number;
   thinkingLevel?: ThinkingLevel;
 }
@@ -118,6 +119,12 @@ export function normalizeDialogPresetParticipant(
     ...(participant.toolPolicy ? { toolPolicy: cloneToolPolicy(participant.toolPolicy) } : {}),
     executionPolicy,
     middlewareOverrides,
+    ...(typeof participant.timeoutSeconds === "number"
+      ? { timeoutSeconds: participant.timeoutSeconds }
+      : {}),
+    ...(typeof participant.idleLeaseSeconds === "number"
+      ? { idleLeaseSeconds: participant.idleLeaseSeconds }
+      : {}),
   };
 }
 

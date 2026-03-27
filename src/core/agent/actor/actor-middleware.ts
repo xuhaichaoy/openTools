@@ -3,6 +3,9 @@ import type { AgentRole } from "@/core/agent/cluster/types";
 import type { ActorSystem } from "./actor-system";
 import type { ExecutionPolicy, InboxMessage, ToolPolicy, MiddlewareOverrides } from "./types";
 import type { AskUserCallback, ConfirmDangerousAction } from "./agent-actor";
+import { createLogger } from "@/core/logger";
+
+const log = createLogger("ActorMiddleware");
 
 /**
  * ActorRunContext — shared mutable context flowing through the middleware chain.
@@ -78,6 +81,30 @@ export async function runMiddlewareChain(
 
   for (const mw of middlewares) {
     if (disableSet?.has(mw.name.toLowerCase())) continue;
-    await mw.apply(ctx);
+    const startedAt = Date.now();
+    log.info("middleware start", {
+      actorId: ctx.actorId,
+      actorName: ctx.role.name,
+      middleware: mw.name,
+    });
+    try {
+      await mw.apply(ctx);
+      log.info("middleware done", {
+        actorId: ctx.actorId,
+        actorName: ctx.role.name,
+        middleware: mw.name,
+        elapsedMs: Date.now() - startedAt,
+        toolCount: ctx.tools.length,
+      });
+    } catch (error) {
+      log.error("middleware failed", {
+        actorId: ctx.actorId,
+        actorName: ctx.role.name,
+        middleware: mw.name,
+        elapsedMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
   }
 }

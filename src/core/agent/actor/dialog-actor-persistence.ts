@@ -1,10 +1,16 @@
 import type { AgentCapabilities } from "./types";
 import { clampGlobalAgentMaxIterations } from "./iteration-budget";
+import {
+  DEFAULT_DIALOG_MAIN_BUDGET_SECONDS,
+  DEFAULT_DIALOG_MAIN_IDLE_LEASE_SECONDS,
+} from "./timeout-policy";
 
 export interface PersistedDialogActorConfigLike {
   roleName: string;
   maxIterations?: number;
   capabilities?: AgentCapabilities;
+  timeoutSeconds?: number;
+  idleLeaseSeconds?: number;
 }
 
 export function isLegacySingleDefaultDialogLead(
@@ -26,6 +32,40 @@ export function resolvePersistedDialogActorMaxIterations(
   }
   if (isLegacySingleDefaultDialogLead(config, actorCount)) {
     return 40;
+  }
+  return undefined;
+}
+
+export function resolvePersistedDialogActorBudgetSeconds(
+  config: PersistedDialogActorConfigLike,
+  actorCount: number,
+  sessionVersion?: number,
+): number | undefined {
+  if (typeof config.timeoutSeconds === "number" && Number.isFinite(config.timeoutSeconds)) {
+    if (
+      (sessionVersion ?? 0) < 10
+      && isLegacySingleDefaultDialogLead(config, actorCount)
+      && config.timeoutSeconds <= DEFAULT_DIALOG_MAIN_IDLE_LEASE_SECONDS
+    ) {
+      return DEFAULT_DIALOG_MAIN_BUDGET_SECONDS;
+    }
+    return config.timeoutSeconds;
+  }
+  if (isLegacySingleDefaultDialogLead(config, actorCount)) {
+    return DEFAULT_DIALOG_MAIN_BUDGET_SECONDS;
+  }
+  return undefined;
+}
+
+export function resolvePersistedDialogActorIdleLeaseSeconds(
+  config: PersistedDialogActorConfigLike,
+  actorCount: number,
+): number | undefined {
+  if (typeof config.idleLeaseSeconds === "number" && Number.isFinite(config.idleLeaseSeconds)) {
+    return config.idleLeaseSeconds;
+  }
+  if (isLegacySingleDefaultDialogLead(config, actorCount)) {
+    return DEFAULT_DIALOG_MAIN_IDLE_LEASE_SECONDS;
   }
   return undefined;
 }

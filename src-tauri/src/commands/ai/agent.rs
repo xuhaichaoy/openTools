@@ -243,6 +243,38 @@ pub async fn ai_agent_stream(
     tools: Vec<serde_json::Value>,
     conversation_id: String,
 ) -> Result<(), AppError> {
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = run_ai_agent_stream(
+            app_handle.clone(),
+            messages,
+            config,
+            tools,
+            conversation_id.clone(),
+        )
+        .await
+        {
+            let error_message = error.to_string();
+            log::error!(
+                "[ai_agent_stream] background task failed conv={} err={}",
+                conversation_id,
+                error_message
+            );
+            emit_stream_error(&app_handle, &conversation_id, &error_message);
+            let cancellation = app_handle.state::<StreamCancellation>();
+            cancellation.clear(&conversation_id);
+        }
+    });
+    Ok(())
+}
+
+async fn run_ai_agent_stream(
+    app: AppHandle,
+    messages: Vec<ChatMessage>,
+    config: AIConfig,
+    tools: Vec<serde_json::Value>,
+    conversation_id: String,
+) -> Result<(), AppError> {
     let protocol = config.protocol.as_deref().unwrap_or("openai");
     log::info!(
         "[ai_agent_stream] start conv={} protocol={} source={:?} model={} base_url={} team_id={:?} team_config_id={:?} thinking_level={:?} messages={} tools={}",

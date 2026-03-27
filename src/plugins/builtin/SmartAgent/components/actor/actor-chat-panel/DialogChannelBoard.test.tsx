@@ -13,6 +13,7 @@ import {
   ChannelSessionBoard,
   getPrimaryChildSessionPreview,
 } from "./DialogChannelBoard";
+import { shouldShowDialogTopSessionStrip } from "./dialog-top-session-strip";
 
 vi.mock("@tauri-apps/plugin-store", () => ({
   load: vi.fn(async () => ({
@@ -258,6 +259,43 @@ describe("buildDialogChannelGroups", () => {
 
     expect(groups.dingtalk.conversations).toHaveLength(1);
     expect(groups.dingtalk.conversations[0].activeSessionId).toBe(activeSessionId);
+  });
+
+  it("hides the top session strip when only the local room exists", () => {
+    expect(shouldShowDialogTopSessionStrip([
+      {
+        key: "local",
+        label: "本机",
+        detail: "本地房间",
+        statusLabel: "本机协作",
+        updatedAt: 1,
+        connectionState: "connected",
+        connectionLabel: "本机协作",
+      },
+    ])).toBe(false);
+  });
+
+  it("keeps the top session strip when any external channel is present", () => {
+    expect(shouldShowDialogTopSessionStrip([
+      {
+        key: "local",
+        label: "本机",
+        detail: "本地房间",
+        statusLabel: "本机协作",
+        updatedAt: 1,
+        connectionState: "connected",
+        connectionLabel: "本机协作",
+      },
+      {
+        key: "feishu",
+        label: "飞书渠道",
+        detail: "飞书会话",
+        statusLabel: "历史",
+        updatedAt: 2,
+        connectionState: "unconfigured",
+        connectionLabel: "历史会话",
+      },
+    ])).toBe(true);
   });
 
   it("shows waiting confirmation label when the active conversation is pending approval", () => {

@@ -10,6 +10,10 @@ import {
   resolveSurfaceExecutionPolicy,
   resolveSurfaceToolPolicy,
 } from "@/core/collaboration/surface-security-policy";
+import {
+  DEFAULT_DIALOG_MAIN_BUDGET_SECONDS,
+  DEFAULT_DIALOG_MAIN_IDLE_LEASE_SECONDS,
+} from "./timeout-policy";
 
 function makeId(): string {
   return Math.random().toString(36).substring(2, 8);
@@ -64,7 +68,7 @@ function buildLocalDialogSystemPromptAppend(productMode?: "dialog" | "review"): 
 export function buildDefaultDialogActorConfig(
   roleName: string,
   options?: DefaultDialogActorSpawnOptions,
-): Pick<ActorConfig, "role" | "toolPolicy" | "executionPolicy" | "middlewareOverrides"> {
+): Pick<ActorConfig, "role" | "toolPolicy" | "executionPolicy" | "middlewareOverrides" | "timeoutSeconds" | "idleLeaseSeconds"> {
   const isExternalIM = options?.mode === "external_im";
   const localProductMode = options?.productMode === "review" ? "review" : "dialog";
   const policyProfile = isExternalIM
@@ -108,6 +112,12 @@ export function buildDefaultDialogActorConfig(
       executionPolicy,
       policyProfile.middlewareOverrides,
     ),
+    ...(roleName === "Lead"
+      ? {
+          timeoutSeconds: DEFAULT_DIALOG_MAIN_BUDGET_SECONDS,
+          idleLeaseSeconds: DEFAULT_DIALOG_MAIN_IDLE_LEASE_SECONDS,
+        }
+      : {}),
   };
 }
 
@@ -140,5 +150,7 @@ export function spawnDefaultDialogActors(
     ...(coordinatorConfig.toolPolicy ? { toolPolicy: coordinatorConfig.toolPolicy } : {}),
     executionPolicy: coordinatorConfig.executionPolicy,
     middlewareOverrides: coordinatorConfig.middlewareOverrides,
+    timeoutSeconds: coordinatorConfig.timeoutSeconds,
+    idleLeaseSeconds: coordinatorConfig.idleLeaseSeconds,
   });
 }

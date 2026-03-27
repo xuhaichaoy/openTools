@@ -6,3 +6,4 @@ src-tauri/target/
 crates/**/target/
 
 !official-plugins/dist/
+deliverables/

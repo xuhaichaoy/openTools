@@ -20,6 +20,7 @@ import {
   DEFAULT_APPROVAL_MODE,
   summarizeExecutionPolicy,
 } from "@/core/agent/actor/execution-policy";
+import { formatDurationSeconds } from "@/core/agent/actor/timeout-policy";
 import type {
   AccessMode,
   AgentCapability,
@@ -99,6 +100,17 @@ export type AddActorDraft = {
   middlewareOverrides?: MiddlewareOverrides;
   thinkingLevel?: ThinkingLevel;
 };
+
+function summarizeTimeoutPolicy(actor: Pick<ActorSnapshot, "timeoutSeconds" | "idleLeaseSeconds">): string | null {
+  const parts: string[] = [];
+  if (actor.timeoutSeconds) {
+    parts.push(`预算 ${formatDurationSeconds(actor.timeoutSeconds) ?? `${actor.timeoutSeconds}s`}`);
+  }
+  if (actor.idleLeaseSeconds) {
+    parts.push(`租约 ${formatDurationSeconds(actor.idleLeaseSeconds) ?? `${actor.idleLeaseSeconds}s`}`);
+  }
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
 
 export function getActorColor(index: number) {
   return ACTOR_COLORS[index % ACTOR_COLORS.length];
@@ -201,14 +213,18 @@ export function useAvailableModels(): ModelOption[] {
 
 export function ActorStatusBar({ actors, compact = false }: { actors: ActorSnapshot[]; compact?: boolean }) {
   return (
-    <div className="flex items-center gap-1.5 flex-wrap">
+    <div
+      className={compact
+        ? "flex min-w-0 flex-nowrap items-center gap-1.5 overflow-x-auto pb-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        : "flex items-center gap-1.5 flex-wrap"}
+    >
       {actors.map((actor, index) => {
         const color = getActorColor(index);
         const isThinking = actor.status === "running";
         return (
           <div
             key={actor.id}
-            className={`flex items-center gap-1.5 rounded-full border ${compact ? "px-2 py-0.5 text-[10px]" : "px-2 py-1 text-[10px]"} ${color.bg} ${color.text} ${color.border}`}
+            className={`flex shrink-0 items-center gap-1.5 rounded-full border ${compact ? "px-2 py-0.5 text-[10px]" : "px-2 py-1 text-[10px]"} ${color.bg} ${color.text} ${color.border}`}
           >
             <div className={`w-1.5 h-1.5 rounded-full ${color.dot} ${isThinking ? "animate-pulse" : ""}`} />
             <span className="font-medium">{actor.roleName}</span>
@@ -309,6 +325,7 @@ export function LiveActorRow({
   const isRunning = actor.status === "running";
   const executionPolicySummary = summarizeExecutionPolicy(actor.normalizedExecutionPolicy);
   const middlewareSummary = summarizeMiddleware(actor.middlewareOverrides);
+  const timeoutSummary = summarizeTimeoutPolicy(actor);
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState(actor.roleName);
   const [editModel, setEditModel] = useState(actor.modelOverride || "");
@@ -461,6 +478,11 @@ export function LiveActorRow({
         {actor.thinkingLevel && (
           <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg)]/80 text-[var(--color-text-secondary)]">
             思考 {actor.thinkingLevel}
+          </span>
+        )}
+        {timeoutSummary && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg)]/80 text-[var(--color-text-secondary)]">
+            {timeoutSummary}
           </span>
         )}
       </div>

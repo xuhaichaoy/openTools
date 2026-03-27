@@ -232,21 +232,46 @@ def extract_topics() -> list[dict[str, Any]]:
 
 def load_fragments() -> tuple[dict[int, dict[str, Any]], int]:
     topic_map: dict[int, dict[str, Any]] = {}
-    fragment_paths = sorted(FRAGMENTS_DIR.glob("*.json"))
-    for fragment_path in fragment_paths:
-        with fragment_path.open("r", encoding="utf-8") as handle:
-            fragment = json.load(handle)
-        topics = fragment if isinstance(fragment, list) else fragment.get("topics", [])
-        for topic in topics:
-            seq = int(topic["seq"])
-            merged_topic = topic_map.setdefault(seq, {"seq": seq, "options": {}})
-            for option in topic.get("options", []):
-                option_type = normalize_text(option.get("option_type"))
-                if option_type in merged_topic["options"]:
-                    raise ValueError(
-                        f"发现重复课程方案: seq={seq} option={option_type} ({fragment_path.name})"
-                    )
-                merged_topic["options"][option_type] = option
+    fragment_paths = sorted(FRAGMENTS_DIR.glob("*.json")) if FRAGMENTS_DIR.exists() else []
+    if fragment_paths:
+        for fragment_path in fragment_paths:
+            with fragment_path.open("r", encoding="utf-8") as handle:
+                fragment = json.load(handle)
+            topics = fragment if isinstance(fragment, list) else fragment.get("topics", [])
+            for topic in topics:
+                seq = int(topic["seq"])
+                merged_topic = topic_map.setdefault(seq, {"seq": seq, "options": {}})
+                for option in topic.get("options", []):
+                    option_type = normalize_text(option.get("option_type"))
+                    if option_type in merged_topic["options"]:
+                        raise ValueError(
+                            f"发现重复课程方案: seq={seq} option={option_type} ({fragment_path.name})"
+                        )
+                    merged_topic["options"][option_type] = option
+    else:
+        workbook = load_workbook(SOURCE_XLSX, data_only=True)
+        worksheet = workbook[workbook.sheetnames[0]]
+        current_seq: int | None = None
+        for row_idx in range(3, worksheet.max_row + 1):
+            seq = worksheet.cell(row_idx, 1).value
+            if seq is not None:
+                current_seq = int(seq)
+            if current_seq is None:
+                continue
+            course_name = normalize_text(worksheet.cell(row_idx, 10).value)
+            option_marker = normalize_text(worksheet.cell(row_idx, 15).value)
+            if not course_name or not option_marker:
+                continue
+            option_type = option_marker[-1]
+            merged_topic = topic_map.setdefault(current_seq, {"seq": current_seq, "options": {}})
+            merged_topic["options"][option_type] = {
+                "option_type": option_type,
+                "course_name": course_name,
+                "course_outline": normalize_text(worksheet.cell(row_idx, 11).value),
+                "course_intro": normalize_text(worksheet.cell(row_idx, 12).value),
+                "teacher_name": normalize_text(worksheet.cell(row_idx, 13).value),
+                "teacher_bio": normalize_text(worksheet.cell(row_idx, 14).value),
+            }
     finalized: dict[int, dict[str, Any]] = {}
     for seq, topic in topic_map.items():
         finalized[seq] = {
@@ -392,12 +417,167 @@ def enhance_teacher_bio(source: dict[str, Any], option: dict[str, Any]) -> str:
     return enhanced
 
 
+def extract_outline_headings(outline: str) -> list[str]:
+    text = normalize_text(outline).replace(" / ", "\n")
+    headings = re.findall(
+        r"(?:^|\n)(模块[一二三四五六七八九十0-9]+[:：][^\n]+|Day\s*\d+[:：][^\n]+|[一二三四五六七八九十]+[、:：][^\n]+)",
+        text,
+    )
+    cleaned: list[str] = []
+    for item in headings:
+        value = re.sub(r"^(模块[一二三四五六七八九十0-9]+[:：]|Day\s*\d+[:：]|[一二三四五六七八九十]+[、:：])", "", item).strip()
+        if value and value not in cleaned:
+            cleaned.append(value)
+    return cleaned[:3]
+
+
+COURSE_OUTPUTS = {
+    "AI应用开发": {
+        "A": ["AI应用建设方法框架", "系统架构蓝图草案", "质量与安全检查清单"],
+        "B": ["上机联调记录", "实操问题清单与修正建议", "应用实施步骤说明"],
+        "C": ["专题优化方案", "专项架构治理清单", "性能或安全改进建议"],
+        "D": ["分组共创方案", "实施路线图", "答辩优化纪要"],
+    },
+    "AI应用解决方案": {
+        "A": ["场景识别清单", "能力地图", "机会判断表"],
+        "B": ["需求转化草案", "场景卡片", "推进建议清单"],
+        "C": ["专题能力图谱", "业务建模方案", "岗位进阶行动表"],
+        "D": ["机会地图", "场景优先级清单", "共创行动计划"],
+    },
+    "AI应用运营": {
+        "A": ["数据分析框架卡", "指标拆解表", "问题诊断路径图"],
+        "B": ["看板设计草案", "异常诊断结论", "优化动作清单"],
+        "C": ["专题复盘报告", "增长机会清单", "指标归因模型"],
+        "D": ["专题诊断报告", "优化方案草案", "汇报材料提纲"],
+    },
+    "AI模型算法工程化": {
+        "A": ["模型选型评估框架", "场景适配判断表", "风险清单"],
+        "B": ["试点评测方案", "上机实验记录", "落地建议书"],
+        "C": ["专题技术评估报告", "架构或性能优化清单", "实验结论摘要"],
+        "D": ["技术路线建议书", "评审模板", "分组答辩成果"],
+    },
+    "AI数据能力提升": {
+        "A": ["数据架构方法框架", "建模评审清单", "治理控制清单"],
+        "B": ["数据工程实施记录", "服务设计草案", "质量问题清单"],
+        "C": ["平台升级专题方案", "非结构化治理策略", "服务优化建议"],
+        "D": ["实施方案文档", "服务发布清单", "答辩优化纪要"],
+    },
+    "AI能力全员赋能": {
+        "A": ["AI工具认知图", "岗位应用清单", "合规提示卡"],
+        "B": ["提示词模板", "轻量Agent配置记录", "个人提效清单"],
+        "C": ["岗位场景应用方案", "效果评估清单", "安全使用规范"],
+        "D": ["部门Agent需求卡", "原型演示结果", "试点推广计划"],
+    },
+}
+
+SEMINAR_TEMPLATES = {
+    "A": ["小组讨论", "案例分析", "互动演练"],
+    "B": ["案例分析", "实战演练", "项目实战"],
+    "C": ["小组讨论", "案例分析", "互动演练"],
+    "D": ["小组讨论", "项目实战", "角色扮演"],
+}
+
+HIGHLIGHT_TEMPLATES = {
+    "A": ["紧扣招标大纲中的核心知识点，形成结构化方法框架。", "兼顾金融科技业务场景与岗位职责，便于课后直接迁移应用。"] ,
+    "B": ["案例与实战占比较高，强调操作步骤、结果验证与问题复盘。", "课堂产出物明确，便于培训后快速转化为项目执行动作。"] ,
+    "C": ["专题切入更深，突出关键机制、专项能力与进阶优化方法。", "兼顾技术深度与金融科技场景适配，适合骨干人员能力提升。"] ,
+    "D": ["采用共创式组织方式，强调分工协作、成果沉淀与现场答辩。", "课堂交付物导向明确，可直接服务后续立项、评审或项目推进。"] ,
+}
+
+APPLICABILITY_TEMPLATES = {
+    "AI应用开发": "内容紧贴金融科技团队在低代码开发、模型集成、系统对接、安全验证等场景下的实际需求，适合用于提升机构级AI应用研发交付与质量保障能力。",
+    "AI应用解决方案": "内容契合金融科技条线在场景识别、需求分析、业务建模和跨部门协同中的工作特点，能够缩短从业务想法到AI方案落地的转化路径。",
+    "AI应用运营": "内容适配金融科技运营团队在智能运维、性能监控、指标分析和风险控制中的真实工作场景，可直接支撑运营决策与价值验证。",
+    "AI模型算法工程化": "内容适配金融科技团队在模型选型、训练调优、部署上线和生命周期管理中的技术要求，有助于提升机构自有模型工程能力与落地效率。",
+    "AI数据能力提升": "内容紧贴金融科技机构在数据治理、数据工程、非结构化处理和安全管控方面的建设需求，可支撑数据质量提升与数据资产价值释放。",
+    "AI能力全员赋能": "内容适配金融科技机构的全员AI认知普及与场景推广需要，有助于建立统一的AI使用语言、合规意识和协同提效方式。",
+}
+
+
+def build_course_outputs(source: dict[str, Any], option_type: str) -> list[str]:
+    return COURSE_OUTPUTS[source["project"]][option_type]
+
+
+def build_seminar_arrangement(source: dict[str, Any], option: dict[str, Any]) -> list[str]:
+    option_type = normalize_text(option["option_type"])
+    headings = extract_outline_headings(option["course_outline"])
+    topic_ref = "、".join(headings[:2]) if headings else source["project_practice_focus"]
+    practice_focus = source["project_practice_focus"]
+    arrangements = []
+    for item in SEMINAR_TEMPLATES[option_type]:
+        if item == "小组讨论":
+            arrangements.append(f"小组讨论：围绕{source['topic']}对应的关键任务，分组讨论{topic_ref}在实际金融科技场景中的落地方式。")
+        elif item == "案例分析":
+            arrangements.append(f"案例分析：结合金融科技典型业务案例，拆解{topic_ref or practice_focus}相关问题、方法和常见风险。")
+        elif item == "互动演练":
+            arrangements.append(f"互动演练：通过现场问答、步骤推演或工具演示，帮助学员理解{practice_focus}中的关键控制点。")
+        elif item == "实战演练":
+            arrangements.append(f"实战演练：围绕课程核心模块组织现场操作或过程演练，验证学员对{practice_focus}方法的掌握程度。")
+        elif item == "项目实战":
+            arrangements.append(f"项目实战：以拟真项目任务推进课堂活动，要求学员形成可复用的方案草稿、记录或结论输出。")
+        elif item == "角色扮演":
+            arrangements.append("角色扮演：模拟业务、产品、研发、运营等多角色协作过程，检验方案沟通与任务分工能力。")
+    return arrangements[:3]
+
+
+def build_course_highlights(source: dict[str, Any], option: dict[str, Any]) -> list[str]:
+    option_type = normalize_text(option["option_type"])
+    return HIGHLIGHT_TEMPLATES[option_type][:2]
+
+
+def build_applicability_value(source: dict[str, Any], option: dict[str, Any]) -> str:
+    base = APPLICABILITY_TEMPLATES[source["project"]]
+    option_type = normalize_text(option["option_type"])
+    if option_type == "D":
+        suffix = "同时，课程通过共创与成果输出方式，更适合用于机构内部跨团队共识对齐和项目启动前的能力准备。"
+    elif option_type == "C":
+        suffix = "对于承担专项攻关、体系升级或深度优化任务的人员，这类专题化内容更有助于形成可持续的专业能力积累。"
+    elif option_type == "B":
+        suffix = "通过案例和演练驱动的方式，课程成果更容易映射到日常项目执行、问题处置和效果验证工作。"
+    else:
+        suffix = "通过方法框架的统一讲解，课程有助于不同角色建立一致的理解口径和执行标准。"
+    return f"{base}{suffix}"
+
+
+def compose_course_intro(
+    course_description: str,
+    course_outputs: list[str],
+    seminar_arrangement: list[str],
+    course_highlights: list[str],
+    applicability_value: str,
+) -> str:
+    sections = [
+        f"课程介绍：{course_description}",
+        "课程产出：" + "".join(f"{idx}. {item}" for idx, item in enumerate(course_outputs, start=1)),
+        "课程研讨安排：" + "".join(f"{idx}. {item}" for idx, item in enumerate(seminar_arrangement, start=1)),
+        "课程亮点：" + "".join(f"{idx}. {item}" for idx, item in enumerate(course_highlights, start=1)),
+        f"适用性和价值度：{applicability_value}",
+    ]
+    return "\n".join(sections)
+
+
 def adapt_option(source: dict[str, Any], option: dict[str, Any]) -> dict[str, Any]:
+    course_description = enhance_intro(source, option)
+    course_outputs = build_course_outputs(source, normalize_text(option["option_type"]))
+    seminar_arrangement = build_seminar_arrangement(source, option)
+    course_highlights = build_course_highlights(source, option)
+    applicability_value = build_applicability_value(source, option)
     adapted = {
         "option_type": normalize_text(option["option_type"]),
         "course_name": normalize_text(option["course_name"]),
         "course_outline": enhance_outline(source, option),
-        "course_intro": enhance_intro(source, option),
+        "course_description": course_description,
+        "course_outputs": course_outputs,
+        "seminar_arrangement": seminar_arrangement,
+        "course_highlights": course_highlights,
+        "applicability_value": applicability_value,
+        "course_intro": compose_course_intro(
+            course_description,
+            course_outputs,
+            seminar_arrangement,
+            course_highlights,
+            applicability_value,
+        ),
         "teacher_name": normalize_text(option["teacher_name"]),
         "teacher_bio": enhance_teacher_bio(source, option),
     }
@@ -429,6 +609,11 @@ def build_candidate_records(
                     "option_type": option["option_type"],
                     "course_name": option["course_name"],
                     "course_outline": option["course_outline"],
+                    "course_description": option["course_description"],
+                    "course_outputs": " | ".join(option["course_outputs"]),
+                    "seminar_arrangement": " | ".join(option["seminar_arrangement"]),
+                    "course_highlights": " | ".join(option["course_highlights"]),
+                    "applicability_value": option["applicability_value"],
                     "course_intro": option["course_intro"],
                     "teacher_name": option["teacher_name"],
                     "teacher_bio": option["teacher_bio"],
@@ -455,9 +640,9 @@ def render_project_requirement_block(project: str) -> list[str]:
 
 def render_markdown(grouped: dict[str, list[dict[str, Any]]]) -> str:
     lines: list[str] = []
-    lines.append("# AI培训课程候选方案文档初稿")
+    lines.append("# AI培训课程设计与授课研讨安排")
     lines.append("")
-    lines.append("> 说明：本稿基于招标需求梳理生成，每个课程主题提供四门候选课程，分别为“方法论版（A）”“实战版（B）”“专项深化版（C）”“方案共创版（D）”。授课教师为候选讲师方案，可在后续商务排期阶段替换为最终授课名单。")
+    lines.append("> 说明：本稿按课程设计与授课研讨样式整理，每个课程主题提供四门候选课程，分别为“方法论版（A）”“实战版（B）”“专项深化版（C）”“方案共创版（D）”。授课教师为候选讲师方案，可在后续商务排期阶段替换为最终授课名单。")
     lines.append("")
     for project, items in grouped.items():
         lines.append(f"## {project}")
@@ -472,15 +657,18 @@ def render_markdown(grouped: dict[str, list[dict[str, Any]]]) -> str:
             lines.append(f"- **项目级培训对象**：{source['project_training_audience']}")
             lines.append(f"- **项目级培训目标**：{source['project_training_objective']}")
             lines.append(f"- **参考时长**：{source['duration_normalized'] or source['duration_raw']}")
-            lines.append(f"- **参考大纲**：{source['source_outline']}")
             lines.append("")
             for option in entry["options"]:
                 option_title = OPTION_TITLES.get(option["option_type"], "候选版")
                 lines.append(f"#### 备选课{option['option_type']}（{option_title}）：{option['course_name']}")
                 lines.append("")
                 lines.append(f"- **课程大纲**：{markdown_escape(normalize_text(option['course_outline']))}")
-                lines.append(f"- **课程简介**：{markdown_escape(normalize_text(option['course_intro']))}")
+                lines.append(f"- **课程介绍**：{markdown_escape(normalize_text(option['course_description']))}")
+                lines.append(f"- **课程产出**：{markdown_escape('；'.join(option['course_outputs']))}")
+                lines.append(f"- **课程研讨安排**：{markdown_escape('；'.join(option['seminar_arrangement']))}")
                 lines.append(f"- **授课教师**：{normalize_text(option['teacher_name'])}")
+                lines.append(f"- **课程亮点**：{markdown_escape('；'.join(option['course_highlights']))}")
+                lines.append(f"- **适用性和价值度**：{markdown_escape(normalize_text(option['applicability_value']))}")
                 lines.append(f"- **授课教师简介**：{markdown_escape(normalize_text(option['teacher_bio']))}")
                 lines.append("")
     return "\n".join(lines).strip() + "\n"

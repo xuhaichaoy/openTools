@@ -49,6 +49,7 @@ import {
 } from "@/store/cluster-plan-approval-store";
 import { useConfirmDialogStore } from "@/store/confirm-dialog-store";
 import { useToolTrustStore } from "@/store/command-allowlist-store";
+import { resolveInteractiveToolApproval } from "../../core/interactive-tool-approval";
 import {
   getChannelManager,
   loadSavedChannels,
@@ -88,7 +89,7 @@ import type {
   DialogRoomCompactionState,
   PendingInteraction,
   SessionUploadRecord,
-  SpawnedTaskEventDetail,
+  SpawnedTaskLifecycleEvent,
   SpawnedTaskRecord,
 } from "@/core/agent/actor/types";
 import {
@@ -119,6 +120,25 @@ import { DialogFollowUpDock } from "./DialogFollowUpDock";
 import { DialogContextStrip } from "./DialogContextStrip";
 import { ChannelSessionBoard, buildDialogChannelGroups, formatSessionStripTime, getDialogChannelConnectionLabel, getDialogViewLabel, inferIMChannelType, type DialogChannelConnectionMeta, type DialogSessionViewKey, type DialogTopSessionItem } from "./actor-chat-panel/DialogChannelBoard";
 import { DialogChildSessionStrip } from "./actor-chat-panel/DialogChildSessionStrip";
+import {
+  DEFAULT_DIALOG_MAIN_BUDGET_SECONDS,
+  DEFAULT_DIALOG_MAIN_IDLE_LEASE_SECONDS,
+  DEFAULT_DIALOG_WORKER_BUDGET_SECONDS,
+  DEFAULT_DIALOG_WORKER_IDLE_LEASE_SECONDS,
+  formatDurationSeconds,
+} from "@/core/agent/actor/timeout-policy";
+import { shouldShowDialogTopSessionStrip } from "./actor-chat-panel/dialog-top-session-strip";
+import {
+  buildLocalCollaborationTimelineGroups,
+  DialogCollaborationTimelineCard,
+  mergeLocalDialogTranscriptItems,
+} from "./actor-chat-panel/DialogCollaborationTimeline";
+import {
+  shouldHideLocalDialogLiveActor,
+  shouldHideLocalDialogMessage,
+  shouldRenderLocalDialogStreamingAnswer,
+  shouldHideLocalDialogStreamingAnswer,
+} from "./actor-chat-panel/local-dialog-projection";
 import {
   ActorStatusBar,
   AddAgentForm,
@@ -178,6 +198,7 @@ const EMPTY_DIALOG_ACTORS: ActorSnapshot[] = [];
 const EMPTY_DIALOG_HISTORY: DialogMessage[] = [];
 const EMPTY_PENDING_INTERACTIONS: PendingInteraction[] = [];
 const EMPTY_SPAWNED_TASKS: SpawnedTaskRecord[] = [];
+const EMPTY_SPAWNED_TASK_EVENTS: SpawnedTaskLifecycleEvent[] = [];
 const EMPTY_DIALOG_ARTIFACTS: DialogArtifactRecord[] = [];
 const EMPTY_SESSION_UPLOADS: SessionUploadRecord[] = [];
 const EMPTY_QUEUED_FOLLOW_UPS: DialogQueuedFollowUp[] = [];
@@ -194,6 +215,15 @@ type DialogPlanReview = {
   risk?: ExecutionContractApprovalAssessment["risk"];
   reason?: string;
 };
+
+function formatOptionalDurationLabel(seconds?: number): string | null {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= 0) return null;
+  return formatDurationSeconds(seconds) ?? `${seconds}s`;
+}
+
+function formatResolvedDurationLabel(seconds: number | undefined, fallback: number): string {
+  return formatOptionalDurationLabel(seconds) ?? formatDurationSeconds(fallback) ?? `${fallback}s`;
+}
 
 function mapTrustLevelToContractTrustMode(
   trustLevel: ReturnType<typeof useToolTrustStore.getState>["trustLevel"],
@@ -349,6 +379,12 @@ function describeAgentActivity(
   }
 
   if (latest.type === "observation") {
+    if (/模型刚才没有返回任何可见内容|空响应/u.test(latest.content)) {
+      return "模型空响应，自动重试";
+    }
+    if (/Function Calling 模式不可用/u.test(latest.content)) {
+      return "切换文本模式重试";
+    }
     const prevAction = [...steps].reverse().find((s) => s.type === "action");
     if (prevAction?.toolName) {
       const name = prevAction.toolName;
@@ -424,6 +460,8 @@ function buildActionDetail(toolName: string, input: Record<string, unknown>): st
       return `搜索: "${String(input.query ?? "")}"`;
     case "web_fetch":
       return `访问: ${String(input.url ?? "").slice(0, 60)}`;
+    case "memory_search":
+      return `检索记忆: "${String(input.query ?? "").slice(0, 48)}"`;
     case "spawn_task":
       return `派发: ${String(input.target_agent ?? "")} - ${String(input.task ?? "").slice(0, 60)}`;
     default:
@@ -451,6 +489,48 @@ function truncateWorkflowText(value: string | undefined, max = 80): string | und
   if (!normalized) return undefined;
   if (normalized.length <= max) return normalized;
   return `${normalized.slice(0, Math.max(0, max - 1)).trimEnd()}…`;
+}
+
+function summarizeObservationPreview(content: string | undefined, max = 120): string | undefined {
+  const normalized = content?.trim();
+  if (!normalized) return undefined;
+
+  if (normalized.startsWith("{") || normalized.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(normalized) as unknown;
+      if (Array.isArray(parsed)) {
+        return `返回 ${parsed.length} 条结果`;
+      }
+
+      if (parsed && typeof parsed === "object") {
+        const objectValue = parsed as Record<string, unknown>;
+        const results = Array.isArray(objectValue.results) ? objectValue.results : null;
+        if (results) {
+          const firstResult = results.find((item) => item && typeof item === "object") as Record<string, unknown> | undefined;
+          const firstPath = typeof firstResult?.path === "string" ? basename(firstResult.path) : "";
+          return firstPath
+            ? `返回 ${results.length} 条结果 · ${firstPath}`
+            : `返回 ${results.length} 条结果`;
+        }
+
+        const summary = typeof objectValue.summary === "string"
+          ? objectValue.summary
+          : typeof objectValue.message === "string"
+            ? objectValue.message
+            : undefined;
+        const summarized = truncateWorkflowText(summary, max);
+        if (summarized) return summarized;
+
+        return `返回 ${Object.keys(objectValue).length} 个字段`;
+      }
+    } catch {
+      // ignore JSON parse failures and fall through to plain-text summary
+    }
+  }
+
+  const compact = normalized.replace(/\s+/g, " ");
+  if (compact.length <= max) return compact;
+  return `${compact.slice(0, max).trimEnd()}...`;
 }
 
 function collectArtifacts(
@@ -755,7 +835,7 @@ export function ActorChatPanel({
   const isReviewSurface = dialogSurfaceMode === "review";
 
   const {
-    active: systemActive, actors, dialogHistory, pendingUserInteractions, spawnedTasks, artifacts: structuredArtifacts,
+    active: systemActive, actors, dialogHistory, pendingUserInteractions, spawnedTasks, spawnedTaskEvents, artifacts: structuredArtifacts,
     sessionUploads, queuedFollowUps, dialogRoomCompaction,
     coordinatorActorId, actorTodos, sourceHandoff: incomingHandoff, contextSnapshot, collaborationSnapshot,
     init, spawnActor, killActor, destroyAll,
@@ -770,6 +850,7 @@ export function ActorChatPanel({
       dialogHistory: active ? state.dialogHistory : EMPTY_DIALOG_HISTORY,
       pendingUserInteractions: active ? state.pendingUserInteractions : EMPTY_PENDING_INTERACTIONS,
       spawnedTasks: active ? state.spawnedTasks : EMPTY_SPAWNED_TASKS,
+      spawnedTaskEvents: active ? state.spawnedTaskEvents : EMPTY_SPAWNED_TASK_EVENTS,
       artifacts: active ? state.artifacts : EMPTY_DIALOG_ARTIFACTS,
       sessionUploads: active ? state.sessionUploads : EMPTY_SESSION_UPLOADS,
       queuedFollowUps: active ? state.queuedFollowUps : EMPTY_QUEUED_FOLLOW_UPS,
@@ -876,6 +957,45 @@ export function ActorChatPanel({
     actors.forEach((a) => map.set(a.id, a));
     return map;
   }, [actors]);
+  const coordinatorActor = useMemo(
+    () => (coordinatorActorId ? actorById.get(coordinatorActorId) : undefined) ?? actors[0] ?? null,
+    [actorById, actors, coordinatorActorId],
+  );
+  const effectiveMainBudgetLabel = useMemo(
+    () => formatResolvedDurationLabel(coordinatorActor?.timeoutSeconds, DEFAULT_DIALOG_MAIN_BUDGET_SECONDS),
+    [coordinatorActor],
+  );
+  const effectiveMainIdleLeaseLabel = useMemo(
+    () => formatResolvedDurationLabel(coordinatorActor?.idleLeaseSeconds, DEFAULT_DIALOG_MAIN_IDLE_LEASE_SECONDS),
+    [coordinatorActor],
+  );
+  const supportActorTimeoutOverridesSummary = useMemo(() => {
+    const overrideItems = actors
+      .filter((actor) => actor.id !== coordinatorActor?.id)
+      .map((actor) => {
+        const budgetLabel = formatOptionalDurationLabel(actor.timeoutSeconds);
+        const leaseLabel = formatOptionalDurationLabel(actor.idleLeaseSeconds);
+        if (!budgetLabel && !leaseLabel) return null;
+        const parts = [
+          budgetLabel ? `预算 ${budgetLabel}` : null,
+          leaseLabel ? `租约 ${leaseLabel}` : null,
+        ].filter(Boolean);
+        return `${actor.roleName} ${parts.join(" · ")}`;
+      })
+      .filter((item): item is string => Boolean(item));
+    if (!overrideItems.length) return null;
+    const preview = overrideItems.slice(0, 2).join("；");
+    return overrideItems.length > 2 ? `${preview} 等 ${overrideItems.length} 个 Agent` : preview;
+  }, [actors, coordinatorActor?.id]);
+  const legacyTimeoutActors = useMemo(
+    () => actors.filter((actor) =>
+      typeof actor.timeoutSeconds === "number"
+      && actor.timeoutSeconds > 0
+      && actor.timeoutSeconds <= DEFAULT_DIALOG_MAIN_IDLE_LEASE_SECONDS
+      && !actor.idleLeaseSeconds,
+    ),
+    [actors],
+  );
   const contractApprovalActors = useMemo(
     () => actors.map((actor) => ({
       id: actor.id,
@@ -898,31 +1018,17 @@ export function ActorChatPanel({
       params: Record<string, unknown>,
       context?: DangerousActionConfirmationContext,
     ): Promise<boolean> => {
-      const toolTrust = useToolTrustStore.getState();
-      const cachedDecision = toolTrust.getCachedDecision(toolName, params);
-      if (cachedDecision !== null) {
-        return Promise.resolve(cachedDecision);
-      }
-      const assessment = toolTrust.assess(toolName, params, {
+      return resolveInteractiveToolApproval({
+        aiMode: dialogSurfaceMode,
+        toolName,
+        params,
+        source: "actor_dialog",
+        openConfirmDialog,
         executionPolicy: context?.executionPolicy,
         workspace: context?.workspace ?? dialogMemoryWorkspaceId,
       });
-      if (assessment.decision !== "ask") {
-        toolTrust.rememberDecision(toolName, params, true);
-        return Promise.resolve(true);
-      }
-      return openConfirmDialog({
-        source: "actor_dialog",
-        toolName,
-        params,
-        risk: assessment.risk,
-        reason: assessment.reason,
-      }).then((confirmed) => {
-        toolTrust.rememberDecision(toolName, params, confirmed);
-        return confirmed;
-      });
     },
-    [dialogMemoryWorkspaceId, openConfirmDialog],
+    [dialogMemoryWorkspaceId, dialogSurfaceMode, openConfirmDialog],
   );
   const hasRunningActors = runningActors.length > 0;
   const currentRoomSessionId = getSystem()?.sessionId ?? null;
@@ -1029,6 +1135,10 @@ export function ActorChatPanel({
   const activeDialogView = dialogTopSessionItems.some((item) => item.key === requestedDialogView)
     ? requestedDialogView
     : "local";
+  const showDialogTopSessionStrip = useMemo(
+    () => shouldShowDialogTopSessionStrip(dialogTopSessionItems),
+    [dialogTopSessionItems],
+  );
   const activeDialogTopSessionItem = useMemo(
     () => dialogTopSessionItems.find((item) => item.key === activeDialogView) ?? dialogTopSessionItems[0] ?? null,
     [activeDialogView, dialogTopSessionItems],
@@ -1533,6 +1643,37 @@ export function ActorChatPanel({
     pendingUserInteractions.forEach((interaction) => map.set(interaction.messageId, interaction));
     return map;
   }, [pendingUserInteractions]);
+  const collaborationTimelineGroups = useMemo(
+    () => buildLocalCollaborationTimelineGroups({
+      events: spawnedTaskEvents,
+      spawnedTasks,
+      dialogHistory,
+      actorNameById,
+    }),
+    [actorNameById, dialogHistory, spawnedTaskEvents, spawnedTasks],
+  );
+  const collaborationWorkerActorIds = useMemo(
+    () => new Set(collaborationTimelineGroups.flatMap((group) => group.workers.map((worker) => worker.targetActorId))),
+    [collaborationTimelineGroups],
+  );
+  const visibleDialogMessages = useMemo(
+    () => visibleMessages.filter((message) => !shouldHideLocalDialogMessage(message, {
+      hasCollaborationGroups: collaborationTimelineGroups.length > 0,
+    })),
+    [collaborationTimelineGroups.length, visibleMessages],
+  );
+  const visibleTranscriptItems = useMemo(() => {
+    const windowStartAt = visibleDialogMessages[0]?.timestamp ?? 0;
+    const visibleGroups = collaborationTimelineGroups.filter((group) =>
+      showAllMessages
+      || group.phase !== "aggregated"
+      || group.updatedAt >= windowStartAt,
+    );
+    return mergeLocalDialogTranscriptItems({
+      messages: visibleDialogMessages,
+      groups: visibleGroups,
+    });
+  }, [collaborationTimelineGroups, showAllMessages, visibleDialogMessages]);
   const approvalInteractions = useMemo(
     () => pendingUserInteractions.filter((interaction) => interaction.type === "approval"),
     [pendingUserInteractions],
@@ -1728,6 +1869,7 @@ export function ActorChatPanel({
         executionPolicy: p.executionPolicy,
         middlewareOverrides: p.middlewareOverrides,
         timeoutSeconds: p.timeoutSeconds,
+        idleLeaseSeconds: p.idleLeaseSeconds,
         contextTokens: p.contextTokens,
         thinkingLevel: p.thinkingLevel,
       });
@@ -1762,6 +1904,7 @@ export function ActorChatPanel({
         executionPolicy: a.normalizedExecutionPolicy,
         middlewareOverrides: a.middlewareOverrides,
         timeoutSeconds: a.timeoutSeconds,
+        idleLeaseSeconds: a.idleLeaseSeconds,
         contextTokens: a.contextTokens,
         thinkingLevel: a.thinkingLevel,
       })),
@@ -2725,7 +2868,7 @@ export function ActorChatPanel({
         id: a.id, name: a.roleName, status: a.status, capabilities: a.capabilities?.tags,
       }));
       const spawnEvents = useActorSystemStore.getState().spawnedTaskEvents || [];
-      const tasks = spawnEvents.map((e: SpawnedTaskEventDetail) => ({
+      const tasks = spawnEvents.map((e: SpawnedTaskLifecycleEvent) => ({
         spawner: e.spawnerActorId, target: e.targetActorId, label: e.label || "", status: e.status,
       }));
       const dialog = dialogHistory.map((m) => ({ from: m.from, to: m.to }));
@@ -2845,7 +2988,7 @@ export function ActorChatPanel({
           </div>
 
           <div className="flex flex-col gap-2.5">
-            {dialogTopSessionItems.length > 0 && (
+            {showDialogTopSessionStrip && (
               <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/32 px-2.5 py-2">
                 <div className="flex flex-wrap items-center gap-1.5">
                   {dialogTopSessionItems.map((item) => {
@@ -3018,7 +3161,7 @@ export function ActorChatPanel({
             )
           ) : (
             <>
-              {dialogHistory.length === 0 && (
+              {visibleTranscriptItems.length === 0 && (
                 <div className="rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-secondary)]/20 px-4 py-4 text-center">
                   <div className="flex flex-col items-center gap-1.5">
                     <Bot className="w-5 h-5 text-[var(--color-text-tertiary)] opacity-60" />
@@ -3108,7 +3251,16 @@ export function ActorChatPanel({
                 </button>
               )}
 
-              {visibleMessages.map((msg) => {
+              {visibleTranscriptItems.map((item) => {
+                if (item.kind === "collaboration_group") {
+                  return (
+                    <div key={item.id} className="max-w-full">
+                      <DialogCollaborationTimelineCard group={item.group} />
+                    </div>
+                  );
+                }
+
+                const msg = item.message;
                 const isUser = msg.from === "user";
                 const actorIdx = actorIdToIndex.get(msg.from) ?? 0;
                 const actor = actorById.get(msg.from);
@@ -3136,7 +3288,14 @@ export function ActorChatPanel({
                 );
               })}
 
-              {runningActors.map((a, i) => {
+              {runningActors
+                .filter((actor) => !shouldHideLocalDialogLiveActor({
+                  actorId: actor.id,
+                  steps: actor.currentTask?.steps,
+                  workerActorIds: collaborationWorkerActorIds,
+                  hasCollaborationGroups: collaborationTimelineGroups.length > 0,
+                }))
+                .map((a, i) => {
                 const color = getActorColor(actorIdToIndex.get(a.id) ?? i);
                 const steps = a.currentTask?.steps ?? [];
                 const hasPendingApproval = pendingUserInteractions.some(
@@ -3226,43 +3385,52 @@ export function ActorChatPanel({
                   effectiveExecutionIndex,
                   effectiveArtifactIndex,
                 );
+                const latestBlockingLiveIndex = latestExecutionStateStepIndex;
 
-                const streamingContent = latestStreamingAnswer?.content;
+                const rawStreamingContent = latestStreamingAnswer?.content;
+                const hideStreamingPlanningBubble = shouldHideLocalDialogStreamingAnswer(rawStreamingContent);
+                const visibleStreamingAnswerIndex = hideStreamingPlanningBubble ? -1 : latestStreamingAnswerIndex;
+                const streamingContent = hideStreamingPlanningBubble ? undefined : rawStreamingContent;
+                const showStreamingAnswerBlock = shouldRenderLocalDialogStreamingAnswer({
+                  content: streamingContent,
+                  streamingAnswerIndex: visibleStreamingAnswerIndex,
+                  latestBlockingLiveIndex,
+                });
                 const thinkingContent = prefersThoughtToolPreview
                   ? derivedThinkingContent
                   : latestThinkingStep?.content ?? derivedThinkingContent;
                 const toolStreamingContent = latestToolStreamingStep?.content;
                 const showExecutionCard = Boolean(
-                  !streamingContent
-                  && latestStreamingAnswerIndex < effectiveExecutionIndex
+                  !showStreamingAnswerBlock
+                  && visibleStreamingAnswerIndex < effectiveExecutionIndex
                   && effectiveExecutionIndex >= 0
                   && effectiveExecutionIndex === effectiveLiveBlockIndex,
                 );
                 const showThinkingPlaceholder = Boolean(
-                  !streamingContent
-                  && latestStreamingAnswerIndex < 0
+                  !showStreamingAnswerBlock
+                  && visibleStreamingAnswerIndex < 0
                   && !showExecutionCard
                   && effectiveLiveBlockIndex < 0
                   && a.currentTask?.status === "running",
                 );
                 const hasDetailedThinkingContent = Boolean(latestThinkingStep || derivedThinkingContent);
                 const showThinkingBlock = Boolean(
-                  !streamingContent
+                  !showStreamingAnswerBlock
                   && hasDetailedThinkingContent
-                  && latestStreamingAnswerIndex < effectiveThinkingIndex
+                  && visibleStreamingAnswerIndex < effectiveThinkingIndex
                   && effectiveThinkingIndex >= 0
                   && effectiveThinkingIndex === effectiveLiveBlockIndex,
                 );
                 const showThinkingSummaryOnly = Boolean(
                   hasActiveCollaborationFlow
-                  && !streamingContent
+                  && !showStreamingAnswerBlock
                   && !showExecutionCard
                   && !hasDetailedThinkingContent
                   && showThinkingPlaceholder,
                 );
                 const showArtifactBlock = Boolean(
-                  !streamingContent
-                  && latestStreamingAnswerIndex < effectiveArtifactIndex
+                  !showStreamingAnswerBlock
+                  && visibleStreamingAnswerIndex < effectiveArtifactIndex
                   && effectiveArtifactIndex >= 0
                   && effectiveArtifactIndex === effectiveLiveBlockIndex,
                 );
@@ -3278,9 +3446,9 @@ export function ActorChatPanel({
                   if (lastAction?.toolName) {
                     const input = lastAction.toolInput ?? {};
                     const toolDetail = buildActionDetail(lastAction.toolName, input);
-                    if (lastObs?.content) {
-                      const obsPreview = lastObs.content.slice(0, 120).replace(/\n/g, " ");
-                      return `${toolDetail}\n${obsPreview}${lastObs.content.length > 120 ? "..." : ""}`;
+                    const obsPreview = summarizeObservationPreview(lastObs?.content, 120);
+                    if (obsPreview) {
+                      return `${toolDetail}\n${obsPreview}`;
                     }
                     return toolDetail;
                   }
@@ -3315,8 +3483,11 @@ export function ActorChatPanel({
                   || showExecutionCard
                   || showThinkingSummaryOnly
                   || showArtifactBlock
-                  || streamingContent,
+                  || showStreamingAnswerBlock,
                 );
+                const fallbackActivityLabel = hideStreamingPlanningBubble
+                  ? "正在规划执行路径"
+                  : describeAgentActivity(steps, a.roleName, showStreamingAnswerBlock, currentTaskStatus);
 
                 return (
                   <div key={`thinking-${a.id}`} className="space-y-2">
@@ -3352,7 +3523,7 @@ export function ActorChatPanel({
                       />
                     )}
 
-                    {streamingContent && (
+                    {showStreamingAnswerBlock && streamingContent && (
                       <div className={`flex gap-2 ${color.text}`}>
                         <div className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 ${color.bg}`}>
                           <Bot className="w-3.5 h-3.5" />
@@ -3382,7 +3553,7 @@ export function ActorChatPanel({
                         <span className="text-[11px] truncate max-w-[88%] lg:max-w-[78%]">
                           <span className="font-medium">{a.roleName}</span>
                           <span className="opacity-70 ml-1">
-                            {describeAgentActivity(steps, a.roleName, !!streamingContent, currentTaskStatus)}
+                            {fallbackActivityLabel}
                           </span>
                         </span>
                       </div>
@@ -3703,6 +3874,49 @@ export function ActorChatPanel({
             </div>
 
             <div className="flex-1 overflow-auto bg-[var(--color-bg-secondary)]/35 px-3 py-3 space-y-3">
+              <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] p-3 space-y-2.5">
+                <div className="text-[10px] font-medium uppercase tracking-[0.16em] text-[var(--color-text-tertiary)]">
+                  超时策略
+                </div>
+                <div className="grid gap-2 sm:grid-cols-3">
+                  <div className="rounded-xl border border-[var(--color-border)]/80 bg-[var(--color-bg-secondary)]/40 px-3 py-2">
+                    <div className="text-[10px] text-[var(--color-text-tertiary)]">Worker 总预算</div>
+                    <div className="mt-1 text-[12px] font-medium text-[var(--color-text)]">
+                      {formatDurationSeconds(DEFAULT_DIALOG_WORKER_BUDGET_SECONDS)}
+                    </div>
+                    <div className="mt-1 text-[10px] text-[var(--color-text-secondary)]">
+                      {supportActorTimeoutOverridesSummary
+                        ? `当前房间 Actor override：${supportActorTimeoutOverridesSummary}`
+                        : "`spawn_task.timeout_seconds` 用作预算 override；无 override 时按默认值生效"}
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-[var(--color-border)]/80 bg-[var(--color-bg-secondary)]/40 px-3 py-2">
+                    <div className="text-[10px] text-[var(--color-text-tertiary)]">主 Agent 总预算</div>
+                    <div className="mt-1 text-[12px] font-medium text-[var(--color-text)]">
+                      {effectiveMainBudgetLabel}
+                    </div>
+                    <div className="mt-1 text-[10px] text-[var(--color-text-secondary)]">
+                      当前协调者 {coordinatorActor?.roleName ?? "Lead"} 的实际预算；超时后显示主线程原因
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-[var(--color-border)]/80 bg-[var(--color-bg-secondary)]/40 px-3 py-2">
+                    <div className="text-[10px] text-[var(--color-text-tertiary)]">活跃度租约</div>
+                    <div className="mt-1 text-[12px] font-medium text-[var(--color-text)]">
+                      Worker {formatDurationSeconds(DEFAULT_DIALOG_WORKER_IDLE_LEASE_SECONDS)} · 主 Agent {effectiveMainIdleLeaseLabel}
+                    </div>
+                    <div className="mt-1 text-[10px] text-[var(--color-text-secondary)]">
+                      只有真实 step / tool / artifact / 子任务回报会续命
+                    </div>
+                  </div>
+                </div>
+                {legacyTimeoutActors.length > 0 && (
+                  <div className="rounded-xl border border-amber-500/30 bg-amber-500/8 px-3 py-2 text-[10px] leading-relaxed text-amber-700">
+                    检测到 {legacyTimeoutActors.length} 个 Agent 仍是旧式单值 timeout（无 idle lease）。
+                    如果当前房间是在修复前创建，建议重置当前房间或重建 Agent，让新策略完整接管运行时。
+                  </div>
+                )}
+              </div>
+
               <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] p-3 space-y-2.5">
                 <div className="text-[10px] font-medium uppercase tracking-[0.16em] text-[var(--color-text-tertiary)]">
                   预设

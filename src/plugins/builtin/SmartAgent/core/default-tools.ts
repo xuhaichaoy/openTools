@@ -102,6 +102,7 @@ const NON_TEXT_FILE_EXTENSIONS = new Set([
   ".pdf",
   ".doc",
   ".docx",
+  ".rtf",
   ".ppt",
   ".pptx",
   ".xls",
@@ -137,6 +138,67 @@ const NON_TEXT_FILE_EXTENSIONS = new Set([
   ".otf",
 ]);
 
+const SPREADSHEET_FILE_EXTENSIONS = new Set([
+  ".csv",
+  ".xls",
+  ".xlsx",
+]);
+
+const DOCUMENT_TEXT_EXTRACTION_EXTENSIONS = new Set([
+  ".pdf",
+  ".docx",
+  ".ppt",
+  ".pptx",
+  ".xmind",
+  ".mm",
+]);
+
+const TEXT_DOCUMENT_EXTENSIONS = new Set([
+  ".md",
+  ".mdx",
+  ".markdown",
+  ".txt",
+  ".text",
+  ".json",
+  ".yaml",
+  ".yml",
+  ".toml",
+  ".ini",
+  ".xml",
+  ".html",
+  ".htm",
+  ".log",
+]);
+
+const SHELL_REDIRECT_DOCUMENT_EXTENSIONS = new Set([
+  ".doc",
+  ".docx",
+  ".mm",
+  ".pdf",
+  ".ppt",
+  ".pptx",
+  ".xls",
+  ".xlsx",
+  ".xmind",
+]);
+
+const SHELL_DOCUMENT_READ_BASES = new Set([
+  "awk",
+  "cat",
+  "cut",
+  "file",
+  "grep",
+  "head",
+  "less",
+  "more",
+  "rg",
+  "sed",
+  "sort",
+  "strings",
+  "tail",
+  "wc",
+]);
+
 function normalizePathForExtension(path: string): string {
   return path.trim().replace(/\\/g, "/").toLowerCase();
 }
@@ -146,6 +208,38 @@ function getPathExtension(path: string): string {
   const fileName = normalized.split("/").pop() ?? normalized;
   const dotIndex = fileName.lastIndexOf(".");
   return dotIndex >= 0 ? fileName.slice(dotIndex) : "";
+}
+
+function getShellCommandBase(command: string): string {
+  const normalized = command.trim();
+  if (!normalized) return "";
+  const first = normalized.split(/\s+/)[0] ?? "";
+  const lastSegment = first.split("/").pop() ?? first;
+  return lastSegment.replace(/^["']|["']$/g, "").toLowerCase();
+}
+
+function extractDocumentLikePaths(command: string): string[] {
+  const matches = command.match(/(?:[~./\w-][^\s"'`|;&()<>]*\.(?:doc|docx|mm|pdf|ppt|pptx|xls|xlsx|xmind))/gi);
+  if (!matches) return [];
+  return [...new Set(matches.map((item) => item.replace(/^["']|["']$/g, "")))];
+}
+
+function getShellDocumentRedirectError(
+  command: string,
+): { error: string; hint: string; paths: string[] } | null {
+  const base = getShellCommandBase(command);
+  if (!SHELL_DOCUMENT_READ_BASES.has(base)) return null;
+
+  const paths = extractDocumentLikePaths(command).filter((path) =>
+    SHELL_REDIRECT_DOCUMENT_EXTENSIONS.has(getPathExtension(path)),
+  );
+  if (paths.length === 0) return null;
+
+  return {
+    error: `检测到 ${base} 正在直接读取文档/Office 文件：${paths.join(", ")}`,
+    hint: "请改用 read_document 读取这类文件；不要使用 shell 直接解析 xlsx/pdf/docx/pptx 等文档。",
+    paths,
+  };
 }
 
 function getUnsupportedTextToolPathError(
@@ -165,7 +259,9 @@ function getUnsupportedTextToolPathError(
 
   return {
     error: `${toolName} 仅支持文本文件，不能读取或编辑二进制文件 (${ext})：${path}`,
-    hint: "请改用该文件格式的专用解析流程，或让用户提供转换后的文本内容。",
+    hint: ext === ".docx" || ext === ".rtf"
+      ? "请改用 export_document 导出 Word/RTF 文档，或使用 read_document 读取现有文档内容。"
+      : "请改用 read_document 读取这类文档/表格文件，或让用户提供转换后的文本内容。",
   };
 }
 
@@ -177,6 +273,53 @@ async function readTextToolFile(
   if (pathError) return pathError;
   const result = await invokeTauri<string | { content: string }>("read_text_file", { path });
   return typeof result === "string" ? result : result.content;
+}
+
+async function readDocumentToolFile(
+  path: string,
+  maxRows?: number,
+): Promise<string | { error: string; hint: string }> {
+  const ext = getPathExtension(path);
+  if (!ext) {
+    return {
+      error: `read_document 无法识别文件类型：${path}`,
+      hint: "请提供带扩展名的文件路径，或改用 read_file 读取纯文本文件。",
+    };
+  }
+
+  if (SPREADSHEET_FILE_EXTENSIONS.has(ext)) {
+    return invokeTauri<string>("extract_spreadsheet_text", {
+      filePath: path,
+      ...(typeof maxRows === "number" ? { maxRows } : {}),
+    });
+  }
+
+  if (TEXT_DOCUMENT_EXTENSIONS.has(ext)) {
+    return readTextToolFile(path, "read_document");
+  }
+
+  if (DOCUMENT_TEXT_EXTRACTION_EXTENSIONS.has(ext)) {
+    return invokeTauri<string>("extract_document_text", { path });
+  }
+
+  if (ext === ".doc") {
+    return {
+      error: `read_document 目前不支持旧版 Word 文件 (${ext})：${path}`,
+      hint: "请先将 .doc 转为 .docx 或纯文本后再读取。",
+    };
+  }
+
+  if (IMAGE_FILE_EXTENSIONS.has(ext)) {
+    return {
+      error: `read_document 不支持直接读取图片文件 (${ext})：${path}`,
+      hint: "如果这张图片已经作为会话附件传入，请直接基于图片分析；否则请走 OCR 或文字摘录流程。",
+    };
+  }
+
+  return {
+    error: `read_document 不支持该文件类型 (${ext})：${path}`,
+    hint: "纯文本文件请改用 read_file / read_file_range；其他格式请走对应专用工具。",
+  };
 }
 
 function createLocalDevTools(
@@ -250,6 +393,26 @@ function createLocalDevTools(
       },
     },
     {
+      name: "read_document",
+      description: "读取本地文档或表格内容。支持 xlsx/xls/csv/pdf/docx/ppt/pptx/xmind/mm，以及 md/txt/json/yaml/toml/log/html/xml 等文本文档。遇到文档、Office、PDF、表格文件时优先使用此工具，不要退回 shell 命令读取。",
+      readonly: true,
+      parameters: {
+        path: { type: "string", description: "文件路径（建议绝对路径）" },
+        max_rows: {
+          type: "integer",
+          description: "读取表格时每个 sheet 最多提取的行数（可选，默认 500）",
+          required: false,
+        },
+      },
+      execute: async (params) => {
+        const path = String(params.path || "");
+        if (!path.trim()) return { error: "path 不能为空" };
+        const maxRows =
+          typeof params.max_rows === "number" ? Math.max(1, Math.floor(params.max_rows)) : undefined;
+        return readDocumentToolFile(path, maxRows);
+      },
+    },
+    {
       name: "search_in_files",
       description: "递归搜索项目中的文本，返回匹配文件和行号",
       readonly: true,
@@ -311,6 +474,32 @@ function createLocalDevTools(
         return agentRuntimeManager.writeTextFile(path, content, {
           confirmHostFallback,
           allowInteractiveHostWriteWhenNoPolicyRoots: true,
+        });
+      },
+    },
+    {
+      name: "export_document",
+      description:
+        "将 Markdown / 纯文本导出为 Word 或 RTF 文档。适用于方案、报告、课程内容等正式文档输出。需要保存为 .docx / .rtf 时优先使用此工具，不要用 write_file 手写 RTF 控制符或伪造 Word 文件。",
+      parameters: {
+        path: { type: "string", description: "输出文档路径，扩展名必须是 .docx 或 .rtf" },
+        content: { type: "string", description: "要导出的 Markdown 或纯文本内容", required: true },
+        title: { type: "string", description: "文档标题（可选）", required: false },
+        source_format: { type: "string", description: "内容格式：markdown（默认） | text | rtf", required: false },
+      },
+      dangerous: true,
+      execute: async (params) => {
+        const path = String(params.path || "").trim();
+        const content = String(params.content || "");
+        if (!path) return { error: "path 不能为空" };
+        if (!content.trim()) return { error: "content 不能为空" };
+        return invokeTauri("export_document", {
+          outputPath: path,
+          content,
+          ...(typeof params.title === "string" && params.title.trim() ? { title: params.title.trim() } : {}),
+          ...(typeof params.source_format === "string" && params.source_format.trim()
+            ? { sourceFormat: params.source_format.trim() }
+            : {}),
         });
       },
     },
@@ -557,6 +746,8 @@ function createLocalDevTools(
       execute: async (params) => {
         const command = String(params.command || "").trim();
         if (!command) return { error: "command 不能为空" };
+        const redirect = getShellDocumentRedirectError(command);
+        if (redirect) return redirect;
         return agentRuntimeManager.runShellCommand(command, {
           confirmHostFallback,
         });
@@ -1591,6 +1782,8 @@ export function createBuiltinAgentTools(
 
       const command = String(params.command || "").trim();
       if (!command) return { error: "command 不能为空" };
+      const redirect = getShellDocumentRedirectError(command);
+      if (redirect) return redirect;
 
       const timeoutSec = Math.min(Math.max(Number(params.timeout_seconds) || 120, 5), 300);
 

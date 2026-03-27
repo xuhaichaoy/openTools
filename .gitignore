@@ -27,3 +27,5 @@ crates/**/target
 *.njsproj
 *.sln
 *.sw?
+
+deliverables/

@@ -106,6 +106,92 @@ describe("spawned-task-result-validator", () => {
     expect(validation.requiresConcreteOutput).toBe(true);
   });
 
+  it("rejects coordination summaries that do not contain real deliverable evidence", () => {
+    const validation = validateActorTaskResult({
+      taskText: "基于 xlsx 生成完整课程方案并保存到 Downloads",
+      result: `一、已确认源文件
+文件：/Users/demo/Downloads/AI培训课程需求.xlsx
+二、已完成4个分段任务
+三、当前缺口
+主题 8-14：仅确认完成状态
+四、产物位置
+历史文档产物：/Users/demo/Downloads/1.docx`,
+      actorId: "coordinator",
+      startedAt: 1000,
+      completedAt: 2000,
+      artifacts: [],
+    });
+
+    expect(validation.accepted).toBe(false);
+    expect(validation.reason).toContain("协作过程总结");
+  });
+
+  it("rejects execution-plan style results for spreadsheet deliverables", () => {
+    const validation = validateActorTaskResult({
+      taskText: "根据课程主题生成课程清单，最终给我一个 Excel 文件",
+      result: `执行计划
+步骤1：读取并归纳课程需求结构
+工具：read_document、memory_search
+步骤2：并行拆分主题方向，委派多 Agent 生成候选
+工具：spawn_task、wait_for_spawned_tasks
+步骤3：主 Agent 接管超时子任务，补齐全部课程清单
+输出：/Users/demo/Downloads/课程候选A_主接管.json`,
+      actorId: "coordinator",
+      startedAt: 1000,
+      completedAt: 2000,
+      artifacts: [
+        {
+          id: "artifact-plan-json",
+          actorId: "coordinator",
+          path: "/Users/demo/Downloads/课程候选A_主接管.json",
+          fileName: "课程候选A_主接管.json",
+          directory: "/Users/demo/Downloads",
+          source: "tool_write",
+          toolName: "write_file",
+          summary: "主接管中间清单",
+          timestamp: 1500,
+        },
+      ],
+    });
+
+    expect(validation.accepted).toBe(false);
+    expect(validation.reason).toContain("执行计划");
+  });
+
+  it("accepts spreadsheet deliverables when xlsx export evidence exists", () => {
+    const steps: AgentStep[] = [
+      {
+        type: "action",
+        content: "调用 export_spreadsheet",
+        toolName: "export_spreadsheet",
+        toolInput: {
+          file_name: "课程清单.xlsx",
+          sheets: "[]",
+        },
+        timestamp: 1000,
+      },
+      {
+        type: "observation",
+        content: "Excel 导出完成",
+        toolName: "export_spreadsheet",
+        toolOutput: "已导出 Excel 文件: /Users/demo/Downloads/课程清单.xlsx",
+        timestamp: 1200,
+      },
+    ];
+
+    const validation = validateActorTaskResult({
+      taskText: "根据课程主题生成课程清单，最终给我一个 Excel 文件",
+      result: "已导出 Excel 文件: /Users/demo/Downloads/课程清单.xlsx",
+      actorId: "coordinator",
+      startedAt: 1000,
+      completedAt: 2000,
+      artifacts: [],
+      steps,
+    });
+
+    expect(validation.accepted).toBe(true);
+  });
+
   it("rejects schedule success claims without real scheduling tool calls", () => {
     const validation = validateActorTaskResult({
       taskText: "再创建一个任务 每隔两分钟提醒我喝水",

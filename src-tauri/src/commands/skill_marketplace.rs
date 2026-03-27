@@ -69,8 +69,6 @@ pub struct ClawHubSearchRequest {
     pub query: String,
     pub limit: Option<u32>,
     pub token: Option<String>,
-    pub site_url: Option<String>,
-    pub registry_url: Option<String>,
     pub source_kind: Option<String>,
 }
 
@@ -79,8 +77,6 @@ pub struct ClawHubInstallRequest {
     pub slug: String,
     pub version: Option<String>,
     pub token: Option<String>,
-    pub site_url: Option<String>,
-    pub registry_url: Option<String>,
     pub source_kind: Option<String>,
     pub bundle_base64: Option<String>,
 }
@@ -266,7 +262,10 @@ fn build_http_client() -> Result<reqwest::Client, String> {
 
 fn apply_auth(request: reqwest::RequestBuilder, token: Option<&str>) -> reqwest::RequestBuilder {
     let request = request
-        .header(ACCEPT, "application/json, application/zip, application/octet-stream;q=0.9, */*;q=0.8")
+        .header(
+            ACCEPT,
+            "application/json, application/zip, application/octet-stream;q=0.9, */*;q=0.8",
+        )
         .header(USER_AGENT, CLAWHUB_USER_AGENT);
     match token {
         Some(token) if !token.trim().is_empty() => {
@@ -370,18 +369,20 @@ fn extract_string_from_json(value: &Value, keys: &[&str]) -> Option<String> {
 
 fn extract_version_from_json(value: &Value) -> Option<String> {
     match value {
-        Value::Object(map) => {
-            json_string(map.get("version"))
-                .or_else(|| json_string(map.get("latest_version")))
-                .or_else(|| json_string(map.get("installed_version")))
-                .or_else(|| map.values().find_map(extract_version_from_json))
-        }
+        Value::Object(map) => json_string(map.get("version"))
+            .or_else(|| json_string(map.get("latest_version")))
+            .or_else(|| json_string(map.get("installed_version")))
+            .or_else(|| map.values().find_map(extract_version_from_json)),
         Value::Array(items) => items.iter().find_map(extract_version_from_json),
         _ => None,
     }
 }
 
-fn extract_origin_url_from_json(value: &Value, site_url: &str, registry_url: &str) -> Option<String> {
+fn extract_origin_url_from_json(
+    value: &Value,
+    site_url: &str,
+    registry_url: &str,
+) -> Option<String> {
     extract_url_from_json(
         value,
         &["origin_url", "originUrl", "url", "site_url", "siteUrl"],
@@ -435,12 +436,28 @@ fn parse_http_search_entries(
                 }
 
                 for child in map.values() {
-                    visit(child, entries, seen, limit, site_url, registry_url, source_kind);
+                    visit(
+                        child,
+                        entries,
+                        seen,
+                        limit,
+                        site_url,
+                        registry_url,
+                        source_kind,
+                    );
                 }
             }
             Value::Array(items) => {
                 for item in items {
-                    visit(item, entries, seen, limit, site_url, registry_url, source_kind);
+                    visit(
+                        item,
+                        entries,
+                        seen,
+                        limit,
+                        site_url,
+                        registry_url,
+                        source_kind,
+                    );
                 }
             }
             _ => {}
@@ -505,10 +522,7 @@ async fn fetch_json_endpoint(
         .await
         .map_err(|error| format!("请求 ClawHub 接口失败 ({url}): {error}"))?;
     if !response.status().is_success() {
-        return Err(format!(
-            "ClawHub 接口返回 {} ({url})",
-            response.status()
-        ));
+        return Err(format!("ClawHub 接口返回 {} ({url})", response.status()));
     }
     response
         .json::<Value>()
@@ -561,7 +575,9 @@ async fn search_with_http(
                         entries,
                     });
                 }
-                last_error = Some(format!("ClawHub 搜索接口返回成功，但未解析到 skill ({url})"));
+                last_error = Some(format!(
+                    "ClawHub 搜索接口返回成功，但未解析到 skill ({url})"
+                ));
             }
             Err(error) => last_error = Some(error),
         }
@@ -658,7 +674,9 @@ async fn resolve_bundle_from_http(
                 let followup_response = apply_auth(client.get(&download_url), token)
                     .send()
                     .await
-                    .map_err(|error| format!("下载 ClawHub bundle 失败 ({download_url}): {error}"))?;
+                    .map_err(|error| {
+                    format!("下载 ClawHub bundle 失败 ({download_url}): {error}")
+                })?;
                 if !followup_response.status().is_success() {
                     last_error = Some(format!(
                         "ClawHub bundle 下载返回 {} ({download_url})",
@@ -684,7 +702,8 @@ async fn resolve_bundle_from_http(
                 });
             }
 
-            if let Some(raw_skill_md) = extract_string_from_json(&payload, &["skill_md", "skillMd"]) {
+            if let Some(raw_skill_md) = extract_string_from_json(&payload, &["skill_md", "skillMd"])
+            {
                 return Ok(HttpClawHubBundle {
                     bytes: raw_skill_md.into_bytes(),
                     version: extract_version_from_json(&payload)
@@ -697,7 +716,9 @@ async fn resolve_bundle_from_http(
                 });
             }
 
-            last_error = Some(format!("ClawHub 下载接口返回 JSON，但未发现 bundle URL ({url})"));
+            last_error = Some(format!(
+                "ClawHub 下载接口返回 JSON，但未发现 bundle URL ({url})"
+            ));
             continue;
         }
 
@@ -762,8 +783,12 @@ async fn install_with_http(
 
 fn install_bundle_to_root(root: PathBuf, bytes: Vec<u8>) -> Result<InstalledBundle, String> {
     if root.exists() {
-        fs::remove_dir_all(&root)
-            .map_err(|error| format!("清理旧 ClawHub bundle 目录失败 ({}): {error}", root.display()))?;
+        fs::remove_dir_all(&root).map_err(|error| {
+            format!(
+                "清理旧 ClawHub bundle 目录失败 ({}): {error}",
+                root.display()
+            )
+        })?;
     }
     fs::create_dir_all(&root)
         .map_err(|error| format!("创建 ClawHub bundle 目录失败 ({}): {error}", root.display()))?;
@@ -787,8 +812,12 @@ fn install_bundle_to_root(root: PathBuf, bytes: Vec<u8>) -> Result<InstalledBund
 
     let skill_md_path = find_first_skill_md(&root)
         .ok_or_else(|| format!("安装完成，但未在 {} 中找到 SKILL.md", root.display()))?;
-    let skill_md = fs::read_to_string(&skill_md_path)
-        .map_err(|error| format!("读取安装后的 SKILL.md 失败 ({}): {error}", skill_md_path.display()))?;
+    let skill_md = fs::read_to_string(&skill_md_path).map_err(|error| {
+        format!(
+            "读取安装后的 SKILL.md 失败 ({}): {error}",
+            skill_md_path.display()
+        )
+    })?;
 
     Ok(InstalledBundle {
         skill_md,
@@ -822,10 +851,12 @@ fn extract_zip_bundle(root: &Path, bytes: &[u8]) -> Result<(), String> {
             fs::create_dir_all(parent)
                 .map_err(|error| format!("创建文件父目录失败 ({}): {error}", parent.display()))?;
         }
-        let mut file = fs::File::create(&target_path)
-            .map_err(|error| format!("创建 bundle 文件失败 ({}): {error}", target_path.display()))?;
-        std::io::copy(&mut entry, &mut file)
-            .map_err(|error| format!("写入 bundle 文件失败 ({}): {error}", target_path.display()))?;
+        let mut file = fs::File::create(&target_path).map_err(|error| {
+            format!("创建 bundle 文件失败 ({}): {error}", target_path.display())
+        })?;
+        std::io::copy(&mut entry, &mut file).map_err(|error| {
+            format!("写入 bundle 文件失败 ({}): {error}", target_path.display())
+        })?;
     }
     Ok(())
 }

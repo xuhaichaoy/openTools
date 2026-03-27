@@ -12,6 +12,7 @@ interface ConfirmDialogProps {
   params: Record<string, unknown>;
   risk?: ToolApprovalRisk;
   reason?: string;
+  reviewedByModel?: boolean;
   onResult: (result: ConfirmResult) => void;
 }
 
@@ -92,6 +93,7 @@ export function ConfirmDialog({
   params,
   risk,
   reason,
+  reviewedByModel = false,
   onResult,
 }: ConfirmDialogProps) {
   const [showDetail, setShowDetail] = useState(false);
@@ -123,7 +125,9 @@ export function ConfirmDialog({
                 </span>
               )}
               <span className="text-[var(--color-text-secondary)]">
-                自动审核未直接放行，已升级到人工确认。
+                {reviewedByModel
+                  ? "自动审核与模型复核都未直接放行，已升级到人工确认。"
+                  : "自动审核未直接放行，已升级到人工确认。"}
               </span>
             </div>
             {reason && (

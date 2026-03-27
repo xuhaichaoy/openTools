@@ -36,6 +36,14 @@ import {
 } from "./execution-policy";
 import { resolveActorEffectiveMaxIterations } from "./iteration-budget";
 import { ClarificationInterrupt, createDefaultMiddlewares } from "./middlewares";
+import {
+  DEFAULT_DIALOG_MAIN_BUDGET_SECONDS,
+  DEFAULT_DIALOG_MAIN_IDLE_LEASE_SECONDS,
+  TIMEOUT_CHECK_INTERVAL_MS,
+  formatTimeoutError,
+  isTimeoutErrorMessage,
+} from "./timeout-policy";
+import { isLikelyExecutionPlanReply } from "./result-shape-detection";
 import type {
   AgentCapabilities,
   ActorConfig,
@@ -62,10 +70,7 @@ const _agentActorLogger = createLogger("AgentActor");
 const formatActorLog = (name: string, args: unknown[]) =>
   `[${name}] ${args.map((arg) => (typeof arg === "string" ? arg : JSON.stringify(arg))).join(" ")}`;
 const actorDebugLog = (name: string, ...args: unknown[]) => {
-  void name;
-  void args;
-  void _agentActorLogger;
-  void formatActorLog;
+  _agentActorLogger.debug(formatActorLog(name, args));
 };
 const actorInfoLog = (name: string, ...args: unknown[]) => {
   _agentActorLogger.info(formatActorLog(name, args));
@@ -85,16 +90,24 @@ export type ConfirmDangerousAction = (
   context?: DangerousActionConfirmationContext,
 ) => Promise<boolean>;
 
-const ARTIFACT_TOOL_NAMES = new Set(["write_file", "str_replace_edit", "json_edit"]);
+const ARTIFACT_TOOL_NAMES = new Set(["write_file", "export_document", "str_replace_edit", "json_edit"]);
 const INTERIM_SYNTHESIS_PATTERNS = [
   /(正在|继续|稍后|马上|随后).*(整理|汇总|整合|输出|总结)/u,
   /(先|我会|正在).*(看|检查|处理|拉齐)/u,
   /(working on it|pulling .* together|give me a few|let me compile|i'?ll gather)/i,
 ];
+const TAKEOVER_DENIED_TOOL_NAMES = ["spawn_task", "wait_for_spawned_tasks", "ask_user", "ask_clarification"];
 
 function basename(path: string): string {
   const normalized = String(path ?? "").replace(/\\/g, "/");
   return normalized.split("/").pop() || normalized;
+}
+
+function previewActorText(value?: string, maxLength = 120): string | undefined {
+  const normalized = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!normalized) return undefined;
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(1, maxLength - 3)).trimEnd()}...`;
 }
 
 function inferArtifactLanguage(path: string): string | undefined {
@@ -128,6 +141,31 @@ function inferArtifactLanguage(path: string): string | undefined {
   }
 }
 
+function uniqueNonEmptyStrings(values: Array<string | null | undefined>): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const normalized = String(value ?? "").trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(normalized);
+  }
+  return result;
+}
+
+function mergeToolPolicyWithDeniedTools(
+  basePolicy: ToolPolicy | undefined,
+  deniedTools: string[],
+): ToolPolicy | undefined {
+  const allow = uniqueNonEmptyStrings(basePolicy?.allow ?? []);
+  const deny = uniqueNonEmptyStrings([...(basePolicy?.deny ?? []), ...deniedTools]);
+  if (allow.length === 0 && deny.length === 0) return undefined;
+  return {
+    ...(allow.length > 0 ? { allow } : {}),
+    ...(deny.length > 0 ? { deny } : {}),
+  };
+}
+
 function buildArtifactPayloadFromToolCall(
   actorId: string,
   actorSystem: ActorSystem,
@@ -148,6 +186,12 @@ function buildArtifactPayloadFromToolCall(
       fullContent = params.content;
       preview = params.content.slice(0, 1200);
     }
+  } else if (toolName === "export_document") {
+    summary = "通过 export_document 导出文档";
+    if (typeof params.content === "string") {
+      fullContent = params.content;
+      preview = params.content.slice(0, 1200);
+    }
   } else if (toolName === "str_replace_edit") {
     summary = "通过 str_replace_edit 修改文件";
     if (typeof params.newText === "string") {
@@ -163,13 +207,18 @@ function buildArtifactPayloadFromToolCall(
 
   const relatedRun = actorSystem
     .getSpawnedTasksSnapshot()
-    .filter((record) => record.mode === "session" && record.sessionOpen && record.targetActorId === actorId)
+    .filter((record) =>
+      record.targetActorId === actorId
+      && (
+        record.status === "running"
+        || (record.mode === "session" && record.sessionOpen)
+      ))
     .sort((a, b) => (b.lastActiveAt ?? b.spawnedAt) - (a.lastActiveAt ?? a.spawnedAt))[0];
 
   actorSystem.recordArtifact({
     actorId,
     path,
-    source: toolName === "write_file" ? "tool_write" : "tool_edit",
+    source: toolName === "write_file" || toolName === "export_document" ? "tool_write" : "tool_edit",
     toolName,
     summary,
     preview,
@@ -180,9 +229,56 @@ function buildArtifactPayloadFromToolCall(
   });
 }
 
+function extractPathFromToolOutput(toolName: string, toolOutput: unknown): string | null {
+  const normalized = typeof toolOutput === "string"
+    ? toolOutput.trim()
+    : typeof toolOutput === "object" && toolOutput !== null
+      ? JSON.stringify(toolOutput)
+      : "";
+  if (!normalized) return null;
+
+  if (toolName === "export_spreadsheet") {
+    const match = normalized.match(/已导出\s*Excel\s*文件[:：]\s*(\/[^\s"'`]+?\.(?:xlsx|xls|csv))/iu);
+    return match?.[1]?.trim() || null;
+  }
+
+  return null;
+}
+
+function buildArtifactPayloadFromToolResult(
+  actorId: string,
+  actorSystem: ActorSystem,
+  toolName: string,
+  toolOutput: unknown,
+): void {
+  const path = extractPathFromToolOutput(toolName, toolOutput);
+  if (!path) return;
+
+  const relatedRun = actorSystem
+    .getSpawnedTasksSnapshot()
+    .filter((record) =>
+      record.targetActorId === actorId
+      && (
+        record.status === "running"
+        || (record.mode === "session" && record.sessionOpen)
+      ))
+    .sort((a, b) => (b.lastActiveAt ?? b.spawnedAt) - (a.lastActiveAt ?? a.spawnedAt))[0];
+
+  actorSystem.recordArtifact({
+    actorId,
+    path,
+    source: "tool_write",
+    toolName,
+    summary: toolName === "export_spreadsheet" ? "通过 export_spreadsheet 导出表格" : "通过工具生成文件",
+    timestamp: Date.now(),
+    relatedRunId: relatedRun?.runId,
+  });
+}
+
 function isLikelyInterimSynthesisReply(content: string): boolean {
   const normalized = content.trim();
   if (!normalized) return true;
+  if (isLikelyExecutionPlanReply(normalized)) return true;
   if (normalized.length > 220) return false;
   return INTERIM_SYNTHESIS_PATTERNS.some((pattern) => pattern.test(normalized));
 }
@@ -245,11 +341,14 @@ export class AgentActor {
   private actorSystem?: ActorSystem;
   private toolPolicy?: ToolPolicy;
   private _timeoutSeconds?: number;
+  private _idleLeaseSeconds?: number;
   private _workspace?: string;
   private _contextTokens?: number;
   private _thinkingLevel?: ThinkingLevel;
   private _executionPolicy?: ExecutionPolicy;
   private _middlewareOverrides?: import("./types").MiddlewareOverrides;
+  private _lastProgressAt = 0;
+  private _abortReason: string | null = null;
 
   /** 会话记忆：跨任务保留对话上下文（对标 OpenClaw 持久会话） */
   private sessionHistory: Array<{ role: "user" | "assistant"; content: string; timestamp: number }> = [];
@@ -276,7 +375,12 @@ export class AgentActor {
     this.maxIterations = config.maxIterations ?? config.role.maxIterations ?? 15;
     this.systemPromptOverride = config.systemPromptOverride;
     this.toolPolicy = config.toolPolicy;
-    this._timeoutSeconds = config.timeoutSeconds;
+    this._timeoutSeconds = config.timeoutSeconds ?? (config.role.name === "Lead"
+      ? DEFAULT_DIALOG_MAIN_BUDGET_SECONDS
+      : undefined);
+    this._idleLeaseSeconds = config.idleLeaseSeconds ?? (config.role.name === "Lead"
+      ? DEFAULT_DIALOG_MAIN_IDLE_LEASE_SECONDS
+      : undefined);
     this._workspace = config.workspace;
     this._contextTokens = config.contextTokens;
     this._thinkingLevel = config.thinkingLevel;
@@ -406,6 +510,10 @@ export class AgentActor {
     return this._timeoutSeconds;
   }
 
+  get idleLeaseSeconds(): number | undefined {
+    return this._idleLeaseSeconds;
+  }
+
   get contextTokens(): number | undefined {
     return this._contextTokens;
   }
@@ -457,6 +565,8 @@ export class AgentActor {
     name?: string;
     modelOverride?: string;
     workspace?: string;
+    timeoutSeconds?: number;
+    idleLeaseSeconds?: number;
     thinkingLevel?: ThinkingLevel;
     toolPolicy?: ToolPolicy;
     executionPolicy?: ExecutionPolicy;
@@ -467,6 +577,8 @@ export class AgentActor {
     if ("name" in patch && patch.name !== undefined) this.role.name = patch.name;
     if ("modelOverride" in patch) this.modelOverride = patch.modelOverride || undefined;
     if ("workspace" in patch) this._workspace = patch.workspace || undefined;
+    if ("timeoutSeconds" in patch) this._timeoutSeconds = patch.timeoutSeconds;
+    if ("idleLeaseSeconds" in patch) this._idleLeaseSeconds = patch.idleLeaseSeconds;
     if ("thinkingLevel" in patch) this._thinkingLevel = patch.thinkingLevel;
     if ("toolPolicy" in patch) this.toolPolicy = patch.toolPolicy;
     if ("executionPolicy" in patch || "middlewareOverrides" in patch) {
@@ -516,11 +628,27 @@ export class AgentActor {
     const senderName = message.from === "user" ? "用户" : (this.actorSystem?.get(message.from)?.role.name ?? message.from);
     actorDebugLog(this.role.name, `receive: from=${senderName}, status=${this._status}, inboxSize=${this.inbox.length + 1}, content="${String(message.content).slice(0, 60)}"`);
     this.inbox.push(message);
+    actorInfoLog(this.role.name, "receive queued", {
+      actorId: this.id,
+      from: senderName,
+      messageFrom: message.from,
+      currentStatus: this._status,
+      inboxSize: this.inbox.length,
+      hasImages: (message.images?.length ?? 0) > 0,
+      contentPreview: previewActorText(message.content),
+    });
     this.emit("message_received", { message });
 
     if (this._status === "idle") {
       actorDebugLog(this.role.name, "receive: idle → triggering wakeUpForInbox");
       this.wakeUpForInbox();
+    } else {
+      actorInfoLog(this.role.name, "receive deferred because actor busy", {
+        actorId: this.id,
+        currentStatus: this._status,
+        inboxSize: this.inbox.length,
+        currentTaskId: this.currentTask?.id,
+      });
     }
   }
 
@@ -532,12 +660,20 @@ export class AgentActor {
    */
   private _wakeUpScheduled = false;
   private wakeUpForInbox(): void {
-    if (this._wakeUpScheduled) return;
+    if (this._wakeUpScheduled) {
+      actorDebugLog(this.role.name, "wakeUpForInbox: already scheduled");
+      return;
+    }
     this._wakeUpScheduled = true;
     queueMicrotask(() => {
       this._wakeUpScheduled = false;
       if (this._status !== "idle" || this.inbox.length === 0) {
         actorDebugLog(this.role.name, `wakeUpForInbox: skipped (status=${this._status}, inbox=${this.inbox.length})`);
+        actorInfoLog(this.role.name, "wakeUpForInbox skipped", {
+          actorId: this.id,
+          currentStatus: this._status,
+          inboxSize: this.inbox.length,
+        });
         return;
       }
 
@@ -559,6 +695,13 @@ export class AgentActor {
       }
 
       const allImages = messages.flatMap((m) => m.images ?? []);
+      actorInfoLog(this.role.name, "wakeUpForInbox dispatch task", {
+        actorId: this.id,
+        drainedMessageCount: messages.length,
+        userMessageCount: userMsgs.length,
+        imageCount: allImages.length,
+        queryPreview: previewActorText(query),
+      });
       void this.assignTask(query, allImages.length > 0 ? allImages : undefined);
     });
   }
@@ -595,25 +738,107 @@ export class AgentActor {
       steps: [],
     };
     this.tasks.push(task);
+    actorInfoLog(this.role.name, "assignTask start", {
+      actorId: this.id,
+      taskId: task.id,
+      currentStatus: this._status,
+      inboxSize: this.inbox.length,
+      publishResult: opts?.publishResult !== false,
+      imageCount: images?.length ?? 0,
+      queryPreview: previewActorText(query),
+    });
 
-    let globalTimeoutId: ReturnType<typeof setTimeout> | undefined;
+    let timeoutGuardId: ReturnType<typeof setInterval> | undefined;
     const rerunDiagnostics = {
       spawnFollowUpRuns: 0,
       finalSynthesisTriggered: false,
       validationRepairTriggered: false,
       answerStreamRestarts: 0,
     };
+    let timeoutErrorMessage: string | null = null;
+    let lastObservedSpawnActivityAt = 0;
     let lastStreamingAnswerLength = 0;
     let lastStreamingAnswerSnapshot = "";
     let lastAnswerClearedBy: string | null = null;
+    let hasLoggedStreamingAnswerClear = false;
 
     try {
       task.status = "running";
       task.startedAt = Date.now();
+      const effectiveTimeoutSeconds = opts?.runOverrides?.timeoutSeconds ?? this._timeoutSeconds;
+      const effectiveIdleLeaseSeconds = opts?.runOverrides?.idleLeaseSeconds ?? this._idleLeaseSeconds;
+      const timeoutAbort = new AbortController();
+      const runWithTimeoutGuard = <T,>(promise: Promise<T>): Promise<T> => {
+        if (
+          !(effectiveTimeoutSeconds && effectiveTimeoutSeconds > 0)
+          && !(effectiveIdleLeaseSeconds && effectiveIdleLeaseSeconds > 0)
+        ) {
+          return promise;
+        }
+        if (timeoutAbort.signal.aborted) {
+          return Promise.reject(new Error(String(timeoutAbort.signal.reason ?? timeoutErrorMessage ?? "Aborted")));
+        }
+        return Promise.race([
+          promise,
+          new Promise<T>((_, reject) => {
+            const onAbort = () => {
+              reject(new Error(String(timeoutAbort.signal.reason ?? timeoutErrorMessage ?? "Aborted")));
+            };
+            timeoutAbort.signal.addEventListener("abort", onAbort, { once: true });
+            void promise.then(
+              () => {
+                timeoutAbort.signal.removeEventListener("abort", onAbort);
+              },
+              () => {
+                timeoutAbort.signal.removeEventListener("abort", onAbort);
+              },
+            );
+          }),
+        ]);
+      };
       this.setStatus("running");
       actorDebugLog(this.role.name, `📋 assignTask RUNNING: taskId=${task.id}, status changed to running`);
       this.emit("task_started", { taskId: task.id, query });
+      this._lastProgressAt = task.startedAt;
+      const markProgress = (timestamp = Date.now()) => {
+        this._lastProgressAt = Math.max(this._lastProgressAt, timestamp);
+      };
+      const getLatestSpawnActivityAt = (): number => {
+        const activeTasks = this.actorSystem?.getActiveSpawnedTasks(this.id) ?? [];
+        return activeTasks.reduce((latest, record) => Math.max(latest, record.lastActiveAt ?? record.spawnedAt), 0);
+      };
+      const refreshSpawnActivity = () => {
+        const latestSpawnActivityAt = getLatestSpawnActivityAt();
+        if (latestSpawnActivityAt > lastObservedSpawnActivityAt) {
+          lastObservedSpawnActivityAt = latestSpawnActivityAt;
+          markProgress(latestSpawnActivityAt);
+        }
+      };
+      const requestTimeoutAbort = (reason: "idle" | "budget", seconds: number, observation: string) => {
+        if (timeoutErrorMessage) return;
+        timeoutErrorMessage = formatTimeoutError(reason, seconds);
+        emitTaskStep({
+          type: "observation",
+          content: observation,
+          timestamp: Date.now(),
+        });
+        actorWarnLog(this.role.name, "assignTask: timeout guard triggered", {
+          taskId: task.id,
+          timeoutReason: reason,
+          seconds,
+          lastProgressAt: this._lastProgressAt,
+          startedAt: task.startedAt,
+        });
+        if (!timeoutAbort.signal.aborted) {
+          timeoutAbort.abort(timeoutErrorMessage);
+        }
+        this.abort(timeoutErrorMessage);
+      };
+      const throwIfTimedOut = () => {
+        if (timeoutErrorMessage) throw new Error(timeoutErrorMessage);
+      };
       const emitTaskStep = (step: AgentStep) => {
+        markProgress(step.timestamp ?? Date.now());
         if (step.type === "answer" && step.streaming) {
           const currentLength = step.content.trim().length;
           const looksLikeRestart =
@@ -636,10 +861,14 @@ export class AgentActor {
           lastStreamingAnswerLength = currentLength;
           lastStreamingAnswerSnapshot = step.content;
           lastAnswerClearedBy = null;
-        } else if ((step.type === "action" || step.type === "tool_streaming") && lastStreamingAnswerLength >= 320) {
-          lastAnswerClearedBy = step.type === "action"
-            ? `action:${step.toolName ?? "unknown"}`
-            : "tool_streaming";
+          hasLoggedStreamingAnswerClear = false;
+        } else if (
+          step.type === "action"
+          && lastStreamingAnswerLength >= 320
+          && !hasLoggedStreamingAnswerClear
+        ) {
+          lastAnswerClearedBy = `action:${step.toolName ?? "unknown"}`;
+          hasLoggedStreamingAnswerClear = true;
           actorInfoLog(this.role.name, "assignTask: long streaming answer cleared before next phase", {
             taskId: task.id,
             previousLength: lastStreamingAnswerLength,
@@ -647,25 +876,64 @@ export class AgentActor {
             preview: lastStreamingAnswerSnapshot.slice(0, 120),
           });
         }
+        if (this.actorSystem && step.toolName) {
+          if (step.type === "action" && step.toolInput) {
+            appendToolCall(this.actorSystem.sessionId, this.id, step.toolName, step.toolInput);
+            buildArtifactPayloadFromToolCall(this.id, this.actorSystem, step.toolName, step.toolInput);
+          } else if (step.type === "observation" && step.toolOutput !== undefined) {
+            appendToolResult(this.actorSystem.sessionId, this.id, step.toolName, step.toolOutput);
+            buildArtifactPayloadFromToolResult(this.id, this.actorSystem, step.toolName, step.toolOutput);
+          }
+        }
         task.steps = applyIncomingAgentStep(task.steps, step);
         this.emit("step", { taskId: task.id, step });
       };
-
-      if (this._timeoutSeconds && this._timeoutSeconds > 0) {
-        globalTimeoutId = setTimeout(() => {
-          actorWarnLog(this.role.name, `assignTask: GLOBAL TIMEOUT after ${this._timeoutSeconds}s, aborting task ${task.id}`);
-          this.abort();
-        }, this._timeoutSeconds * 1000);
+      if (
+        (effectiveTimeoutSeconds && effectiveTimeoutSeconds > 0)
+        || (effectiveIdleLeaseSeconds && effectiveIdleLeaseSeconds > 0)
+      ) {
+        timeoutGuardId = setInterval(() => {
+          if (task.status !== "running") return;
+          const now = Date.now();
+          if (
+            effectiveTimeoutSeconds
+            && effectiveTimeoutSeconds > 0
+            && task.startedAt
+            && now - task.startedAt >= effectiveTimeoutSeconds * 1000
+          ) {
+            requestTimeoutAbort(
+              "budget",
+              effectiveTimeoutSeconds,
+              `超过总预算，已停止当前主 Agent（${effectiveTimeoutSeconds}s）。`,
+            );
+            return;
+          }
+          if (
+            effectiveIdleLeaseSeconds
+            && effectiveIdleLeaseSeconds > 0
+            && this._lastProgressAt > 0
+            && now - this._lastProgressAt >= effectiveIdleLeaseSeconds * 1000
+          ) {
+            requestTimeoutAbort(
+              "idle",
+              effectiveIdleLeaseSeconds,
+              `长时间无进展，准备接管（${effectiveIdleLeaseSeconds}s）。`,
+            );
+          }
+        }, TIMEOUT_CHECK_INTERVAL_MS);
       }
 
       actorDebugLog(this.role.name, `📝 assignTask: executing with sessionHistory=${this.sessionHistory.length} entries, inbox=${this.inbox.length}`);
       this._capturedInboxUserQuery = undefined;
-      const { result: initialResult, finalQuery: executedQuery } = await this.runWithClarifications(
-        query,
-        images,
-        emitTaskStep,
-        opts?.runOverrides,
+      const { result: initialResult, finalQuery: executedQuery } = await runWithTimeoutGuard(
+        this.runWithClarifications(
+          query,
+          images,
+          emitTaskStep,
+          opts?.runOverrides,
+        ),
       );
+      throwIfTimedOut();
       let result = initialResult;
       const historyQuery = this._capturedInboxUserQuery || executedQuery;
       this._capturedInboxUserQuery = undefined;
@@ -679,50 +947,104 @@ export class AgentActor {
       let processedSpawnFollowUps = 0;
       let hadFailedSpawnFollowUp = false;
       const failedSpawnTaskLabels: string[] = [];
+      const buildTakeoverRunOverrides = (params?: {
+        failedTaskLabels?: string[];
+        stage?: "failure_follow_up" | "final_synthesis" | "validation_repair";
+      }): ActorRunOverrides => {
+        const labels = uniqueNonEmptyStrings(params?.failedTaskLabels ?? []);
+        const stageLabel = params?.stage === "validation_repair"
+          ? "结果修复"
+          : params?.stage === "final_synthesis"
+            ? "最终收尾"
+            : "失败接管";
+        const takeoverInstruction = [
+          "## 主 Agent 接管模式（高优先级）",
+          `当前处于${stageLabel}阶段。此前子任务已经失败或结束，你必须由主 Agent 自己收尾。`,
+          labels.length > 0 ? `需要优先接管的失败子任务：${labels.join("、")}` : "",
+          "- 本轮禁止继续调用 `spawn_task` 或 `wait_for_spawned_tasks`。",
+          "- 本轮禁止调用 `ask_user` 或 `ask_clarification` 向用户追问输出形式；若用户已经指定文件格式/路径，直接按原要求完成。",
+          "- 优先直接产出真实结果：文件路径、文档产物、结构化内容或明确 blocker。",
+          "- 如果用户明确要求 Excel / Word / PDF / 代码文件等特定交付格式，必须交付对应格式；JSON 中间文件、执行计划、过程清单都不算完成。",
+          "- 禁止再次停在“继续整理/等待汇总/稍后输出”等中间态。",
+        ].filter(Boolean).join("\n");
+
+        return {
+          ...(opts?.runOverrides ?? {}),
+          toolPolicy: mergeToolPolicyWithDeniedTools(
+            opts?.runOverrides?.toolPolicy ?? this.toolPolicy,
+            TAKEOVER_DENIED_TOOL_NAMES,
+          ),
+          systemPromptAppend: [opts?.runOverrides?.systemPromptAppend, takeoverInstruction]
+            .filter(Boolean)
+            .join("\n\n"),
+        };
+      };
+      const processSpawnFollowUpMessages = async (drainedMessages: InboxMessage[]) => {
+        if (drainedMessages.length === 0) return;
+        const followUp = this.buildFollowUpFromMessages(drainedMessages);
+        if (followUp.summary.hasTaskFailure) {
+          hadFailedSpawnFollowUp = true;
+          failedSpawnTaskLabels.push(...followUp.summary.failedTaskLabels);
+        }
+        actorDebugLog(
+          this.role.name,
+          `assignTask: processing ${drainedMessages.length} inbox messages in follow-up run`,
+          {
+            mode: followUp.mode,
+            failedTasks: followUp.summary.failedTaskLabels,
+            completedTasks: followUp.summary.completedTaskLabels,
+            userMessages: followUp.summary.userMessageCount,
+          },
+        );
+        rerunDiagnostics.spawnFollowUpRuns += 1;
+        actorWarnLog(this.role.name, "assignTask: rerun triggered by follow-up inbox messages", {
+          taskId: task.id,
+          rerunIndex: rerunDiagnostics.spawnFollowUpRuns,
+          drainedMessageCount: drainedMessages.length,
+          mode: followUp.mode,
+          failedTasks: followUp.summary.failedTaskLabels,
+          completedTasks: followUp.summary.completedTaskLabels,
+          userMessageCount: followUp.summary.userMessageCount,
+        });
+        const followUpRunOverrides = followUp.summary.hasTaskFailure
+          ? buildTakeoverRunOverrides({
+              failedTaskLabels: followUp.summary.failedTaskLabels,
+              stage: "failure_follow_up",
+            })
+          : opts?.runOverrides;
+        if (followUp.summary.hasTaskFailure) {
+          emitTaskStep({
+            type: "observation",
+            content: "子任务失败，主 Agent 正在直接接管收尾，并临时禁用继续派工。",
+            timestamp: Date.now(),
+          });
+        }
+        const { result: followUpResult, finalQuery: followUpHistoryQuery } = await runWithTimeoutGuard(
+          this.runWithClarifications(
+            followUp.prompt,
+            followUp.images,
+            emitTaskStep,
+            followUpRunOverrides,
+          ),
+        );
+        this.appendSessionHistory("user", followUpHistoryQuery);
+        this.appendSessionHistory("assistant", followUpResult ?? "");
+        result = followUpResult ?? result;
+        processedSpawnFollowUps++;
+      };
       while (
         this.actorSystem?.getActiveSpawnedTasks(this.id).length &&
         waitRound < MAX_WAIT_ROUNDS
       ) {
+        refreshSpawnActivity();
         const activeCount = this.actorSystem.getActiveSpawnedTasks(this.id).length;
         actorDebugLog(this.role.name, `assignTask: waiting for ${activeCount} spawned tasks (round ${waitRound + 1})...`);
-        await this.waitForInbox(WAIT_POLL_MS);
+        await this.waitForInbox(WAIT_POLL_MS, () => Boolean(timeoutErrorMessage));
+        throwIfTimedOut();
+        refreshSpawnActivity();
         if (this.inbox.length > 0) {
-          const drainedMessages = this.drainInbox();
-          const followUp = this.buildFollowUpFromMessages(drainedMessages);
-          if (followUp.summary.hasTaskFailure) {
-            hadFailedSpawnFollowUp = true;
-            failedSpawnTaskLabels.push(...followUp.summary.failedTaskLabels);
-          }
-          actorDebugLog(
-            this.role.name,
-            `assignTask: processing ${drainedMessages.length} inbox messages in follow-up run`,
-            {
-              mode: followUp.mode,
-              failedTasks: followUp.summary.failedTaskLabels,
-              completedTasks: followUp.summary.completedTaskLabels,
-              userMessages: followUp.summary.userMessageCount,
-            },
-          );
-          rerunDiagnostics.spawnFollowUpRuns += 1;
-          actorWarnLog(this.role.name, "assignTask: rerun triggered by follow-up inbox messages", {
-            taskId: task.id,
-            rerunIndex: rerunDiagnostics.spawnFollowUpRuns,
-            drainedMessageCount: drainedMessages.length,
-            mode: followUp.mode,
-            failedTasks: followUp.summary.failedTaskLabels,
-            completedTasks: followUp.summary.completedTaskLabels,
-            userMessageCount: followUp.summary.userMessageCount,
-          });
-          const { result: followUpResult, finalQuery: followUpHistoryQuery } = await this.runWithClarifications(
-            followUp.prompt,
-            followUp.images,
-            emitTaskStep,
-            opts?.runOverrides,
-          );
-          this.appendSessionHistory("user", followUpHistoryQuery);
-          this.appendSessionHistory("assistant", followUpResult ?? "");
-          result = followUpResult ?? result;
-          processedSpawnFollowUps++;
+          await processSpawnFollowUpMessages(this.drainInbox());
+          throwIfTimedOut();
         }
         waitRound++;
         if (waitRound % 12 === 0) {
@@ -731,13 +1053,27 @@ export class AgentActor {
         }
       }
 
+      while (this.inbox.length > 0) {
+        actorWarnLog(this.role.name, "assignTask: processing residual inbox after spawned-task wait loop", {
+          taskId: task.id,
+          pendingMessages: this.inbox.length,
+        });
+        await processSpawnFollowUpMessages(this.drainInbox());
+        throwIfTimedOut();
+      }
+
       if (
         processedSpawnFollowUps > 0 &&
-        isLikelyInterimSynthesisReply(String(result ?? ""))
+        (
+          hadFailedSpawnFollowUp
+          || isLikelyInterimSynthesisReply(String(result ?? ""))
+        )
       ) {
         emitTaskStep({
           type: "observation",
-          content: "所有子任务已结束，正在触发一次最终综合，避免停留在中间态回复。",
+          content: hadFailedSpawnFollowUp
+            ? "检测到子任务失败，正在触发一次主协调复核，避免直接停在状态总结。"
+            : "所有子任务已结束，正在触发一次最终综合，避免停留在中间态回复。",
           timestamp: Date.now(),
         });
         rerunDiagnostics.finalSynthesisTriggered = true;
@@ -751,12 +1087,21 @@ export class AgentActor {
           failedSpawnTaskLabels: [...new Set(failedSpawnTaskLabels.filter(Boolean))],
           resultPreview: String(result ?? "").slice(0, 120),
         });
-        const { result: finalSynthesisResult, finalQuery: finalSynthesisQuery } = await this.runWithClarifications(
-          finalSynthesisPrompt,
-          undefined,
-          emitTaskStep,
-          opts?.runOverrides,
+        const finalSynthesisRunOverrides = hadFailedSpawnFollowUp
+          ? buildTakeoverRunOverrides({
+              failedTaskLabels: failedSpawnTaskLabels,
+              stage: "final_synthesis",
+            })
+          : opts?.runOverrides;
+        const { result: finalSynthesisResult, finalQuery: finalSynthesisQuery } = await runWithTimeoutGuard(
+          this.runWithClarifications(
+            finalSynthesisPrompt,
+            undefined,
+            emitTaskStep,
+            finalSynthesisRunOverrides,
+          ),
         );
+        throwIfTimedOut();
         this.appendSessionHistory("user", finalSynthesisQuery);
         this.appendSessionHistory("assistant", finalSynthesisResult ?? "");
         result = finalSynthesisResult ?? result;
@@ -799,16 +1144,30 @@ export class AgentActor {
           "1. 如果任务需要生成网页、代码、文档或文件，请给出真实文件路径、关键内容或明确的产物说明。",
           "2. 如果你实际上还没有完成，就继续执行，不要输出无关算术、占位文本或空泛总结。",
           "3. 如果确实无法完成，请直接说明真实阻塞原因和缺失条件，不要假装完成。",
+          ...(hadFailedSpawnFollowUp
+            ? [
+                `4. 本轮存在失败子任务${failedSpawnTaskLabels.length ? `（${[...new Set(failedSpawnTaskLabels.filter(Boolean))].join("、")}）` : ""}。你必须先完成一次主协调复核：自己接管补齐，或在补充清晰输出路径与验收标准后重派一次子任务；禁止只汇报过程状态。`,
+              ]
+            : []),
           ...(finalValidation.reason?.includes("算术结果")
-            ? ["4. 这不是数学题，禁止调用 calculate 工具，也不要返回算式结果。请继续围绕真实产物执行。"] 
+            ? [`${hadFailedSpawnFollowUp ? "5" : "4"}. 这不是数学题，禁止调用 calculate 工具，也不要返回算式结果。请继续围绕真实产物执行。`] 
             : []),
         ].join("\n");
-        const { result: repairedResult, finalQuery: repairedQuery } = await this.runWithClarifications(
-          repairPrompt,
-          undefined,
-          emitTaskStep,
-          opts?.runOverrides,
+        const repairRunOverrides = hadFailedSpawnFollowUp
+          ? buildTakeoverRunOverrides({
+              failedTaskLabels: failedSpawnTaskLabels,
+              stage: "validation_repair",
+            })
+          : opts?.runOverrides;
+        const { result: repairedResult, finalQuery: repairedQuery } = await runWithTimeoutGuard(
+          this.runWithClarifications(
+            repairPrompt,
+            undefined,
+            emitTaskStep,
+            repairRunOverrides,
+          ),
         );
+        throwIfTimedOut();
         this.appendSessionHistory("user", repairedQuery);
         this.appendSessionHistory("assistant", repairedResult ?? "");
         result = repairedResult ?? result;
@@ -823,7 +1182,7 @@ export class AgentActor {
         }
       }
 
-      if (globalTimeoutId) clearTimeout(globalTimeoutId);
+      if (timeoutGuardId) clearInterval(timeoutGuardId);
 
       task.status = "completed";
       this.applyLatestRecallToTask(task);
@@ -847,6 +1206,7 @@ export class AgentActor {
           finalResultPreview: String(result ?? "").slice(0, 160),
         });
       }
+      this._abortReason = null;
       this.setStatus("idle");
 
       // 自动提取记忆（对标 OpenClaw session-memory hook）
@@ -868,10 +1228,18 @@ export class AgentActor {
       this.emit("task_completed", { taskId: task.id, result, elapsed });
       return task;
     } catch (e) {
-      if (globalTimeoutId) clearTimeout(globalTimeoutId);
+      if (timeoutGuardId) clearInterval(timeoutGuardId);
 
-      const error = e instanceof Error ? e.message : String(e);
-      task.status = error === "Aborted" ? "aborted" : "error";
+      const rawError = e instanceof Error ? e.message : String(e);
+      const abortReason = this._abortReason;
+      const error = rawError === "Aborted"
+        ? this.consumeAbortReason()
+        : rawError;
+      if (abortReason && abortReason === rawError) {
+        this.consumeAbortReason(rawError);
+      }
+      const isTimeoutAbort = isTimeoutErrorMessage(error);
+      task.status = rawError === "Aborted" || Boolean(abortReason) || isTimeoutAbort ? "aborted" : "error";
       this.applyLatestRecallToTask(task);
       task.error = error;
       task.finishedAt = Date.now();
@@ -893,6 +1261,7 @@ export class AgentActor {
           error,
         });
       }
+      this._abortReason = null;
       this.setStatus("idle");
       if (this.actorSystem && opts?.publishResult !== false) {
         this.actorSystem.publishResult(
@@ -970,12 +1339,15 @@ export class AgentActor {
   }
 
   /** 等待 inbox 有消息或超时 */
-  private waitForInbox(timeoutMs: number): Promise<void> {
+  private waitForInbox(timeoutMs: number, shouldStop?: () => boolean): Promise<void> {
     return new Promise((resolve) => {
-      if (this.inbox.length > 0) { resolve(); return; }
-      const timer = setTimeout(resolve, timeoutMs);
+      if (this.inbox.length > 0 || shouldStop?.()) { resolve(); return; }
+      const timer = setTimeout(() => {
+        clearInterval(check);
+        resolve();
+      }, timeoutMs);
       const check = setInterval(() => {
-        if (this.inbox.length > 0) {
+        if (this.inbox.length > 0 || shouldStop?.()) {
           clearTimeout(timer);
           clearInterval(check);
           resolve();
@@ -986,7 +1358,10 @@ export class AgentActor {
   }
 
   /** 停止当前任务 */
-  abort(): void {
+  abort(reason?: string): void {
+    if (reason) {
+      this._abortReason = reason;
+    }
     this.actorSystem?.cancelPendingInteractionsForActor(this.id);
     this.abortController?.abort();
   }
@@ -1048,7 +1423,11 @@ export class AgentActor {
       const resolution = await Promise.race([
         interrupt.waitForReply(),
         new Promise<never>((_, reject) => {
-          waitingAbort.signal.addEventListener("abort", () => reject(new Error("Aborted")), { once: true });
+          waitingAbort.signal.addEventListener(
+            "abort",
+            () => reject(new Error(this._abortReason ?? "Aborted")),
+            { once: true },
+          );
         }),
       ]);
 
@@ -1114,6 +1493,12 @@ export class AgentActor {
     return `${baseQuery}\n\n${clarificationBlock}`;
   }
 
+  private consumeAbortReason(fallback = "Aborted"): string {
+    const resolved = this._abortReason ?? fallback;
+    this._abortReason = null;
+    return resolved;
+  }
+
   /** 完全停止 Actor */
   stop(): void {
     this.abort();
@@ -1136,7 +1521,21 @@ export class AgentActor {
     if (this._status === status) return;
     const prev = this._status;
     this._status = status;
+    actorInfoLog(this.role.name, "status change", {
+      actorId: this.id,
+      prevStatus: prev,
+      nextStatus: status,
+      inboxSize: this.inbox.length,
+      currentTaskId: this.currentTask?.id,
+    });
     this.emit("status_change", { prev, next: status });
+    if (status === "idle" && this.inbox.length > 0) {
+      actorDebugLog(
+        this.role.name,
+        `setStatus: idle with queued inbox=${this.inbox.length}, triggering wakeUpForInbox`,
+      );
+      this.wakeUpForInbox();
+    }
   }
 
   private emit(type: ActorEventType, detail?: unknown): void {
@@ -1213,6 +1612,15 @@ export class AgentActor {
       this.role.name,
       `runWithInbox: model=${effectiveModelOverride ?? "default"}, maxIter=${effectiveMaxIterations}, thinking=${effectiveThinkingLevel ?? "adaptive"}, inboxSize=${this.inbox.length}`,
     );
+    actorInfoLog(this.role.name, "runWithInbox start", {
+      actorId: this.id,
+      model: effectiveModelOverride ?? "default",
+      maxIterations: effectiveMaxIterations,
+      thinkingLevel: effectiveThinkingLevel ?? "adaptive",
+      inboxSize: this.inbox.length,
+      imageCount: activeImageRefs.size,
+      queryPreview: previewActorText(query),
+    });
 
     const ctx: ActorRunContext = {
       query,
@@ -1241,6 +1649,13 @@ export class AgentActor {
     };
 
     await runMiddlewareChain(createDefaultMiddlewares(), ctx);
+    actorInfoLog(this.role.name, "runWithInbox middleware completed", {
+      actorId: this.id,
+      toolCount: ctx.tools.length,
+      contextMessageCount: ctx.contextMessages.length,
+      hasSkillsPrompt: Boolean(ctx.skillsPrompt),
+      hasMemoryPrompt: Boolean(ctx.userMemoryPrompt),
+    });
 
     this._lastMemoryRecallAttempted = ctx.memoryRecallAttempted === true;
     this._lastMemoryRecallPreview = [...(ctx.appliedMemoryPreview ?? [])];
@@ -1292,26 +1707,38 @@ export class AgentActor {
       },
       (step) => {
         onStep?.(step);
-        if (this.actorSystem && step.toolName) {
-          if (step.type === "action" && step.toolInput) {
-            appendToolCall(this.actorSystem.sessionId, this.id, step.toolName, step.toolInput);
-            buildArtifactPayloadFromToolCall(this.id, this.actorSystem, step.toolName, step.toolInput);
-          } else if (step.type === "observation" && step.toolOutput !== undefined) {
-            appendToolResult(this.actorSystem.sessionId, this.id, step.toolName, step.toolOutput);
-          }
-        }
       },
     );
 
     try {
+      actorInfoLog(this.role.name, "runWithInbox invoking llm", {
+        actorId: this.id,
+        model: effectiveModelOverride ?? "default",
+        toolCount: ctx.tools.length,
+        hasRetry: Boolean(ctx.withRetry && ctx.retryConfig),
+        imageCount: activeImageRefs.size,
+        queryPreview: previewActorText(query),
+      });
       if (ctx.withRetry && ctx.retryConfig) {
         const retryConf = ctx.retryConfig as Required<typeof ctx.retryConfig>;
         const answer = await ctx.withRetry(() => agent.run(query, signal, images), retryConf, `LLM call for ${this.role.name}`);
+        actorInfoLog(this.role.name, "runWithInbox llm completed", {
+          actorId: this.id,
+          answerPreview: previewActorText(answer),
+        });
         return answer;
       }
       const answer = await agent.run(query, signal, images);
+      actorInfoLog(this.role.name, "runWithInbox llm completed", {
+        actorId: this.id,
+        answerPreview: previewActorText(answer),
+      });
       return answer;
     } catch (error) {
+      actorErrorLog(this.role.name, "runWithInbox llm failed", {
+        actorId: this.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
       const recovered = allowContextRecovery
         ? await this.tryRecoverDialogContextPressure(query, onStep, error)
         : false;

@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { ActorConfig, ExecutionPolicy, ToolPolicy } from "./types";
 import type { ExecutionContract } from "@/core/collaboration/types";
@@ -24,10 +24,14 @@ vi.mock("./agent-actor", () => {
     private toolPolicy?: ToolPolicy;
     private executionPolicyValue?: ExecutionPolicy;
     private systemPromptOverride?: string;
+    private timeoutSecondsValue?: number;
+    private idleLeaseSecondsValue?: number;
     private _status = "idle";
     private inbox: unknown[] = [];
+    private handlers: Array<(event: { type: string; actorId: string; timestamp: number; detail?: unknown }) => void> = [];
     lastAssignedQuery?: string;
     lastAssignedImages?: string[];
+    lastAssignOptions?: { publishResult?: boolean; runOverrides?: Record<string, unknown> };
     lastMemoryRecallAttempted = false;
     lastMemoryRecallPreview: string[] = [];
     lastTranscriptRecallAttempted = false;
@@ -44,9 +48,26 @@ vi.mock("./agent-actor", () => {
       this.toolPolicy = config.toolPolicy;
       this.executionPolicyValue = config.executionPolicy;
       this.systemPromptOverride = config.systemPromptOverride;
+      this.timeoutSecondsValue = config.timeoutSeconds;
+      this.idleLeaseSecondsValue = config.idleLeaseSeconds;
     }
 
-    on() {}
+    on(handler: (event: { type: string; actorId: string; timestamp: number; detail?: unknown }) => void) {
+      this.handlers.push(handler);
+      return () => {
+        this.handlers = this.handlers.filter((item) => item !== handler);
+      };
+    }
+
+    emitEvent(type: string, detail?: unknown) {
+      const event = {
+        type,
+        actorId: this.id,
+        timestamp: Date.now(),
+        detail,
+      };
+      this.handlers.forEach((handler) => handler(event));
+    }
 
     receive(message: unknown) {
       this.inbox.push(message);
@@ -90,7 +111,11 @@ vi.mock("./agent-actor", () => {
     }
 
     get timeoutSeconds() {
-      return undefined;
+      return this.timeoutSecondsValue;
+    }
+
+    get idleLeaseSeconds() {
+      return this.idleLeaseSecondsValue;
     }
 
     get contextTokens() {
@@ -113,10 +138,12 @@ vi.mock("./agent-actor", () => {
       return [];
     }
 
-    assignTask(query: string, images?: string[]) {
+    assignTask(query: string, images?: string[], opts?: { publishResult?: boolean; runOverrides?: Record<string, unknown> }) {
       this.lastAssignedQuery = query;
       this.lastAssignedImages = images;
+      this.lastAssignOptions = opts;
       this._status = "running";
+      this.emitEvent("task_started", { taskId: "task-1", query });
       return Promise.resolve({
         id: "task-1",
         query,
@@ -125,6 +152,10 @@ vi.mock("./agent-actor", () => {
         steps: [],
         startedAt: Date.now(),
         finishedAt: Date.now(),
+      }).then((result) => {
+        this._status = "idle";
+        this.emitEvent("task_completed", { taskId: result.id, result: result.result });
+        return result;
       });
     }
 
@@ -175,6 +206,10 @@ vi.mock("./spawned-task-result-validator", () => ({
 }));
 
 let ActorSystem: typeof import("./actor-system").ActorSystem;
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 beforeAll(async () => {
   ({ ActorSystem } = await import("./actor-system"));
@@ -426,6 +461,29 @@ describe("ActorSystem.replyToMessage", () => {
   });
 });
 
+describe("ActorSystem coordinator cleanup", () => {
+  it("removes idle support actors after the coordinator completes the main task", async () => {
+    const system = new ActorSystem();
+    const coordinator = system.spawn(buildActorConfig("coordinator", "Coordinator")) as unknown as {
+      emitEvent: (type: string, detail?: unknown) => void;
+    };
+    system.spawn(buildActorConfig("specialist-a", "Specialist A"));
+    system.spawn(buildActorConfig("specialist-b", "Specialist B"));
+
+    coordinator.emitEvent("task_completed", {
+      taskId: "task-main",
+      result: "最终结果已输出",
+      elapsed: 1234,
+    });
+
+    await Promise.resolve();
+
+    expect(system.get("coordinator")).toBeDefined();
+    expect(system.get("specialist-a")).toBeUndefined();
+    expect(system.get("specialist-b")).toBeUndefined();
+  });
+});
+
 describe("ActorSystem.spawnTask", () => {
   it("passes inherited images to the spawned actor task", () => {
     const system = new ActorSystem();
@@ -442,6 +500,54 @@ describe("ActorSystem.spawnTask", () => {
     if ("error" in record) return;
     expect(record.images).toEqual(["/tmp/design.png"]);
     expect(specialist.lastAssignedImages).toEqual(["/tmp/design.png"]);
+  });
+
+  it("passes the effective worker timeout policy down into the per-run overrides", () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+    const specialist = system.spawn(buildActorConfig("specialist", "Specialist", {
+      timeoutSeconds: 240,
+    })) as unknown as {
+      lastAssignOptions?: { runOverrides?: Record<string, unknown> };
+    };
+
+    const record = system.spawnTask("coordinator", "specialist", "长任务", {
+      timeoutSeconds: 600,
+      cleanup: "keep",
+    });
+
+    expect("error" in record).toBe(false);
+    if ("error" in record) return;
+    expect(specialist.lastAssignOptions?.runOverrides).toMatchObject({
+      timeoutSeconds: 600,
+      idleLeaseSeconds: 180,
+    });
+  });
+
+  it("does not let create_if_missing workers shrink below the default budget", () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+
+    const record = system.spawnTask("coordinator", "course-designer-1", "生成课程名称与课程介绍", {
+      createIfMissing: true,
+      timeoutSeconds: 300,
+      cleanup: "keep",
+    });
+
+    expect("error" in record).toBe(false);
+    if ("error" in record) return;
+
+    const worker = system.get(record.targetActorId) as unknown as {
+      timeoutSeconds?: number;
+      lastAssignOptions?: { runOverrides?: Record<string, unknown> };
+    };
+
+    expect(record.budgetSeconds).toBe(600);
+    expect(worker.timeoutSeconds).toBe(600);
+    expect(worker.lastAssignOptions?.runOverrides).toMatchObject({
+      timeoutSeconds: 600,
+      idleLeaseSeconds: 180,
+    });
   });
 
   it("wraps spawned work in a contract-style delegation prompt", () => {
@@ -934,6 +1040,127 @@ describe("ActorSystem.spawnTask", () => {
     expect(record.plannedDelegationId).toBe("delegation-graph-1");
     expect(record.dispatchSource).toBe("contract_suggestion");
     expect(record.roleBoundary).toBe("validator");
+  });
+
+  it("keeps a worker alive past the old 180s cutoff while progress continues", () => {
+    vi.useFakeTimers();
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+    const specialist = system.spawn(buildActorConfig("specialist", "Specialist")) as unknown as {
+      assignTask: ReturnType<typeof vi.fn>;
+      emitEvent: (type: string, detail?: unknown) => void;
+    };
+
+    specialist.assignTask = vi.fn(() => new Promise(() => undefined));
+
+    const record = system.spawnTask("coordinator", "specialist", "长时间整理实现方案", {
+      cleanup: "keep",
+    });
+
+    expect("error" in record).toBe(false);
+    if ("error" in record) return;
+
+    vi.advanceTimersByTime(120_000);
+    specialist.emitEvent("step", {
+      step: {
+        type: "thinking",
+        content: "仍在持续分析范围和依赖",
+      },
+    });
+
+    vi.advanceTimersByTime(120_000);
+    specialist.emitEvent("step", {
+      step: {
+        type: "action",
+        content: "开始整理实施步骤",
+      },
+    });
+
+    vi.advanceTimersByTime(160_000);
+
+    expect(system.getSpawnedTask(record.runId)?.status).toBe("running");
+
+    system.abortSpawnedTask(record.runId, {
+      error: "test cleanup",
+    });
+  });
+
+  it("times out a worker as idle when no activity arrives within the lease", () => {
+    vi.useFakeTimers();
+    const system = new ActorSystem();
+    const timeoutEvents: Array<{
+      type: string;
+      detail?: unknown;
+    }> = [];
+    system.onEvent((event) => {
+      if ("type" in event) {
+        timeoutEvents.push(event as { type: string; detail?: unknown });
+      }
+    });
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+    const specialist = system.spawn(buildActorConfig("specialist", "Specialist")) as unknown as {
+      assignTask: ReturnType<typeof vi.fn>;
+    };
+
+    specialist.assignTask = vi.fn(() => new Promise(() => undefined));
+
+    const record = system.spawnTask("coordinator", "specialist", "无进展任务", {
+      cleanup: "keep",
+    });
+
+    expect("error" in record).toBe(false);
+    if ("error" in record) return;
+
+    vi.advanceTimersByTime(185_000);
+
+    const updated = system.getSpawnedTask(record.runId);
+    expect(updated?.status).toBe("aborted");
+    expect(updated?.timeoutReason).toBe("idle");
+    expect(updated?.error).toBe("Idle timeout after 180s");
+    expect(timeoutEvents.find((event) => event.type === "spawned_task_timeout")).toMatchObject({
+      detail: expect.objectContaining({
+        runId: record.runId,
+        timeoutReason: "idle",
+        budgetSeconds: 600,
+        idleLeaseSeconds: 180,
+      }),
+    });
+  });
+
+  it("still aborts a worker when the total budget is exceeded despite progress", () => {
+    vi.useFakeTimers();
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+    const specialist = system.spawn(buildActorConfig("specialist", "Specialist")) as unknown as {
+      assignTask: ReturnType<typeof vi.fn>;
+      emitEvent: (type: string, detail?: unknown) => void;
+    };
+
+    specialist.assignTask = vi.fn(() => new Promise(() => undefined));
+
+    const record = system.spawnTask("coordinator", "specialist", "持续推进但超过预算", {
+      cleanup: "keep",
+    });
+
+    expect("error" in record).toBe(false);
+    if ("error" in record) return;
+
+    for (let i = 0; i < 4; i += 1) {
+      vi.advanceTimersByTime(120_000);
+      specialist.emitEvent("step", {
+        step: {
+          type: "thinking",
+          content: `progress-${i}`,
+        },
+      });
+    }
+
+    vi.advanceTimersByTime(125_000);
+
+    const updated = system.getSpawnedTask(record.runId);
+    expect(updated?.status).toBe("aborted");
+    expect(updated?.timeoutReason).toBe("budget");
+    expect(updated?.error).toBe("Budget exceeded after 600s");
   });
 });
 

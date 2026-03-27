@@ -266,7 +266,7 @@ export function createActorCommunicationTools(
       },
       timeout_seconds: {
         type: "number",
-        description: "超时时间（秒），默认 120 秒。超时后子任务自动终止。",
+        description: "子任务总预算（秒）。默认按 Dialog worker 预算 600 秒执行；期间只要持续有进展就不会因旧式 wall-clock 被误杀。若填写值低于默认预算，系统会按默认预算执行，避免模型把复杂任务过早超时。超过预算后子任务会停止。",
         required: false,
       },
       attachments: {

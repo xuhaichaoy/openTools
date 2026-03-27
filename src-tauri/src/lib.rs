@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    webview::PageLoadEvent,
     Manager, PhysicalPosition, Position,
 };
 
@@ -191,6 +192,17 @@ fn place_main_window_top_center(window: &tauri::WebviewWindow) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        .on_page_load(|webview, payload| {
+            if webview.label() != "main" || payload.event() != PageLoadEvent::Started {
+                return;
+            }
+            let cancellation = webview.app_handle().state::<commands::ai::StreamCancellation>();
+            cancellation.cancel(None);
+            log::info!(
+                "[ai_stream] cancelled active streams on main webview page reload: {}",
+                payload.url()
+            );
+        })
         .plugin(
             tauri_plugin_log::Builder::default()
                 .level(log::LevelFilter::Info)
@@ -416,6 +428,7 @@ pub fn run() {
             commands::system::extract_spreadsheet_text,
             commands::system::extract_document_text,
             commands::system::export_spreadsheet,
+            commands::system::export_document,
             // ── File Search ──
             commands::file_search::file_search,
             commands::file_search::file_open,

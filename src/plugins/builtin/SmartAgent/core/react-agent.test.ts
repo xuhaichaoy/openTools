@@ -29,6 +29,40 @@ function createMockAI(
 }
 
 describe("ReActAgent FC compatibility cache", () => {
+  it("should not expose delegate_subtask when managed dialog delegation tools exist", () => {
+    const ai = createMockAI(async () => ({
+      type: "content",
+      content: "done",
+    }));
+
+    const tools: AgentTool[] = [
+      ...noopTools,
+      {
+        name: "spawn_task",
+        description: "spawn task",
+        execute: async () => ({ status: "queued" }),
+      },
+      {
+        name: "wait_for_spawned_tasks",
+        description: "wait spawned tasks",
+        execute: async () => ({ status: "waiting" }),
+      },
+    ];
+
+    const agent = new ReActAgent(ai, tools, {
+      maxIterations: 2,
+      fcCompatibilityKey: "managed-dialog-delegation-tools",
+    });
+
+    const toolNames = (agent as unknown as {
+      getAvailableTools(): AgentTool[];
+    }).getAvailableTools().map((tool) => tool.name);
+
+    expect(toolNames).toContain("spawn_task");
+    expect(toolNames).toContain("wait_for_spawned_tasks");
+    expect(toolNames).not.toContain("delegate_subtask");
+  });
+
   it("should not trigger memory recall correction from wrapped system planning text alone", async () => {
     let fcCalls = 0;
     const ai = createMockAI(async () => {
@@ -265,6 +299,62 @@ describe("ReActAgent FC compatibility cache", () => {
     expect(fcCalls).toBe(2);
   });
 
+  it("should finish immediately after export_document succeeds for docx saves", async () => {
+    let fcCalls = 0;
+    let capturedPath = "";
+    let capturedContent = "";
+
+    const ai = createMockAI(async () => {
+      fcCalls += 1;
+      return {
+        type: "tool_calls",
+        toolCalls: [
+          {
+            id: "call-export-document",
+            type: "function",
+            function: {
+              name: "export_document",
+              arguments: JSON.stringify({
+                path: "/Users/haichao/Downloads/1.docx",
+                content: "# 课程方案\n\n- 模块一：运营方法论",
+                title: "课程方案",
+              }),
+            },
+          },
+        ],
+      };
+    });
+
+    const tools: AgentTool[] = [
+      {
+        name: "export_document",
+        description: "export docx",
+        parameters: {
+          path: { type: "string", description: "path" },
+          content: { type: "string", description: "content" },
+          title: { type: "string", description: "title", required: false },
+        },
+        execute: async (params) => {
+          capturedPath = String(params.path ?? "");
+          capturedContent = String(params.content ?? "");
+          return { path: capturedPath, format: "docx" };
+        },
+      },
+    ];
+
+    const agent = new ReActAgent(ai, tools, {
+      maxIterations: 4,
+      fcCompatibilityKey: "export-document-quick-answer",
+    });
+
+    const answer = await agent.run("将课程方案保存为 Word 到 Downloads/1.docx");
+
+    expect(answer).toContain("已导出Word 文档到 /Users/haichao/Downloads/1.docx");
+    expect(capturedPath).toBe("/Users/haichao/Downloads/1.docx");
+    expect(capturedContent).toContain("课程方案");
+    expect(fcCalls).toBe(1);
+  });
+
   it("should recover malformed write_file arguments with raw html content", async () => {
     let fcCalls = 0;
     let capturedPath = "";
@@ -397,6 +487,63 @@ describe("ReActAgent FC compatibility cache", () => {
     expect(lastToolStep?.content).toBe(finalArgs);
     expect(lastToolStep?.content.match(/<!doctype html>/gi)?.length ?? 0).toBe(1);
     expect(lastToolStep?.content).not.toContain("temporary tail");
+  });
+
+  it("should not surface generic tool arg streams as UI tool_streaming steps", async () => {
+    const steps: Array<{ type: string; content: string; streaming?: boolean }> = [];
+
+    const ai = createMockAI(async ({ onToolArgs }) => {
+      onToolArgs?.("{\"summary\":\"先给出 15-20 门课程列表\"}");
+      onToolArgs?.("{\"summary\":\"先给出 15-20 门课程列表，并导出 Excel\"}");
+      return {
+        type: "tool_calls",
+        toolCalls: [
+          {
+            id: "call-task-done",
+            type: "function",
+            function: {
+              name: "task_done",
+              arguments: "{\"summary\":\"已整理课程列表并准备导出 Excel\"}",
+            },
+          },
+        ],
+      };
+    });
+
+    const tools: AgentTool[] = [
+      {
+        name: "task_done",
+        description: "finish task",
+        parameters: {
+          summary: { type: "string", description: "summary" },
+        },
+        execute: async (params) => ({
+          ok: true,
+          summary: String(params.summary ?? ""),
+        }),
+      },
+    ];
+
+    const agent = new ReActAgent(
+      ai,
+      tools,
+      {
+        maxIterations: 2,
+        fcCompatibilityKey: "hide-generic-tool-args-preview",
+      },
+      (step) => {
+        steps.push({
+          type: step.type,
+          content: step.content,
+          streaming: step.streaming,
+        });
+      },
+    );
+
+    const answer = await agent.run("生成课程列表并导出 Excel");
+
+    expect(answer).toContain("课程列表");
+    expect(steps.some((step) => step.type === "tool_streaming")).toBe(false);
   });
 
   it("should flush the final streamed answer before task_done uses it", async () => {
@@ -628,6 +775,43 @@ describe("ReActAgent FC compatibility cache", () => {
     const secondAnswer = await second.run("second");
     expect(secondAnswer).toContain("文本模式回答");
     expect(fcCalls).toBe(1);
+  });
+
+  it("should stop early when downgraded text mode keeps returning empty content", async () => {
+    let fcCalls = 0;
+    let streamCalls = 0;
+    let chatCalls = 0;
+
+    const ai: MToolsAI = {
+      chat: async () => {
+        chatCalls += 1;
+        return { content: "" };
+      },
+      stream: async ({ onDone }) => {
+        streamCalls += 1;
+        onDone?.("");
+      },
+      streamWithTools: async () => {
+        fcCalls += 1;
+        throw new Error("FC_INCOMPATIBLE: ai_agent_stream 返回空响应（无 chunk 且无 tool_calls）");
+      },
+      embedding: async () => [],
+      getModels: async () => [],
+    };
+
+    const agent = new ReActAgent(ai, noopTools, {
+      maxIterations: 10,
+      fcCompatibilityKey: "downgrade-text-empty-stop",
+    });
+
+    const answer = await agent.run("根据上传的 xlsx 生成课程方案");
+
+    expect(answer).toContain("模型连续未返回有效内容");
+    expect(answer).toContain("实际运行轮数：3 / 10");
+    expect(answer).not.toContain("已达到最大执行步数（10 步）");
+    expect(fcCalls).toBe(1);
+    expect(streamCalls).toBe(3);
+    expect(chatCalls).toBe(3);
   });
 
   it("should not treat calculate output as final answer for concrete artifact tasks", async () => {
@@ -923,11 +1107,11 @@ describe("ReActAgent FC compatibility cache", () => {
 
     const answer = await agent.run("继续处理当前任务");
 
-    expect(answer).toContain("执行已提前停止：检测到重复 tool_calls（最大 6 步）。");
+    expect(answer).toContain("执行已提前停止：检测到连续重复的 tool_calls 计划（最大 6 步）。");
     expect(answer).toContain("执行诊断：");
     expect(answer).toContain("实际运行轮数：4 / 6");
     expect(answer).toContain("轮数定义：1 轮 = 1 次模型决策（返回回答或 tool_calls），不等于 1 次工具执行");
-    expect(answer).toContain("停止原因：连续 2 轮 tool_calls 完全相同");
+    expect(answer).toContain("停止原因：连续 2 轮 tool_calls 计划完全相同");
     expect(answer).toContain("工具执行次数：2");
     expect(answer).toContain("重复工具模式：noop");
   });
@@ -938,7 +1122,7 @@ describe("ReActAgent FC compatibility cache", () => {
       const hasCorrectionPrompt = messages.some((message) =>
         message.role === "user"
         && typeof message.content === "string"
-        && message.content.includes("不要再次重复调用这些工具"),
+        && message.content.includes("不要再次提交完全相同的 tool_calls 计划"),
       );
       if (hasCorrectionPrompt) {
         return {
@@ -1020,7 +1204,7 @@ describe("ReActAgent FC compatibility cache", () => {
             type: "function",
             function: {
               name: "noop",
-              arguments: `{\"tag\":\"${fcCalls}\"}`,
+              arguments: `{"tag":"${fcCalls}"}`,
             },
           },
         ],

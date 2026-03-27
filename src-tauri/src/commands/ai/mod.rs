@@ -10,7 +10,7 @@ pub mod types;
 pub use stream::{FrontendToolState, StreamCancellation, ToolConfirmationState};
 pub use types::{AIConfig, ChatMessage, OwnKeyModelConfig};
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::error::AppError;
 
@@ -31,8 +31,7 @@ fn should_force_rag_for_query(query: &str) -> bool {
 
     // 产品知识问答兜底：即便用户未开启自动检索，也先做一次预检索，避免模型遗漏工具调用。
     let name_lower = crate::branding::APP_NAME.to_lowercase();
-    let has_product_name =
-        q.contains(&name_lower) || q.contains("HiClow") || q.contains("mtools");
+    let has_product_name = q.contains(&name_lower) || q.contains("HiClow") || q.contains("mtools");
     if !has_product_name {
         return false;
     }
@@ -346,6 +345,46 @@ pub async fn ai_chat(messages: Vec<ChatMessage>, config: AIConfig) -> Result<Str
 /// 流式 AI 对话（支持 Function Calling + 多轮工具调用）
 #[tauri::command]
 pub async fn ai_chat_stream(
+    app: AppHandle,
+    messages: Vec<ChatMessage>,
+    config: AIConfig,
+    conversation_id: String,
+    extra_tools: Option<Vec<serde_json::Value>>,
+    skip_tools: Option<bool>,
+) -> Result<(), AppError> {
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = run_ai_chat_stream(
+            app_handle.clone(),
+            messages,
+            config,
+            conversation_id.clone(),
+            extra_tools,
+            skip_tools,
+        )
+        .await
+        {
+            let error_message = error.to_string();
+            log::error!(
+                "[ai_chat_stream] background task failed conv={} err={}",
+                conversation_id,
+                error_message
+            );
+            let _ = app_handle.emit(
+                "ai-stream-error",
+                serde_json::json!({
+                    "conversation_id": conversation_id,
+                    "error": error_message,
+                }),
+            );
+            let cancellation = app_handle.state::<StreamCancellation>();
+            cancellation.clear(&conversation_id);
+        }
+    });
+    Ok(())
+}
+
+async fn run_ai_chat_stream(
     app: AppHandle,
     messages: Vec<ChatMessage>,
     config: AIConfig,

@@ -8,6 +8,7 @@ import {
   buildCollaborationChildSessions,
   buildCollaborationContractDelegations,
 } from "./child-session";
+import { createLogger } from "@/core/logger";
 import {
   cloneExecutionContract,
   doesExecutionContractMatchActorRoster,
@@ -42,6 +43,8 @@ function summarizeText(value?: string, maxLength = 140): string | undefined {
   if (normalized.length <= maxLength) return normalized;
   return `${normalized.slice(0, Math.max(1, maxLength - 3)).trimEnd()}...`;
 }
+
+const log = createLogger("CollaborationSession");
 
 function normalizeDispatchInput(
   input: CollaborationDispatchInput | string,
@@ -314,6 +317,16 @@ export class CollaborationSessionController {
       focusedChildSessionId: item.focusedChildSessionId ?? this.focusedChildSessionId,
     };
     this.queuedFollowUps = [...this.queuedFollowUps, queued];
+    log.info("Queued follow-up enqueued", {
+      surface: this.surface,
+      followUpId: queued.id,
+      policy,
+      executionStrategy,
+      contractStatus,
+      focusedChildSessionId: queued.focusedChildSessionId ?? null,
+      queuedFollowUpCount: this.queuedFollowUps.length,
+      contentPreview: summarizeText(queued.displayText ?? queued.content, 120),
+    });
     this.refreshProjection();
     return queued.id;
   }
@@ -332,6 +345,14 @@ export class CollaborationSessionController {
       this.refreshProjection();
       throw new Error("Queued follow-up needs reapproval before dispatch");
     }
+    log.info("Running queued follow-up", {
+      surface: this.surface,
+      followUpId: itemId,
+      policy: item.policy,
+      executionStrategy: item.executionStrategy,
+      contractStatus: item.contractStatus,
+      contentPreview: summarizeText(item.displayText ?? item.content, 120),
+    });
     const result = this.dispatchUserInput({
       content: item.content,
       displayText: item.displayText,
@@ -440,11 +461,41 @@ export class CollaborationSessionController {
     const effectivePending = explicitPending
       ?? (!forceAsNewMessage && pendingInteractions.length === 1 ? pendingInteractions[0] : undefined);
 
+    log.info("dispatchUserInput start", {
+      surface: this.surface,
+      contentPreview: summarizeText(
+        normalizedInput.displayText ?? normalizedInput.briefContent ?? normalizedInput.content,
+        120,
+      ),
+      pendingInteractionCount: pendingInteractions.length,
+      pendingApprovalCount: pendingInteractions.filter((interaction) => interaction.type === "approval").length,
+      queuedFollowUpCount: this.queuedFollowUps.length,
+      selectedPendingMessageId,
+      effectivePendingMessageId: effectivePending?.messageId ?? null,
+      directTargetActorId: options?.directTargetActorId ?? null,
+      steerTargetActorId: options?.steerTargetActorId ?? null,
+      forceAsNewMessage,
+      allowQueue: options?.allowQueue !== false,
+      activeContractState: this.activeContract?.state ?? null,
+      activeContractStrategy: this.activeContract?.executionStrategy ?? null,
+    });
+
     if (!forceAsNewMessage && pendingInteractions.length > 1 && !effectivePending) {
+      log.warn("dispatchUserInput blocked by multiple pending interactions", {
+        surface: this.surface,
+        pendingMessageIds: pendingInteractions.map((interaction) => interaction.messageId),
+      });
       throw new Error("当前有多条待处理交互，请先明确回复对象。");
     }
 
     if (effectivePending) {
+      log.info("dispatchUserInput resolved as pending interaction reply", {
+        surface: this.surface,
+        interactionId: effectivePending.id,
+        interactionType: effectivePending.type,
+        messageId: effectivePending.messageId,
+        fromActorId: effectivePending.fromActorId,
+      });
       return this.replyToInteraction(effectivePending.id, normalizedInput);
     }
 
@@ -471,8 +522,24 @@ export class CollaborationSessionController {
       hasFocusedChildSession: Boolean(focusedChild?.focusable),
       roomBusy: this.isRoomBusy(snapshot.childSessions),
     });
+    log.info("dispatchUserInput policy resolved", {
+      surface: this.surface,
+      policy,
+      hasFocusedChildSession: Boolean(focusedChild?.focusable),
+      focusedChildSessionId: focusedChild?.id ?? null,
+      roomBusy: this.isRoomBusy(snapshot.childSessions),
+      childSessionStatuses: snapshot.childSessions
+        .slice(0, 6)
+        .map((session) => `${session.label}:${session.status}`),
+    });
 
     if (focusedChild?.focusable && !options?.directTargetActorId && policy === "steer") {
+      log.info("dispatchUserInput routed to focused child session", {
+        surface: this.surface,
+        childSessionId: focusedChild.id,
+        runId: focusedChild.runId,
+        contentPreview: summarizeText(normalizedInput.displayText ?? normalizedInput.content, 120),
+      });
       const message = this.system.sendUserMessageToSpawnedSession?.(focusedChild.runId, normalizedInput.content, {
         _briefContent: normalizedInput.briefContent ?? normalizedInput.displayText,
         images: normalizedInput.images,
@@ -504,6 +571,13 @@ export class CollaborationSessionController {
         contract: options?.contract ?? this.activeContract,
         focusedChildSessionId: focusedChild?.id ?? null,
       }, policy);
+      log.warn("dispatchUserInput queued because room is busy", {
+        surface: this.surface,
+        followUpId,
+        policy,
+        focusedChildSessionId: focusedChild?.id ?? null,
+        contentPreview: summarizeText(normalizedInput.displayText ?? normalizedInput.content, 120),
+      });
       this.syncFromSystem();
       return { disposition: "queued", followUpId };
     }
@@ -511,20 +585,24 @@ export class CollaborationSessionController {
     const briefContent = normalizedInput.briefContent ?? normalizedInput.displayText;
     const strategy = options?.contract?.executionStrategy ?? this.activeContract?.executionStrategy ?? "coordinator";
     let message: DialogMessage | null = null;
+    let dispatchMode = "broadcast_and_resolve";
 
     if (options?.directTargetActorId) {
+      dispatchMode = "direct_target";
       message = this.system.send?.("user", options.directTargetActorId, normalizedInput.content, {
         _briefContent: briefContent,
         images: normalizedInput.images,
         relatedRunId: focusedChild?.runId,
       }) ?? null;
     } else if (strategy === "direct" && this.activeContract?.initialRecipientActorIds.length === 1) {
+      dispatchMode = "contract_direct";
       message = this.system.send?.("user", this.activeContract.initialRecipientActorIds[0], normalizedInput.content, {
         _briefContent: briefContent,
         images: normalizedInput.images,
         relatedRunId: focusedChild?.runId,
       }) ?? null;
     } else if (strategy === "broadcast") {
+      dispatchMode = "broadcast";
       message = this.system.broadcast?.("user", normalizedInput.content, {
         _briefContent: briefContent,
         images: normalizedInput.images,
@@ -547,6 +625,14 @@ export class CollaborationSessionController {
         })
         ?? null;
     }
+    log.info("dispatchUserInput dispatched", {
+      surface: this.surface,
+      dispatchMode,
+      strategy,
+      messageId: message?.id ?? null,
+      directTargetActorId: options?.directTargetActorId ?? null,
+      contentPreview: summarizeText(normalizedInput.displayText ?? normalizedInput.content, 120),
+    });
 
     if (normalizedInput.uploadRecords?.length) {
       this.system.registerSessionUploads?.(normalizedInput.uploadRecords, {
@@ -581,6 +667,17 @@ export class CollaborationSessionController {
     if (!interaction) {
       throw new Error(`Unknown pending interaction: ${interactionId}`);
     }
+    log.info("replyToInteraction dispatching reply", {
+      surface: this.surface,
+      interactionId: interaction.id,
+      interactionType: interaction.type,
+      messageId: interaction.messageId,
+      fromActorId: interaction.fromActorId,
+      contentPreview: summarizeText(
+        normalizedReply.displayText ?? normalizedReply.briefContent ?? normalizedReply.content,
+        120,
+      ),
+    });
     const message = this.system.replyToMessage?.(interaction.messageId, normalizedReply.content, {
       _briefContent: normalizedReply.briefContent ?? normalizedReply.displayText,
       images: normalizedReply.images,
@@ -592,6 +689,11 @@ export class CollaborationSessionController {
       });
     }
     this.syncFromSystem();
+    log.info("replyToInteraction completed", {
+      surface: this.surface,
+      interactionId: interaction.id,
+      messageId: message?.id ?? null,
+    });
     return {
       disposition: "replied",
       messageId: message?.id,

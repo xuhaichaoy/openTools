@@ -23,9 +23,9 @@ import { getAICenterHandoffImportPaths } from "@/core/ai/ai-center-handoff";
 import { normalizeAIProductMode } from "@/core/ai/ai-mode-types";
 
 import { AgentInputBar } from "./components/AgentInputBar";
-import { useToolTrustStore } from "@/store/command-allowlist-store";
 import { useAskUserStore } from "@/store/ask-user-store";
 import { useConfirmDialogStore } from "@/store/confirm-dialog-store";
+import { resolveInteractiveToolApproval } from "./core/interactive-tool-approval";
 import type { AskUserQuestion } from "./core/default-tools";
 import { AgentWorkbenchPanel } from "./components/AgentWorkbenchPanel";
 import { AgentHistoryDrawer } from "./components/AgentHistoryDrawer";
@@ -391,25 +391,13 @@ const SmartAgentPlugin = forwardRef<SmartAgentHandle, SmartAgentProps>(
       inputRef,
       scrollRef,
       openDangerConfirm: (toolName, params) => {
-        const toolTrust = useToolTrustStore.getState();
-        const cachedDecision = toolTrust.getCachedDecision(toolName, params);
-        if (cachedDecision !== null) {
-          return Promise.resolve(cachedDecision);
-        }
-        const assessment = toolTrust.assess(toolName, params);
-        if (assessment.decision !== "ask") {
-          toolTrust.rememberDecision(toolName, params, true);
-          return Promise.resolve(true);
-        }
-        return openConfirmDialog({
-          source: "agent",
+        return resolveInteractiveToolApproval({
+          ai,
+          aiMode: "build",
           toolName,
           params,
-          risk: assessment.risk,
-          reason: assessment.reason,
-        }).then((confirmed) => {
-          toolTrust.rememberDecision(toolName, params, confirmed);
-          return confirmed;
+          source: "agent",
+          openConfirmDialog,
         });
       },
       resetPerRunState,

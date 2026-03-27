@@ -28,6 +28,15 @@ pub struct SystemWriteFileResult {
     pub message: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ExportDocumentResult {
+    pub runtime: &'static str,
+    pub path: String,
+    pub format: String,
+    pub bytes: usize,
+    pub message: String,
+}
+
 /// 执行 Python 脚本
 #[tauri::command]
 pub async fn run_python_script(
@@ -659,6 +668,269 @@ pub async fn write_text_file(
         path: path.clone(),
         bytes: content.len(),
         message: format!("已写入 {} 字节到 {}", content.len(), path),
+    })
+}
+
+fn rtf_escape(text: &str) -> String {
+    let mut escaped = String::new();
+    for ch in text.chars() {
+        match ch {
+            '\\' => escaped.push_str(r"\\"),
+            '{' => escaped.push_str(r"\{"),
+            '}' => escaped.push_str(r"\}"),
+            '\t' => escaped.push_str(r"\tab "),
+            '\n' | '\r' => {}
+            _ if ch.is_ascii() && !ch.is_control() => escaped.push(ch),
+            _ => {
+                let mut buf = [0u16; 2];
+                for unit in ch.encode_utf16(&mut buf) {
+                    let signed = if *unit <= 32767 {
+                        i32::from(*unit)
+                    } else {
+                        i32::from(*unit) - 65536
+                    };
+                    escaped.push_str(&format!(r"\u{}?", signed));
+                }
+            }
+        }
+    }
+    escaped
+}
+
+fn strip_markdown_inline(text: &str) -> String {
+    text.replace('`', "")
+}
+
+fn bold_segments_to_rtf(text: &str) -> String {
+    let mut result = String::new();
+    for (index, segment) in text.split("**").enumerate() {
+        if segment.is_empty() {
+            continue;
+        }
+        if index % 2 == 1 {
+            result.push_str(r"\b ");
+            result.push_str(&rtf_escape(&strip_markdown_inline(segment)));
+            result.push_str(r" \b0 ");
+        } else {
+            result.push_str(&rtf_escape(&strip_markdown_inline(segment)));
+        }
+    }
+    result.trim().to_string()
+}
+
+fn paragraph(text: &str) -> String {
+    format!(r"\pard\sa120\sl300\slmult1 {}\par", text)
+}
+
+fn heading(text: &str, level: usize) -> String {
+    let size = match level {
+        1 => 40,
+        2 => 32,
+        3 => 28,
+        4 => 26,
+        _ => 24,
+    };
+    format!(
+        r"\pard\sa180\sl320\slmult1\b\fs{} {}\b0\fs24\par",
+        size,
+        rtf_escape(&strip_markdown_inline(text.trim()))
+    )
+}
+
+fn parse_heading(line: &str) -> Option<(usize, &str)> {
+    let trimmed = line.trim_start();
+    let level = trimmed.chars().take_while(|ch| *ch == '#').count();
+    if !(1..=6).contains(&level) {
+        return None;
+    }
+    let rest = trimmed.get(level..)?.trim_start();
+    if rest.is_empty() {
+        return None;
+    }
+    Some((level, rest))
+}
+
+fn parse_ordered_item(line: &str) -> Option<(String, String)> {
+    let trimmed = line.trim_start();
+    let digit_count = trimmed.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    if digit_count == 0 {
+        return None;
+    }
+    let suffix = trimmed.get(digit_count..)?;
+    let content = suffix.strip_prefix(". ")?.trim();
+    if content.is_empty() {
+        return None;
+    }
+    Some((trimmed[..digit_count].to_string(), content.to_string()))
+}
+
+fn markdown_to_rtf(markdown_text: &str, title: &str) -> String {
+    let mut body: Vec<String> = Vec::new();
+    if !title.trim().is_empty() {
+        body.push(heading(title.trim(), 1));
+    }
+
+    for raw_line in markdown_text.lines() {
+        let line = raw_line.trim_end();
+        if line.trim().is_empty() {
+            body.push(r"\pard\sa80\par".to_string());
+            continue;
+        }
+
+        if let Some((level, text)) = parse_heading(line) {
+            body.push(heading(text, level));
+            continue;
+        }
+
+        if let Some(text) = line.trim_start().strip_prefix("> ") {
+            body.push(format!(
+                r"\pard\li720\i {} \i0\li0\par",
+                bold_segments_to_rtf(text.trim())
+            ));
+            continue;
+        }
+
+        if let Some(text) = line
+            .trim_start()
+            .strip_prefix("- ")
+            .or_else(|| line.trim_start().strip_prefix("* "))
+        {
+            body.push(format!(
+                r"\pard\li720\tx720 \u8226?\tab {}\par",
+                bold_segments_to_rtf(text.trim())
+            ));
+            continue;
+        }
+
+        if let Some((number, content)) = parse_ordered_item(line) {
+            body.push(format!(
+                r"\pard\li720\tx720 {}.\tab {}\par",
+                rtf_escape(&number),
+                bold_segments_to_rtf(content.trim())
+            ));
+            continue;
+        }
+
+        body.push(paragraph(&bold_segments_to_rtf(line.trim())));
+    }
+
+    format!(
+        "{}{}{}{}",
+        r"{\rtf1\ansi\ansicpg65001\deff0",
+        r"{\fonttbl{\f0 PingFang SC;}{\f1 Microsoft YaHei;}{\f2 Menlo;}}",
+        r"\viewkind4\uc1\pard\lang2052\f0\fs24 ",
+        format!("{}{}", body.join(""), "}")
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn convert_rtf_to_docx(rtf_path: &Path, output_path: &Path) -> Result<(), String> {
+    let output = Command::new("/usr/bin/textutil")
+        .args([
+            "-convert",
+            "docx",
+            rtf_path.to_string_lossy().as_ref(),
+            "-output",
+            output_path.to_string_lossy().as_ref(),
+        ])
+        .output()
+        .map_err(|e| format!("执行 textutil 失败: {}", e))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(if stderr.is_empty() {
+            "textutil 导出 docx 失败".to_string()
+        } else {
+            format!("textutil 导出 docx 失败: {}", stderr)
+        })
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn convert_rtf_to_docx(_rtf_path: &Path, _output_path: &Path) -> Result<(), String> {
+    Err("当前平台暂不支持直接导出 .docx；请改为导出 .md/.txt，或在 macOS 上执行此操作".to_string())
+}
+
+#[tauri::command]
+pub async fn export_document(
+    app: tauri::AppHandle,
+    output_path: String,
+    content: String,
+    title: Option<String>,
+    source_format: Option<String>,
+) -> Result<ExportDocumentResult, String> {
+    validate_path_access(&app, &output_path)?;
+    let target = PathBuf::from(&output_path);
+    let ext = target
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_lowercase())
+        .unwrap_or_default();
+    if ext != "docx" && ext != "rtf" {
+        return Err(format!(
+            "export_document 仅支持导出为 .docx 或 .rtf，当前目标为: {}",
+            output_path
+        ));
+    }
+    if content.trim().is_empty() {
+        return Err("content 不能为空".to_string());
+    }
+
+    if let Some(parent) = target.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
+        }
+    }
+
+    let normalized_title = title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            target
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_else(|| "文档".to_string());
+    let normalized_source_format = source_format
+        .as_deref()
+        .unwrap_or("markdown")
+        .trim()
+        .to_lowercase();
+    let rtf_content = if normalized_source_format == "rtf" {
+        content.clone()
+    } else {
+        markdown_to_rtf(&content, &normalized_title)
+    };
+
+    if ext == "rtf" {
+        std::fs::write(&target, rtf_content.as_bytes())
+            .map_err(|e| format!("写入 RTF 失败: {}", e))?;
+    } else {
+        let temp_path =
+            std::env::temp_dir().join(format!("hicloud-export-{}.rtf", uuid::Uuid::new_v4()));
+        std::fs::write(&temp_path, rtf_content.as_bytes())
+            .map_err(|e| format!("写入临时 RTF 失败: {}", e))?;
+        let convert_result = convert_rtf_to_docx(&temp_path, &target);
+        let _ = std::fs::remove_file(&temp_path);
+        convert_result?;
+    }
+
+    let abs_path = std::fs::canonicalize(&target).unwrap_or(target.clone());
+    let bytes = std::fs::metadata(&abs_path)
+        .map(|meta| meta.len() as usize)
+        .unwrap_or(content.len());
+
+    Ok(ExportDocumentResult {
+        runtime: "host",
+        path: abs_path.display().to_string(),
+        format: ext,
+        bytes,
+        message: format!("已导出文档到 {}", abs_path.display()),
     })
 }
 

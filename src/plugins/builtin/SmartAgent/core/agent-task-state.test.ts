@@ -93,4 +93,35 @@ describe("agent-task-state", () => {
       },
     ]);
   });
+
+  it("keeps provisional streaming answers while tool args are still streaming", () => {
+    const steps = applyIncomingAgentStep([
+      {
+        type: "answer",
+        content: "先整理成用户可读的结果",
+        timestamp: 1,
+        streaming: true,
+      },
+    ], {
+      type: "tool_streaming",
+      content: "{\"path\":\"/tmp/result.md\",\"content\":\"# draft\"}",
+      timestamp: 2,
+      streaming: true,
+    });
+
+    expect(steps).toEqual([
+      {
+        type: "answer",
+        content: "先整理成用户可读的结果",
+        timestamp: 1,
+        streaming: true,
+      },
+      {
+        type: "tool_streaming",
+        content: "{\"path\":\"/tmp/result.md\",\"content\":\"# draft\"}",
+        timestamp: 2,
+        streaming: true,
+      },
+    ]);
+  });
 });

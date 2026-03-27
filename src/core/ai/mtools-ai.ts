@@ -12,8 +12,7 @@ import type {
   AIToolCall,
 } from "@/core/plugin-system/plugin-interface";
 import { handleError } from "@/core/errors";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { invoke, transformCallback } from "@tauri-apps/api/core";
 import type { AICenterMode } from "@/store/app-store";
 import type { AIConfig } from "@/core/ai/types";
 import { AssistantReasoningStreamNormalizer } from "@/core/ai/reasoning-tag-stream";
@@ -45,6 +44,50 @@ const THINKING_DEBUG_LOG_PREFIX = "[streamWithTools][thinking-window]";
 const STREAM_FULL_DUMP_PREFIX = "[MToolsAI][streamWithTools][dump]";
 const STREAM_STAGE_PREFIX = "[MToolsAI][streamWithTools][stage]";
 const STREAM_CONTEXT_PREFIX = "[MToolsAI][streamWithTools][context]";
+const AI_STREAM_EVENT_LISTENER_STORAGE_KEY = "__mtools_ai_stream_event_listeners__";
+const TAURI_EVENT_LISTENERS_OBJECT_NAME = "__internal_unstable_listeners_object_id__";
+const AI_STREAM_EVENT_NAMES = [
+  "ai-stream-chunk",
+  "ai-stream-done",
+  "ai-stream-error",
+  "ai-stream-raw",
+  "ai-stream-thinking",
+  "ai-stream-tool-args",
+  "ai-agent-tool-calls",
+] as const;
+
+type TauriEventCallbackPayload<T> = {
+  event: string;
+  id: number;
+  payload: T;
+};
+
+type PersistedAIStreamEventListener = {
+  event: string;
+  eventId: number;
+};
+
+type TauriInternalsLike = {
+  unregisterCallback?: (id: number) => void;
+};
+
+type TauriEventPluginInternalsLike = {
+  unregisterListener?: (event: string, eventId: number) => void;
+};
+
+type TauriEventListenerRecord = {
+  handlerId?: number;
+};
+
+type TauriWindowLike = Window &
+  Record<string, unknown> & {
+  __TAURI_INTERNALS__?: TauriInternalsLike;
+  __TAURI_EVENT_PLUGIN_INTERNALS__?: TauriEventPluginInternalsLike;
+};
+
+let staleAIStreamEventListenersCleanupPromise: Promise<void> | null = null;
+let staleAIStreamEventListenersCleared = false;
+let aiStreamEventUnloadCleanupRegistered = false;
 
 type StreamStageKey =
   | "start"
@@ -131,6 +174,189 @@ export function shouldDeferManagedAuthStreamError(
   const source = config.source ?? "own_key";
   if (source !== "team" && source !== "platform") return false;
   return MANAGED_AUTH_STREAM_ERROR_PATTERNS.some((pattern) => pattern.test(error));
+}
+
+export function classifyRecoverableStreamResult(params: {
+  content?: string | null;
+  toolCalls?: readonly AIToolCall[] | null;
+}): "tool_calls" | "content" | null {
+  const toolCalls = (params.toolCalls ?? []).filter(
+    (toolCall) => (toolCall.function?.name ?? "").trim().length > 0,
+  );
+  if (toolCalls.length > 0) return "tool_calls";
+
+  const content = String(params.content ?? "").trim();
+  if (content) return "content";
+
+  return null;
+}
+
+function getTauriWindow(): TauriWindowLike | null {
+  if (typeof window === "undefined") return null;
+  return window as TauriWindowLike;
+}
+
+function getTauriEventListenersObject(
+  tauriWindow: TauriWindowLike,
+): Record<string, Record<string, TauriEventListenerRecord>> | null {
+  const listeners = tauriWindow[TAURI_EVENT_LISTENERS_OBJECT_NAME];
+  if (!listeners || typeof listeners !== "object") return null;
+  return listeners as Record<string, Record<string, TauriEventListenerRecord>>;
+}
+
+function removeAIStreamEventListenerFromCurrentPage(
+  tauriWindow: TauriWindowLike,
+  event: string,
+  eventId: number,
+): void {
+  const listenersByEvent = getTauriEventListenersObject(tauriWindow);
+  const eventListeners = listenersByEvent?.[event];
+  if (!eventListeners) return;
+
+  const listener = eventListeners[String(eventId)];
+  const handlerId = Number(listener?.handlerId);
+  if (Number.isFinite(handlerId)) {
+    tauriWindow.__TAURI_INTERNALS__?.unregisterCallback?.(handlerId);
+  }
+
+  Reflect.deleteProperty(eventListeners, String(eventId));
+}
+
+export function clearAIStreamEventListenersFromCurrentPage(
+  tauriWindow: TauriWindowLike | null = getTauriWindow(),
+): void {
+  if (!tauriWindow) return;
+
+  for (const event of AI_STREAM_EVENT_NAMES) {
+    const listenersByEvent = getTauriEventListenersObject(tauriWindow);
+    const eventListeners = listenersByEvent?.[event];
+    if (!eventListeners) continue;
+
+    for (const eventId of Object.keys(eventListeners)) {
+      removeAIStreamEventListenerFromCurrentPage(tauriWindow, event, Number(eventId));
+    }
+  }
+}
+
+function ensureAIStreamEventUnloadCleanupRegistered(): void {
+  if (aiStreamEventUnloadCleanupRegistered) return;
+  const tauriWindow = getTauriWindow();
+  if (!tauriWindow) return;
+
+  const cleanup = () => {
+    clearAIStreamEventListenersFromCurrentPage(tauriWindow);
+  };
+
+  tauriWindow.addEventListener("beforeunload", cleanup);
+  tauriWindow.addEventListener("pagehide", cleanup);
+  aiStreamEventUnloadCleanupRegistered = true;
+}
+
+function readPersistedAIStreamEventListeners(): PersistedAIStreamEventListener[] {
+  const tauriWindow = getTauriWindow();
+  if (!tauriWindow) return [];
+  try {
+    const raw = tauriWindow.sessionStorage.getItem(AI_STREAM_EVENT_LISTENER_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((item) => {
+        if (!item || typeof item !== "object") return null;
+        const record = item as Record<string, unknown>;
+        const event = String(record.event ?? "").trim();
+        const eventId = Number(record.eventId);
+        if (!event || !Number.isFinite(eventId)) return null;
+        return { event, eventId };
+      })
+      .filter((item): item is PersistedAIStreamEventListener => item !== null);
+  } catch {
+    return [];
+  }
+}
+
+function writePersistedAIStreamEventListeners(
+  listeners: readonly PersistedAIStreamEventListener[],
+): void {
+  const tauriWindow = getTauriWindow();
+  if (!tauriWindow) return;
+  try {
+    tauriWindow.sessionStorage.setItem(
+      AI_STREAM_EVENT_LISTENER_STORAGE_KEY,
+      JSON.stringify(listeners),
+    );
+  } catch {
+    // noop
+  }
+}
+
+function rememberAIStreamEventListener(listener: PersistedAIStreamEventListener): void {
+  const current = readPersistedAIStreamEventListeners();
+  current.push(listener);
+  writePersistedAIStreamEventListeners(current);
+}
+
+function forgetAIStreamEventListener(listener: PersistedAIStreamEventListener): void {
+  const current = readPersistedAIStreamEventListeners();
+  const next = current.filter((item) =>
+    !(item.event === listener.event && item.eventId === listener.eventId)
+  );
+  writePersistedAIStreamEventListeners(next);
+}
+
+async function ensureStaleAIStreamEventListenersCleared(): Promise<void> {
+  if (staleAIStreamEventListenersCleared) return;
+  if (staleAIStreamEventListenersCleanupPromise) {
+    await staleAIStreamEventListenersCleanupPromise;
+    return;
+  }
+
+  staleAIStreamEventListenersCleanupPromise = (async () => {
+    const staleListeners = readPersistedAIStreamEventListeners();
+    if (staleListeners.length === 0) {
+      staleAIStreamEventListenersCleared = true;
+      return;
+    }
+    writePersistedAIStreamEventListeners([]);
+    await Promise.allSettled(
+      staleListeners.map(({ event, eventId }) =>
+        invoke("plugin:event|unlisten", { event, eventId }),
+      ),
+    );
+    staleAIStreamEventListenersCleared = true;
+  })().finally(() => {
+    staleAIStreamEventListenersCleanupPromise = null;
+  });
+
+  await staleAIStreamEventListenersCleanupPromise;
+}
+
+async function listenAIStreamEvent<T>(
+  event: string,
+  handler: (event: TauriEventCallbackPayload<T>) => void,
+): Promise<() => Promise<void>> {
+  ensureAIStreamEventUnloadCleanupRegistered();
+  await ensureStaleAIStreamEventListenersCleared();
+
+  const callbackId = transformCallback(handler);
+  const eventId = await invoke<number>("plugin:event|listen", {
+    event,
+    target: { kind: "Any" },
+    handler: callbackId,
+  });
+  const persistedListener = { event, eventId };
+  rememberAIStreamEventListener(persistedListener);
+
+  let disposed = false;
+  return async () => {
+    if (disposed) return;
+    disposed = true;
+    forgetAIStreamEventListener(persistedListener);
+    const tauriWindow = getTauriWindow();
+    removeAIStreamEventListenerFromCurrentPage(tauriWindow, event, eventId);
+    tauriWindow?.__TAURI_INTERNALS__?.unregisterCallback?.(callbackId);
+    await invoke("plugin:event|unlisten", { event, eventId }).catch(() => undefined);
+  };
 }
 
 function logStreamWithToolsContext(
@@ -555,7 +781,7 @@ export function createMToolsAI(mode: AICenterMode = "explore"): MToolsAI {
 
         void (async () => {
           const [u1, u2, u3, u4] = await Promise.all([
-            listen<{ conversation_id: string; content: string }>(
+            listenAIStreamEvent<{ conversation_id: string; content: string }>(
               "ai-stream-chunk",
               (event) => {
                 if (event.payload.conversation_id === conversationId) {
@@ -571,7 +797,7 @@ export function createMToolsAI(mode: AICenterMode = "explore"): MToolsAI {
                 }
               },
             ),
-            listen<{ conversation_id: string }>(
+            listenAIStreamEvent<{ conversation_id: string }>(
               "ai-stream-done",
               (event) => {
                 if (event.payload.conversation_id === conversationId && !settled) {
@@ -585,7 +811,7 @@ export function createMToolsAI(mode: AICenterMode = "explore"): MToolsAI {
                 }
               },
             ),
-            listen<{ conversation_id: string; error: string }>(
+            listenAIStreamEvent<{ conversation_id: string; error: string }>(
               "ai-stream-error",
               (event) => {
                 if (event.payload.conversation_id === conversationId && !settled) {
@@ -605,12 +831,29 @@ export function createMToolsAI(mode: AICenterMode = "explore"): MToolsAI {
                     });
                     return;
                   }
+                  const recoveredKind = classifyRecoverableStreamResult({
+                    content,
+                  });
+                  if (recoveredKind === "content") {
+                    aiLog.warn("[chat] recover partial content after error", {
+                      conversationId,
+                      elapsedMs: Date.now() - startedAt,
+                      contentLength: content.trim().length,
+                      error: event.payload.error,
+                    });
+                    traceStreamEvent(conversationId, "error_recovered", {
+                      error: event.payload.error,
+                      content,
+                    });
+                    safeResolve({ content });
+                    return;
+                  }
                   traceStreamEvent(conversationId, "error", event.payload.error);
                   safeReject(new Error(event.payload.error));
                 }
               },
             ),
-            listen<{ conversation_id: string; raw_line: string }>(
+            listenAIStreamEvent<{ conversation_id: string; raw_line: string }>(
               "ai-stream-raw",
               (event) => {
                 if (event.payload.conversation_id === conversationId) {
@@ -723,7 +966,7 @@ export function createMToolsAI(mode: AICenterMode = "explore"): MToolsAI {
 
         void (async () => {
           const [u1, u2, u3, u4] = await Promise.all([
-            listen<{ conversation_id: string; content: string }>(
+            listenAIStreamEvent<{ conversation_id: string; content: string }>(
               "ai-stream-chunk",
               (event) => {
                 if (event.payload.conversation_id === conversationId) {
@@ -754,7 +997,7 @@ export function createMToolsAI(mode: AICenterMode = "explore"): MToolsAI {
                 }
               },
             ),
-            listen<{ conversation_id: string }>(
+            listenAIStreamEvent<{ conversation_id: string }>(
               "ai-stream-done",
               (event) => {
                 if (event.payload.conversation_id === conversationId && !settled) {
@@ -790,7 +1033,7 @@ export function createMToolsAI(mode: AICenterMode = "explore"): MToolsAI {
                 }
               },
             ),
-            listen<{ conversation_id: string; error: string }>(
+            listenAIStreamEvent<{ conversation_id: string; error: string }>(
               "ai-stream-error",
               (event) => {
                 if (event.payload.conversation_id === conversationId && !settled) {
@@ -810,12 +1053,45 @@ export function createMToolsAI(mode: AICenterMode = "explore"): MToolsAI {
                     });
                     return;
                   }
+                  const remaining = reasoningStream.flush();
+                  if (remaining.visible) {
+                    const normalized = normalizeStreamChunk({
+                      conversationId,
+                      phase: "stream_error_flush",
+                      previous: fullContent,
+                      incoming: remaining.visible,
+                    });
+                    fullContent = normalized.full;
+                    if (normalized.delta) {
+                      traceStreamEvent(conversationId, "chunk", normalized.delta);
+                      options.onChunk(normalized.delta);
+                    }
+                  }
+                  const recoveredKind = classifyRecoverableStreamResult({
+                    content: fullContent,
+                  });
+                  if (recoveredKind === "content") {
+                    aiLog.warn("[stream] recover partial content after error", {
+                      conversationId,
+                      elapsedMs: Date.now() - startedAt,
+                      chunkCount: fullContent.length > 0 ? 1 : 0,
+                      contentLength: fullContent.trim().length,
+                      error: event.payload.error,
+                    });
+                    traceStreamEvent(conversationId, "error_recovered", {
+                      error: event.payload.error,
+                      content: fullContent,
+                    });
+                    options.onDone?.(fullContent);
+                    safeResolve();
+                    return;
+                  }
                   traceStreamEvent(conversationId, "error", event.payload.error);
                   safeReject(new Error(event.payload.error));
                 }
               },
             ),
-            listen<{ conversation_id: string; raw_line: string }>(
+            listenAIStreamEvent<{ conversation_id: string; raw_line: string }>(
               "ai-stream-raw",
               (event) => {
                 if (event.payload.conversation_id === conversationId) {
@@ -1096,7 +1372,7 @@ export function createMToolsAI(mode: AICenterMode = "explore"): MToolsAI {
 
         void (async () => {
           const listeners = await Promise.all([
-            listen<{ conversation_id: string; raw_line: string }>(
+            listenAIStreamEvent<{ conversation_id: string; raw_line: string }>(
               "ai-stream-raw",
               (event) => {
                 if (event.payload.conversation_id === conversationId) {
@@ -1123,7 +1399,7 @@ export function createMToolsAI(mode: AICenterMode = "explore"): MToolsAI {
                 }
               },
             ),
-            listen<{ conversation_id: string; content: string }>(
+            listenAIStreamEvent<{ conversation_id: string; content: string }>(
               "ai-stream-chunk",
               (event) => {
                 if (event.payload.conversation_id === conversationId) {
@@ -1206,7 +1482,7 @@ export function createMToolsAI(mode: AICenterMode = "explore"): MToolsAI {
                 }
               },
             ),
-            listen<{ conversation_id: string; tool_calls: AIToolCall[] }>(
+            listenAIStreamEvent<{ conversation_id: string; tool_calls: AIToolCall[] }>(
               "ai-agent-tool-calls",
               (event) => {
                 if (event.payload.conversation_id === conversationId) {
@@ -1237,7 +1513,7 @@ export function createMToolsAI(mode: AICenterMode = "explore"): MToolsAI {
                 }
               },
             ),
-            listen<{ conversation_id: string }>(
+            listenAIStreamEvent<{ conversation_id: string }>(
               "ai-stream-done",
               (event) => {
                 if (event.payload.conversation_id !== conversationId || settled) {
@@ -1348,7 +1624,7 @@ export function createMToolsAI(mode: AICenterMode = "explore"): MToolsAI {
                 }
               },
             ),
-            listen<{ conversation_id: string; error: string }>(
+            listenAIStreamEvent<{ conversation_id: string; error: string }>(
               "ai-stream-error",
               (event) => {
                 if (event.payload.conversation_id !== conversationId || settled) {
@@ -1364,13 +1640,6 @@ export function createMToolsAI(mode: AICenterMode = "explore"): MToolsAI {
                 kickWatchdog("error");
                 traceStreamEvent(conversationId, "error", event.payload.error);
                 logThinkingWindow("error_event", {
-                  error: event.payload.error,
-                });
-                aiLog.error("[streamWithTools] error event", {
-                  conversationId,
-                  elapsedMs: Date.now() - startedAt,
-                  chunkCount,
-                  chunkChars,
                   error: event.payload.error,
                 });
                 if (abortBridge.isAborted()) {
@@ -1389,6 +1658,24 @@ export function createMToolsAI(mode: AICenterMode = "explore"): MToolsAI {
                   return;
                 }
                 const remaining = reasoningStream.flush();
+                if (remaining.visible) {
+                  hadModelResponse = true;
+                  const normalized = normalizeStreamChunk({
+                    conversationId,
+                    phase: "stream_with_tools_error_visible_flush",
+                    previous: fullContent,
+                    incoming: remaining.visible,
+                  });
+                  fullContent = normalized.full;
+                  const emittedChunk =
+                    normalized.mode === "reset"
+                      ? normalized.full
+                      : normalized.delta;
+                  if (emittedChunk) {
+                    traceStreamEvent(conversationId, "chunk", emittedChunk);
+                    options.onChunk(emittedChunk);
+                  }
+                }
                 if (remaining.thinking) {
                   hadModelResponse = true;
                   const normalizedThinking = normalizeStreamChunk({
@@ -1418,10 +1705,54 @@ export function createMToolsAI(mode: AICenterMode = "explore"): MToolsAI {
                 endThinkingWindow("error", {
                   error: event.payload.error,
                 });
+                const recoveredKind = classifyRecoverableStreamResult({
+                  content: fullContent,
+                  toolCalls: resolvedToolCalls,
+                });
+                if (recoveredKind === "tool_calls" && resolvedToolCalls) {
+                  aiLog.warn("[streamWithTools] recover tool calls after error", {
+                    conversationId,
+                    elapsedMs: Date.now() - startedAt,
+                    chunkCount,
+                    chunkChars,
+                    toolCallCount: resolvedToolCalls.length,
+                    error: event.payload.error,
+                  });
+                  traceStreamEvent(conversationId, "error_recovered", {
+                    error: event.payload.error,
+                    toolCalls: resolvedToolCalls,
+                  });
+                  safeResolve({ type: "tool_calls", toolCalls: resolvedToolCalls });
+                  return;
+                }
+                if (recoveredKind === "content") {
+                  aiLog.warn("[streamWithTools] recover partial content after error", {
+                    conversationId,
+                    elapsedMs: Date.now() - startedAt,
+                    chunkCount,
+                    chunkChars,
+                    contentLength: fullContent.trim().length,
+                    error: event.payload.error,
+                  });
+                  traceStreamEvent(conversationId, "error_recovered", {
+                    error: event.payload.error,
+                    content: fullContent,
+                  });
+                  options.onDone?.(fullContent);
+                  safeResolve({ type: "content", content: fullContent });
+                  return;
+                }
+                aiLog.error("[streamWithTools] error event", {
+                  conversationId,
+                  elapsedMs: Date.now() - startedAt,
+                  chunkCount,
+                  chunkChars,
+                  error: event.payload.error,
+                });
                 safeReject(new Error(event.payload.error));
               },
             ),
-            listen<{ conversation_id: string; content: string }>(
+            listenAIStreamEvent<{ conversation_id: string; content: string }>(
               "ai-stream-thinking",
               (event) => {
                 if (event.payload.conversation_id === conversationId) {
@@ -1472,7 +1803,7 @@ export function createMToolsAI(mode: AICenterMode = "explore"): MToolsAI {
                 }
               },
             ),
-            listen<{ conversation_id: string; content: string }>(
+            listenAIStreamEvent<{ conversation_id: string; content: string }>(
               "ai-stream-tool-args",
               (event) => {
                 if (event.payload.conversation_id === conversationId) {

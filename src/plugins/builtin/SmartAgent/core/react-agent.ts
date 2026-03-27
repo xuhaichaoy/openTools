@@ -25,6 +25,10 @@ import {
 } from "@/core/agent/context-budget";
 import { mergeStreamChunk } from "@/core/ai/stream-chunk-merge";
 import { parseToolCallArguments } from "./tool-call-arguments";
+import {
+  hasArtifactPayloadKey,
+  parsePartialToolJSON,
+} from "./tool-streaming-preview";
 
 // ── 结构化工具错误类型（借鉴 Kimi CLI 四层体系） ──
 
@@ -92,6 +96,16 @@ export interface AgentStep {
   streaming?: boolean;
   /** 用于区分不同流式来源（如主 Agent vs 子任务），防止相互覆盖 */
   streamId?: string;
+}
+
+function shouldEmitToolStreamingPreview(rawContent: string): boolean {
+  const parsed = parsePartialToolJSON(rawContent);
+  if (parsed.thought.trim()) return true;
+  if (parsed.targetAgent.trim() && parsed.task.trim()) return true;
+  return Boolean(
+    parsed.path.trim()
+      && (parsed.content.trim() || hasArtifactPayloadKey(rawContent)),
+  );
 }
 
 export interface AgentConfig {
@@ -166,12 +180,14 @@ interface IterationStopDiagnostics {
   repeatedToolPattern?: string;
 }
 
+const EMPTY_MODEL_OUTPUT_LIMIT = 3;
+
 function formatIterationStopReason(reason: IterationStopReason): string {
   switch (reason) {
     case "repeated_tool_calls":
-      return "连续 2 轮 tool_calls 完全相同";
+      return "连续 2 轮 tool_calls 计划完全相同";
     case "empty_model_output":
-      return "连续 3 轮模型未返回有效内容";
+      return `连续 ${EMPTY_MODEL_OUTPUT_LIMIT} 轮模型未返回有效内容`;
     default:
       return "已达到迭代上限";
   }
@@ -183,7 +199,7 @@ function formatIterationStopHeadline(
 ): string {
   switch (reason) {
     case "repeated_tool_calls":
-      return `执行已提前停止：检测到重复 tool_calls（最大 ${maxIterations} 步）。`;
+      return `执行已提前停止：检测到连续重复的 tool_calls 计划（最大 ${maxIterations} 步）。`;
     case "empty_model_output":
       return `执行已提前停止：模型连续未返回有效内容（最大 ${maxIterations} 步）。`;
     default:
@@ -208,9 +224,9 @@ function formatRepeatedToolPattern(
 
 function buildRepeatedToolCallCorrectionMessage(toolPattern?: string): string {
   return [
-    "[系统提示] 你刚刚连续两轮提出了相同的 tool_calls。",
-    toolPattern ? `重复工具模式：${toolPattern}` : "",
-    "不要再次重复调用这些工具。",
+    "[系统提示] 你刚刚连续两轮提出了完全相同的 tool_calls 计划。",
+    toolPattern ? `连续重复计划：${toolPattern}` : "",
+    "不要再次提交完全相同的 tool_calls 计划。",
     "请先基于当前已有结果说明卡点在哪里。",
     "如果还要继续，必须至少改变其中一项：工具、参数、目标对象，或直接给出结论。",
     "若这是有副作用的工具（如创建页面、写文件、发请求），默认视为上一次已经生效，不要盲目重试。",
@@ -228,7 +244,7 @@ const DEFAULT_CONFIG: AgentConfig = {
 // ── MCP 参数自动推断 ──
 
 const URL_PATTERN = /https?:\/\/[^\s"'<>\u3000\u3001\u3002\uff01\uff0c\uff1b]+/;
-const FILE_PATH_PATTERN = /(?:\/[\w.\-]+){2,}|[A-Z]:\\[\w.\-\\]+/;
+const FILE_PATH_PATTERN = /(?:\/[\w.-]+){2,}|[A-Z]:\\[\w.-\\]+/;
 
 /**
  * 从用户输入中推断 MCP 工具缺失的必填参数值。
@@ -564,7 +580,6 @@ function pruneProcessedHistoryImages<
   let nextMessages: T[] | null = null;
   for (const i of imageMessageIndexes) {
     if (preservedIndexes.has(i)) continue;
-    const message = messages[i];
     if (!nextMessages) nextMessages = cloneMessages(messages);
 
     nextMessages[i] = {
@@ -850,6 +865,7 @@ const FILE_REGEN_LOG_PREFIX = "[ReActAgent][file_regen]";
 const FILE_REGEN_PARSE_LOG_PREFIX = "[ReActAgent][file_regen_parse]";
 const FILE_WRITE_TOOL_NAMES = new Set([
   "write_file",
+  "export_document",
   "str_replace_edit",
   "json_edit",
 ]);
@@ -1085,6 +1101,28 @@ export class ReActAgent {
     toolName: string,
     toolOutput: unknown,
   ): string | null {
+    if (
+      toolName === "export_document" &&
+      toolOutput &&
+      typeof toolOutput === "object"
+    ) {
+      const output = toolOutput as { path?: unknown; format?: unknown; message?: unknown };
+      if (typeof output.path === "string" && output.path.trim()) {
+        const format = typeof output.format === "string" && output.format.trim()
+          ? output.format.trim().toLowerCase()
+          : "";
+        const formatLabel = format === "docx"
+          ? "Word 文档"
+          : format === "rtf"
+            ? "RTF 文档"
+            : "文档";
+        return `已导出${formatLabel}到 ${output.path.trim()}`;
+      }
+      if (typeof output.message === "string" && output.message.trim()) {
+        return output.message.trim();
+      }
+    }
+
     if (toolName === "get_current_time" && this.isQuickTimeQuery(userInput)) {
       if (toolOutput && typeof toolOutput === "object") {
         const output = toolOutput as { time?: unknown; timestamp?: unknown };
@@ -1162,8 +1200,8 @@ export class ReActAgent {
     toolName: string,
     toolParams: Record<string, unknown>,
   ): string {
-    if (toolName === "write_file") {
-      return `write_file::${String(toolParams.content ?? "")}`;
+    if (toolName === "write_file" || toolName === "export_document") {
+      return `${toolName}::${String(toolParams.content ?? "")}`;
     }
     if (toolName === "str_replace_edit") {
       return JSON.stringify({
@@ -1302,7 +1340,7 @@ export class ReActAgent {
 
   private hasWriteFileAction(): boolean {
     const allSteps = [...this.history, ...this.steps];
-    const writeToolPatterns = ["write_file", "str_replace_edit", "json_edit"];
+    const writeToolPatterns = ["write_file", "export_document", "str_replace_edit", "json_edit"];
     return allSteps.some(
       (step) =>
         step.type === "action" &&
@@ -1328,7 +1366,7 @@ export class ReActAgent {
       "edit",
     ];
     if (writeVerbs.some((k) => text.includes(k))) return true;
-    const targets = [".md", ".txt", ".json", ".csv", ".yaml", ".yml"];
+    const targets = [".md", ".txt", ".json", ".csv", ".yaml", ".yml", ".docx", ".rtf"];
     const writeContextWords = [
       "改成",
       "改为",
@@ -1432,7 +1470,7 @@ export class ReActAgent {
       !this.hasWriteFileAction() &&
       this.isLikelySaveOutcomeClaim(answer)
     ) {
-      return "你尚未实际调用文件写入工具（write_file / str_replace_edit / json_edit）。若任务包含保存/修改文件，必须先调用相应工具并基于真实工具结果再给结论。";
+      return "你尚未实际调用保存/写入工具（write_file / export_document / str_replace_edit / json_edit）。若任务包含保存、导出或修改文件，必须先调用相应工具并基于真实工具结果再给结论。";
     }
     if (
       rejectedDangerousActionCount === 0 &&
@@ -1533,7 +1571,10 @@ export class ReActAgent {
 
     const MAX_DEPTH = 2;
     const baseTools = [...tools];
-    if (depth < MAX_DEPTH) {
+    const hasManagedDelegationTool = tools.some((tool) =>
+      tool.name === "spawn_task" || tool.name === "wait_for_spawned_tasks"
+    );
+    if (depth < MAX_DEPTH && !hasManagedDelegationTool) {
       baseTools.push(this.createDelegateSubtaskTool(ai, tools, depth));
     }
     baseTools.push(...this.createModeSwitchTools());
@@ -2358,6 +2399,8 @@ ${s.modeSwitching}
 
 ${s.taskStrategy}
 
+${s.documentToolBlock}
+
 用中文回答`;
 
     const sections: PromptSection[] = [
@@ -2610,6 +2653,18 @@ ${s.taskStrategy}
 4. **结果验证**：完成关键操作后，通过读取或查询验证结果是否正确
 5. **错误恢复**：工具失败时分析根因，尝试替代方案而非简单重试`;
 
+    const documentToolBlock = `## 文档/表格读取规则
+- 遇到 xlsx/xls/csv/pdf/docx/ppt/pptx/xmind/mm 这类文件时，优先使用 read_document。
+- md/txt/json/yaml/toml/log/html/xml 这类文本文档也可以直接使用 read_document；代码文件仍优先使用 read_file / read_file_range。
+- 不要对 Office/PDF/表格文件使用 read_file / read_file_range。
+- 不要为了读取这类文件退回 run_shell_command，除非用户明确要求你用 shell。`;
+    const documentExportBlock = this.hasToolNamed("export_document")
+      ? `## 文档导出规则
+- 当用户明确要求保存为 Word / .docx / .rtf 时，优先使用 export_document。
+- 不要用 write_file 手写 RTF 控制符，也不要伪造 .docx 二进制内容。
+- 普通文本、Markdown、代码文件仍优先使用 write_file。`
+      : "";
+
     const codingBlock = isCoding
       ? `## 编程任务工作流（7 步法）
 当任务涉及代码编写、修改、调试时，遵循以下流程：
@@ -2650,6 +2705,8 @@ ${s.taskStrategy}
       codingBlock,
       modeSwitching,
       taskStrategy,
+      documentToolBlock,
+      documentExportBlock,
       skillsBlock,
       memoryPolicyBlock,
       memoryBlock,
@@ -2680,6 +2737,10 @@ ${userInteractionRules}
 ${s.modeSwitching}
 
 ${s.taskStrategy}
+
+${s.documentToolBlock}
+
+${s.documentExportBlock}
 
 ## 工具使用规则
 - 需要工具时直接调用，**严禁在回复文本中写出工具调用**（如"调用工具: web_search(...)"），必须通过 function call 真正执行
@@ -2810,11 +2871,15 @@ ${s.taskStrategy}
         if (!toolArgsStartedAt) toolArgsStartedAt = Date.now();
         const merged = mergeStreamChunk(toolArgsAccum, chunk);
         toolArgsAccum = merged.full;
+        const shouldSurfacePreview = shouldEmitToolStreamingPreview(toolArgsAccum);
 
         if (
+          shouldSurfacePreview
+          && (
           toolArgsAccum &&
           (merged.mode === "reset" ||
             toolArgsAccum.length > lastToolArgsPushedLen + 5)
+          )
         ) {
           this.onStep?.({
             type: "tool_streaming",
@@ -2847,12 +2912,14 @@ ${s.taskStrategy}
       });
     }
     if (toolArgsAccum) {
-      this.onStep?.({
-        type: "tool_streaming",
-        content: toolArgsAccum,
-        timestamp: toolArgsStartedAt || Date.now(),
-        streaming: false,
-      });
+      if (shouldEmitToolStreamingPreview(toolArgsAccum)) {
+        this.onStep?.({
+          type: "tool_streaming",
+          content: toolArgsAccum,
+          timestamp: toolArgsStartedAt || Date.now(),
+          streaming: false,
+        });
+      }
     }
     return result;
   }
@@ -2899,6 +2966,7 @@ ${s.taskStrategy}
     const READ_TOOLS = new Set([
       "read_file",
       "read_file_range",
+      "read_document",
       "list_directory",
       "search_in_files",
       "web_search",
@@ -3151,7 +3219,7 @@ ${s.taskStrategy}
           return answer;
         }
         fcEmptyCount++;
-        if (fcEmptyCount >= 3) {
+        if (fcEmptyCount >= EMPTY_MODEL_OUTPUT_LIMIT) {
           const fallback = this.buildIterationExhaustedSummary({
             iterationsUsed: i + 1,
             stopReason: "empty_model_output",
@@ -3178,7 +3246,7 @@ ${s.taskStrategy}
         );
       }
 
-      // 重复 tool_calls 检测：连续 2 次完全相同则退出
+      // 循环 tool_calls 检测：连续 2 轮计划完全相同则触发纠偏/停止
       const curToolCallsKey = validToolCalls
         .map((tc) => `${tc.function.name}::${tc.function.arguments ?? ""}`)
         .join("|");
@@ -3190,8 +3258,8 @@ ${s.taskStrategy}
           this.addStep({
             type: "observation",
             content: repeatedToolPattern
-              ? `检测到重复 tool_calls，已要求模型调整计划：${repeatedToolPattern}`
-              : "检测到重复 tool_calls，已要求模型调整计划。",
+              ? `检测到连续重复的工具计划，已要求模型调整策略：${repeatedToolPattern}`
+              : "检测到连续重复的工具计划，已要求模型调整策略。",
             timestamp: Date.now(),
           });
           messages.push({
@@ -3227,7 +3295,7 @@ ${s.taskStrategy}
         return { tc, toolName: tc.function.name, toolParams, parseError };
       });
 
-      for (const { tc, toolName } of parsedCalls) {
+      for (const { toolName } of parsedCalls) {
         if (!this.tools.find((t) => t.name === toolName)) {
           unknownToolCount++;
           if (unknownToolCount >= 3) {
@@ -3522,6 +3590,7 @@ ${s.taskStrategy}
     let textIterationWarningIdx = -1;
     let prevResponseContent = "";
     let staleCount = 0;
+    let textEmptyCount = 0;
 
     for (let i = 0; i < this.config.maxIterations; i++) {
       if (signal?.aborted) throw new Error("Aborted");
@@ -3543,6 +3612,7 @@ ${s.taskStrategy}
       }
 
       let responseContent: string;
+      let usedChatFallback = false;
       const compactedTextMessages = prepareMessagesForModel(
         messages,
         this.config.contextLimit ?? DEFAULT_CONTEXT_LIMIT,
@@ -3565,11 +3635,55 @@ ${s.taskStrategy}
           signal,
         });
         responseContent = response.content;
+        usedChatFallback = true;
       }
 
       if (signal?.aborted) throw new Error("Aborted");
 
-      const trimmed = responseContent.trim();
+      let trimmed = responseContent.trim();
+      if (!trimmed && !usedChatFallback) {
+        try {
+          const response = await this.ai.chat({
+            messages: compactedTextMessages,
+            temperature: this.config.temperature,
+            signal,
+          });
+          responseContent = response.content ?? "";
+          trimmed = responseContent.trim();
+          usedChatFallback = true;
+        } catch (e) {
+          if ((e as Error).message === "Aborted") throw e;
+        }
+      }
+
+      if (!trimmed) {
+        textEmptyCount++;
+        if (textEmptyCount >= EMPTY_MODEL_OUTPUT_LIMIT) {
+          const fallback = this.buildIterationExhaustedSummary({
+            iterationsUsed: i + 1,
+            stopReason: "empty_model_output",
+          });
+          this.addStep({
+            type: "answer",
+            content: fallback,
+            timestamp: Date.now(),
+          });
+          return fallback;
+        }
+        this.addStep({
+          type: "observation",
+          content: `模型刚才没有返回任何可见内容，正在自动重试（${textEmptyCount}/${EMPTY_MODEL_OUTPUT_LIMIT}）...`,
+          timestamp: Date.now(),
+        });
+        messages.push({ role: "assistant", content: "" });
+        messages.push({
+          role: "user",
+          content: "你上一轮返回了空响应。禁止留空；下一轮必须直接给出可见回答，或按规定格式输出 Thought/Action/Action Input 或 Final Answer。",
+        });
+        continue;
+      }
+      textEmptyCount = 0;
+
       const prevTrimmed = prevResponseContent.trim();
       const compareLen = Math.min(300, trimmed.length, prevTrimmed.length);
       const isSimilar =

@@ -10,6 +10,7 @@ import {
   buildAssistantMemoryPromptBundleForQuery,
   type AssistantMemoryPromptBundle,
 } from "@/core/ai/assistant-memory";
+import { createLogger } from "@/core/logger";
 
 export interface UserMemory {
   key: string;
@@ -58,6 +59,7 @@ interface AgentMemoryState {
 
 let cachedPrompt = "";
 let promptDirty = true;
+const log = createLogger("AgentMemoryStore");
 
 export const useAgentMemoryStore = create<AgentMemoryState>((set, get) => ({
   memories: [],
@@ -70,15 +72,18 @@ export const useAgentMemoryStore = create<AgentMemoryState>((set, get) => ({
       await migrateAgentMemory();
       set({ migrated: true });
     }
-    // Pre-warm prompt cache
-    try {
-      const memories = await recallMemories("", { topK: 20 });
-      cachedPrompt = buildMemoryPromptBlock(memories);
-      promptDirty = false;
-    } catch (err) {
-      console.warn("[AgentMemoryStore] Failed to pre-warm memory prompt:", err);
-    }
     set({ loaded: true });
+    // Pre-warm prompt cache in background so memory bootstrap never blocks chat.
+    void recallMemories("", { topK: 20 })
+      .then((memories) => {
+        cachedPrompt = buildMemoryPromptBlock(memories);
+        promptDirty = false;
+      })
+      .catch((err) => {
+        log.warn("failed to pre-warm memory prompt", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
   },
 
   save: () => {

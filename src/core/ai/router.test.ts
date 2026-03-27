@@ -208,4 +208,98 @@ describe("resolveTeamModelConfig", () => {
       "refreshed-refresh-token",
     );
   });
+
+  it("reuses a newer auth-store token before issuing another refresh", async () => {
+    const authState = {
+      token: "stale-token",
+      refreshToken: "refresh-token",
+      login: mocks.login,
+      logout: mocks.logout,
+    };
+    mocks.getAuthState.mockImplementation(() => authState);
+
+    const config: AIConfig = {
+      base_url: "https://api.openai.com/v1",
+      api_key: "",
+      model: "gpt-5.4",
+      temperature: 0.7,
+      max_tokens: null,
+      enable_advanced_tools: true,
+      system_prompt: "",
+      enable_rag_auto_search: true,
+      enable_native_tools: true,
+      enable_long_term_memory: true,
+      enable_memory_auto_recall: true,
+      enable_memory_auto_save: true,
+      enable_memory_sync: true,
+      source: "platform",
+      protocol: "openai",
+    };
+
+    const runner = vi.fn(async (routed: AIConfig) => {
+      if (routed.api_key === "stale-token") {
+        authState.token = "fresh-token-from-store";
+        throw new Error('API 错误 (HTTP 401): {"code":"UNAUTHORIZED","message":"Invalid token"}');
+      }
+      return "ok";
+    });
+
+    const result = await withRoutedAIConfig(config, runner);
+
+    expect(result).toBe("ok");
+    expect(runner).toHaveBeenCalledTimes(2);
+    expect(runner.mock.calls[1]?.[0]?.api_key).toBe("fresh-token-from-store");
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+
+  it("deduplicates concurrent managed-auth refresh requests", async () => {
+    mocks.fetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        access_token: "shared-refreshed-token",
+        refresh_token: "shared-refresh-token",
+        user: { id: "user-1" },
+      }),
+    });
+
+    const config: AIConfig = {
+      base_url: "https://api.openai.com/v1",
+      api_key: "",
+      model: "gpt-5.4",
+      temperature: 0.7,
+      max_tokens: null,
+      enable_advanced_tools: true,
+      system_prompt: "",
+      enable_rag_auto_search: true,
+      enable_native_tools: true,
+      enable_long_term_memory: true,
+      enable_memory_auto_recall: true,
+      enable_memory_auto_save: true,
+      enable_memory_sync: true,
+      source: "platform",
+      protocol: "openai",
+    };
+
+    const runnerA = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new Error('API 错误 (HTTP 401): {"code":"UNAUTHORIZED","message":"Invalid token"}'),
+      )
+      .mockResolvedValueOnce("ok-a");
+    const runnerB = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new Error('API 错误 (HTTP 401): {"code":"UNAUTHORIZED","message":"Invalid token"}'),
+      )
+      .mockResolvedValueOnce("ok-b");
+
+    const [resultA, resultB] = await Promise.all([
+      withRoutedAIConfig(config, runnerA),
+      withRoutedAIConfig(config, runnerB),
+    ]);
+
+    expect(resultA).toBe("ok-a");
+    expect(resultB).toBe("ok-b");
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+  });
 });

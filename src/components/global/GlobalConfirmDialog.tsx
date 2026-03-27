@@ -13,6 +13,7 @@ export function GlobalConfirmDialog() {
       params={active.params}
       risk={active.risk}
       reason={active.reason}
+      reviewedByModel={active.reviewedByModel}
       onResult={(result) => submit(result.confirmed)}
     />
   );

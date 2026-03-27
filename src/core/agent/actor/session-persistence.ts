@@ -474,6 +474,8 @@ export interface TranscriptSession {
     toolPolicy?: import("./types").ToolPolicy;
     executionPolicy?: import("./types").ExecutionPolicy;
     workspace?: string;
+    timeoutSeconds?: number;
+    idleLeaseSeconds?: number;
     thinkingLevel?: import("./types").ThinkingLevel;
   }>;
   snapshot?: Record<string, unknown>;

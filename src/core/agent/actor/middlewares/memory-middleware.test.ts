@@ -4,6 +4,9 @@ import { MemoryMiddleware } from "./memory-middleware";
 
 const hoisted = vi.hoisted(() => ({
   shouldRecall: true,
+  memoryLoaded: true,
+  loadMock: vi.fn(async () => undefined),
+  getMemoryRecallBundleAsyncMock: vi.fn(async () => hoisted.memoryBundle),
   memoryBundle: {
     prompt: "用户偏好：默认中文回答",
     memories: [],
@@ -31,8 +34,9 @@ vi.mock("@/store/ai-store", () => ({
 vi.mock("@/store/agent-memory-store", () => ({
   useAgentMemoryStore: {
     getState: () => ({
-      loaded: true,
-      getMemoryRecallBundleAsync: vi.fn(async () => hoisted.memoryBundle),
+      loaded: hoisted.memoryLoaded,
+      load: hoisted.loadMock,
+      getMemoryRecallBundleAsync: hoisted.getMemoryRecallBundleAsyncMock,
     }),
   },
 }));
@@ -62,6 +66,11 @@ function createContext(): ActorRunContext {
 describe("MemoryMiddleware", () => {
   beforeEach(() => {
     hoisted.shouldRecall = true;
+    hoisted.memoryLoaded = true;
+    hoisted.loadMock.mockReset();
+    hoisted.loadMock.mockResolvedValue(undefined);
+    hoisted.getMemoryRecallBundleAsyncMock.mockReset();
+    hoisted.getMemoryRecallBundleAsyncMock.mockResolvedValue(hoisted.memoryBundle);
   });
 
   it("stores memory and transcript recall metadata on the actor run context", async () => {
@@ -89,5 +98,25 @@ describe("MemoryMiddleware", () => {
     expect(ctx.transcriptRecallAttempted).toBe(false);
     expect(ctx.transcriptRecallHitCount).toBe(0);
     expect(ctx.appliedTranscriptPreview).toEqual([]);
+  });
+
+  it("falls back to empty memory metadata when recall stalls", async () => {
+    vi.useFakeTimers();
+    const ctx = createContext();
+    hoisted.getMemoryRecallBundleAsyncMock.mockImplementationOnce(
+      async () => new Promise(() => {}),
+    );
+
+    const promise = new MemoryMiddleware().apply(ctx);
+    await vi.advanceTimersByTimeAsync(1_250);
+    await promise;
+
+    expect(ctx.userMemoryPrompt).toBeUndefined();
+    expect(ctx.memoryRecallAttempted).toBe(false);
+    expect(ctx.appliedMemoryPreview).toEqual([]);
+    expect(ctx.transcriptRecallAttempted).toBe(false);
+    expect(ctx.transcriptRecallHitCount).toBe(0);
+    expect(ctx.appliedTranscriptPreview).toEqual([]);
+    vi.useRealTimers();
   });
 });

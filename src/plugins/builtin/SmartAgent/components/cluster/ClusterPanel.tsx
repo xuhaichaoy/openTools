@@ -77,6 +77,7 @@ import { useToolTrustStore } from "@/store/command-allowlist-store";
 import { useConfirmDialogStore } from "@/store/confirm-dialog-store";
 import { useClusterPlanApprovalStore } from "@/store/cluster-plan-approval-store";
 import type { AskUserQuestion, AskUserAnswers } from "../../core/default-tools";
+import { resolveInteractiveToolApproval } from "../../core/interactive-tool-approval";
 import {
   useInputAttachments,
   FILE_ACCEPT_ALL,
@@ -764,25 +765,12 @@ export function ClusterPanel({ active = true }: { active?: boolean }) {
 
   const confirmDangerousAction = useCallback(
     (toolName: string, params: Record<string, unknown>): Promise<boolean> => {
-      const toolTrust = useToolTrustStore.getState();
-      const cachedDecision = toolTrust.getCachedDecision(toolName, params);
-      if (cachedDecision !== null) {
-        return Promise.resolve(cachedDecision);
-      }
-      const assessment = toolTrust.assess(toolName, params);
-      if (assessment.decision !== "ask") {
-        toolTrust.rememberDecision(toolName, params, true);
-        return Promise.resolve(true);
-      }
-      return openConfirmDialog({
-        source: "cluster",
+      return resolveInteractiveToolApproval({
+        aiMode: "plan",
         toolName,
         params,
-        risk: assessment.risk,
-        reason: assessment.reason,
-      }).then((confirmed) => {
-        toolTrust.rememberDecision(toolName, params, confirmed);
-        return confirmed;
+        source: "cluster",
+        openConfirmDialog,
       });
     },
     [openConfirmDialog],

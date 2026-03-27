@@ -17,7 +17,7 @@ const STREAMING_FALLBACK_TEXT: Partial<Record<AgentStep["type"], string>> = {
 };
 
 function shouldClearStreamingAnswersForStep(step: AgentStep): boolean {
-  return step.type === "action" || step.type === "tool_streaming";
+  return step.type === "action";
 }
 
 export function applyIncomingAgentStep(

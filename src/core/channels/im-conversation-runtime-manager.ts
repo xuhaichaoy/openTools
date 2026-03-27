@@ -61,6 +61,13 @@ const log = createLogger("IMConversationRuntime");
 const MAX_PERSISTED_ACTOR_SESSION_HISTORY = 24;
 const IM_RUNTIME_IDLE_COMPACTION_DELAY_MS = 1_500;
 
+function previewText(value?: string, maxLength = 120): string | undefined {
+  const normalized = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!normalized) return undefined;
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(1, maxLength - 3)).trimEnd()}...`;
+}
+
 interface PendingIMMessage {
   messageId: string;
   text: string;
@@ -1202,10 +1209,29 @@ export class IMConversationRuntimeManager {
 
   private async dispatch(runtime: IMConversationRuntime, pending: PendingIMMessage): Promise<void> {
     let snapshot = this.getCollaborationSnapshot(runtime);
+    log.info("Dispatching IM pending message", {
+      runtimeKey: runtime.key,
+      channelId: runtime.channelId,
+      conversationId: runtime.conversationId,
+      topicId: runtime.topicId,
+      messageId: pending.messageId,
+      textPreview: previewText(pending.briefContent || pending.text),
+      queueLength: runtime.queue.length,
+      pendingInteractionCount: snapshot.pendingInteractions.length,
+      queuedFollowUpCount: snapshot.queuedFollowUps.length,
+      presentationStatus: snapshot.presentationState.status,
+      inFlight: runtime.inFlight,
+    });
     if (snapshot.pendingInteractions.length > 1) {
       runtime.queue = [pending, ...runtime.queue];
       runtime.inFlight = false;
       runtime.status = "waiting";
+      log.warn("IM dispatch deferred because multiple pending interactions exist", {
+        runtimeKey: runtime.key,
+        messageId: pending.messageId,
+        pendingMessageIds: snapshot.pendingInteractions.map((interaction) => interaction.messageId),
+        queueLength: runtime.queue.length,
+      });
       void this.options.onReply({
         channelId: runtime.channelId,
         conversationId: runtime.conversationId,
@@ -1238,6 +1264,12 @@ export class IMConversationRuntimeManager {
       : null;
 
     if (singlePendingInteraction?.type === "approval" && queuedApprovalMessage) {
+      log.info("IM dispatch routed as approval reply", {
+        runtimeKey: runtime.key,
+        messageId: pending.messageId,
+        approvalInteractionId: singlePendingInteraction.id,
+        approvalMessageId: singlePendingInteraction.messageId,
+      });
       runtime.controller.dispatchUserInput({
         content: pending.text,
         briefContent: pending.briefContent,
@@ -1257,6 +1289,12 @@ export class IMConversationRuntimeManager {
       });
 
       const decision = parseContractApprovalReply(pending.text);
+      log.info("IM approval reply parsed", {
+        runtimeKey: runtime.key,
+        messageId: pending.messageId,
+        decision,
+        textPreview: previewText(pending.text, 64),
+      });
       if (decision === "allow") {
         this.continueApprovedQueuedMessage(runtime, queuedApprovalMessage);
       } else if (decision === "deny") {
@@ -1305,6 +1343,11 @@ export class IMConversationRuntimeManager {
         if (assessment.decision === "deny") {
           runtime.inFlight = false;
           runtime.status = "waiting";
+          log.warn("IM dispatch denied by execution contract policy", {
+            runtimeKey: runtime.key,
+            messageId: pending.messageId,
+            reason: assessment.reason,
+          });
           void this.options.onReply({
             channelId: runtime.channelId,
             conversationId: runtime.conversationId,
@@ -1317,6 +1360,12 @@ export class IMConversationRuntimeManager {
           return;
         }
         if (assessment.decision === "ask") {
+          log.warn("IM dispatch requires external contract approval", {
+            runtimeKey: runtime.key,
+            messageId: pending.messageId,
+            risk: assessment.risk,
+            reason: assessment.reason,
+          });
           this.requestExternalContractApproval({
             runtime,
             pending,
@@ -1331,6 +1380,14 @@ export class IMConversationRuntimeManager {
 
     runtime.inFlight = true;
     runtime.status = "running";
+    log.info("IM dispatch forwarding to collaboration controller", {
+      runtimeKey: runtime.key,
+      messageId: pending.messageId,
+      hasDispatchContract: Boolean(dispatchContract),
+      dispatchContractState: dispatchContract?.state ?? null,
+      forceAsNewMessage: snapshot.pendingInteractions.length === 0,
+      pendingInteractionCount: snapshot.pendingInteractions.length,
+    });
     runtime.controller.dispatchUserInput({
       content: pending.text,
       briefContent: pending.briefContent,
@@ -1400,6 +1457,7 @@ export class IMConversationRuntimeManager {
     const snapshot = this.getCollaborationSnapshot(runtime);
     this.cleanupStaleApprovalQueue(runtime, snapshot);
     const activity = this.inspectRuntime(runtime, snapshot);
+    const previousStatus = runtime.status;
     let shouldScheduleIdleCompaction = false;
     if (activity.pendingApprovals > 0 || activity.pendingReplies > 0) {
       runtime.status = "waiting";
@@ -1436,6 +1494,21 @@ export class IMConversationRuntimeManager {
     }
 
     runtime.updatedAt = Date.now();
+    if (previousStatus !== runtime.status) {
+      log.info("IM runtime status changed", {
+        runtimeKey: runtime.key,
+        from: previousStatus,
+        to: runtime.status,
+        queueLength: runtime.queue.length,
+        queuedFollowUpCount: snapshot.queuedFollowUps.length,
+        pendingApprovals: activity.pendingApprovals,
+        pendingReplies: activity.pendingReplies,
+        runningTasks: activity.runningTasks,
+        activeActors: activity.activeActors,
+        inFlight: runtime.inFlight,
+        presentationStatus: snapshot.presentationState.status,
+      });
+    }
     this.syncRuntimeState(runtime, activity, snapshot);
     if (shouldScheduleIdleCompaction) {
       this.scheduleIdleCompaction(runtime, snapshot, activity);
@@ -1454,6 +1527,12 @@ export class IMConversationRuntimeManager {
       runtime.pumping = true;
       const next = runtime.queue.shift();
       if (next && next.approvalState !== "awaiting_user") {
+        log.info("IM runtime pumping queued message", {
+          runtimeKey: runtime.key,
+          messageId: next.messageId,
+          remainingQueueLength: runtime.queue.length,
+          textPreview: previewText(next.briefContent || next.text),
+        });
         void this.dispatch(runtime, next).finally(() => {
           runtime.pumping = false;
           this.syncRuntimeState(runtime, undefined, this.getCollaborationSnapshot(runtime));

@@ -201,6 +201,19 @@ function MainApp() {
     }).catch(() => undefined);
   }, [trayAttentionCount]);
 
+  useEffect(() => {
+    const stopActiveAIStreams = () => {
+      invoke("ai_stop_stream").catch(() => undefined);
+    };
+
+    window.addEventListener("beforeunload", stopActiveAIStreams);
+    window.addEventListener("pagehide", stopActiveAIStreams);
+    return () => {
+      window.removeEventListener("beforeunload", stopActiveAIStreams);
+      window.removeEventListener("pagehide", stopActiveAIStreams);
+    };
+  }, []);
+
   return (
     <div className="relative w-full h-full flex flex-col bg-[var(--color-bg)] text-[var(--color-text)] overflow-hidden rounded-xl border border-[var(--color-border)] shadow-2xl">
       <WindowResizeHandles bucket={resizeBucket} />

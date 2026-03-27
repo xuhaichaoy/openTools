@@ -10,6 +10,7 @@ interface ConfirmDialogRequest {
   source: ConfirmDialogSource;
   risk?: ToolApprovalRisk;
   reason?: string;
+  reviewedByModel?: boolean;
   resolve: (confirmed: boolean) => void;
 }
 
@@ -22,6 +23,7 @@ interface ConfirmDialogState {
     source: ConfirmDialogSource;
     risk?: ToolApprovalRisk;
     reason?: string;
+    reviewedByModel?: boolean;
   }) => Promise<boolean>;
   submit: (confirmed: boolean) => void;
   dismiss: () => void;
@@ -41,7 +43,7 @@ function popNext(requests: ConfirmDialogRequest[]): [ConfirmDialogRequest | null
 export const useConfirmDialogStore = create<ConfirmDialogState>((set, get) => ({
   active: null,
   queue: [],
-  open: ({ toolName, params, source, risk, reason }) =>
+  open: ({ toolName, params, source, risk, reason, reviewedByModel }) =>
     new Promise<boolean>((resolve) => {
       const request: ConfirmDialogRequest = {
         id: nextId(),
@@ -50,6 +52,7 @@ export const useConfirmDialogStore = create<ConfirmDialogState>((set, get) => ({
         source,
         risk,
         reason,
+        reviewedByModel,
         resolve,
       };
 

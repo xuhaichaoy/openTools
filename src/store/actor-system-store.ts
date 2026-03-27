@@ -19,6 +19,8 @@ import type {
   SessionUploadRecord,
   SpawnedTaskRecord,
   SpawnedTaskEventDetail,
+  SpawnedTaskLifecycleEvent,
+  SpawnedTaskLifecycleEventType,
   ThinkingLevel,
   ToolPolicy,
 } from "@/core/agent/actor/types";
@@ -47,7 +49,11 @@ import {
 } from "@/core/ai/ai-session-runtime";
 import { buildDialogContextSummary } from "@/core/agent/actor/dialog-session-summary";
 import { buildSpawnedTaskCheckpoint } from "@/core/agent/actor/spawned-task-checkpoint";
-import { resolvePersistedDialogActorMaxIterations } from "@/core/agent/actor/dialog-actor-persistence";
+import {
+  resolvePersistedDialogActorBudgetSeconds,
+  resolvePersistedDialogActorIdleLeaseSeconds,
+  resolvePersistedDialogActorMaxIterations,
+} from "@/core/agent/actor/dialog-actor-persistence";
 import { buildExecutionContractFromLegacyDialogExecutionPlan } from "@/core/agent/actor/dialog-execution-plan-compat";
 import {
   compactMiddlewareOverridesForPersistence,
@@ -95,7 +101,7 @@ const log = createLogger("ActorStore");
 
 const LEGACY_STORAGE_KEY = "dialog_session";
 const ACTIVE_SESSION_POINTER_KEY = "dialog_session_pointer";
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 
 interface PersistedSpawnedTask {
   runId: string;
@@ -114,6 +120,9 @@ interface PersistedSpawnedTask {
   completedAt?: number;
   result?: string;
   error?: string;
+  timeoutReason?: SpawnedTaskRecord["timeoutReason"];
+  budgetSeconds?: number;
+  idleLeaseSeconds?: number;
   sessionHistoryStartIndex?: number;
   sessionHistoryEndIndex?: number;
   mode?: SpawnedTaskRecord["mode"];
@@ -138,6 +147,7 @@ interface PersistedSession {
     executionPolicy?: ExecutionPolicy;
     workspace?: string;
     timeoutSeconds?: number;
+    idleLeaseSeconds?: number;
     contextTokens?: number;
     thinkingLevel?: ThinkingLevel;
     middlewareOverrides?: MiddlewareOverrides;
@@ -286,6 +296,9 @@ function buildSessionSnapshot(
         completedAt: r.completedAt,
         result: r.result?.slice(0, 1000),
         error: r.error,
+        timeoutReason: r.timeoutReason,
+        budgetSeconds: r.budgetSeconds,
+        idleLeaseSeconds: r.idleLeaseSeconds,
         sessionHistoryStartIndex: r.sessionHistoryStartIndex,
         sessionHistoryEndIndex: r.sessionHistoryEndIndex,
         mode: r.mode,
@@ -312,6 +325,7 @@ function buildSessionSnapshot(
       executionPolicy: a.normalizedExecutionPolicy,
       workspace: a.workspace,
       timeoutSeconds: a.timeoutSeconds,
+      idleLeaseSeconds: a.idleLeaseSeconds,
       contextTokens: a.contextTokens,
       thinkingLevel: a.thinkingLevel,
       middlewareOverrides: compactMiddlewareOverridesForPersistence(a.middlewareOverrides),
@@ -1293,6 +1307,7 @@ async function saveSessionSnapshot(system: ActorSystem): Promise<void> {
       thinkingLevel: actor.thinkingLevel,
       middlewareOverrides: actor.middlewareOverrides,
       timeoutSeconds: actor.timeoutSeconds,
+      idleLeaseSeconds: actor.idleLeaseSeconds,
       contextTokens: actor.contextTokens,
     })),
     snapshot: snapshot as unknown as Record<string, unknown>,
@@ -1325,7 +1340,8 @@ function restoreSnapshot(system: ActorSystem, persisted: PersistedSession): Rest
       toolPolicy: config.toolPolicy,
       executionPolicy: config.executionPolicy,
       workspace: config.workspace,
-      timeoutSeconds: config.timeoutSeconds,
+      timeoutSeconds: resolvePersistedDialogActorBudgetSeconds(config, actorCount, persisted.version),
+      idleLeaseSeconds: resolvePersistedDialogActorIdleLeaseSeconds(config, actorCount),
       contextTokens: config.contextTokens,
       thinkingLevel: config.thinkingLevel,
       middlewareOverrides: config.middlewareOverrides,
@@ -1389,6 +1405,9 @@ function restoreSnapshot(system: ActorSystem, persisted: PersistedSession): Rest
         completedAt: t.completedAt,
         result: t.result,
         error: t.error,
+        timeoutReason: t.timeoutReason,
+        budgetSeconds: t.budgetSeconds,
+        idleLeaseSeconds: t.idleLeaseSeconds,
         sessionHistoryStartIndex: t.sessionHistoryStartIndex,
         sessionHistoryEndIndex: t.sessionHistoryEndIndex,
         sessionOpen: t.sessionOpen,
@@ -1437,6 +1456,7 @@ export interface ActorSnapshot {
   normalizedExecutionPolicy: NormalizedExecutionPolicy;
   workspace?: string;
   timeoutSeconds?: number;
+  idleLeaseSeconds?: number;
   contextTokens?: number;
   thinkingLevel?: ThinkingLevel;
   middlewareOverrides?: MiddlewareOverrides;
@@ -1477,7 +1497,7 @@ interface ActorSystemState {
   /** 当前 coordinator 的 actor id */
   coordinatorActorId: string | null;
   /** 子任务生命周期事件流（UI 用于展示中间过程） */
-  spawnedTaskEvents: SpawnedTaskEventDetail[];
+  spawnedTaskEvents: SpawnedTaskLifecycleEvent[];
   /** 当前待办快照 */
   actorTodos: Record<string, TodoItem[]>;
   /** 当前排队等待发送的新消息 */
@@ -1563,6 +1583,8 @@ interface ActorSystemState {
     name?: string;
     modelOverride?: string;
     workspace?: string;
+    timeoutSeconds?: number;
+    idleLeaseSeconds?: number;
     thinkingLevel?: ThinkingLevel;
     toolPolicy?: ToolPolicy;
     executionPolicy?: ExecutionPolicy;
@@ -1585,6 +1607,7 @@ function snapshotActor(actor: AgentActor): ActorSnapshot {
     normalizedExecutionPolicy: actor.normalizedExecutionPolicy,
     workspace: actor.workspace,
     timeoutSeconds: actor.timeoutSeconds,
+    idleLeaseSeconds: actor.idleLeaseSeconds,
     contextTokens: actor.contextTokens,
     thinkingLevel: actor.thinkingLevel,
     middlewareOverrides: actor.middlewareOverrides,
@@ -1653,17 +1676,22 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
       "spawned_task_started", "spawned_task_running",
       "spawned_task_completed", "spawned_task_failed", "spawned_task_timeout",
     ]);
-    const MAX_TASK_EVENTS = 100;
+    const MAX_TASK_EVENTS = 240;
 
     // RAF-based debounce: coalesce rapid events into a single sync per frame
     let syncRAF = 0;
     system.onEvent((ev) => {
       if ("type" in ev) {
-        const event = ev as { type: string; detail?: unknown };
+        const event = ev as { type: string; detail?: unknown; timestamp: number };
         if (SPAWNED_TASK_EVENT_TYPES.has(event.type) && event.detail) {
           const detail = event.detail as SpawnedTaskEventDetail;
+          const lifecycleEvent: SpawnedTaskLifecycleEvent = {
+            ...detail,
+            eventType: event.type as SpawnedTaskLifecycleEventType,
+            timestamp: event.timestamp,
+          };
           set((state) => {
-            const events = [...state.spawnedTaskEvents, detail];
+            const events = [...state.spawnedTaskEvents, lifecycleEvent];
             return { spawnedTaskEvents: events.slice(-MAX_TASK_EVENTS) };
           });
         }
