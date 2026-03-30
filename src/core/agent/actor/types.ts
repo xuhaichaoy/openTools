@@ -1,6 +1,7 @@
 import type { AgentStep } from "@/plugins/builtin/SmartAgent/core/react-agent";
 import type { AgentRole } from "@/core/agent/cluster/types";
 import type { TimeoutReason } from "./timeout-policy";
+import type { DialogStructuredSubtaskResult } from "./dialog-subtask-runtime";
 
 // ── Actor Lifecycle ──
 
@@ -27,6 +28,8 @@ export interface InboxMessage {
   images?: string[];
   /** 附带的文件列表（本地文件路径） */
   attachments?: { path: string; fileName?: string }[];
+  /** 结构化子任务终态（Dialog 子代理结果的一等输入） */
+  spawnedTaskResult?: DialogStructuredSubtaskResult;
 }
 
 // ── Dialog Messages（UI 层使用） ──
@@ -94,6 +97,10 @@ export interface DialogExecutionPlannedSpawn {
   childCapabilities?: AgentCapability[];
   childWorkspace?: string;
   childMaxIterations?: number;
+  overrides?: Pick<
+    SpawnTaskOverrides,
+    "executionIntent" | "resultContract" | "deliveryTargetId" | "deliveryTargetLabel" | "sheetName"
+  >;
 }
 
 export interface DialogExecutionPlan {
@@ -271,6 +278,7 @@ export interface ToolPolicy {
 
 /** 访问权限级别：控制是否允许读写执行环境。 */
 export type AccessMode = "read_only" | "auto" | "full_access";
+export type DialogExecutionMode = "execute" | "plan";
 
 /** HumanApproval 策略级别 */
 export type ApprovalMode = "strict" | "normal" | "permissive" | "off";
@@ -329,6 +337,16 @@ export interface ActorConfig {
 
 /** spawn_task 时可动态覆盖的 Subagent 配置 */
 export interface SpawnTaskOverrides {
+  /** 显式指定子任务执行意图（默认由系统推断） */
+  executionIntent?: DialogSubtaskExecutionIntent;
+  /** 子任务结果合同：用于固定终态交付语义，而不是靠 prompt 猜 */
+  resultContract?: "default" | "inline_structured_result";
+  /** 通用交付目标 ID，例如 sheet/bucket/section 标识 */
+  deliveryTargetId?: string;
+  /** 通用交付目标标签，例如 sheet 名、章节名、分桶名 */
+  deliveryTargetLabel?: string;
+  /** 专用交付元数据：当前子任务产出应归属的工作表 */
+  sheetName?: string;
   /** 覆盖 subagent 使用的 LLM 模型 */
   model?: string;
   /** 覆盖单次运行总预算（秒） */
@@ -374,6 +392,7 @@ export type ActorEventType =
   | "spawned_task_timeout"
   | "session_title_updated"
   | "dialog_plan_finalized"
+  | "dialog_execution_mode_changed"
   | "session_stalled";
 
 export interface ActorEvent {
@@ -419,6 +438,22 @@ export interface SpawnedTaskEventDetail {
   idleLeaseSeconds?: number;
   /** Timeout reason when status is aborted due to timeout */
   timeoutReason?: TimeoutReason;
+  /** Stable subtask runtime id */
+  subtaskId?: string;
+  /** Normalized child execution profile */
+  profile?: DialogSubtaskProfile;
+  /** Stable execution intent used to derive the child tool surface */
+  executionIntent?: DialogSubtaskExecutionIntent;
+  /** Latest runtime progress summary */
+  progressSummary?: string;
+  /** Structured terminal result mirrored from runtime */
+  terminalResult?: string;
+  /** Structured terminal error mirrored from runtime */
+  terminalError?: string;
+  /** Runtime timeout budget in seconds */
+  timeoutSeconds?: number;
+  /** Observed lifecycle/progress event count */
+  eventCount?: number;
 }
 
 export type SpawnedTaskLifecycleEventType = Extract<
@@ -493,6 +528,20 @@ export type SpawnedTaskStatus = "running" | "completed" | "error" | "aborted";
 /** Spawn 模式：对标 OpenClaw sessions_spawn mode */
 export type SpawnMode = "run" | "session";
 export type SpawnedTaskRoleBoundary = "reviewer" | "validator" | "executor" | "general";
+export type DialogSubtaskProfile = "executor" | "reviewer" | "validator" | "general";
+export type DialogSubtaskExecutionIntent = "content_executor" | "coding_executor" | "reviewer" | "validator" | "general";
+
+export interface DialogSubtaskRuntimeState {
+  subtaskId: string;
+  profile: DialogSubtaskProfile;
+  progressSummary?: string;
+  terminalResult?: string;
+  terminalError?: string;
+  startedAt: number;
+  completedAt?: number;
+  timeoutSeconds?: number;
+  eventCount: number;
+}
 
 /** SpawnedTaskRecord：对标 OpenClaw subagent registry entry */
 export interface SpawnedTaskRecord {
@@ -511,6 +560,16 @@ export interface SpawnedTaskRecord {
   rootRunId?: string;
   /** 临时子 Agent 的默认职责边界；常驻 Agent 默认为 general */
   roleBoundary?: SpawnedTaskRoleBoundary;
+  /** 稳定执行意图：用于固定 child 工具面，不再半继承 parent 工具池 */
+  executionIntent?: DialogSubtaskExecutionIntent;
+  /** 子任务结果合同：用于固定终态交付语义，而不是靠 prompt 猜 */
+  resultContract?: "default" | "inline_structured_result";
+  /** 通用交付目标 ID，例如 sheet/bucket/section 标识 */
+  deliveryTargetId?: string;
+  /** 通用交付目标标签，例如 sheet 名、章节名、分桶名 */
+  deliveryTargetLabel?: string;
+  /** 专用交付元数据：当前子任务产出应归属的工作表 */
+  sheetName?: string;
   task: string;
   label?: string;
   /** 任务启动时继承的图片附件（如截图、设计稿） */
@@ -543,4 +602,6 @@ export interface SpawnedTaskRecord {
   lastActiveAt?: number;
   /** 子会话关闭时间（手动关闭 / reset / actor 销毁） */
   sessionClosedAt?: number;
+  /** Dialog 子任务统一运行时快照 */
+  runtime?: DialogSubtaskRuntimeState;
 }

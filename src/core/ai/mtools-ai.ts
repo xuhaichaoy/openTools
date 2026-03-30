@@ -27,8 +27,8 @@ import {
 } from "@/core/ai/assistant-memory";
 
 const aiLog = createLogger("MToolsAI");
-const STREAM_STALL_TIMEOUT_MS = 120_000;
-const STREAM_FIRST_CHUNK_TIMEOUT_MS = 90_000;
+const STREAM_STALL_TIMEOUT_MS = 60_000;
+const STREAM_FIRST_CHUNK_TIMEOUT_MS = 45_000;
 const STREAM_HARD_TIMEOUT_MS = 600_000;
 const MANAGED_AUTH_STREAM_ERROR_PATTERNS = [
   /\b401\b/,
@@ -1198,6 +1198,9 @@ export function createMToolsAI(mode: AICenterMode = "explore"): MToolsAI {
       let hadModelResponse = false;
       let fullThinking = "";
       let fullToolArgs = "";
+      const emitTrace = (event: string, detail?: Record<string, unknown>) => {
+        options.onTraceEvent?.(event, detail);
+      };
 
       return new Promise((resolve, reject) => {
         const startedAt = Date.now();
@@ -1257,6 +1260,12 @@ export function createMToolsAI(mode: AICenterMode = "explore"): MToolsAI {
           thinkingLevel: options.thinkingLevel ?? "adaptive",
           messageCount: options.messages.length,
           toolCount: options.tools?.length ?? 0,
+        });
+        emitTrace("llm_invoke_started", {
+          phase: "mtools_stream_start",
+          model: config.model,
+          count: options.messages.length,
+          tool_count: options.tools?.length ?? 0,
         });
         let cleaned = false;
         let settled = false;
@@ -1343,6 +1352,12 @@ export function createMToolsAI(mode: AICenterMode = "explore"): MToolsAI {
             const idleMs = Date.now() - lastActivityAt;
             const timeoutSec = Math.floor(timeoutMs / 1000);
             const message = `ai_agent_stream 卡住超过 ${timeoutSec} 秒（phase=${phase}, idle=${idleMs}ms）`;
+            emitTrace("llm_stream_stall", {
+              phase,
+              elapsed_ms: Date.now() - startedAt,
+              idle_ms: idleMs,
+              count: chunkCount,
+            });
             aiLog.error("[streamWithTools] stall timeout", {
               conversationId,
               phase,
@@ -1403,10 +1418,18 @@ export function createMToolsAI(mode: AICenterMode = "explore"): MToolsAI {
               "ai-stream-chunk",
               (event) => {
                 if (event.payload.conversation_id === conversationId) {
+                  const isFirstChunk = typeof stageMarks.first_chunk !== "number";
                   markStage("first_chunk", {
                     chunkLength: event.payload.content.length,
                     chunkPreview: previewStageText(event.payload.content),
                   });
+                  if (isFirstChunk && event.payload.content.trim()) {
+                    emitTrace("llm_first_chunk", {
+                      elapsed_ms: Date.now() - startedAt,
+                      phase: "mtools_stream_chunk",
+                      preview: previewStageText(event.payload.content, 80),
+                    });
+                  }
                   dump("ai-stream-chunk:raw", event.payload);
                   kickWatchdog("chunk");
                   chunkCount += 1;
@@ -1496,6 +1519,14 @@ export function createMToolsAI(mode: AICenterMode = "explore"): MToolsAI {
                   markStage("first_tool_calls", {
                     toolCallCount: normalizedToolCalls.length,
                     tools: normalizedToolCalls.map((toolCall) => toolCall.function?.name ?? "unknown"),
+                  });
+                  emitTrace("llm_tool_calls_received", {
+                    elapsed_ms: Date.now() - startedAt,
+                    count: normalizedToolCalls.length,
+                    preview: previewStageText(
+                      normalizedToolCalls.map((toolCall) => toolCall.function?.name ?? "unknown").join(", "),
+                      80,
+                    ),
                   });
                   dump("ai-agent-tool-calls", {
                     ...event.payload,
@@ -1619,6 +1650,11 @@ export function createMToolsAI(mode: AICenterMode = "explore"): MToolsAI {
                     safeReject(emptyErr);
                     return;
                   }
+                  emitTrace("llm_content_completed", {
+                    elapsed_ms: Date.now() - startedAt,
+                    count: fullContent.trim().length,
+                    preview: previewStageText(fullContent, 80),
+                  });
                   options.onDone?.(fullContent);
                   safeResolve({ type: "content", content: fullContent });
                 }
@@ -1748,6 +1784,11 @@ export function createMToolsAI(mode: AICenterMode = "explore"): MToolsAI {
                   chunkCount,
                   chunkChars,
                   error: event.payload.error,
+                });
+                emitTrace("llm_failed", {
+                  elapsed_ms: Date.now() - startedAt,
+                  phase: "mtools_stream_error",
+                  preview: previewStageText(event.payload.error, 80),
                 });
                 safeReject(new Error(event.payload.error));
               },
@@ -1907,6 +1948,11 @@ export function createMToolsAI(mode: AICenterMode = "explore"): MToolsAI {
             conversationId,
             elapsedMs: Date.now() - startedAt,
             error: errMsg,
+          });
+          emitTrace("llm_failed", {
+            elapsed_ms: Date.now() - startedAt,
+            phase: "mtools_invoke_failed",
+            preview: previewStageText(errMsg, 80),
           });
           if (abortBridge.isAborted()) {
             safeReject(new Error("Aborted"));

@@ -45,7 +45,7 @@ const hoisted = vi.hoisted(() => ({
   },
   latestHistorySteps: [] as Array<{ type: string; content: string; timestamp: number }>,
   latestOnStep: null as null | ((step: { type: string; content: string; timestamp: number; streaming?: boolean }) => void),
-  runMode: "success" as "success" | "abort" | "timeout" | "tool_round" | "retry_then_success",
+  runMode: "success" as "success" | "abort" | "timeout" | "tool_round" | "retry_then_success" | "fc_retry_observation",
   runCallCount: 0,
   modelSupportsImageInput: true,
   shouldRecallAssistantMemory: false,
@@ -134,6 +134,14 @@ vi.mock("../core/react-agent", () => ({
           timestamp: Date.now(),
         });
         return "retry-success-answer";
+      }
+      if (hoisted.runMode === "fc_retry_observation") {
+        hoisted.latestOnStep?.({
+          type: "observation",
+          content: "网络/流传输错误，3秒后自动重试（第1次）...",
+          timestamp: Date.now(),
+        });
+        return "mock-result";
       }
       hoisted.latestOnStep?.({
         type: "answer",
@@ -1162,5 +1170,65 @@ describe("useAgentExecution", () => {
     });
     const actionSteps = actionUpdate?.[2]?.steps as Array<{ type: string; content: string; streaming?: boolean }> | undefined;
     expect(actionSteps?.some((step) => step.type === "answer" && step.streaming)).toBe(false);
+  });
+
+  it("switches waiting stage to model_retrying when transport retry observation arrives", async () => {
+    hoisted.runMode = "fc_retry_observation";
+    hoisted.fakeStoreState = {
+      currentSessionId: "target",
+      sessions: [
+        {
+          id: "target",
+          createdAt: 1,
+          tasks: [],
+        },
+      ],
+    };
+
+    const setExecutionWaitingStage = vi.fn();
+    let hookValue: ReturnType<typeof useAgentExecution> | null = null;
+
+    act(() => {
+      root.render(
+        <HookHarness
+          onReady={(value) => {
+            hookValue = value;
+          }}
+          params={{
+            ai: {} as never,
+            setRunning: vi.fn(),
+            setRunningPhase: vi.fn(),
+            setExecutionWaitingStage,
+            availableTools: [] as AgentTool[],
+            currentSessionId: "target",
+            createSession: vi.fn(() => "target"),
+            addTask: vi.fn(() => "task_retry_obs"),
+            updateTask: vi.fn(),
+            updateSession: vi.fn(),
+            forkSession: vi.fn(() => null),
+            inputRef: { current: document.createElement("textarea") },
+            scrollRef: {
+              current: {
+                scrollHeight: 100,
+                scrollTo: vi.fn(),
+              } as unknown as HTMLDivElement,
+            },
+            openDangerConfirm: vi.fn(async () => true),
+            resetPerRunState: null,
+          }}
+        />,
+      );
+    });
+
+    await act(async () => {
+      await hookValue!.executeAgentTask("query", { sessionId: "target" });
+    });
+
+    expect(setExecutionWaitingStage).toHaveBeenCalledWith(expect.any(Function));
+    const updaterResults = setExecutionWaitingStage.mock.calls
+      .map((call) => call?.[0])
+      .filter((candidate): candidate is ((prev: string | null) => string | null) => typeof candidate === "function")
+      .map((updater) => updater("model_first_token"));
+    expect(updaterResults).toContain("model_retrying");
   });
 });

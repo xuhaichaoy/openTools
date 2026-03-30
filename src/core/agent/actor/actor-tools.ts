@@ -44,6 +44,44 @@ const KNOWN_ROLE_BOUNDARIES = new Set<SpawnedTaskRoleBoundary>([
   "validator",
 ]);
 
+function previewSpawnTargetText(value?: string, maxLength = 32): string | undefined {
+  const normalized = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!normalized) return undefined;
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(1, maxLength - 3)).trimEnd()}...`;
+}
+
+function deriveEphemeralSpawnTarget(params: {
+  target?: string;
+  label?: string;
+  description?: string;
+  task?: string;
+  roleBoundary?: SpawnedTaskRoleBoundary;
+}): string {
+  const candidates = [
+    params.target,
+    params.label,
+    params.description,
+    previewSpawnTargetText(params.task),
+  ];
+
+  for (const candidate of candidates) {
+    const normalized = String(candidate ?? "").replace(/\s+/g, " ").trim();
+    if (normalized) return normalized;
+  }
+
+  switch (params.roleBoundary) {
+    case "reviewer":
+      return "Independent Reviewer";
+    case "validator":
+      return "QA Validator";
+    case "executor":
+      return "Task Executor";
+    default:
+      return "Temporary Worker";
+  }
+}
+
 async function invokeTauriCommand<T = unknown>(
   command: string,
   args?: Record<string, unknown>,
@@ -344,6 +382,10 @@ export function createActorCommunicationTools(
     readonly: false,
     execute: async (params) => {
       const currentInheritedImages = opts?.getInheritedImages?.() ?? opts?.inheritedImages;
+      const queueIfBusy = params.__queue_if_busy === true;
+      const softSpawnLimit = Number.isFinite(Number(params.__spawn_limit))
+        ? Number(params.__spawn_limit)
+        : undefined;
       const targetInput = params.target_agent ? String(params.target_agent).trim() : "";
       const target = targetInput ? resolveTarget(targetInput) : "";
       const plannedDelegationId = params.planned_delegation_id ? String(params.planned_delegation_id).trim() : undefined;
@@ -362,6 +404,16 @@ export function createActorCommunicationTools(
       const expectsCompletionMessage = params.expects_completion !== false;
       const childCapabilities = parseCapabilities(params.agent_capabilities);
       const roleBoundary = parseRoleBoundary(params.role_boundary);
+      const derivedTarget = createIfMissing
+        ? deriveEphemeralSpawnTarget({
+            target,
+            label,
+            description: params.agent_description ? String(params.agent_description) : undefined,
+            task,
+            roleBoundary,
+          })
+        : "";
+      const resolvedTarget = target || derivedTarget;
 
       // Subagent 独立配置
       const overrides: import("./types").SpawnTaskOverrides = {};
@@ -380,8 +432,60 @@ export function createActorCommunicationTools(
         overrides.systemPromptAppend = String(params.override_system_prompt_append);
       }
       const hasOverrides = Object.keys(overrides).length > 0;
+      const queuedSpawnCount = typeof system.getPendingDeferredSpawnTaskCount === "function"
+        ? system.getPendingDeferredSpawnTaskCount(actorId)
+        : 0;
+      const activeSpawnCount = typeof system.getActiveSpawnedTasks === "function"
+        ? system.getActiveSpawnedTasks(actorId).length
+        : 0;
 
-      const result = system.spawnTask(actorId, target, task, {
+      if (
+        queueIfBusy
+        && mode === "run"
+        && typeof softSpawnLimit === "number"
+        && (activeSpawnCount >= softSpawnLimit || queuedSpawnCount > 0)
+        && typeof system.enqueueDeferredSpawnTask === "function"
+      ) {
+        const queued = system.enqueueDeferredSpawnTask(actorId, resolvedTarget, task, {
+          label,
+          context,
+          timeoutSeconds,
+          attachments,
+          images: currentInheritedImages,
+          mode,
+          cleanup,
+          expectsCompletionMessage,
+          roleBoundary,
+          createIfMissing,
+          createChildSpec: createIfMissing
+            ? {
+                description: params.agent_description ? String(params.agent_description) : undefined,
+                capabilities: childCapabilities,
+                workspace: params.agent_workspace ? String(params.agent_workspace) : undefined,
+              }
+            : undefined,
+          overrides: hasOverrides ? overrides : undefined,
+          plannedDelegationId,
+        });
+        const pendingDispatchCount = typeof system.getPendingDeferredSpawnTaskCount === "function"
+          ? system.getPendingDeferredSpawnTaskCount(actorId)
+          : queuedSpawnCount + 1;
+        return {
+          spawned: false,
+          queued: true,
+          dispatch_status: "queued",
+          queue_id: queued.id,
+          pending_dispatch_count: pendingDispatchCount,
+          profile: queued.profile,
+          execution_intent: queued.executionIntent ?? queued.overrides?.executionIntent,
+          role_boundary: queued.roleBoundary ?? "general",
+          roleBoundary: queued.roleBoundary,
+          mode: queued.mode ?? mode,
+          hint: `已加入待派发队列（第 ${pendingDispatchCount} 个）。当前并发达到上限时，系统会在空位出现后自动补派。`,
+        };
+      }
+
+      const result = system.spawnTask(actorId, resolvedTarget, task, {
         label,
         context,
         timeoutSeconds,
@@ -408,10 +512,15 @@ export function createActorCommunicationTools(
       }
       return {
         spawned: true,
+        task_id: result.runId,
+        subtask_id: result.runtime?.subtaskId ?? result.runId,
         runId: result.runId,
         mode: result.mode,
         to: getActorName(result.targetActorId),
         label: result.label,
+        profile: result.runtime?.profile ?? result.roleBoundary ?? "general",
+        execution_intent: result.executionIntent,
+        role_boundary: result.roleBoundary ?? "general",
         roleBoundary: result.roleBoundary,
         hint: `任务已派发（mode=${result.mode}）。当你的下一步明确依赖这些子任务结果时，再调用 wait_for_spawned_tasks 挂起等待。`,
       };
@@ -423,37 +532,34 @@ export function createActorCommunicationTools(
     name: "wait_for_spawned_tasks",
     description:
       "挂起当前执行，等待所有你派发的子任务（跑在后台的）全部完成。当你的下一步明确依赖这些子任务结果时，再调用此工具。" +
-      "工具会一直阻塞直到所有目标子任务完成，返回它们成功或失败的完整结果。" +
-      "这样你可以拿到各方的完整详细报告，再往下执行综合梳理和总结，而不用依赖公屏的简短播报。",
+      "工具会等待一次运行时更新，然后返回最新结构化快照；如果目标子任务都已完成，会直接返回完整终态。" +
+      "这样你可以拿到各方的结构化结果继续综合，而不会因为长时间阻塞把当前主链路卡死。",
     parameters: {},
     readonly: true,
     execute: async () => {
-      while (true) {
-        const actor = system.get(actorId);
-        if (!actor || actor.status !== "running") {
-          return { error: "任务已终止或被叫停，结束等待。" };
-        }
-
-        const descendants = system.getDescendantTasks(actorId);
-        // 只等待当前 actor 直接派发出的子任务
-        const myTasks = descendants.filter((r) => r.spawnerActorId === actorId);
-        const running = myTasks.filter((r) => r.status === "running");
-
-        if (running.length === 0) {
-          const results = myTasks.map(r => {
-            const targetName = getActorName(r.targetActorId);
-            return `[子任务执行方: ${targetName}]\n目标任务: ${r.task}\n最终状态: ${r.status}\n产出结果:\n${r.result ?? r.error ?? "（无明确返回内容）"}`;
-          });
-          return {
-            wait_complete: true,
-            summary: "所有派发的子任务均已完成。下方是各子任务的详细执行成果，请基于这些成果进行最后的排版总结。",
-            details: results.length > 0 ? results.join("\n\n------------------------\n\n") : "当前并未发现派发任何子任务。",
-          };
-        }
-
-        // sleep 3 短暂轮询
-        await new Promise((resolve) => setTimeout(resolve, 3000));
+      const WAIT_UPDATE_TIMEOUT_MS = 30_000;
+      const actor = system.get(actorId);
+      if (!actor || actor.status !== "running") {
+        return { error: "任务已终止或被叫停，结束等待。" };
       }
+
+      const initialState = system.buildWaitForSpawnedTasksResult(actorId);
+      if (initialState.pending_count === 0 && (initialState.pending_dispatch_count ?? 0) === 0) {
+        return initialState;
+      }
+
+      await system.waitForSpawnedTaskUpdate(actorId, WAIT_UPDATE_TIMEOUT_MS);
+      const latestState = system.buildWaitForSpawnedTasksResult(actorId);
+      if (latestState.pending_count === 0 && (latestState.pending_dispatch_count ?? 0) === 0) {
+        return latestState;
+      }
+
+      return {
+        ...latestState,
+        wait_complete: false,
+        summary: latestState.summary
+          || `仍有 ${latestState.pending_count} 个子任务运行中；已返回最新结构化快照。若当前步骤不再必须同步等待，请结束本轮，由父运行时继续后台等待并在子结果回流后自动恢复。`,
+      };
     },
   });
 

@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
-import type { ActorConfig, ExecutionPolicy, ToolPolicy } from "./types";
+import type { ActorConfig, DialogExecutionMode, ExecutionPolicy, ToolPolicy } from "./types";
 import type { ExecutionContract } from "@/core/collaboration/types";
 
 vi.mock("./actor-transcript", () => ({
@@ -23,6 +23,7 @@ vi.mock("./agent-actor", () => {
     private _workspace?: string;
     private toolPolicy?: ToolPolicy;
     private executionPolicyValue?: ExecutionPolicy;
+    private dialogExecutionModeValue: DialogExecutionMode = "execute";
     private systemPromptOverride?: string;
     private timeoutSecondsValue?: number;
     private idleLeaseSecondsValue?: number;
@@ -110,6 +111,10 @@ vi.mock("./agent-actor", () => {
       return { ...this.executionPolicyValue };
     }
 
+    get dialogExecutionMode() {
+      return this.dialogExecutionModeValue;
+    }
+
     get timeoutSeconds() {
       return this.timeoutSecondsValue;
     }
@@ -162,6 +167,10 @@ vi.mock("./agent-actor", () => {
     abort() {
       this._status = "idle";
     }
+
+    setDialogExecutionMode(mode: DialogExecutionMode) {
+      this.dialogExecutionModeValue = mode;
+    }
   }
 
   return {
@@ -199,9 +208,8 @@ vi.mock("./middlewares", () => ({
 vi.mock("./spawned-task-result-validator", () => ({
   buildSpawnTaskExecutionHint: vi.fn(() => ""),
   validateSpawnedTaskResult: vi.fn(() => ({
-    ok: true,
-    reason: "",
-    warnings: [],
+    accepted: true,
+    requiresConcreteOutput: false,
   })),
 }));
 
@@ -259,6 +267,25 @@ function buildExecutionContract(
     state: overrides.state ?? "sealed",
   };
 }
+
+describe("ActorSystem dialog execution mode", () => {
+  it("applies plan mode to existing actors and newly spawned actors", () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("lead", "Lead"));
+
+    system.setDialogExecutionMode("plan");
+
+    expect(system.getDialogExecutionMode()).toBe("plan");
+    expect(system.get("lead")?.dialogExecutionMode).toBe("plan");
+
+    system.spawn(buildActorConfig("reviewer", "Reviewer"));
+    expect(system.get("reviewer")?.dialogExecutionMode).toBe("plan");
+
+    system.setDialogExecutionMode("execute");
+    expect(system.get("lead")?.dialogExecutionMode).toBe("execute");
+    expect(system.get("reviewer")?.dialogExecutionMode).toBe("execute");
+  });
+});
 
 describe("ActorSystem.broadcastAndResolve", () => {
   it("queues a new user message to the fallback coordinator when all actors are awaiting reply", () => {
@@ -500,6 +527,13 @@ describe("ActorSystem.spawnTask", () => {
     if ("error" in record) return;
     expect(record.images).toEqual(["/tmp/design.png"]);
     expect(specialist.lastAssignedImages).toEqual(["/tmp/design.png"]);
+    expect(record.runtime).toEqual(expect.objectContaining({
+      subtaskId: record.runId,
+      profile: "general",
+      startedAt: record.spawnedAt,
+      timeoutSeconds: 420,
+      eventCount: 1,
+    }));
   });
 
   it("passes the effective worker timeout policy down into the per-run overrides", () => {
@@ -512,15 +546,15 @@ describe("ActorSystem.spawnTask", () => {
     };
 
     const record = system.spawnTask("coordinator", "specialist", "长任务", {
-      timeoutSeconds: 600,
+      timeoutSeconds: 420,
       cleanup: "keep",
     });
 
     expect("error" in record).toBe(false);
     if ("error" in record) return;
     expect(specialist.lastAssignOptions?.runOverrides).toMatchObject({
-      timeoutSeconds: 600,
-      idleLeaseSeconds: 180,
+      timeoutSeconds: 420,
+      idleLeaseSeconds: 120,
     });
   });
 
@@ -542,11 +576,11 @@ describe("ActorSystem.spawnTask", () => {
       lastAssignOptions?: { runOverrides?: Record<string, unknown> };
     };
 
-    expect(record.budgetSeconds).toBe(600);
-    expect(worker.timeoutSeconds).toBe(600);
+    expect(record.budgetSeconds).toBe(420);
+    expect(worker.timeoutSeconds).toBe(420);
     expect(worker.lastAssignOptions?.runOverrides).toMatchObject({
-      timeoutSeconds: 600,
-      idleLeaseSeconds: 180,
+      timeoutSeconds: 420,
+      idleLeaseSeconds: 120,
     });
   });
 
@@ -621,6 +655,38 @@ describe("ActorSystem.spawnTask", () => {
       fromActorId: record.targetActorId,
       toActorId: "coordinator",
     });
+  });
+
+  it("falls back to the label when create_if_missing omits a target name", () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+
+    system.armExecutionContract(buildExecutionContract({
+      contractId: "contract-dynamic-label-fallback",
+      summary: "Coordinator 可按标签创建临时子 Agent",
+      approvedAt: Date.now(),
+      initialRecipientActorIds: ["coordinator"],
+      participantActorIds: ["coordinator"],
+      allowedMessagePairs: [],
+      allowedSpawnPairs: [],
+    }));
+
+    const record = system.spawnTask("coordinator", "", "基于技术方向主题生成课程名称和课程介绍", {
+      label: "技术方向课程生成",
+      createIfMissing: true,
+      createChildSpec: {
+        description: "负责技术方向课程内容整理",
+        capabilities: ["documentation"],
+      },
+      cleanup: "keep",
+    });
+
+    expect("error" in record).toBe(false);
+    if ("error" in record) return;
+
+    const child = system.get(record.targetActorId);
+    expect(child?.role.name).toBe("技术方向课程生成");
+    expect(record.label).toBe("技术方向课程生成");
   });
 
   it("derives the legacy dialog plan view from the active contract graph", () => {
@@ -750,6 +816,12 @@ describe("ActorSystem.spawnTask", () => {
 
   it("can abort an open child session by runId and clear focus", () => {
     const system = new ActorSystem();
+    const lifecycleEvents: Array<{ type: string; detail?: unknown }> = [];
+    system.onEvent((event) => {
+      if ("type" in event) {
+        lifecycleEvents.push(event as { type: string; detail?: unknown });
+      }
+    });
     system.spawn(buildActorConfig("coordinator", "Coordinator"));
     const reviewer = system.spawn(buildActorConfig("reviewer", "Reviewer")) as unknown as {
       assignTask: (query: string, images?: string[]) => Promise<unknown>;
@@ -777,7 +849,59 @@ describe("ActorSystem.spawnTask", () => {
     expect(aborted?.status).toBe("aborted");
     expect(aborted?.sessionOpen).toBe(false);
     expect(aborted?.error).toBe("用户手动中止子会话");
+    expect(aborted?.sessionClosedAt).toBeTypeOf("number");
+    expect(aborted?.runtime).toEqual(expect.objectContaining({
+      subtaskId: record.runId,
+      terminalError: "用户手动中止子会话",
+      completedAt: aborted?.completedAt,
+    }));
     expect(system.getFocusedSpawnedSessionRunId()).toBeNull();
+    expect(lifecycleEvents.find((event) => event.type === "spawned_task_failed")).toMatchObject({
+      detail: expect.objectContaining({
+        runId: record.runId,
+        subtaskId: record.runId,
+        terminalError: "用户手动中止子会话",
+      }),
+    });
+  });
+
+  it("aborts only active run children when the parent task exits abnormally", () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+    const runner = system.spawn(buildActorConfig("runner", "Runner")) as unknown as {
+      assignTask: ReturnType<typeof vi.fn>;
+      abort: ReturnType<typeof vi.fn>;
+    };
+    const reviewer = system.spawn(buildActorConfig("reviewer", "Reviewer")) as unknown as {
+      assignTask: ReturnType<typeof vi.fn>;
+      abort: ReturnType<typeof vi.fn>;
+    };
+
+    runner.abort = vi.fn();
+    reviewer.abort = vi.fn();
+    runner.assignTask = vi.fn(() => new Promise(() => undefined));
+    reviewer.assignTask = vi.fn(() => new Promise(() => undefined));
+
+    const runRecord = system.spawnTask("coordinator", "runner", "执行实现", {
+      cleanup: "keep",
+    });
+    const sessionRecord = system.spawnTask("coordinator", "reviewer", "保持审查会话", {
+      mode: "session",
+      cleanup: "keep",
+    });
+
+    expect("error" in runRecord).toBe(false);
+    expect("error" in sessionRecord).toBe(false);
+    if ("error" in runRecord || "error" in sessionRecord) return;
+
+    const abortedCount = system.abortActiveRunSpawnedTasks("coordinator", "Lead timeout");
+
+    expect(abortedCount).toBe(1);
+    expect(runner.abort).toHaveBeenCalledTimes(1);
+    expect(reviewer.abort).not.toHaveBeenCalled();
+    expect(system.getSpawnedTask(runRecord.runId)?.status).toBe("aborted");
+    expect(system.getSpawnedTask(sessionRecord.runId)?.status).toBe("running");
+    expect(system.getSpawnedTask(sessionRecord.runId)?.sessionOpen).toBe(true);
   });
 
   it("applies read-only defaults to reviewer-like temporary child agents", () => {
@@ -808,6 +932,13 @@ describe("ActorSystem.spawnTask", () => {
 
     const child = system.get(record.targetActorId);
     expect(record.roleBoundary).toBe("reviewer");
+    expect(record.runtime?.profile).toBe("reviewer");
+    expect(child?.toolPolicyConfig?.allow).toEqual(expect.arrayContaining([
+      "task_done",
+      "list_*",
+      "read_*",
+      "search_*",
+    ]));
     expect(child?.toolPolicyConfig?.deny).toEqual(expect.arrayContaining([
       "spawn_task",
       "write_file",
@@ -848,6 +979,12 @@ describe("ActorSystem.spawnTask", () => {
 
     const child = system.get(record.targetActorId);
     expect(record.roleBoundary).toBe("validator");
+    expect(record.runtime?.profile).toBe("validator");
+    expect(child?.toolPolicyConfig?.allow).toEqual(expect.arrayContaining([
+      "task_done",
+      "run_shell_command",
+      "persistent_shell",
+    ]));
     expect(child?.toolPolicyConfig?.deny).toEqual(expect.arrayContaining([
       "spawn_task",
       "write_file",
@@ -898,16 +1035,259 @@ describe("ActorSystem.spawnTask", () => {
 
     const child = system.get(record.targetActorId);
     expect(record.roleBoundary).toBe("executor");
+    expect(record.executionIntent).toBe("coding_executor");
+    expect(record.runtime?.profile).toBe("executor");
+    expect(child?.toolPolicyConfig?.allow).toEqual(expect.arrayContaining([
+      "task_done",
+      "write_file",
+      "str_replace_edit",
+      "json_edit",
+      "run_shell_command",
+    ]));
     expect(child?.toolPolicyConfig?.deny).toEqual(expect.arrayContaining([
       "spawn_task",
+      "delegate_subtask",
+      "wait_for_spawned_tasks",
+      "send_message",
+      "agents",
+      "ask_user",
+      "ask_clarification",
+      "send_local_media",
+      "enter_plan_mode",
+      "exit_plan_mode",
+      "memory_*",
       "delete_file",
       "native_*",
       "ssh_*",
-      "web_search",
       "database_execute",
     ]));
     expect(child?.getSystemPromptOverride()).toContain("你当前是执行子 Agent");
     expect(child?.getSystemPromptOverride()).toContain("优先输出最小改动方案。");
+  });
+
+  it("keeps non-coding executor children inline-only by disabling write and shell tools", () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+
+    system.armExecutionContract(buildExecutionContract({
+      contractId: "contract-dynamic-executor-inline",
+      summary: "Coordinator 可创建执行子 Agent",
+      approvedAt: Date.now(),
+      initialRecipientActorIds: ["coordinator"],
+      participantActorIds: ["coordinator"],
+      allowedMessagePairs: [],
+      allowedSpawnPairs: [],
+    }));
+
+    const record = system.spawnTask("coordinator", "Course Writer", "整理这批课程并直接返回最终课程清单，输出保存到 /Users/demo/Downloads/课程候选A_重跑.json", {
+      createIfMissing: true,
+      roleBoundary: "executor",
+      createChildSpec: {
+        description: "只负责执行内容整理",
+        capabilities: ["documentation"],
+      },
+      cleanup: "keep",
+    });
+
+    expect("error" in record).toBe(false);
+    if ("error" in record) return;
+
+    const child = system.get(record.targetActorId) as unknown as {
+      toolPolicyConfig?: { deny?: string[] };
+      lastAssignedQuery?: string;
+    };
+    expect(record.roleBoundary).toBe("executor");
+    expect(record.executionIntent).toBe("content_executor");
+    expect(child?.toolPolicyConfig?.allow).toEqual(expect.arrayContaining([
+      "task_done",
+      "read_document",
+      "calculate",
+    ]));
+    expect(child?.toolPolicyConfig?.deny).toEqual(expect.arrayContaining([
+      "spawn_task",
+      "delegate_subtask",
+      "wait_for_spawned_tasks",
+      "send_message",
+      "agents",
+      "ask_user",
+      "ask_clarification",
+      "memory_*",
+      "list_*",
+      "search_*",
+      "web_search",
+      "read_file",
+      "read_file_range",
+      "write_file",
+      "str_replace_edit",
+      "json_edit",
+      "export_spreadsheet",
+      "run_shell_command",
+      "persistent_shell",
+    ]));
+    expect(child?.toolPolicyConfig?.allow).not.toContain("export_spreadsheet");
+    expect(child?.lastAssignedQuery).toContain("不要写入任何中间 JSON / 临时文件");
+    expect(child?.lastAssignedQuery).toContain("先给完整结果，再在末尾补一行简短摘要");
+    expect(child?.lastAssignedQuery).not.toContain("/Users/demo/Downloads/课程候选A_重跑.json");
+  });
+
+  it("still treats course-generation tasks as inline-only even when they mention 开发和测试", () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+
+    system.armExecutionContract(buildExecutionContract({
+      contractId: "contract-dynamic-executor-course-content",
+      summary: "Coordinator 可创建执行子 Agent",
+      approvedAt: Date.now(),
+      initialRecipientActorIds: ["coordinator"],
+      participantActorIds: ["coordinator"],
+      allowedMessagePairs: [],
+      allowedSpawnPairs: [],
+    }));
+
+    const record = system.spawnTask(
+      "coordinator",
+      "Course Writer",
+      "读取 Excel，围绕应用开发、安全、运维、测试方向生成课程候选 JSON，保存到 /Users/demo/Downloads/课程候选A_本轮.json 并返回摘要。",
+      {
+        createIfMissing: true,
+        roleBoundary: "executor",
+        createChildSpec: {
+          description: "只负责课程内容整理",
+          capabilities: ["documentation"],
+        },
+        cleanup: "keep",
+      },
+    );
+
+    expect("error" in record).toBe(false);
+    if ("error" in record) return;
+
+    const child = system.get(record.targetActorId) as unknown as {
+      toolPolicyConfig?: { deny?: string[] };
+      lastAssignedQuery?: string;
+    };
+    expect(record.executionIntent).toBe("content_executor");
+    expect(child?.toolPolicyConfig?.deny).toEqual(expect.arrayContaining([
+      "list_*",
+      "search_*",
+      "web_search",
+      "read_file",
+      "read_file_range",
+      "write_file",
+      "str_replace_edit",
+      "json_edit",
+      "run_shell_command",
+      "persistent_shell",
+    ]));
+    expect(child?.lastAssignedQuery).toContain("不要写入任何中间 JSON / 临时文件");
+    expect(child?.lastAssignedQuery).toContain("先给完整结果，再在末尾补一行简短摘要");
+    expect(child?.lastAssignedQuery).not.toContain("/Users/demo/Downloads/课程候选A_本轮.json");
+  });
+
+  it("promotes spreadsheet content subtasks from general to strict executor defaults", () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+
+    system.armExecutionContract(buildExecutionContract({
+      contractId: "contract-dynamic-executor-auto-promote",
+      summary: "Coordinator 可创建内容执行子 Agent",
+      approvedAt: Date.now(),
+      initialRecipientActorIds: ["coordinator"],
+      participantActorIds: ["coordinator"],
+      allowedMessagePairs: [],
+      allowedSpawnPairs: [],
+    }));
+
+    const record = system.spawnTask(
+      "coordinator",
+      "Course Planner",
+      "读取 Excel 并生成课程候选清单，最终给我一个 excel 文件，先直接返回结构化课程结果，不要写中间文件。",
+      {
+        createIfMissing: true,
+        createChildSpec: {
+          description: "负责课程内容整理",
+          capabilities: ["documentation"],
+        },
+        cleanup: "keep",
+      },
+    );
+
+    expect("error" in record).toBe(false);
+    if ("error" in record) return;
+
+    const child = system.get(record.targetActorId) as unknown as {
+      toolPolicyConfig?: { deny?: string[] };
+      getSystemPromptOverride?: () => string | undefined;
+    };
+    expect(record.roleBoundary).toBe("executor");
+    expect(record.executionIntent).toBe("content_executor");
+    expect(record.runtime?.profile).toBe("executor");
+    expect(child?.toolPolicyConfig?.deny).toEqual(expect.arrayContaining([
+      "list_*",
+      "search_*",
+      "read_file",
+      "read_file_range",
+      "write_file",
+      "str_replace_edit",
+      "json_edit",
+      "export_spreadsheet",
+    ]));
+    expect(child?.getSystemPromptOverride?.()).toContain("默认直接在 terminal result 返回完整结果");
+    expect(child?.getSystemPromptOverride?.()).not.toContain("必须通过 `write_file` 或 `export_spreadsheet` 工具实际写入文件");
+  });
+
+  it("locks inline-structured content executors away from rereading the source document", () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+
+    system.armExecutionContract(buildExecutionContract({
+      contractId: "contract-sheet-bound-content-executor",
+      summary: "Coordinator 可创建受限的 sheet-bound content executor",
+      approvedAt: Date.now(),
+      initialRecipientActorIds: ["coordinator"],
+      participantActorIds: ["coordinator"],
+      allowedMessagePairs: [],
+      allowedSpawnPairs: [],
+    }));
+
+    const record = system.spawnTask(
+      "coordinator",
+      "Course Planner",
+      "围绕以下主题，为「技术方向课程」工作表生成课程候选，直接返回结构化结果。",
+      {
+        createIfMissing: true,
+        createChildSpec: {
+          description: "负责技术方向课程生成",
+          capabilities: ["documentation"],
+        },
+        cleanup: "keep",
+        overrides: {
+          executionIntent: "content_executor",
+          resultContract: "inline_structured_result",
+          deliveryTargetLabel: "技术方向课程",
+          sheetName: "技术方向课程",
+        },
+      },
+    );
+
+    expect("error" in record).toBe(false);
+    if ("error" in record) return;
+
+    const child = system.get(record.targetActorId) as unknown as {
+      toolPolicyConfig?: { allow?: string[]; deny?: string[] };
+    };
+    expect(record.executionIntent).toBe("content_executor");
+    expect(record.resultContract).toBe("inline_structured_result");
+    expect(record.deliveryTargetLabel).toBe("技术方向课程");
+    expect(record.sheetName).toBe("技术方向课程");
+    expect(child?.toolPolicyConfig?.allow).toEqual(["task_done"]);
+    expect(child?.toolPolicyConfig?.deny).toEqual(expect.arrayContaining([
+      "read_document",
+      "read_file",
+      "read_file_range",
+      "write_file",
+      "export_spreadsheet",
+    ]));
   });
 
   it("lets explicit roleBoundary override temporary child inference", () => {
@@ -1042,9 +1422,143 @@ describe("ActorSystem.spawnTask", () => {
     expect(record.roleBoundary).toBe("validator");
   });
 
-  it("keeps a worker alive past the old 180s cutoff while progress continues", () => {
+  it("inherits structured delivery overrides from planned delegations", () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+
+    system.armExecutionContract({
+      contractId: "contract-structured-delegation",
+      surface: "local_dialog",
+      executionStrategy: "coordinator",
+      summary: "Coordinator 协调结构化内容子任务",
+      coordinatorActorId: "coordinator",
+      inputHash: "input-hash",
+      actorRosterHash: "roster-hash",
+      initialRecipientActorIds: ["coordinator"],
+      participantActorIds: ["coordinator"],
+      allowedMessagePairs: [],
+      allowedSpawnPairs: [],
+      plannedDelegations: [
+        {
+          id: "delegation-structured-1",
+          targetActorId: "delivery-target-tech",
+          targetActorName: "技术方向课程生成",
+          task: "围绕以下主题生成技术方向课程候选。",
+          label: "技术方向课程生成",
+          roleBoundary: "executor",
+          createIfMissing: true,
+          overrides: {
+            executionIntent: "content_executor",
+            resultContract: "inline_structured_result",
+            deliveryTargetId: "tech-sheet",
+            deliveryTargetLabel: "技术方向课程",
+            sheetName: "技术方向课程",
+          },
+        },
+      ],
+      approvedAt: 1,
+      state: "active",
+    });
+
+    const record = system.spawnTask("coordinator", "", "", {
+      plannedDelegationId: "delegation-structured-1",
+      cleanup: "keep",
+    });
+
+    expect("error" in record).toBe(false);
+    if ("error" in record) return;
+
+    expect(record.plannedDelegationId).toBe("delegation-structured-1");
+    expect(record.executionIntent).toBe("content_executor");
+    expect(record.resultContract).toBe("inline_structured_result");
+    expect(record.deliveryTargetId).toBe("tech-sheet");
+    expect(record.deliveryTargetLabel).toBe("技术方向课程");
+    expect(record.sheetName).toBe("技术方向课程");
+  });
+
+  it("dispatches deferred child tasks after earlier workers settle", async () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+
+    const finishByWorker = new Map<string, () => void>();
+    const workers = ["worker-1", "worker-2", "worker-3", "worker-4", "worker-5", "worker-6"]
+      .map((id, index) => {
+        const actor = system.spawn(buildActorConfig(id, `Worker ${index + 1}`)) as unknown as {
+          assignTask: ReturnType<typeof vi.fn>;
+          emitEvent: (type: string, detail?: unknown) => void;
+          lastAssignedQuery?: string;
+          _status?: string;
+        };
+        actor.assignTask = vi.fn((query: string) => {
+          actor.lastAssignedQuery = query;
+          actor._status = "running";
+          actor.emitEvent("task_started", { taskId: `task-${id}`, query });
+          return new Promise((resolve) => {
+            finishByWorker.set(id, () => {
+              actor._status = "idle";
+              const result = {
+                id: `task-${id}`,
+                query,
+                status: "completed" as const,
+                result: `done-${id}`,
+                steps: [],
+                startedAt: Date.now(),
+                finishedAt: Date.now(),
+              };
+              actor.emitEvent("task_completed", { taskId: result.id, result: result.result });
+              resolve(result);
+            });
+          });
+        });
+        return actor;
+      });
+
+    const initialRuns = workers.slice(0, 3).map((worker, index) =>
+      system.spawnTask("coordinator", worker.id, `先跑第 ${index + 1} 批任务`, { cleanup: "keep" }),
+    );
+
+    initialRuns.forEach((record) => expect("error" in record).toBe(false));
+    expect(system.getActiveSpawnedTasks("coordinator")).toHaveLength(3);
+
+    workers.slice(3).forEach((worker, index) => {
+      system.enqueueDeferredSpawnTask("coordinator", worker.id, `排队的第 ${index + 4} 批任务`, {
+        cleanup: "keep",
+        roleBoundary: "executor",
+      });
+    });
+
+    expect(system.getPendingDeferredSpawnTaskCount("coordinator")).toBe(3);
+
+    finishByWorker.get("worker-1")?.();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(system.getPendingDeferredSpawnTaskCount("coordinator")).toBe(2);
+    expect(system.getActiveSpawnedTasks("coordinator")).toHaveLength(3);
+    expect(workers[3].lastAssignedQuery).toContain("排队的第 4 批任务");
+
+    finishByWorker.get("worker-2")?.();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(system.getPendingDeferredSpawnTaskCount("coordinator")).toBe(1);
+    expect(workers[4].lastAssignedQuery).toContain("排队的第 5 批任务");
+
+    finishByWorker.get("worker-3")?.();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(system.getPendingDeferredSpawnTaskCount("coordinator")).toBe(0);
+    expect(workers[5].lastAssignedQuery).toContain("排队的第 6 批任务");
+  });
+
+  it("keeps a worker alive past the old idle cutoff while progress continues", () => {
     vi.useFakeTimers();
     const system = new ActorSystem();
+    const lifecycleEvents: Array<{ type: string; detail?: unknown }> = [];
+    system.onEvent((event) => {
+      if ("type" in event) {
+        lifecycleEvents.push(event as { type: string; detail?: unknown });
+      }
+    });
     system.spawn(buildActorConfig("coordinator", "Coordinator"));
     const specialist = system.spawn(buildActorConfig("specialist", "Specialist")) as unknown as {
       assignTask: ReturnType<typeof vi.fn>;
@@ -1060,7 +1574,7 @@ describe("ActorSystem.spawnTask", () => {
     expect("error" in record).toBe(false);
     if ("error" in record) return;
 
-    vi.advanceTimersByTime(120_000);
+    vi.advanceTimersByTime(100_000);
     specialist.emitEvent("step", {
       step: {
         type: "thinking",
@@ -1068,7 +1582,7 @@ describe("ActorSystem.spawnTask", () => {
       },
     });
 
-    vi.advanceTimersByTime(120_000);
+    vi.advanceTimersByTime(100_000);
     specialist.emitEvent("step", {
       step: {
         type: "action",
@@ -1076,13 +1590,122 @@ describe("ActorSystem.spawnTask", () => {
       },
     });
 
-    vi.advanceTimersByTime(160_000);
+    vi.advanceTimersByTime(115_000);
 
-    expect(system.getSpawnedTask(record.runId)?.status).toBe("running");
+    const updated = system.getSpawnedTask(record.runId);
+    expect(updated?.status).toBe("running");
+    expect(updated?.runtime).toEqual(expect.objectContaining({
+      subtaskId: record.runId,
+      profile: "general",
+      progressSummary: "开始整理实施步骤",
+      eventCount: 3,
+    }));
+    expect(lifecycleEvents.find((event) => event.type === "spawned_task_started")).toMatchObject({
+      detail: expect.objectContaining({
+        runId: record.runId,
+        subtaskId: record.runId,
+        profile: "general",
+        timeoutSeconds: 420,
+        eventCount: 1,
+      }),
+    });
+    expect(lifecycleEvents.filter((event) => event.type === "spawned_task_running")).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        detail: expect.objectContaining({
+          progressSummary: "正在分析",
+          eventCount: 2,
+        }),
+      }),
+      expect.objectContaining({
+        detail: expect.objectContaining({
+          progressSummary: "开始整理实施步骤",
+          eventCount: 3,
+        }),
+      }),
+    ]));
 
     system.abortSpawnedTask(record.runId, {
       error: "test cleanup",
     });
+  });
+
+  it("stores terminal results in runtime when a spawned task completes", async () => {
+    const system = new ActorSystem();
+    const lifecycleEvents: Array<{ type: string; detail?: unknown }> = [];
+    system.onEvent((event) => {
+      if ("type" in event) {
+        lifecycleEvents.push(event as { type: string; detail?: unknown });
+      }
+    });
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+    const specialist = system.spawn(buildActorConfig("specialist", "Specialist")) as unknown as {
+      assignTask: ReturnType<typeof vi.fn>;
+    };
+
+    specialist.assignTask = vi.fn(async () => ({
+      status: "completed",
+      result: "已修改 /repo/src/core/agent/actor/actor-system.ts，并补充验证结论：spawn_task 已返回结构化 task_id，wait_for_spawned_tasks 已输出结构化任务列表。",
+    }));
+
+    const record = system.spawnTask("coordinator", "specialist", "补充验证结论", {
+      cleanup: "keep",
+    });
+
+    expect("error" in record).toBe(false);
+    if ("error" in record) return;
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const updated = system.getSpawnedTask(record.runId);
+    expect(updated?.status).toBe("completed");
+    expect(updated?.runtime).toEqual(expect.objectContaining({
+      subtaskId: record.runId,
+      profile: "general",
+      terminalResult: "已修改 /repo/src/core/agent/actor/actor-system.ts，并补充验证结论：spawn_task 已返回结构化 task_id，wait_for_spawned_tasks 已输出结构化任务列表。",
+    }));
+    expect(lifecycleEvents.find((event) => event.type === "spawned_task_completed")).toMatchObject({
+      detail: expect.objectContaining({
+        runId: record.runId,
+        subtaskId: record.runId,
+        terminalResult: "已修改 /repo/src/core/agent/actor/actor-system.ts，并补充验证结论：spawn_task 已返回结构化 task_id，wait_for_spawned_tasks 已输出结构化任务列表。",
+      }),
+    });
+  });
+
+  it("attaches structured child-result payloads to announce messages", async () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+    const specialist = system.spawn(buildActorConfig("specialist", "Specialist")) as unknown as {
+      assignTask: ReturnType<typeof vi.fn>;
+    };
+
+    specialist.assignTask = vi.fn(async () => ({
+      status: "completed",
+      result: "已创建 /Users/demo/Downloads/index.html",
+    }));
+
+    const record = system.spawnTask("coordinator", "specialist", "实现页面", {
+      cleanup: "keep",
+    });
+
+    expect("error" in record).toBe(false);
+    if ("error" in record) return;
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const announce = system.getMessagesBetween("specialist", "coordinator").at(-1);
+    expect(announce?.relatedRunId).toBe(record.runId);
+    expect(announce?.spawnedTaskResult).toEqual(expect.objectContaining({
+      runId: record.runId,
+      subtaskId: record.runId,
+      targetActorId: "specialist",
+      targetActorName: "Specialist",
+      profile: "general",
+      status: "completed",
+      terminalResult: "已创建 /Users/demo/Downloads/index.html",
+    }));
   });
 
   it("times out a worker as idle when no activity arrives within the lease", () => {
@@ -1111,18 +1734,18 @@ describe("ActorSystem.spawnTask", () => {
     expect("error" in record).toBe(false);
     if ("error" in record) return;
 
-    vi.advanceTimersByTime(185_000);
+    vi.advanceTimersByTime(125_000);
 
     const updated = system.getSpawnedTask(record.runId);
     expect(updated?.status).toBe("aborted");
     expect(updated?.timeoutReason).toBe("idle");
-    expect(updated?.error).toBe("Idle timeout after 180s");
+    expect(updated?.error).toBe("Idle timeout after 120s");
     expect(timeoutEvents.find((event) => event.type === "spawned_task_timeout")).toMatchObject({
       detail: expect.objectContaining({
         runId: record.runId,
         timeoutReason: "idle",
-        budgetSeconds: 600,
-        idleLeaseSeconds: 180,
+        budgetSeconds: 420,
+        idleLeaseSeconds: 120,
       }),
     });
   });
@@ -1145,8 +1768,8 @@ describe("ActorSystem.spawnTask", () => {
     expect("error" in record).toBe(false);
     if ("error" in record) return;
 
-    for (let i = 0; i < 4; i += 1) {
-      vi.advanceTimersByTime(120_000);
+    for (let i = 0; i < 3; i += 1) {
+      vi.advanceTimersByTime(100_000);
       specialist.emitEvent("step", {
         step: {
           type: "thinking",
@@ -1160,7 +1783,7 @@ describe("ActorSystem.spawnTask", () => {
     const updated = system.getSpawnedTask(record.runId);
     expect(updated?.status).toBe("aborted");
     expect(updated?.timeoutReason).toBe("budget");
-    expect(updated?.error).toBe("Budget exceeded after 600s");
+    expect(updated?.error).toBe("Budget exceeded after 420s");
   });
 });
 

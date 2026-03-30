@@ -54,12 +54,41 @@ const SCHEDULE_MUTATION_TOOL_NAMES = new Set([
   "native_reminder_create",
 ]);
 
+const INCOMPLETE_RESULT_PATTERNS = [
+  /未能完全完成/iu,
+  /未完全完成/iu,
+  /部分完成/iu,
+  /仍有.{0,12}(?:未完成|待补|缺失)/iu,
+  /迭代限制/iu,
+  /提前停止/iu,
+];
+
+const HISTORICAL_CONFIRMATION_PATTERNS = [
+  /根据记忆检索结果/iu,
+  /我已确认以下历史信息/iu,
+  /我确认以下历史信息/iu,
+  /目标\s*(?:excel|xlsx|xls|csv|表格|工作簿)\s*文件存在/iu,
+];
+
+const EXPLICIT_BLOCKER_PATTERNS = [
+  /阻塞(?:原因|点)?[:：]?/iu,
+  /无法(?:完成|导出|生成|写入|交付)/iu,
+  /未能(?:完成|导出|生成|写入|交付)/iu,
+  /失败(?:原因)?[:：]?/iu,
+  /缺失条件|缺少前提|缺少权限|权限不足/iu,
+  /工具(?:不可用|失败)|导出失败|参数校验失败/iu,
+];
+
 type OutputContract = {
   kind: "spreadsheet";
   label: string;
   extensions: string[];
   toolNames: string[];
 };
+
+function isContentExecutorPartialContract(task: SpawnedTaskRecord): boolean {
+  return task.executionIntent === "content_executor";
+}
 
 function normalizeText(input?: string | null): string {
   return String(input ?? "").replace(/\s+/g, " ").trim();
@@ -86,14 +115,104 @@ function resolveOutputContract(task: string): OutputContract | null {
     /(?:最终|最后|输出|导出|保存|生成|给我|给出|返回).{0,18}(?:excel|xlsx|xls|csv|表格|工作簿)(?:文件|表格|工作簿)?/iu,
     /(?:excel|xlsx|xls|csv|表格|工作簿)(?:文件|表格|工作簿).{0,12}(?:输出|导出|保存|生成|给我|给出|返回|最终|最后)/iu,
   ].some((pattern) => pattern.test(normalized));
+  const requestsExcelOutput = /(?:excel|xlsx|xls)/iu.test(normalized);
+  const requestsCsvOutput = /(?:csv)/iu.test(normalized);
 
   if (!requestsSpreadsheetOutput) return null;
+  if (requestsExcelOutput) {
+    return {
+      kind: "spreadsheet",
+      label: "Excel 文件",
+      extensions: ["xlsx", "xls"],
+      toolNames: ["export_spreadsheet"],
+    };
+  }
+  if (requestsCsvOutput) {
+    return {
+      kind: "spreadsheet",
+      label: "CSV 文件",
+      extensions: ["csv"],
+      toolNames: ["export_spreadsheet"],
+    };
+  }
   return {
     kind: "spreadsheet",
     label: "Excel/表格文件",
     extensions: ["xlsx", "xls", "csv"],
     toolNames: ["export_spreadsheet"],
   };
+}
+
+function resolveSpawnedTaskOutputContract(task: string, opts?: { record?: SpawnedTaskRecord }): OutputContract | null {
+  if (opts?.record && isContentExecutorPartialContract(opts.record)) return null;
+  const contract = resolveOutputContract(task);
+  if (!contract) return null;
+
+  const normalized = normalizeText(task);
+  const requestsInlineTerminalResult = taskAllowsInlineTerminalResult(normalized);
+  const hasExplicitSpreadsheetOutputInstruction = [
+    /(?:输出到|导出到|保存到|写入到|落盘到).{0,24}(?:\/[^\s"'`]+\.(?:xlsx|xls|csv))/iu,
+    /\/[^\s"'`]+\.(?:xlsx|xls|csv)\b/i,
+    /(?:必须|需要|请|直接|最终|最后).{0,20}(?:导出|输出|保存|返回|交付|生成).{0,24}(?:excel|xlsx|xls|csv|表格|工作簿)/iu,
+    /(?:导出|输出|保存|返回|交付|生成).{0,24}(?:excel|xlsx|xls|csv|表格|工作簿)(?:文件|表格|工作簿)?/iu,
+  ].some((pattern) => pattern.test(normalized));
+
+  if (requestsInlineTerminalResult && !/\/[^\s"'`]+\.(?:xlsx|xls|csv)\b/i.test(normalized)) {
+    return null;
+  }
+
+  if (hasExplicitSpreadsheetOutputInstruction) {
+    return contract;
+  }
+
+  const looksLikeInputReferenceOnly = [
+    /(?:读取|分析|参考|基于|根据).{0,16}(?:excel|xlsx|xls|csv|表格|工作簿)(?:附件|文件|模板|清单)?/iu,
+    /(?:excel|xlsx|xls|csv|表格|工作簿)(?:附件|文件|模板|清单).{0,16}(?:读取|分析|参考|基于|根据|围绕)/iu,
+  ].some((pattern) => pattern.test(normalized));
+
+  if (looksLikeInputReferenceOnly) {
+    return null;
+  }
+
+  return null;
+}
+
+function taskAllowsInlineTerminalResult(task: string): boolean {
+  const normalized = normalizeText(task);
+  if (!normalized) return false;
+  return [
+    /terminal result.{0,24}(?:返回|给出|输出)/iu,
+    /(?:直接|最终).{0,24}(?:在|用).{0,12}terminal result.{0,24}(?:返回|给出|输出)/iu,
+    /(?:直接|最终).{0,24}(?:返回|给出|输出).{0,24}(?:课程名称|课程介绍|清单|列表|候选|摘要|正文|内容明细)/iu,
+  ].some((pattern) => pattern.test(normalized));
+}
+
+function hasInlineTerminalResultEvidence(task: string, result: string): boolean {
+  if (!taskAllowsInlineTerminalResult(task)) return false;
+  const normalized = normalizeText(result);
+  if (!normalized || normalized.length < 18) return false;
+
+  const strongInlinePatterns = [
+    /以下为|如下|包含|明细|列表|清单|候选|逐条|课程名称|课程介绍|摘要|正文/iu,
+    /已生成\s*\d+\s*(?:门|条|项|个|份)/iu,
+    /(?:^|\n)\s*(?:[-*•]|\d+[.、])/u,
+  ];
+  return strongInlinePatterns.some((pattern) => pattern.test(normalized));
+}
+
+function hasStructuredCoursePayloadEvidence(result: string): boolean {
+  const normalized = normalizeText(result);
+  if (!normalized) return false;
+  if (/```(?:json)?[\s\S]*```/iu.test(result) && /课程(?:名称|介绍)|course_(?:name|intro)/iu.test(result)) {
+    return true;
+  }
+  return /已生成\s*\d+\s*门.*课程/u.test(normalized)
+    || /课程名称|课程介绍|course_name|course_intro/iu.test(normalized);
+}
+
+function countOutputContractPaths(result: string, contract: OutputContract): number {
+  const extensionPattern = new RegExp("\\/[^\\s'`]+\\.(?:" + contract.extensions.join("|") + ")\\b", "ig");
+  return new Set(result.match(extensionPattern) ?? []).size;
 }
 
 function hasExtension(path: string | undefined, extensions: readonly string[]): boolean {
@@ -104,11 +223,8 @@ function hasExtension(path: string | undefined, extensions: readonly string[]): 
 
 function resultShowsOutputContract(result: string, contract: OutputContract): boolean {
   if (contract.kind === "spreadsheet") {
-    if (/(已导出|导出为|保存到|输出到|生成).{0,24}(?:excel|xlsx|xls|csv|表格)/iu.test(result)) {
-      return true;
-    }
-    return /\/[\w./-]+\.(?:xlsx|xls|csv)\b/i.test(result)
-      && /(文件|路径|产物|附件|下载|导出|保存|输出)/iu.test(result);
+    const extensionPattern = new RegExp("\\/[^\\s']+\\.(?:" + contract.extensions.join("|") + ")\\b", "i");
+    return extensionPattern.test(result) && /(文件|路径|产物|附件|下载|导出|保存|输出)/iu.test(result);
   }
   return false;
 }
@@ -134,6 +250,30 @@ function hasToolOutputEvidenceForContract(
       contract,
     )
   );
+}
+
+function hasToolInvocationForContract(
+  steps: readonly AgentStep[] | undefined,
+  contract: OutputContract,
+): boolean {
+  if (!steps?.length) return false;
+  return steps.some((step) =>
+    typeof step.toolName === "string"
+    && contract.toolNames.includes(step.toolName)
+    && (step.type === "action" || step.type === "observation")
+  );
+}
+
+function isExplicitlyIncompleteResult(result: string): boolean {
+  return INCOMPLETE_RESULT_PATTERNS.some((pattern) => pattern.test(result));
+}
+
+function isLikelyHistoricalConfirmation(result: string): boolean {
+  return HISTORICAL_CONFIRMATION_PATTERNS.some((pattern) => pattern.test(result));
+}
+
+function isExplicitBlockerResult(result: string): boolean {
+  return EXPLICIT_BLOCKER_PATTERNS.some((pattern) => pattern.test(result));
 }
 
 function isScheduleMutationTask(task: string): boolean {
@@ -242,7 +382,7 @@ export function validateSpawnedTaskResult(params: {
   const relatedArtifacts = collectRelatedArtifacts(params.task, params.artifacts ?? []);
   const hasArtifactEvidence = relatedArtifacts.length > 0;
   const hasResultEvidence = RESULT_EVIDENCE_PATTERNS.some((pattern) => pattern.test(resultText));
-  const outputContract = resolveOutputContract(taskText);
+  const outputContract = resolveSpawnedTaskOutputContract(taskText, { record: params.task });
   const matchesOutputContract = outputContract
     ? artifactsMatchOutputContract(relatedArtifacts, outputContract) || resultShowsOutputContract(resultText, outputContract)
     : true;
@@ -253,6 +393,22 @@ export function validateSpawnedTaskResult(params: {
       accepted: false,
       requiresConcreteOutput: true,
       reason: "子任务返回内容更像执行计划/任务拆解，而不是实际完成后的可交付结果。",
+    };
+  }
+
+  if (isExplicitlyIncompleteResult(resultText)) {
+    return {
+      accepted: false,
+      requiresConcreteOutput: true,
+      reason: "子任务明确表示尚未完整完成，不能作为最终交付结果。",
+    };
+  }
+
+  if (outputContract && countOutputContractPaths(resultText, outputContract) > 1) {
+    return {
+      accepted: false,
+      requiresConcreteOutput: true,
+      reason: `最终答复包含多个${outputContract.label}路径；本轮必须只交付一个最终工作簿。`,
     };
   }
 
@@ -269,6 +425,13 @@ export function validateSpawnedTaskResult(params: {
       accepted: false,
       requiresConcreteOutput: true,
       reason: "最终答复更像协作过程总结/状态盘点，而不是实际可交付结果。",
+    };
+  }
+
+  if (!hasArtifactEvidence && !outputContract && (hasInlineTerminalResultEvidence(taskText, resultText) || hasStructuredCoursePayloadEvidence(resultText))) {
+    return {
+      accepted: true,
+      requiresConcreteOutput: true,
     };
   }
 
@@ -345,10 +508,22 @@ export function validateActorTaskResult(params: {
   const hasArtifactEvidence = relatedArtifacts.length > 0;
   const hasResultEvidence = RESULT_EVIDENCE_PATTERNS.some((pattern) => pattern.test(resultText));
   const outputContract = resolveOutputContract(taskText);
-  const matchesOutputContract = outputContract
+  const hasArtifactContractEvidence = outputContract
     ? artifactsMatchOutputContract(relatedArtifacts, outputContract)
-      || resultShowsOutputContract(resultText, outputContract)
-      || hasToolOutputEvidenceForContract(params.steps, outputContract)
+    : false;
+  const hasResultContractEvidence = outputContract
+    ? resultShowsOutputContract(resultText, outputContract)
+    : false;
+  const hasToolContractEvidence = outputContract
+    ? hasToolOutputEvidenceForContract(params.steps, outputContract)
+    : false;
+  const hasToolInvocationEvidence = outputContract
+    ? hasToolInvocationForContract(params.steps, outputContract)
+    : false;
+  const matchesOutputContract = outputContract
+    ? hasArtifactContractEvidence
+      || hasResultContractEvidence
+      || (outputContract.kind !== "spreadsheet" && hasToolContractEvidence)
     : true;
   const veryShort = resultText.length < 40;
 
@@ -360,11 +535,52 @@ export function validateActorTaskResult(params: {
     };
   }
 
+  if (isExplicitlyIncompleteResult(resultText)) {
+    return {
+      accepted: false,
+      requiresConcreteOutput: true,
+      reason: "最终答复明确表示任务尚未完整完成，不能作为最终交付。",
+    };
+  }
+
+  if (outputContract && countOutputContractPaths(resultText, outputContract) > 1) {
+    return {
+      accepted: false,
+      requiresConcreteOutput: true,
+      reason: `最终答复包含多个${outputContract.label}路径；本轮必须只交付一个最终工作簿。`,
+    };
+  }
+
   if (outputContract && !matchesOutputContract) {
+    if (isExplicitBlockerResult(resultText)) {
+      return {
+        accepted: true,
+        requiresConcreteOutput: true,
+      };
+    }
+    if (outputContract.kind === "spreadsheet" && (hasToolContractEvidence || hasToolInvocationEvidence)) {
+      return {
+        accepted: false,
+        requiresConcreteOutput: true,
+        reason: `最终答复提到已执行${outputContract.label}导出，但没有给出当前 run 的真实文件路径；请直接返回绝对路径或真实 blocker。`,
+      };
+    }
     return {
       accepted: false,
       requiresConcreteOutput: true,
       reason: `最终答复没有交付符合要求的${outputContract.label}，当前结果缺少对应格式的文件或导出证据。`,
+    };
+  }
+
+  if (
+    outputContract
+    && isLikelyHistoricalConfirmation(resultText)
+    && !/(已导出|导出为|保存到|输出到|生成并保存|附件|下载)/iu.test(resultText)
+  ) {
+    return {
+      accepted: false,
+      requiresConcreteOutput: true,
+      reason: `最终答复更像对历史产物的确认，而不是直接交付${outputContract.label}。请直接给出导出结果、绝对路径或真实 blocker。`,
     };
   }
 

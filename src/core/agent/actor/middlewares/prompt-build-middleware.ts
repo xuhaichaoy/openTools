@@ -41,6 +41,14 @@ export class PromptBuildMiddleware implements ActorMiddleware {
       prompt += `\n\n## 工作目录\n你的工作目录为: ${effectiveWorkspaceRoot}\n执行 shell 命令和文件操作时，请在此目录下进行。`;
     }
 
+    if (ctx.executionMode === "plan") {
+      prompt += `\n\n## 当前模式：Plan（只读规划）
+你当前处于规划模式，只能做信息收集、分析、方案设计和风险评估。
+- 不要修改文件、执行命令或发起实际落地操作
+- 不要派发子任务、等待子任务、向其他 Agent 发消息推动执行
+- 输出应聚焦：现状判断、可选方案、风险/依赖、建议的下一步执行顺序`;
+    }
+
     if (ctx.actorSystem && ctx.actorSystem.size >= 2) {
       prompt += this.buildCollaborationPrompt(ctx);
     }

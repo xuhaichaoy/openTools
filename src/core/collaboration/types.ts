@@ -7,10 +7,12 @@ import type {
   PendingInteraction,
   SessionUploadRecord,
   SpawnMode,
+  SpawnTaskOverrides,
   SpawnedTaskRoleBoundary,
   ThinkingLevel,
   ToolPolicy,
 } from "@/core/agent/actor/types";
+import type { StructuredDeliveryManifest } from "@/core/agent/actor/structured-delivery-strategy";
 
 export type CollaborationSurface = "local_dialog" | "im_conversation";
 export type ExecutionStrategy = "direct" | "coordinator" | "smart" | "broadcast";
@@ -65,6 +67,10 @@ export interface CollaborationPlannedDelegation {
   childCapabilities?: AgentCapability[];
   childWorkspace?: string;
   childMaxIterations?: number;
+  overrides?: Pick<
+    SpawnTaskOverrides,
+    "executionIntent" | "resultContract" | "deliveryTargetId" | "deliveryTargetLabel" | "sheetName"
+  >;
 }
 
 export interface ExecutionContractDraft {
@@ -86,6 +92,7 @@ export interface ExecutionContractDraft {
   allowedMessagePairs: CollaborationActorPair[];
   allowedSpawnPairs: CollaborationActorPair[];
   plannedDelegations: CollaborationPlannedDelegation[];
+  structuredDeliveryManifest?: StructuredDeliveryManifest;
 }
 
 export interface ExecutionContract {
@@ -104,6 +111,7 @@ export interface ExecutionContract {
   allowedMessagePairs: CollaborationActorPair[];
   allowedSpawnPairs: CollaborationActorPair[];
   plannedDelegations: CollaborationPlannedDelegation[];
+  structuredDeliveryManifest?: StructuredDeliveryManifest;
   approvedAt: number;
   state: ExecutionContractState;
 }

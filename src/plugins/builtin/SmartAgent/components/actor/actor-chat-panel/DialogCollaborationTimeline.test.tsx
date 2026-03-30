@@ -109,7 +109,7 @@ describe("DialogCollaborationTimeline", () => {
     container = null;
   });
 
-  it("groups sibling workers into one local collaboration block and detects aggregation", () => {
+  it("keeps sibling workers awaiting aggregation when the parent reply is only an interim synthesis update", () => {
     const tasks = [
       createTask({
         runId: "run-1",
@@ -221,9 +221,10 @@ describe("DialogCollaborationTimeline", () => {
     });
 
     expect(groups).toHaveLength(1);
-    expect(groups[0].title).toBe("Spawning 2 workers");
-    expect(groups[0].phase).toBe("aggregated");
+    expect(groups[0].title).toBe("并行协作 · 2 个子任务");
+    expect(groups[0].phase).toBe("aggregating");
     expect(groups[0].completedCount).toBe(2);
+    expect(groups[0].summary).toContain("我开始汇总");
     expect(groups[0].latestParentReply).toContain("我开始汇总");
     expect(groups[0].milestones.map((item) => item.text)).toEqual([
       "Created Cicero (类型审查)",
@@ -289,6 +290,193 @@ describe("DialogCollaborationTimeline", () => {
     expect(groups[0].summary).toContain("等待 Coordinator 汇总");
   });
 
+  it("does not mark a batch as aggregated when the parent only says it is validating the final result", () => {
+    const [group] = buildLocalCollaborationTimelineGroups({
+      events: [],
+      spawnedTasks: [
+        createTask({
+          runId: "run-ui-stall",
+          spawnerActorId: "coordinator",
+          targetActorId: "worker-a",
+          task: "生成课程结果",
+          label: "课程结果",
+          status: "completed",
+          spawnedAt: 1000,
+          completedAt: 3000,
+          result: "/Users/demo/Downloads/result.xlsx",
+          mode: "run",
+          expectsCompletionMessage: true,
+          cleanup: "keep",
+        }),
+      ],
+      dialogHistory: [
+        createMessage({
+          id: "msg-interim",
+          from: "coordinator",
+          content: "任务产物已存在。现在验证并输出最终结果。",
+          timestamp: 3600,
+          kind: "agent_result",
+        }),
+      ],
+      actorNameById: new Map([
+        ["coordinator", "Coordinator"],
+        ["worker-a", "Worker A"],
+      ]),
+    });
+
+    expect(group.phase).toBe("aggregating");
+    expect(group.summary).toContain("现在验证并输出最终结果");
+  });
+
+  it("shows aggregating when workers are done and the parent is still live-synthesizing", () => {
+    const [group] = buildLocalCollaborationTimelineGroups({
+      events: [],
+      spawnedTasks: [
+        createTask({
+          runId: "run-live-agg",
+          spawnerActorId: "coordinator",
+          targetActorId: "worker-a",
+          task: "生成课程结果",
+          label: "课程结果",
+          status: "completed",
+          spawnedAt: 1000,
+          completedAt: 3000,
+          result: "/Users/demo/Downloads/result.xlsx",
+          mode: "run",
+          expectsCompletionMessage: true,
+          cleanup: "keep",
+        }),
+      ],
+      dialogHistory: [],
+      actorNameById: new Map([
+        ["coordinator", "Coordinator"],
+        ["worker-a", "Worker A"],
+      ]),
+      parentActivityByActorId: new Map([
+        ["coordinator", {
+          latestOrchestrationIndex: 1,
+          latestContinuationIndex: 3,
+          latestContinuationTimestamp: 3600,
+          latestContinuationPreview: "所有子任务已结束，正在综合最终结果。",
+          isContinuingAfterOrchestration: true,
+        }],
+      ]),
+    });
+
+    expect(group.phase).toBe("aggregating");
+    expect(group.summary).toContain("正在综合最终结果");
+  });
+
+  it("marks earlier worker batches as aggregated once a later final reply exists without duplicating that reply", () => {
+    const groups = buildLocalCollaborationTimelineGroups({
+      events: [],
+      spawnedTasks: [
+        createTask({
+          runId: "run-1",
+          spawnerActorId: "coordinator",
+          targetActorId: "worker-a",
+          task: "第一批 worker",
+          label: "第一批",
+          status: "completed",
+          spawnedAt: 1000,
+          completedAt: 2000,
+          mode: "run",
+          expectsCompletionMessage: true,
+          cleanup: "keep",
+        }),
+        createTask({
+          runId: "run-2",
+          spawnerActorId: "coordinator",
+          targetActorId: "worker-b",
+          task: "第二批 worker",
+          label: "第二批",
+          status: "completed",
+          spawnedAt: 9000,
+          completedAt: 10000,
+          mode: "run",
+          expectsCompletionMessage: true,
+          cleanup: "keep",
+        }),
+      ],
+      dialogHistory: [
+        createMessage({
+          id: "msg-final",
+          from: "coordinator",
+          content: "我已经基于第二批结果完成最终收口。",
+          timestamp: 12000,
+          kind: "agent_result",
+        }),
+      ],
+      actorNameById: new Map([
+        ["coordinator", "Coordinator"],
+        ["worker-a", "Worker A"],
+        ["worker-b", "Worker B"],
+      ]),
+    });
+
+    expect(groups).toHaveLength(2);
+    expect(groups[0].phase).toBe("aggregated");
+    expect(groups[0].latestParentReply).toBeUndefined();
+    expect(groups[0].summary).toContain("已在后续消息中完成统一汇总");
+    expect(groups[1].phase).toBe("aggregated");
+    expect(groups[1].latestParentReply).toContain("第二批结果完成最终收口");
+  });
+
+  it("does not reuse the same live parent preview across multiple sibling groups of the same spawner", () => {
+    const groups = buildLocalCollaborationTimelineGroups({
+      events: [],
+      spawnedTasks: [
+        createTask({
+          runId: "run-a",
+          spawnerActorId: "coordinator",
+          targetActorId: "worker-a",
+          task: "第一组 worker",
+          label: "第一组",
+          status: "completed",
+          spawnedAt: 1000,
+          completedAt: 2000,
+          mode: "run",
+          expectsCompletionMessage: true,
+          cleanup: "keep",
+        }),
+        createTask({
+          runId: "run-b",
+          spawnerActorId: "coordinator",
+          targetActorId: "worker-b",
+          task: "第二组 worker",
+          label: "第二组",
+          status: "completed",
+          spawnedAt: 9000,
+          completedAt: 10000,
+          mode: "run",
+          expectsCompletionMessage: true,
+          cleanup: "keep",
+        }),
+      ],
+      dialogHistory: [],
+      actorNameById: new Map([
+        ["coordinator", "Coordinator"],
+        ["worker-a", "Worker A"],
+        ["worker-b", "Worker B"],
+      ]),
+      parentActivityByActorId: new Map([
+        ["coordinator", {
+          latestOrchestrationIndex: 1,
+          latestContinuationIndex: 3,
+          latestContinuationTimestamp: 10600,
+          latestContinuationPreview: "正在综合最终结果并导出 Excel。",
+          isContinuingAfterOrchestration: true,
+        }],
+      ]),
+    });
+
+    expect(groups).toHaveLength(2);
+    expect(groups[0].phase).toBe("aggregating");
+    expect(groups[1].phase).toBe("aggregating");
+    expect(groups[0].summary).toContain("等待 Coordinator 汇总");
+    expect(groups[1].summary).toContain("正在综合最终结果并导出 Excel");
+  });
+
   it("merges collaboration blocks into the local transcript by timestamp", () => {
     const transcriptItems = mergeLocalDialogTranscriptItems({
       messages: [
@@ -302,7 +490,7 @@ describe("DialogCollaborationTimeline", () => {
         startedAt: 2000,
         updatedAt: 6000,
         phase: "running",
-        title: "Spawning 2 workers",
+        title: "并行协作 · 2 个子任务",
         summary: "并行处理中",
         totalWorkers: 2,
         runningCount: 2,
@@ -379,7 +567,7 @@ describe("DialogCollaborationTimeline", () => {
       root?.render(<DialogCollaborationTimelineCard group={group} />);
     });
 
-    expect(container?.textContent).toContain("Spawning 1 worker");
+    expect(container?.textContent).toContain("并行协作 · 1 个子任务");
     expect(container?.textContent).toContain("协作轨迹");
     expect(container?.textContent).toContain("Created Cicero");
     expect(container?.textContent).toContain("Cicero");

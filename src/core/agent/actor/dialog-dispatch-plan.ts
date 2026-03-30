@@ -2,6 +2,7 @@ import type { AICenterHandoff } from "@/store/app-store";
 import {
   describeCodingExecutionProfile,
   inferCodingExecutionProfile,
+  normalizeCodingExecutionProfile,
   type ResolvedCodingExecutionProfile,
 } from "@/core/agent/coding-profile";
 import {
@@ -15,6 +16,11 @@ import type {
 } from "@/core/collaboration/types";
 import type { ApprovalDialogPresentation } from "@/store/cluster-plan-approval-store";
 import type { ClusterPlan, ClusterStep } from "@/core/agent/cluster/types";
+import {
+  resolveStructuredDeliveryManifest,
+  resolveStructuredDeliveryStrategyById,
+  type StructuredDeliveryManifest,
+} from "./structured-delivery-strategy";
 import type { DialogRoutingMode } from "./dialog-presets";
 import type {
   AgentCapability,
@@ -40,6 +46,7 @@ export type DialogCodingFocus =
 export interface DialogDispatchInsight {
   codingProfile: ResolvedCodingExecutionProfile;
   autoModeLabel: string | null;
+  modeSource: "auto" | "manual" | "none";
   preferredCapabilities: AgentCapability[];
   focus: DialogCodingFocus | null;
   focusLabel: string | null;
@@ -59,6 +66,8 @@ export interface BuildExecutionContractDraftFromDialogParams {
   content: string;
   attachmentSummary?: string;
   attachmentPaths?: readonly string[];
+  structuredDeliveryManifest?: StructuredDeliveryManifest;
+  manualCodingMode?: boolean;
   handoff?: Partial<AICenterHandoff> | null;
   mentionedTargetId?: string | null;
   selectedRoute?: { agentId: string; reason: string } | null;
@@ -257,6 +266,47 @@ function getPreferredCapabilities(focus: DialogCodingFocus, largeProjectMode: bo
     }
   })();
   return uniqueCapabilities(largeProjectMode ? ["coordinator", ...base] : base);
+}
+
+function toPlannerStructuredDeliveryManifest(
+  manifest: StructuredDeliveryManifest,
+): StructuredDeliveryManifest {
+  return {
+    ...manifest,
+    source: "planner",
+  };
+}
+
+function buildStructuredPlannedDelegations(params: {
+  taskText: string;
+  manifest: StructuredDeliveryManifest;
+}): ExecutionContractDraft["plannedDelegations"] | null {
+  const strategy = resolveStructuredDeliveryStrategyById(params.manifest.strategyId);
+  const dispatchPlan = strategy?.buildInitialDispatchPlan?.({
+    taskText: params.taskText,
+    manifest: params.manifest,
+  }) ?? null;
+  if (!dispatchPlan?.shards.length) return null;
+  return dispatchPlan.shards.map((shard, index) => ({
+    id: `structured-delegation-${index + 1}`,
+    targetActorId: shard.overrides?.deliveryTargetId
+      ? `delivery-target-${shard.overrides.deliveryTargetId}`
+      : `structured-target-${index + 1}`,
+    targetActorName: shard.label,
+    task: shard.task,
+    label: shard.label,
+    roleBoundary: shard.roleBoundary,
+    createIfMissing: shard.createIfMissing,
+    overrides: shard.overrides
+      ? {
+          ...(shard.overrides.executionIntent ? { executionIntent: shard.overrides.executionIntent } : {}),
+          ...(shard.overrides.resultContract ? { resultContract: shard.overrides.resultContract } : {}),
+          ...(shard.overrides.deliveryTargetId ? { deliveryTargetId: shard.overrides.deliveryTargetId } : {}),
+          ...(shard.overrides.deliveryTargetLabel ? { deliveryTargetLabel: shard.overrides.deliveryTargetLabel } : {}),
+          ...(shard.overrides.sheetName ? { sheetName: shard.overrides.sheetName } : {}),
+        }
+      : undefined,
+  }));
 }
 
 function getPrimaryWeights(
@@ -745,17 +795,31 @@ export function inferDialogDispatchInsight(params: {
   content: string;
   attachmentSummary?: string;
   attachmentPaths?: readonly string[];
+  manualCodingMode?: boolean;
   handoff?: Partial<AICenterHandoff> | null;
 }): DialogDispatchInsight {
   const content = params.content.trim() || "等待用户输入任务";
   const taskSummary = params.attachmentSummary
     ? `${params.attachmentSummary}\n${content}`.trim()
     : content;
-  const codingProfile = inferCodingExecutionProfile({
+  const inferredCodingProfile = inferCodingExecutionProfile({
     query: taskSummary,
     attachmentPaths: params.attachmentPaths,
     handoff: params.handoff,
   });
+  const codingProfile = params.manualCodingMode === true
+    ? {
+        profile: normalizeCodingExecutionProfile({ codingMode: true }),
+        autoDetected: false,
+        reasons: ["Dialog 已手动开启 Coding 模式"],
+      } satisfies ResolvedCodingExecutionProfile
+    : params.manualCodingMode === false
+      ? {
+          profile: normalizeCodingExecutionProfile({ codingMode: false }),
+          autoDetected: false,
+          reasons: ["Dialog 当前未开启 Coding 模式，按普通协作处理"],
+        } satisfies ResolvedCodingExecutionProfile
+      : inferredCodingProfile;
   const autoModeLabel = describeCodingExecutionProfile(codingProfile.profile);
   const focus = codingProfile.profile.codingMode
     ? inferCodingFocus(taskSummary, codingProfile.profile.largeProjectMode)
@@ -764,6 +828,11 @@ export function inferDialogDispatchInsight(params: {
   return {
     codingProfile,
     autoModeLabel,
+    modeSource: params.manualCodingMode === true
+      ? "manual"
+      : params.manualCodingMode === false
+        ? "none"
+        : (codingProfile.profile.codingMode ? "auto" : "none"),
     preferredCapabilities: focus
       ? getPreferredCapabilities(focus, codingProfile.profile.largeProjectMode)
       : [],
@@ -780,6 +849,7 @@ export function buildDialogDispatchPlanBundle(params: {
   content: string;
   attachmentSummary?: string;
   attachmentPaths?: readonly string[];
+  manualCodingMode?: boolean;
   handoff?: Partial<AICenterHandoff> | null;
   mentionedTargetId?: string | null;
   selectedRoute?: { agentId: string; reason: string } | null;
@@ -791,6 +861,7 @@ export function buildDialogDispatchPlanBundle(params: {
     content,
     attachmentSummary,
     attachmentPaths,
+    manualCodingMode,
     handoff,
     mentionedTargetId,
     selectedRoute,
@@ -803,6 +874,7 @@ export function buildDialogDispatchPlanBundle(params: {
     content,
     attachmentSummary,
     attachmentPaths,
+    manualCodingMode,
     handoff,
   });
   const taskSummary = insight.taskSummary;
@@ -1155,6 +1227,9 @@ export function buildExecutionContractDraftFromDialog(
 ): (ExecutionContractDraft & { insight: DialogDispatchInsight }) | null {
   const planBundle = buildDialogDispatchPlanBundle(params);
   if (!planBundle) return null;
+  const structuredDeliveryManifest = toPlannerStructuredDeliveryManifest(
+    params.structuredDeliveryManifest ?? resolveStructuredDeliveryManifest(params.content),
+  );
   const draft = buildExecutionContractDraftFromDialogBundle({
     surface: "local_dialog",
     bundle: planBundle,
@@ -1163,12 +1238,37 @@ export function buildExecutionContractDraftFromDialog(
       briefContent: params.attachmentSummary,
       attachmentPaths: params.attachmentPaths ? [...params.attachmentPaths] : undefined,
     },
+    structuredDeliveryManifest,
     actorRoster: params.actorRoster ?? params.actors.map((actor) => ({
       actorId: actor.id,
       roleName: actor.roleName,
       capabilities: actor.capabilities?.tags,
     })),
   });
+  const structuredPlannedDelegations = buildStructuredPlannedDelegations({
+    taskText: params.content,
+    manifest: structuredDeliveryManifest,
+  });
+  if (structuredPlannedDelegations?.length) {
+    draft.plannedDelegations = structuredPlannedDelegations;
+    const coordinatorActorId = draft.coordinatorActorId ?? draft.initialRecipientActorIds[0];
+    for (const delegation of structuredPlannedDelegations) {
+      if (!draft.participantActorIds.includes(delegation.targetActorId)) {
+        draft.participantActorIds.push(delegation.targetActorId);
+      }
+      if (coordinatorActorId) {
+        if (!draft.allowedSpawnPairs.some((pair) => pair.fromActorId === coordinatorActorId && pair.toActorId === delegation.targetActorId)) {
+          draft.allowedSpawnPairs.push({ fromActorId: coordinatorActorId, toActorId: delegation.targetActorId });
+        }
+        if (!draft.allowedMessagePairs.some((pair) => pair.fromActorId === coordinatorActorId && pair.toActorId === delegation.targetActorId)) {
+          draft.allowedMessagePairs.push({ fromActorId: coordinatorActorId, toActorId: delegation.targetActorId });
+        }
+        if (!draft.allowedMessagePairs.some((pair) => pair.fromActorId === delegation.targetActorId && pair.toActorId === coordinatorActorId)) {
+          draft.allowedMessagePairs.push({ fromActorId: delegation.targetActorId, toActorId: coordinatorActorId });
+        }
+      }
+    }
+  }
   return { ...draft, insight: planBundle.insight };
 }
 
@@ -1183,6 +1283,17 @@ export function buildClusterPresentationFromDraft(params: {
   const participantLabels = [...new Set(
     params.draft.participantActorIds.map((actorId) => actorById.get(actorId) ?? actorId),
   )];
+  const structuredDeliveryNotes: string[] = [];
+  const manifest = params.draft.structuredDeliveryManifest;
+  if (manifest && (manifest.applyInitialIsolation || manifest.deliveryContract !== "general" || manifest.strategyId)) {
+    structuredDeliveryNotes.push(`交付合同：${manifest.deliveryContract} / ${manifest.parentContract}`);
+    if (manifest.targets?.length) {
+      structuredDeliveryNotes.push(`交付目标：${manifest.targets.map((target) => target.label).join("、")}`);
+    }
+    if (manifest.resultSchema?.fields?.length) {
+      structuredDeliveryNotes.push(`结构化字段：${manifest.resultSchema.fields.map((field) => field.label).join("、")}`);
+    }
+  }
   return {
     kind: "boundary",
     title: "审批协作边界",
@@ -1201,9 +1312,12 @@ export function buildClusterPresentationFromDraft(params: {
       "本次审批的是协作边界与 delegation 上限，而不是固定的逐条执行脚本。",
       "建议 delegations 可以被主协调者在运行时调整，但越界行为会被 runtime 拒绝。",
     ],
-    notes: params.draft.plannedDelegations.length > 0
-      ? [`建议 delegation：${params.draft.plannedDelegations.map((item) => item.label || item.targetActorName || item.targetActorId).join("、")}`]
-      : ["本轮没有预设 delegation，主协调者会按现场情况决定是否拆分。"],
+    notes: [
+      ...(params.draft.plannedDelegations.length > 0
+        ? [`建议 delegation：${params.draft.plannedDelegations.map((item) => item.label || item.targetActorName || item.targetActorId).join("、")}`]
+        : ["本轮没有预设 delegation，主协调者会按现场情况决定是否拆分。"]),
+      ...structuredDeliveryNotes,
+    ],
   };
 }
 

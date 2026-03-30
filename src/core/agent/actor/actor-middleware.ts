@@ -1,7 +1,13 @@
 import type { AgentTool, AgentStep } from "@/plugins/builtin/SmartAgent/core/react-agent";
 import type { AgentRole } from "@/core/agent/cluster/types";
 import type { ActorSystem } from "./actor-system";
-import type { ExecutionPolicy, InboxMessage, ToolPolicy, MiddlewareOverrides } from "./types";
+import type {
+  DialogExecutionMode,
+  ExecutionPolicy,
+  InboxMessage,
+  ToolPolicy,
+  MiddlewareOverrides,
+} from "./types";
 import type { AskUserCallback, ConfirmDangerousAction } from "./agent-actor";
 import { createLogger } from "@/core/logger";
 
@@ -28,6 +34,7 @@ export interface ActorRunContext {
   readonly contextTokens?: number;
   readonly toolPolicy?: ToolPolicy;
   readonly executionPolicy?: ExecutionPolicy;
+  readonly executionMode?: DialogExecutionMode;
   readonly actorSystem?: ActorSystem;
   readonly askUser?: AskUserCallback;
   readonly confirmDangerousAction?: ConfirmDangerousAction;

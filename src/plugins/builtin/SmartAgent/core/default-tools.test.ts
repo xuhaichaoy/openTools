@@ -18,6 +18,9 @@ const hoisted = vi.hoisted(() => ({
         message: "已导出文档到 /Users/haichao/Downloads/课程方案.docx",
       };
     }
+    if (command === "export_spreadsheet") {
+      return "/Users/haichao/Downloads/课程清单.xlsx";
+    }
     throw new Error(`unexpected command: ${command}`);
   }),
   runShellCommand: vi.fn(async (command: string) => ({
@@ -29,6 +32,10 @@ const hoisted = vi.hoisted(() => ({
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: hoisted.invoke,
+}));
+
+vi.mock("@tauri-apps/api/path", () => ({
+  downloadDir: vi.fn(async () => "/Users/haichao/Downloads"),
 }));
 
 vi.mock("@/core/agent/runtime", () => ({
@@ -137,5 +144,79 @@ describe("default-tools read_document", () => {
       hint: expect.stringContaining("export_document"),
     });
     expect(hoisted.writeTextFile).not.toHaveBeenCalled();
+  });
+
+  it("joins relative spreadsheet file names onto the download directory exactly once", async () => {
+    const { tools } = createBuiltinAgentTools(async () => true);
+    const tool = tools.find((item) => item.name === "export_spreadsheet");
+
+    const result = await tool!.execute({
+      file_name: "课程清单.xlsx",
+      sheets: JSON.stringify([{ name: "Sheet1", headers: ["课程"], rows: [["A"]] }]),
+    });
+
+    expect(result).toBe("已导出 Excel 文件: /Users/haichao/Downloads/课程清单.xlsx");
+    expect(hoisted.invoke).toHaveBeenCalledWith("export_spreadsheet", {
+      outputPath: "/Users/haichao/Downloads/课程清单.xlsx",
+      sheetsJson: JSON.stringify([{ name: "Sheet1", headers: ["课程"], rows: [["A"]] }]),
+    });
+  });
+
+  it("preserves absolute spreadsheet output paths without double-prefixing downloads", async () => {
+    const { tools } = createBuiltinAgentTools(async () => true);
+    const tool = tools.find((item) => item.name === "export_spreadsheet");
+
+    await tool!.execute({
+      file_name: "/Users/haichao/Downloads/课程清单.xlsx",
+      sheets: JSON.stringify([{ name: "Sheet1", headers: ["课程"], rows: [["A"]] }]),
+    });
+
+    expect(hoisted.invoke).toHaveBeenCalledWith("export_spreadsheet", {
+      outputPath: "/Users/haichao/Downloads/课程清单.xlsx",
+      sheetsJson: JSON.stringify([{ name: "Sheet1", headers: ["课程"], rows: [["A"]] }]),
+    });
+  });
+
+  it("passes scalar spreadsheet cells through without stringifying them on the frontend", async () => {
+    const { tools } = createBuiltinAgentTools(async () => true);
+    const tool = tools.find((item) => item.name === "export_spreadsheet");
+    const sheets = JSON.stringify([{
+      name: "Sheet1",
+      headers: ["课程", "数量", "启用", "备注"],
+      rows: [["A", 3, true, null]],
+    }]);
+
+    await tool!.execute({
+      file_name: "课程清单.xlsx",
+      sheets,
+    });
+
+    expect(hoisted.invoke).toHaveBeenCalledWith("export_spreadsheet", {
+      outputPath: "/Users/haichao/Downloads/课程清单.xlsx",
+      sheetsJson: sheets,
+    });
+  });
+
+  it("accepts structured sheet objects directly and normalizes them before export", async () => {
+    const { tools } = createBuiltinAgentTools(async () => true);
+    const tool = tools.find((item) => item.name === "export_spreadsheet");
+
+    await tool!.execute({
+      file_name: "课程清单.xlsx",
+      sheets: [{
+        name: "Sheet1",
+        headers: ["课程", "数量", "启用", "备注"],
+        rows: [["A", 3, true, null]],
+      }],
+    });
+
+    expect(hoisted.invoke).toHaveBeenCalledWith("export_spreadsheet", {
+      outputPath: "/Users/haichao/Downloads/课程清单.xlsx",
+      sheetsJson: JSON.stringify([{
+        name: "Sheet1",
+        headers: ["课程", "数量", "启用", "备注"],
+        rows: [["A", 3, true, null]],
+      }]),
+    });
   });
 });

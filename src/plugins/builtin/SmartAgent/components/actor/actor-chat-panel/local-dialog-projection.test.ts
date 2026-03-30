@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  getLocalDialogLiveContinuationState,
   shouldHideLocalDialogLiveActor,
   shouldHideLocalDialogMessage,
   shouldRenderLocalDialogStreamingAnswer,
@@ -70,7 +71,7 @@ describe("local-dialog-projection", () => {
     })).toBe(false);
   });
 
-  it("hides live blocks for worker actors and wait/spawn orchestration steps", () => {
+  it("hides live blocks for worker actors and pure wait/spawn orchestration steps", () => {
     const waitSteps: AgentStep[] = [
       {
         type: "action",
@@ -78,6 +79,20 @@ describe("local-dialog-projection", () => {
         toolInput: {},
         content: "",
         timestamp: 1,
+      },
+    ];
+    const synthesisSteps: AgentStep[] = [
+      ...waitSteps,
+      {
+        type: "observation",
+        content: "所有子任务已结束，正在触发一次最终综合。",
+        timestamp: 2,
+      },
+      {
+        type: "answer",
+        content: "正在汇总最终结果",
+        timestamp: 3,
+        streaming: true,
       },
     ];
 
@@ -97,10 +112,140 @@ describe("local-dialog-projection", () => {
 
     expect(shouldHideLocalDialogLiveActor({
       actorId: "coordinator",
+      steps: synthesisSteps,
+      workerActorIds: new Set<string>(),
+      hasCollaborationGroups: true,
+    })).toBe(false);
+
+    expect(shouldHideLocalDialogLiveActor({
+      actorId: "coordinator",
       steps: waitSteps,
       workerActorIds: new Set<string>(),
       hasCollaborationGroups: false,
     })).toBe(false);
+  });
+
+  it("treats agents tool as orchestration and keeps the lead hidden until real continuation appears", () => {
+    const orchestrationSteps: AgentStep[] = [
+      {
+        type: "action",
+        toolName: "agents",
+        toolInput: { action: "list" },
+        content: "",
+        timestamp: 1,
+      },
+      {
+        type: "observation",
+        content: "{\"agents\":[],\"self\":{\"name\":\"Coordinator\"},\"task_tree\":[]}",
+        timestamp: 2,
+      },
+    ];
+    const synthesisSteps: AgentStep[] = [
+      ...orchestrationSteps,
+      {
+        type: "answer",
+        content: "我来汇总当前协作状态并给出最终结论。",
+        timestamp: 3,
+        streaming: true,
+      },
+    ];
+
+    expect(shouldHideLocalDialogLiveActor({
+      actorId: "coordinator",
+      steps: orchestrationSteps,
+      workerActorIds: new Set<string>(),
+      hasCollaborationGroups: true,
+    })).toBe(true);
+
+    expect(shouldHideLocalDialogLiveActor({
+      actorId: "coordinator",
+      steps: synthesisSteps,
+      workerActorIds: new Set<string>(),
+      hasCollaborationGroups: true,
+    })).toBe(false);
+  });
+
+  it("extracts live continuation preview after wait/spawn orchestration", () => {
+    const state = getLocalDialogLiveContinuationState([
+      {
+        type: "action",
+        toolName: "wait_for_spawned_tasks",
+        toolInput: {},
+        content: "",
+        timestamp: 1,
+      },
+      {
+        type: "observation",
+        content: "所有子任务已结束，正在触发一次最终综合。",
+        timestamp: 2,
+      },
+      {
+        type: "answer",
+        content: "正在汇总最终结果",
+        timestamp: 3,
+        streaming: true,
+      },
+    ]);
+
+    expect(state.isContinuingAfterOrchestration).toBe(true);
+    expect(state.latestContinuationTimestamp).toBe(3);
+    expect(state.latestContinuationPreview).toContain("正在汇总最终结果");
+    expect(state.phase).toBe("aggregating");
+  });
+
+  it("ignores low-signal sequential_thinking payloads as collaboration continuation previews", () => {
+    const state = getLocalDialogLiveContinuationState([
+      {
+        type: "action",
+        toolName: "wait_for_spawned_tasks",
+        toolInput: {},
+        content: "",
+        timestamp: 1,
+      },
+      {
+        type: "action",
+        toolName: "sequential_thinking",
+        toolInput: { thought: "继续整合" },
+        content: "调用 sequential_thinking",
+        timestamp: 2,
+      },
+      {
+        type: "observation",
+        toolName: "sequential_thinking",
+        content: "{\"thought_number\":2,\"total_thoughts\":2,\"next_thought_needed\":false}",
+        timestamp: 3,
+      },
+      {
+        type: "answer",
+        content: "正在综合最终结果并导出 Excel",
+        timestamp: 4,
+        streaming: true,
+      },
+    ]);
+
+    expect(state.isContinuingAfterOrchestration).toBe(true);
+    expect(state.latestContinuationTimestamp).toBe(4);
+    expect(state.latestContinuationPreview).toContain("正在综合最终结果并导出 Excel");
+    expect(state.phase).toBe("aggregating");
+  });
+
+  it("marks repair continuations with an explicit repairing phase", () => {
+    const state = getLocalDialogLiveContinuationState([
+      {
+        type: "action",
+        toolName: "wait_for_spawned_tasks",
+        toolInput: {},
+        content: "",
+        timestamp: 1,
+      },
+      {
+        type: "observation",
+        content: "最终答复未通过结果校验，正在触发一次纠偏。",
+        timestamp: 2,
+      },
+    ]);
+
+    expect(state.phase).toBe("repairing");
   });
 
   it("hides internal planning outlines from the local streaming bubble", () => {

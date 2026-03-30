@@ -6,6 +6,53 @@ import {
   clawHubRuntimeService,
 } from "@/core/agent/skills/clawhub-runtime-service";
 
+function normalizeSpreadsheetSheetsJson(input: unknown): string | null {
+  const normalizeParsed = (value: unknown): string | null => {
+    if (Array.isArray(value)) return JSON.stringify(value);
+    if (value && typeof value === "object") return JSON.stringify([value]);
+    return null;
+  };
+
+  const direct = normalizeParsed(input);
+  if (direct) return direct;
+
+  const raw = String(input ?? "[]").trim();
+  if (!raw) return "[]";
+
+  const candidates = [
+    raw,
+    raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim(),
+  ].filter(Boolean);
+
+  const firstBracketIndex = raw.search(/[\[{]/);
+  if (firstBracketIndex >= 0) {
+    const opening = raw[firstBracketIndex];
+    const closing = opening === "[" ? "]" : "}";
+    const lastBracketIndex = raw.lastIndexOf(closing);
+    if (lastBracketIndex > firstBracketIndex) {
+      candidates.push(raw.slice(firstBracketIndex, lastBracketIndex + 1).trim());
+    }
+  }
+
+  for (const candidate of [...new Set(candidates)]) {
+    if (!candidate) continue;
+    try {
+      const parsed = JSON.parse(candidate);
+      if (typeof parsed === "string") {
+        try {
+          const reparsed = JSON.parse(parsed);
+          const normalized = normalizeParsed(reparsed);
+          if (normalized) return normalized;
+        } catch {}
+      }
+      const normalized = normalizeParsed(parsed);
+      if (normalized) return normalized;
+    } catch {}
+  }
+
+  return null;
+}
+
 /**
  * 安全的数学表达式解析器（递归下降），不使用 eval/Function。
  * 支持: +, -, *, /, %, 括号, 负数
@@ -516,16 +563,13 @@ function createLocalDevTools(
         sheets: {
           type: "string",
           description:
-            'JSON 字符串，格式: [{"name":"Sheet1","headers":["列A","列B"],"rows":[["值1","值2"]]}]',
+            'JSON 字符串，格式: [{"name":"Sheet1","headers":["列A","列B"],"rows":[["值1",123,true,null]]}]；单元格支持 string/number/boolean/null',
         },
       },
       execute: async (params) => {
-        const fileName = String(params.file_name || "export.xlsx");
-        const sheetsJson = String(params.sheets || "[]");
-        // Validate JSON
-        try {
-          JSON.parse(sheetsJson);
-        } catch {
+        const fileName = String(params.file_name || "export.xlsx").trim();
+        const sheetsJson = normalizeSpreadsheetSheetsJson(params.sheets);
+        if (!sheetsJson) {
           return { error: "sheets 参数不是有效的 JSON" };
         }
         // Resolve output path to Downloads directory
@@ -536,7 +580,12 @@ function createLocalDevTools(
         } catch {
           outputDir = "/tmp";
         }
-        const outputPath = `${outputDir}${fileName}`;
+        const isAbsolutePath = /^(?:\/|[A-Za-z]:[\\/])/.test(fileName);
+        const normalizedOutputDir = outputDir.replace(/[\\/]+$/, "");
+        const normalizedFileName = fileName.replace(/^[\\/]+/, "") || "export.xlsx";
+        const outputPath = isAbsolutePath
+          ? fileName
+          : `${normalizedOutputDir}/${normalizedFileName}`;
         try {
           const result = await invokeTauri<string>("export_spreadsheet", {
             outputPath,
@@ -1548,6 +1597,16 @@ export function createBuiltinAgentTools(
         summary: {
           type: "string",
           description: "任务完成摘要（可选）",
+          required: false,
+        },
+        result: {
+          type: "string",
+          description: "完整最终结果（可选）。内容型/结构化子任务请把 JSON 数组或最终明细放这里。",
+          required: false,
+        },
+        answer: {
+          type: "string",
+          description: "完整最终回答（兼容字段，可选）。若提供，系统会优先把它作为最终结果候选。",
           required: false,
         },
       },

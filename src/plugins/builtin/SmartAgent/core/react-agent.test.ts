@@ -29,6 +29,45 @@ function createMockAI(
 }
 
 describe("ReActAgent FC compatibility cache", () => {
+  it("respects authoritative tool lists without auto-injecting delegate or mode tools", () => {
+    const ai = createMockAI(async () => ({
+      type: "content",
+      content: "done",
+    }));
+
+    const tools: AgentTool[] = [
+      {
+        name: "task_done",
+        description: "done",
+        execute: async () => ({ ok: true }),
+      },
+      {
+        name: "export_spreadsheet",
+        description: "export",
+        parameters: {
+          file_name: { type: "string", description: "file" },
+          sheets: { type: "string", description: "sheets" },
+        },
+        execute: async () => ({ ok: true }),
+      },
+    ];
+
+    const agent = new ReActAgent(ai, tools, {
+      maxIterations: 2,
+      fcCompatibilityKey: "authoritative-tool-list",
+      authoritativeToolList: true,
+    });
+
+    const toolNames = (agent as unknown as {
+      getAvailableTools(): AgentTool[];
+    }).getAvailableTools().map((tool) => tool.name);
+
+    expect(toolNames).toEqual(["task_done", "export_spreadsheet"]);
+    expect(toolNames).not.toContain("delegate_subtask");
+    expect(toolNames).not.toContain("enter_plan_mode");
+    expect(toolNames).not.toContain("exit_plan_mode");
+  });
+
   it("should not expose delegate_subtask when managed dialog delegation tools exist", () => {
     const ai = createMockAI(async () => ({
       type: "content",
@@ -647,6 +686,310 @@ describe("ReActAgent FC compatibility cache", () => {
 
     expect(answer).toContain("1000px");
     expect(answer).not.toContain("100px，不需要修改");
+  });
+
+  it("should prefer explicit task_done result for structured content delivery", async () => {
+    const ai = createMockAI(async ({ onChunk }) => {
+      onChunk("已先整理出课程候选。");
+      return {
+        type: "tool_calls",
+        toolCalls: [
+          {
+            id: "call-task-done-structured-result",
+            type: "function",
+            function: {
+              name: "task_done",
+              arguments: JSON.stringify({
+                summary: "已生成 2 门课程候选",
+                result: JSON.stringify([
+                  { 课程名称: "智能体工程化开发实战", 课程介绍: "覆盖开发、评测与部署。" },
+                  { 课程名称: "RAG 知识库构建与检索优化", 课程介绍: "覆盖索引、召回与检索优化。" },
+                ]),
+              }),
+            },
+          },
+        ],
+      };
+    });
+
+    const tools: AgentTool[] = [
+      {
+        name: "task_done",
+        description: "finish task",
+        parameters: {
+          summary: { type: "string", description: "summary" },
+          result: { type: "string", description: "result" },
+          answer: { type: "string", description: "answer" },
+        },
+        execute: async (params) => ({
+          status: "done",
+          summary: String(params.summary ?? ""),
+        }),
+      },
+    ];
+
+    const agent = new ReActAgent(ai, tools, {
+      maxIterations: 2,
+      fcCompatibilityKey: "prefer-task-done-explicit-structured-result",
+    });
+
+    const answer = await agent.run("基于主题生成课程候选，直接返回结构化 JSON");
+
+    expect(answer).toContain("课程名称");
+    expect(answer).toContain("智能体工程化开发实战");
+    expect(answer.trim().startsWith("[")).toBe(true);
+  });
+
+  it("should stop immediately after task_done without forcing memory recall correction", async () => {
+    let fcCalls = 0;
+    let memorySearchCalls = 0;
+    const ai = createMockAI(async () => {
+      fcCalls += 1;
+      return {
+        type: "tool_calls",
+        toolCalls: [
+          {
+            id: "call-task-done-memory",
+            type: "function",
+            function: {
+              name: "task_done",
+              arguments: "{\"summary\":\"我记得你在北京。\"}",
+            },
+          },
+        ],
+      };
+    });
+
+    const tools: AgentTool[] = [
+      {
+        name: "task_done",
+        description: "finish task",
+        parameters: {
+          summary: { type: "string", description: "summary" },
+        },
+        execute: async (params) => ({
+          status: "done",
+          summary: String(params.summary ?? ""),
+        }),
+      },
+      {
+        name: "memory_search",
+        description: "memory search",
+        parameters: {
+          query: { type: "string", description: "query" },
+        },
+        execute: async () => {
+          memorySearchCalls += 1;
+          return { results: [] };
+        },
+      },
+      {
+        name: "memory_get",
+        description: "memory get",
+        execute: async () => ({ content: "" }),
+      },
+    ];
+
+    const agent = new ReActAgent(ai, tools, {
+      maxIterations: 4,
+      fcCompatibilityKey: "task-done-hard-stop-no-memory-correction",
+    });
+
+    const answer = await agent.run("还记得我在哪个城市吗？");
+
+    expect(answer).toContain("北京");
+    expect(fcCalls).toBe(1);
+    expect(memorySearchCalls).toBe(0);
+  });
+
+  it("should treat non-zero run_shell_command exits as tool failures", async () => {
+    const traceEvents: Array<{ event: string; detail?: Record<string, unknown> }> = [];
+    let fcCalls = 0;
+    const ai = createMockAI(async () => {
+      fcCalls += 1;
+      if (fcCalls === 1) {
+        return {
+          type: "tool_calls",
+          toolCalls: [
+            {
+              id: "call-run-shell",
+              type: "function",
+              function: {
+                name: "run_shell_command",
+                arguments: "{\"command\":\"bad-command\"}",
+              },
+            },
+          ],
+        };
+      }
+      return {
+        type: "content",
+        content: "命令执行失败，已停止继续重试。",
+      };
+    });
+
+    const tools: AgentTool[] = [
+      {
+        name: "run_shell_command",
+        description: "run shell command",
+        parameters: {
+          command: { type: "string", description: "command" },
+        },
+        execute: async () => ({
+          exit_code: 127,
+          stdout: "",
+          stderr: "sh: bad-command: command not found",
+        }),
+      },
+    ];
+
+    const agent = new ReActAgent(ai, tools, {
+      maxIterations: 3,
+      fcCompatibilityKey: "non-zero-shell-is-failure",
+      onTraceEvent: (event, detail) => {
+        traceEvents.push({ event, detail });
+      },
+    });
+
+    const answer = await agent.run("执行 bad-command");
+
+    expect(answer).toContain("命令执行失败");
+    expect(traceEvents.some(({ event, detail }) => event === "tool_call_failed" && detail?.tool === "run_shell_command")).toBe(true);
+  });
+
+  it("emits tool_call_dropped when a repeated tool call is satisfied from cache", async () => {
+    const traceEvents: Array<{ event: string; detail?: Record<string, unknown> }> = [];
+    let fcCalls = 0;
+    let executeCalls = 0;
+    const ai = createMockAI(async () => {
+      fcCalls += 1;
+      if (fcCalls === 1 || fcCalls === 3) {
+        return {
+          type: "tool_calls",
+          toolCalls: [
+            {
+              id: `call-list-${fcCalls}`,
+              type: "function",
+              function: {
+                name: "list_directory",
+                arguments: "{\"path\":\"/tmp/demo\"}",
+              },
+            },
+          ],
+        };
+      }
+      if (fcCalls === 2) {
+        return {
+          type: "tool_calls",
+          toolCalls: [
+            {
+              id: "call-calculate",
+              type: "function",
+              function: {
+                name: "calculate",
+                arguments: "{\"expression\":\"1+1\"}",
+              },
+            },
+          ],
+        };
+      }
+      return {
+        type: "content",
+        content: "目录结果已确认，无需再次执行。",
+      };
+    });
+
+    const tools: AgentTool[] = [
+      {
+        name: "list_directory",
+        description: "list directory",
+        parameters: {
+          path: { type: "string", description: "path" },
+        },
+        readonly: true,
+        execute: async () => {
+          executeCalls += 1;
+          return "a.txt\nb.txt";
+        },
+      },
+      {
+        name: "calculate",
+        description: "calculate",
+        parameters: {
+          expression: { type: "string", description: "expression" },
+        },
+        readonly: true,
+        execute: async () => "2",
+      },
+    ];
+
+    const agent = new ReActAgent(ai, tools, {
+      maxIterations: 4,
+      fcCompatibilityKey: "tool-call-dropped-cache",
+      onTraceEvent: (event, detail) => {
+        traceEvents.push({ event, detail });
+      },
+    });
+
+    const answer = await agent.run("列出 /tmp/demo 目录");
+
+    expect(answer).toContain("无需再次执行");
+    expect(executeCalls).toBe(1);
+    expect(traceEvents.some(({ event, detail }) => (
+      event === "tool_call_dropped"
+      && detail?.tool === "list_directory"
+      && detail?.status === "cached"
+    ))).toBe(true);
+  });
+
+  it("parses multiline text-mode spreadsheet action input without collapsing to empty params", async () => {
+    let textCalls = 0;
+    let capturedFileName = "";
+    let capturedSheets = "";
+    const ai: MToolsAI = {
+      chat: async () => ({ content: "" }),
+      stream: async ({ onChunk, onDone }) => {
+        textCalls += 1;
+        const full = textCalls === 1
+          ? `Thought: 我先直接导出 Excel。\nAction: export_spreadsheet\nAction Input:\n\`\`\`json\n{\n  "file_name": "AI培训课程需求_课程生成结果.xlsx",\n  "sheets": "[{\\"name\\":\\"课程清单\\",\\"headers\\":[\\"课程名称\\",\\"课程介绍\\"],\\"rows\\":[[\\"课程A\\",\\"介绍A\\"],[\\"课程B\\",\\"介绍B\\"]]}]"\n}\n\`\`\``
+          : "Thought: 导出已完成。\nFinal Answer: 已导出 Excel 文件。";
+        onChunk(full);
+        onDone?.(full);
+      },
+      streamWithTools: async () => ({ type: "content", content: "" }),
+      embedding: async () => [],
+      getModels: async () => [],
+    };
+
+    const tools: AgentTool[] = [
+      {
+        name: "export_spreadsheet",
+        description: "export",
+        parameters: {
+          file_name: { type: "string", description: "file" },
+          sheets: { type: "string", description: "sheets" },
+        },
+        execute: async (params) => {
+          capturedFileName = String(params.file_name ?? "");
+          capturedSheets = String(params.sheets ?? "");
+          return "已导出 Excel 文件: /Users/haichao/Downloads/AI培训课程需求_课程生成结果.xlsx";
+        },
+      },
+    ];
+
+    const agent = new ReActAgent(ai, tools, {
+      maxIterations: 4,
+      forceTextMode: true,
+      authoritativeToolList: true,
+      fcCompatibilityKey: "text-mode-export-spreadsheet-json",
+    });
+
+    const answer = await agent.run("根据课程数据导出 Excel");
+
+    expect(answer).toContain("已导出 Excel 文件");
+    expect(capturedFileName).toBe("AI培训课程需求_课程生成结果.xlsx");
+    expect(capturedSheets).toContain("\"课程清单\"");
+    expect(capturedSheets).toContain("\"课程A\"");
   });
 
   it("should append generate_suggestions output without forcing a third model round", async () => {

@@ -98,6 +98,20 @@ export interface AgentStep {
   streamId?: string;
 }
 
+export const WAIT_FOR_SPAWNED_TASKS_DEFERRED_RESULT = "__WAIT_FOR_SPAWNED_TASKS_DEFERRED__";
+
+export class WaitForSpawnedTasksInterrupt extends Error {
+  readonly snapshot?: Record<string, unknown>;
+  readonly summary?: string;
+
+  constructor(snapshot?: Record<string, unknown>) {
+    super("wait_for_spawned_tasks_deferred");
+    this.name = "WaitForSpawnedTasksInterrupt";
+    this.snapshot = snapshot;
+    this.summary = typeof snapshot?.summary === "string" ? snapshot.summary : undefined;
+  }
+}
+
 function shouldEmitToolStreamingPreview(rawContent: string): boolean {
   const parsed = parsePartialToolJSON(rawContent);
   if (parsed.thought.trim()) return true;
@@ -112,6 +126,8 @@ export interface AgentConfig {
   maxIterations: number;
   temperature: number;
   verbose: boolean;
+  /** 完整调试用：把关键 LLM / tool 边界事件回传给上层 */
+  onTraceEvent?: (event: string, detail?: Record<string, unknown>) => void;
   /** 危险操作确认回调，返回 true 则继续执行，false 则取消 */
   confirmDangerousAction?: (
     toolName: string,
@@ -161,6 +177,8 @@ export interface AgentConfig {
   }[];
   /** 对话历史上下文：作为多轮 messages 注入（system 之后、当前 query 之前），用于 Actor 会话连续性 */
   contextMessages?: Array<{ role: "user" | "assistant"; content: string }>;
+  /** 将传入工具列表视为最终真相，禁止自动注入 delegate_subtask / enter_plan_mode / exit_plan_mode */
+  authoritativeToolList?: boolean;
 }
 
 export interface DangerousActionConfirmationContext {
@@ -230,6 +248,10 @@ function buildRepeatedToolCallCorrectionMessage(toolPattern?: string): string {
     "请先基于当前已有结果说明卡点在哪里。",
     "如果还要继续，必须至少改变其中一项：工具、参数、目标对象，或直接给出结论。",
     "若这是有副作用的工具（如创建页面、写文件、发请求），默认视为上一次已经生效，不要盲目重试。",
+    "如果工具执行失败或超时，请尝试以下替代方案之一：",
+    "1. 换用更简单的参数或更小的数据量重试",
+    "2. 拆分为多个小步骤分别完成",
+    "3. 在 answer 中直接说明无法完成的原因和已取得的部分成果",
   ]
     .filter(Boolean)
     .join("\n");
@@ -240,6 +262,16 @@ const DEFAULT_CONFIG: AgentConfig = {
   temperature: 0.7,
   verbose: true,
 };
+
+function previewTraceValue(
+  value: unknown,
+  maxLength = 80,
+): string | undefined {
+  const normalized = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!normalized) return undefined;
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(1, maxLength - 3)).trimEnd()}...`;
+}
 
 // ── MCP 参数自动推断 ──
 
@@ -301,6 +333,11 @@ const FC_CACHE_TTL_MS = 30 * 60 * 1000;
 const FC_CACHE_MAX_SIZE = 50;
 const fcIncompatibleCache = new Map<string, number>();
 const MEMORY_RECALL_TOOL_NAMES = new Set(["memory_search", "memory_get"]);
+const NON_CACHEABLE_TOOLS = new Set(["wait_for_spawned_tasks"]);
+const PATH_BASED_FUZZY_CACHE_TOOLS = new Set([
+  "read_document",
+  "read_file",
+]);
 const MEMORY_RECALL_QUERY_PATTERNS: RegExp[] = [
   /之前|先前|前面|上次|刚才|历史|记得|还记得|回忆|回顾/,
   /偏好|习惯|默认|常驻地|常住地|居住地|所在城市|我的城市/,
@@ -387,6 +424,11 @@ function isTransportOrTimeoutErrorMessage(message: string): boolean {
   return /(timeout|timed out|超时|卡住|请求失败|网络|network|econn|socket hang up|connection reset|流读取错误|503|504|502|rate limit|overloaded|temporarily unavailable)/i.test(
     message,
   );
+}
+
+function isFirstChunkStallErrorMessage(message: string): boolean {
+  return /ai_agent_stream 卡住超过/i.test(message)
+    && /phase=(?:invoke_start|init)/i.test(message);
 }
 
 // ── Context 管理 ──
@@ -1051,6 +1093,13 @@ export class ReActAgent {
   private fileMutationTrace = new Map<string, FileMutationTrace>();
   private fileMutationParseTrace = new Map<string, number>();
 
+  private emitTraceEvent(
+    event: string,
+    detail?: Record<string, unknown>,
+  ): void {
+    this.config.onTraceEvent?.(event, detail);
+  }
+
   private isQuickTimeQuery(userInput: string): boolean {
     const q = userInput.trim();
     if (!q) return false;
@@ -1407,6 +1456,14 @@ export class ReActAgent {
     return this.tools.some((tool) => tool.name === toolName);
   }
 
+  private hasBothModeSwitchTools(): boolean {
+    return this.hasToolNamed("enter_plan_mode") && this.hasToolNamed("exit_plan_mode");
+  }
+
+  private hasDelegateSubtaskTool(): boolean {
+    return this.hasToolNamed("delegate_subtask");
+  }
+
   private canUseInteractiveAskUser(): boolean {
     return this.hasToolNamed("ask_user");
   }
@@ -1574,10 +1631,13 @@ export class ReActAgent {
     const hasManagedDelegationTool = tools.some((tool) =>
       tool.name === "spawn_task" || tool.name === "wait_for_spawned_tasks"
     );
-    if (depth < MAX_DEPTH && !hasManagedDelegationTool) {
+    const authoritativeToolList = this.config.authoritativeToolList === true;
+    if (!authoritativeToolList && depth < MAX_DEPTH && !hasManagedDelegationTool) {
       baseTools.push(this.createDelegateSubtaskTool(ai, tools, depth));
     }
-    baseTools.push(...this.createModeSwitchTools());
+    if (!authoritativeToolList) {
+      baseTools.push(...this.createModeSwitchTools());
+    }
     this.tools = baseTools;
   }
 
@@ -1617,6 +1677,7 @@ export class ReActAgent {
             maxIterations: 10,
             temperature: this.config.temperature,
             verbose: this.config.verbose,
+            onTraceEvent: this.config.onTraceEvent,
             fcCompatibilityKey: this.config.fcCompatibilityKey,
             dangerousToolPatterns: this.config.dangerousToolPatterns,
             confirmDangerousAction: this.config.confirmDangerousAction,
@@ -1627,6 +1688,7 @@ export class ReActAgent {
             contextLimit: this.config.contextLimit,
             initialMode: this.config.initialMode,
             defaultToolTimeout: this.config.defaultToolTimeout,
+            authoritativeToolList: this.config.authoritativeToolList,
           },
           (step) => {
             subSteps.push(step);
@@ -1717,6 +1779,10 @@ export class ReActAgent {
       tools = tools.filter((t) => t.readonly);
     }
     return tools;
+  }
+
+  listVisibleToolNames(): string[] {
+    return this.getAvailableTools().map((tool) => tool.name);
   }
 
   private buildMemoryPolicyBlock(): string {
@@ -1953,6 +2019,59 @@ export class ReActAgent {
     reflection?: string;
   }> {
     const startTime = Date.now();
+    const summarizeToolPayload = (value: unknown) => previewTraceValue(
+      typeof value === "string" ? value : JSON.stringify(value),
+    );
+    const finishToolSuccess = <T extends {
+      outputStr: string;
+      rawOutput?: unknown;
+      quickAnswer?: string;
+      rejected?: boolean;
+      error?: string;
+      errorResult?: ToolErrorResult;
+      reflection?: string;
+    }>(result: T, detail?: Record<string, unknown>): T => {
+      this.emitTraceEvent("tool_call_completed", {
+        tool: toolName,
+        elapsed_ms: Date.now() - startTime,
+        ...(detail ?? {}),
+      });
+      this.emitTraceEvent("tool_result_recorded", {
+        tool: toolName,
+        status: result.rejected ? "rejected" : "completed",
+        elapsed_ms: Date.now() - startTime,
+        preview: summarizeToolPayload(result.quickAnswer ?? result.outputStr ?? result.rawOutput),
+      });
+      return result;
+    };
+    const finishToolFailure = <T extends {
+      outputStr: string;
+      rawOutput?: unknown;
+      quickAnswer?: string;
+      rejected?: boolean;
+      error?: string;
+      errorResult?: ToolErrorResult;
+      reflection?: string;
+    }>(result: T, detail?: Record<string, unknown>): T => {
+      this.emitTraceEvent("tool_call_failed", {
+        tool: toolName,
+        elapsed_ms: Date.now() - startTime,
+        status: result.errorResult?.type ?? (result.rejected ? "rejected" : "failed"),
+        preview: summarizeToolPayload(result.error ?? result.outputStr ?? result.rawOutput),
+        ...(detail ?? {}),
+      });
+      this.emitTraceEvent("tool_result_recorded", {
+        tool: toolName,
+        status: result.errorResult?.type ?? (result.rejected ? "rejected" : "failed"),
+        elapsed_ms: Date.now() - startTime,
+        preview: summarizeToolPayload(result.outputStr ?? result.error ?? result.rawOutput),
+      });
+      return result;
+    };
+    this.emitTraceEvent("tool_call_started", {
+      tool: toolName,
+      preview: summarizeToolPayload(toolParams),
+    });
     const tool = this.tools.find((t) => t.name === toolName);
 
     if (!tool) {
@@ -1971,8 +2090,13 @@ export class ReActAgent {
         content: `未知工具: ${toolName}`,
         timestamp: Date.now(),
       });
+      this.emitTraceEvent("tool_call_blocked", {
+        tool: toolName,
+        status: "not_found",
+        preview: summarizeToolPayload(msg),
+      });
       this.recordTrajectory({ type: "error", toolName, error: errResult });
-      return { outputStr: `错误: ${msg}`, error: msg, errorResult: errResult };
+      return finishToolFailure({ outputStr: `错误: ${msg}`, error: msg, errorResult: errResult });
     }
 
     if (this.mode === "plan" && !tool.readonly) {
@@ -1989,8 +2113,13 @@ export class ReActAgent {
         toolName,
         timestamp: Date.now(),
       });
+      this.emitTraceEvent("tool_call_blocked", {
+        tool: toolName,
+        status: "plan_mode_blocked",
+        preview: summarizeToolPayload(msg),
+      });
       this.recordTrajectory({ type: "error", toolName, error: errResult });
-      return { outputStr: msg, error: msg, errorResult: errResult };
+      return finishToolFailure({ outputStr: msg, error: msg, errorResult: errResult });
     }
 
     if (this.loopDetector.isDisabled(toolName)) {
@@ -2007,8 +2136,13 @@ export class ReActAgent {
         toolName,
         timestamp: Date.now(),
       });
+      this.emitTraceEvent("tool_call_dropped", {
+        tool: toolName,
+        status: "loop_disabled",
+        preview: summarizeToolPayload(msg),
+      });
       this.recordTrajectory({ type: "error", toolName, error: errResult });
-      return { outputStr: msg, error: msg, errorResult: errResult };
+      return finishToolFailure({ outputStr: msg, error: msg, errorResult: errResult });
     }
 
     if (tool.parameters) {
@@ -2064,13 +2198,18 @@ export class ReActAgent {
           toolName,
           timestamp: Date.now(),
         });
+        this.emitTraceEvent("tool_call_blocked", {
+          tool: toolName,
+          status: "validation_error",
+          preview: summarizeToolPayload(msg),
+        });
         this.recordTrajectory({
           type: "error",
           toolName,
           toolParams,
           error: errResult,
         });
-        return { outputStr: msg, error: msg, errorResult: errResult };
+        return finishToolFailure({ outputStr: msg, error: msg, errorResult: errResult });
       }
     }
 
@@ -2104,8 +2243,13 @@ export class ReActAgent {
         toolName,
         timestamp: Date.now(),
       });
+      this.emitTraceEvent("tool_call_dropped", {
+        tool: toolName,
+        status: "loop_detected",
+        preview: summarizeToolPayload(msg),
+      });
       this.recordTrajectory({ type: "error", toolName, error: errResult });
-      return { outputStr: msg, error: msg, errorResult: errResult };
+      return finishToolFailure({ outputStr: msg, error: msg, errorResult: errResult });
     }
 
     const consecutiveCheck = this.loopDetector.detectConsecutiveSameTool();
@@ -2127,12 +2271,35 @@ export class ReActAgent {
         toolName,
         timestamp: Date.now(),
       });
+      this.emitTraceEvent("tool_call_dropped", {
+        tool: toolName,
+        status: "consecutive_loop_detected",
+        preview: summarizeToolPayload(msg),
+      });
       this.recordTrajectory({ type: "error", toolName, error: errResult });
-      return { outputStr: msg, error: msg, errorResult: errResult };
+      return finishToolFailure({ outputStr: msg, error: msg, errorResult: errResult });
     }
 
     const cacheKey = `${toolName}::${JSON.stringify(toolParams)}`;
-    const cachedResult = this.successfulCallCache.get(cacheKey);
+    const canUseCallCache = !NON_CACHEABLE_TOOLS.has(toolName);
+    let cachedResult = canUseCallCache ? this.successfulCallCache.get(cacheKey) : undefined;
+    if (!cachedResult && canUseCallCache && PATH_BASED_FUZZY_CACHE_TOOLS.has(toolName)) {
+      const filePath = String(toolParams.path ?? toolParams.filePath ?? toolParams.file ?? "").trim();
+      if (filePath) {
+        const fuzzyPrefix = `${toolName}::`;
+        for (const [key, value] of this.successfulCallCache) {
+          if (!key.startsWith(fuzzyPrefix)) continue;
+          try {
+            const prevParams = JSON.parse(key.slice(fuzzyPrefix.length));
+            const prevPath = String(prevParams.path ?? prevParams.filePath ?? prevParams.file ?? "").trim();
+            if (prevPath === filePath) {
+              cachedResult = value;
+              break;
+            }
+          } catch { /* ignore parse errors */ }
+        }
+      }
+    }
     if (cachedResult) {
       const hint = `[重复调用拦截] 该工具已用相同参数成功执行过，以下是上次的结果（无需再次调用）:\n${cachedResult}\n\n请直接基于此结果回答用户问题，不要再调用同一工具。`;
       if (toolName === "get_system_info") {
@@ -2155,7 +2322,14 @@ export class ReActAgent {
         result: "(cached)",
         durationMs: 0,
       });
-      return { outputStr: hint, rawOutput: cachedResult };
+      this.emitTraceEvent("tool_call_dropped", {
+        tool: toolName,
+        status: "cached",
+        preview: summarizeToolPayload(toolParams),
+      });
+      return finishToolSuccess({ outputStr: hint, rawOutput: cachedResult }, {
+        status: "cached",
+      });
     }
 
     const isDangerous =
@@ -2190,7 +2364,14 @@ export class ReActAgent {
             toolName,
             timestamp: Date.now(),
           });
-          return { outputStr: "用户拒绝执行此操作", rejected: true };
+          this.emitTraceEvent("tool_call_blocked", {
+            tool: toolName,
+            status: "user_rejected",
+            preview: summarizeToolPayload(toolParams),
+          });
+          return finishToolFailure({ outputStr: "用户拒绝执行此操作", rejected: true }, {
+            status: "rejected",
+          });
         }
         this.approvedDangerousKeys.add(dangerousKey);
         this.addStep({
@@ -2207,11 +2388,23 @@ export class ReActAgent {
       const output = await this.executeWithTimeout(tool, toolParams, signal);
       if (signal?.aborted) throw new Error("Aborted");
 
-      const hasToolError =
+      const shellExitCode =
+        (toolName === "run_shell_command" || toolName === "persistent_shell")
+          && output
+          && typeof output === "object"
+          ? (typeof (output as Record<string, unknown>).exit_code === "number"
+            ? Number((output as Record<string, unknown>).exit_code)
+            : typeof (output as Record<string, unknown>).exitCode === "number"
+              ? Number((output as Record<string, unknown>).exitCode)
+              : null)
+          : null;
+      const hasShellToolFailure = shellExitCode !== null && shellExitCode !== 0;
+      const hasToolError = (
         output &&
         typeof output === "object" &&
         "error" in output &&
-        typeof (output as Record<string, unknown>).error === "string";
+        typeof (output as Record<string, unknown>).error === "string"
+      ) || hasShellToolFailure;
       if (hasToolError) {
         this.loopDetector.recordFailure(toolName);
       } else {
@@ -2236,7 +2429,9 @@ export class ReActAgent {
           result: "(quick_answer)",
           durationMs: Date.now() - startTime,
         });
-        return { outputStr: "", rawOutput: output, quickAnswer };
+        return finishToolSuccess({ outputStr: "", rawOutput: output, quickAnswer }, {
+          status: "quick_answer",
+        });
       }
 
       const rawStr =
@@ -2268,7 +2463,7 @@ export class ReActAgent {
         });
       }
 
-      if (!hasToolError) {
+      if (!hasToolError && canUseCallCache) {
         this.successfulCallCache.set(cacheKey, outputStr);
         // LRU eviction: drop oldest entries when exceeding max size
         if (this.successfulCallCache.size > ReActAgent.CALL_CACHE_MAX_SIZE) {
@@ -2290,10 +2485,35 @@ export class ReActAgent {
         result: outputStr.slice(0, 200),
         durationMs: Date.now() - startTime,
       });
-      return { outputStr, rawOutput: output };
+      if (hasToolError) {
+        return finishToolFailure({
+          outputStr,
+          rawOutput: output,
+          error: outputStr,
+          errorResult: {
+            type: ToolErrorType.RuntimeError,
+            tool: toolName,
+            message: outputStr,
+            recoverable: true,
+          },
+        }, {
+          status: hasShellToolFailure ? "command_failed" : "tool_error",
+        });
+      }
+      const shouldYieldForSpawnWait =
+        toolName === "wait_for_spawned_tasks"
+        && output
+        && typeof output === "object"
+        && (output as Record<string, unknown>).wait_complete === false
+        && Number((output as Record<string, unknown>).pending_count ?? 0) > 0;
+      if (shouldYieldForSpawnWait) {
+        finishToolSuccess({ outputStr, rawOutput: output }, { status: "spawn_wait" });
+        throw new WaitForSpawnedTasksInterrupt(output as Record<string, unknown>);
+      }
+      return finishToolSuccess({ outputStr, rawOutput: output });
     } catch (e) {
       if ((e as Error).message === "Aborted") throw e;
-      if (e instanceof ClarificationInterrupt) throw e;
+      if (e instanceof ClarificationInterrupt || e instanceof WaitForSpawnedTasksInterrupt) throw e;
       if (toolName === "get_system_info") {
         this.logSystemInfoToolResult("error", {
           error: e instanceof Error ? e.message : String(e),
@@ -2325,12 +2545,12 @@ export class ReActAgent {
         error: errResult,
         durationMs: Date.now() - startTime,
       });
-      return {
+      return finishToolFailure({
         outputStr: errorStr,
         error: errorStr,
         errorResult: errResult,
         reflection: this.reflectOnError(toolName, toolParams, errorStr),
-      };
+      });
     }
   }
 
@@ -2495,6 +2715,8 @@ ${s.documentToolBlock}
     thought?: string;
     action?: string;
     actionInput?: Record<string, unknown>;
+    actionInputRaw?: string;
+    actionInputParseError?: string;
     finalAnswer?: string;
   } {
     const result: ReturnType<typeof this.parseResponse> = {};
@@ -2516,13 +2738,83 @@ ${s.documentToolBlock}
     const actionMatch = response.match(/Action:\s*(.+)/);
     if (actionMatch) result.action = actionMatch[1].trim();
 
-    // 提取 Action Input
-    const inputMatch = response.match(/Action Input:\s*(\{[\s\S]*?\})/);
-    if (inputMatch) {
-      result.actionInput = parseToolCallArguments(inputMatch[1]).params;
+    const actionInput = this.extractActionInputPayload(response);
+    if (actionInput.raw) {
+      result.actionInputRaw = actionInput.raw;
+      result.actionInput = actionInput.params;
+      if (actionInput.parseError) {
+        result.actionInputParseError = actionInput.parseError;
+      }
     }
 
     return result;
+  }
+
+  private extractActionInputPayload(response: string): {
+    raw?: string;
+    params?: Record<string, unknown>;
+    parseError?: string;
+  } {
+    const markerMatch = response.match(/Action Input:\s*/);
+    if (!markerMatch || markerMatch.index === undefined) return {};
+
+    const afterMarker = response.slice(markerMatch.index + markerMatch[0].length).trimStart();
+    if (!afterMarker) return {};
+
+    let rawCandidate = "";
+    if (afterMarker.startsWith("```")) {
+      const fenceMatch = afterMarker.match(/^```(?:json)?\s*\n([\s\S]*?)\n```/i);
+      rawCandidate = fenceMatch?.[1]?.trim() ?? "";
+    } else {
+      rawCandidate = this.extractLeadingJsonBlock(afterMarker)
+        ?? afterMarker.split(/\n(?:Thought|Action|Final Answer):/)[0]?.trim()
+        ?? "";
+    }
+
+    if (!rawCandidate) return {};
+    const parsed = parseToolCallArguments(rawCandidate);
+    return {
+      raw: rawCandidate,
+      params: parsed.params,
+      ...(parsed.parseError ? { parseError: parsed.parseError } : {}),
+    };
+  }
+
+  private extractLeadingJsonBlock(input: string): string | null {
+    const trimmed = input.trimStart();
+    const first = trimmed[0];
+    if (first !== "{" && first !== "[") return null;
+
+    const closer = first === "{" ? "}" : "]";
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+
+    for (let index = 0; index < trimmed.length; index += 1) {
+      const ch = trimmed[index];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (ch === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (ch === "\"") {
+        inString = !inString;
+        continue;
+      }
+      if (inString) continue;
+      if (ch === first) depth += 1;
+      else if (ch === closer) {
+        depth -= 1;
+        if (depth === 0) {
+          return trimmed.slice(0, index + 1);
+        }
+      }
+    }
+
+    return null;
   }
 
   /**
@@ -2532,8 +2824,10 @@ ${s.documentToolBlock}
     messages: { role: "system" | "user" | "assistant"; content: string }[],
     signal?: AbortSignal,
   ): Promise<string> {
+    const startedAt = Date.now();
     let accumulated = "";
     let lastPushedLen = 0;
+    let hasLoggedFirstChunk = false;
 
     const pushThinking = (force = false) => {
       const current = accumulated.trim();
@@ -2561,6 +2855,14 @@ ${s.documentToolBlock}
       signal,
       onChunk: (chunk) => {
         if (signal?.aborted) return;
+        if (!hasLoggedFirstChunk && chunk.trim()) {
+          hasLoggedFirstChunk = true;
+          this.emitTraceEvent("llm_first_chunk", {
+            elapsed_ms: Date.now() - startedAt,
+            phase: "text_stream",
+            preview: previewTraceValue(chunk),
+          });
+        }
         const merged = mergeStreamChunk(accumulated, chunk);
         accumulated = merged.full;
         pushThinking(merged.mode === "reset");
@@ -2571,6 +2873,14 @@ ${s.documentToolBlock}
     });
 
     if (signal?.aborted) throw new Error("Aborted");
+    if (accumulated.trim()) {
+      this.emitTraceEvent("llm_content_completed", {
+        elapsed_ms: Date.now() - startedAt,
+        phase: "text_stream",
+        count: accumulated.trim().length,
+        preview: previewTraceValue(accumulated),
+      });
+    }
     return accumulated;
   }
 
@@ -2642,9 +2952,11 @@ ${s.documentToolBlock}
         ? this.detectCodingContext(userInput)
         : false;
 
-    const modeSwitching = `## 模式切换
+    const modeSwitching = this.hasBothModeSwitchTools()
+      ? `## 模式切换
 - 面对复杂任务时，可先调用 enter_plan_mode 进入只读分析模式，收集信息和制定方案
-- 方案确定后调用 exit_plan_mode 切回执行模式进行实际操作`;
+- 方案确定后调用 exit_plan_mode 切回执行模式进行实际操作`
+      : "";
 
     const taskStrategy = `## 复杂任务处理策略
 1. **任务分解**：遇到复杂任务时，先在内部将其拆分为多个子步骤，按顺序逐步完成
@@ -2749,7 +3061,7 @@ ${s.documentExportBlock}
 - 不要在没有使用工具的情况下编造信息
 - 涉及文件操作时，必须调用对应工具
 - ClawHub 相关工具仅当当前用户消息**明确提到 ClawHub**时才可调用；未明确提到时，禁止自动搜索、自动推荐或自动安装 skill
-- 如有 delegate_subtask 工具可用，可将独立子问题委派给子 Agent 并行处理
+${this.hasDelegateSubtaskTool() ? "- 如有 delegate_subtask 工具可用，可将独立子问题委派给子 Agent 并行处理" : ""}
 - **所有文件路径必须使用绝对路径**，不要使用 ~ 或相对路径
 - **sequential_thinking 仅用于梳理复杂逻辑，禁止连续调用超过 3 次**
 
@@ -2817,6 +3129,7 @@ ${s.documentExportBlock}
     | { type: "content"; content: string }
     | { type: "tool_calls"; toolCalls: AIToolCall[] }
   > {
+    const startedAt = Date.now();
     const availableTools = stripTools ? [] : this.getAvailableTools();
     const toolDefs = availableTools.map(toolToFunctionDef);
     let lastPushedLen = 0;
@@ -2827,12 +3140,19 @@ ${s.documentExportBlock}
     let toolArgsStartedAt = 0;
     let lastToolArgsPushedLen = 0;
 
+    this.emitTraceEvent("llm_invoke_started", {
+      phase: stripTools ? "fc_final_warning" : "fc_stream",
+      count: messages.length,
+      tool_count: toolDefs.length,
+    });
+
     const result = await this.ai.streamWithTools!({
       messages,
       tools: toolDefs,
       signal,
       modelOverride: this.config.modelOverride,
       thinkingLevel: this.config.thinkingLevel,
+      onTraceEvent: this.config.onTraceEvent,
       onChunk: (chunk) => {
         if (signal?.aborted) return;
         const merged = mergeStreamChunk(accumulated, chunk);
@@ -2920,6 +3240,14 @@ ${s.documentExportBlock}
           streaming: false,
         });
       }
+    }
+    if (result.type === "content" && finalVisibleAnswer) {
+      this.emitTraceEvent("llm_content_completed", {
+        elapsed_ms: Date.now() - startedAt,
+        phase: stripTools ? "fc_final_warning" : "fc_stream",
+        count: finalVisibleAnswer.length,
+        preview: previewTraceValue(finalVisibleAnswer),
+      });
     }
     return result;
   }
@@ -3108,6 +3436,10 @@ ${s.documentExportBlock}
 
     for (let i = 0; i < this.config.maxIterations; i++) {
       if (signal?.aborted) throw new Error("Aborted");
+      this.emitTraceEvent("llm_round_started", {
+        count: i + 1,
+        phase: "fc",
+      });
 
       // Actor inbox 注入点：在每个 iteration 间隙检查是否有新消息
       if (this.config.inboxDrain) {
@@ -3181,6 +3513,13 @@ ${s.documentExportBlock}
         signal,
         isFinalWarningTurn,
       );
+      this.emitTraceEvent("llm_round_completed", {
+        count: i + 1,
+        phase: "fc",
+        status: result.type,
+        tool_count: result.type === "tool_calls" ? result.toolCalls.length : undefined,
+        preview: result.type === "content" ? previewTraceValue(result.content) : undefined,
+      });
 
       if (signal?.aborted) throw new Error("Aborted");
 
@@ -3422,6 +3761,8 @@ ${s.documentExportBlock}
       let taskDoneResult: string | undefined;
       /** task_done params.summary（纯文本，比 JSON outputStr 更适合展示） */
       let taskDoneSummary: string | undefined;
+      /** task_done params.result / params.answer（用于内容型子任务显式交付完整结果） */
+      let taskDoneExplicitResult: string | undefined;
 
       for (const { tc, toolName, result: pipelineResult } of callResults) {
         if (pipelineResult.quickAnswer && !quickAnswerFound) {
@@ -3435,8 +3776,22 @@ ${s.documentExportBlock}
           try {
             const doneParams = parseToolCallArguments(
               tc.function.arguments || "{}",
-            ).params as { summary?: string };
+            ).params as { summary?: string; result?: unknown; answer?: unknown };
             if (doneParams.summary) taskDoneSummary = doneParams.summary.trim();
+            const explicitResultCandidates = [doneParams.result, doneParams.answer]
+              .map((value) => {
+                if (typeof value === "string") return value.trim();
+                if (value == null) return "";
+                try {
+                  return JSON.stringify(value);
+                } catch {
+                  return String(value);
+                }
+              })
+              .filter((value) => value.length > 0);
+            if (explicitResultCandidates.length > 0) {
+              taskDoneExplicitResult = explicitResultCandidates[0];
+            }
           } catch {
             /* ignore */
           }
@@ -3518,6 +3873,7 @@ ${s.documentExportBlock}
           .find((s) => s.type === "answer");
         const answer =
           this.pickBestFinalAnswer(userInput, [
+            taskDoneExplicitResult,
             lastAnswerStep?.content,
             this.lastStreamingAnswer.length > 50
               ? this.lastStreamingAnswer
@@ -3525,16 +3881,6 @@ ${s.documentExportBlock}
             taskDoneSummary,
             taskDoneResult,
           ]) || taskDoneResult;
-        const memoryRecallCorrection =
-          memoryRecallCorrectionCount < 2
-            ? this.buildMemoryRecallCorrection(userInput)
-            : null;
-        if (memoryRecallCorrection) {
-          memoryRecallCorrectionCount++;
-          messages.push({ role: "assistant", content: answer });
-          messages.push({ role: "user", content: memoryRecallCorrection });
-          continue;
-        }
         if (!lastAnswerStep) {
           this.addStep({
             type: "answer",
@@ -3594,6 +3940,10 @@ ${s.documentExportBlock}
 
     for (let i = 0; i < this.config.maxIterations; i++) {
       if (signal?.aborted) throw new Error("Aborted");
+      this.emitTraceEvent("llm_round_started", {
+        count: i + 1,
+        phase: "text",
+      });
 
       const remaining = this.config.maxIterations - i;
       const isFinalWarningTurn = remaining === 1;
@@ -3629,6 +3979,11 @@ ${s.documentExportBlock}
         );
       } catch (e) {
         if ((e as Error).message === "Aborted") throw e;
+        this.emitTraceEvent("llm_retry", {
+          count: i + 1,
+          phase: "text_chat_fallback",
+          preview: previewTraceValue(e instanceof Error ? e.message : String(e)),
+        });
         const response = await this.ai.chat({
           messages: compactedTextMessages,
           temperature: this.config.temperature,
@@ -3643,6 +3998,10 @@ ${s.documentExportBlock}
       let trimmed = responseContent.trim();
       if (!trimmed && !usedChatFallback) {
         try {
+          this.emitTraceEvent("llm_retry", {
+            count: i + 1,
+            phase: "text_empty_retry",
+          });
           const response = await this.ai.chat({
             messages: compactedTextMessages,
             temperature: this.config.temperature,
@@ -3683,6 +4042,12 @@ ${s.documentExportBlock}
         continue;
       }
       textEmptyCount = 0;
+      this.emitTraceEvent("llm_round_completed", {
+        count: i + 1,
+        phase: "text",
+        status: usedChatFallback ? "chat_fallback" : "content",
+        preview: previewTraceValue(trimmed),
+      });
 
       const prevTrimmed = prevResponseContent.trim();
       const compareLen = Math.min(300, trimmed.length, prevTrimmed.length);
@@ -3748,6 +4113,22 @@ ${s.documentExportBlock}
       }
 
       if (parsed.action) {
+        if (parsed.actionInputParseError) {
+          this.emitTraceEvent("tool_call_blocked", {
+            tool: parsed.action,
+            status: "parse_error",
+            preview: previewTraceValue(parsed.actionInputRaw ?? parsed.actionInputParseError, 160),
+          });
+          this.addStep({
+            type: "error",
+            content: parsed.actionInputParseError,
+            toolName: parsed.action,
+            timestamp: Date.now(),
+          });
+          messages.push({ role: "assistant", content: responseContent });
+          messages.push({ role: "user", content: `Observation: ${parsed.actionInputParseError}` });
+          continue;
+        }
         const pipelineResult = await this.executeToolPipeline(
           parsed.action,
           parsed.actionInput || {},
@@ -3847,7 +4228,8 @@ ${s.documentExportBlock}
         typeof this.ai.streamWithTools === "function";
 
       if (canUseFC && this.fcAvailable !== false) {
-        const FC_MAX_TRANSPORT_RETRIES = 2;
+        const FC_MAX_TRANSPORT_RETRIES = 1;
+        const FC_FIRST_CHUNK_RETRIES = 1;
         for (let fcRetryCount = 0; ; fcRetryCount++) {
           try {
             const result = await this.runFC(userInput, signal, images);
@@ -3860,7 +4242,7 @@ ${s.documentExportBlock}
             const isFCIncompatible = isFCCompatibilityErrorMessage(errMsg);
             const isTransportOrTimeout =
               isTransportOrTimeoutErrorMessage(errMsg);
-            const shouldDowngrade = isFCIncompatible;
+            const isFirstChunkStall = isFirstChunkStallErrorMessage(errMsg);
 
             if (isFCIncompatible) {
               this.fcAvailable = false;
@@ -3870,7 +4252,7 @@ ${s.documentExportBlock}
               }
             }
 
-            if (shouldDowngrade) {
+            if (isFCIncompatible) {
               handleError(e, {
                 context: "ReAct Agent Function Calling 降级为文本模式",
                 level: ErrorLevel.Warning,
@@ -3885,12 +4267,50 @@ ${s.documentExportBlock}
               return await this.runText(userInput, signal, images);
             }
 
+            if (isFirstChunkStall && fcRetryCount < FC_FIRST_CHUNK_RETRIES) {
+              const delay = 1500;
+              this.emitTraceEvent("llm_retry", {
+                count: fcRetryCount + 1,
+                phase: "fc_first_chunk_retry",
+                elapsed_ms: delay,
+                preview: previewTraceValue(errMsg),
+              });
+              this.addStep({
+                type: "observation",
+                content: "Function Calling 首个响应迟迟未到，正在快速重试；若仍失败将自动切换到文本模式。",
+                timestamp: Date.now(),
+              });
+              await new Promise((r) => setTimeout(r, delay));
+              continue;
+            }
+
+            if (isFirstChunkStall) {
+              handleError(e, {
+                context: "ReAct Agent Function Calling 首包卡住，降级为文本模式",
+                level: ErrorLevel.Warning,
+                silent: true,
+              });
+              this.addStep({
+                type: "observation",
+                content:
+                  "Function Calling 首个响应持续卡住，已自动切换至文本 ReAct 模式。",
+                timestamp: Date.now(),
+              });
+              return await this.runText(userInput, signal, images);
+            }
+
             // 传输/stall 类错误：自动重试最多 FC_MAX_TRANSPORT_RETRIES 次
             if (
               isTransportOrTimeout &&
               fcRetryCount < FC_MAX_TRANSPORT_RETRIES
             ) {
               const delay = (fcRetryCount + 1) * 3000;
+              this.emitTraceEvent("llm_retry", {
+                count: fcRetryCount + 1,
+                phase: "fc_transport_retry",
+                elapsed_ms: delay,
+                preview: previewTraceValue(errMsg),
+              });
               this.addStep({
                 type: "observation",
                 content: `网络/流传输错误，${delay / 1000}秒后自动重试（第${fcRetryCount + 1}次）...`,
@@ -3898,6 +4318,21 @@ ${s.documentExportBlock}
               });
               await new Promise((r) => setTimeout(r, delay));
               continue;
+            }
+
+            if (isTransportOrTimeout) {
+              handleError(e, {
+                context: "ReAct Agent Function Calling 传输不稳定，降级为文本模式",
+                level: ErrorLevel.Warning,
+                silent: true,
+              });
+              this.addStep({
+                type: "observation",
+                content:
+                  "Function Calling 连接不稳定，已自动切换至文本 ReAct 模式继续执行。",
+                timestamp: Date.now(),
+              });
+              return await this.runText(userInput, signal, images);
             }
 
             if (!isTransportOrTimeout) {

@@ -20,7 +20,10 @@ export function cloneLegacyDialogExecutionPlan(
     participantActorIds: [...plan.participantActorIds],
     allowedMessagePairs: plan.allowedMessagePairs.map((edge) => ({ ...edge })),
     allowedSpawnPairs: plan.allowedSpawnPairs.map((edge) => ({ ...edge })),
-    plannedSpawns: plan.plannedSpawns?.map((spawn) => ({ ...spawn })),
+    plannedSpawns: plan.plannedSpawns?.map((spawn) => ({
+      ...spawn,
+      ...(spawn.overrides ? { overrides: { ...spawn.overrides } } : {}),
+    })),
   };
 }
 
@@ -51,7 +54,11 @@ export function normalizeLegacyDialogExecutionPlan(
       .map((edge) => ({ ...edge })),
     plannedSpawns: plan.plannedSpawns
       ?.filter((spawn) => spawn.targetActorId && spawn.task.trim())
-      .map((spawn) => ({ ...spawn, task: spawn.task.trim() })),
+      .map((spawn) => ({
+        ...spawn,
+        task: spawn.task.trim(),
+        ...(spawn.overrides ? { overrides: { ...spawn.overrides } } : {}),
+      })),
     state: preserveRuntimeState ? plan.state : "armed",
     activatedAt: preserveRuntimeState ? plan.activatedAt : undefined,
     sourceMessageId: preserveRuntimeState ? plan.sourceMessageId : undefined,

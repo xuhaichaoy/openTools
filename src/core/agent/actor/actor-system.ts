@@ -11,7 +11,10 @@ import type {
   AgentCapabilities,
   ActorConfig,
   ActorEvent,
+  DialogSubtaskExecutionIntent,
+  DialogSubtaskProfile,
   DialogArtifactRecord,
+  DialogExecutionMode,
   DialogExecutionPlan,
   DialogMessage,
   DialogRoomCompactionState,
@@ -23,6 +26,8 @@ import type {
   PendingInteractionType,
   PendingReply,
   SessionUploadRecord,
+  SpawnMode,
+  SpawnTaskOverrides,
   SpawnedTaskRecord,
   SpawnedTaskRoleBoundary,
   SpawnedTaskEventDetail,
@@ -39,17 +44,30 @@ import {
 } from "./actor-transcript";
 import { ActorCron } from "./actor-cron";
 import { cloneDialogRoomCompaction } from "./dialog-room-compaction";
+import {
+  DialogSubtaskRuntime,
+  resolveDialogSubtaskProfile,
+} from "./dialog-subtask-runtime";
 import { clearSessionApprovals, clearAllTodos, resetTitleGeneration, clearTelemetry } from "./middlewares";
 import {
   buildSpawnTaskExecutionHint,
-  validateSpawnedTaskResult,
 } from "./spawned-task-result-validator";
+import { inferCodingExecutionProfile } from "@/core/agent/coding-profile";
 import {
   cloneExecutionContract,
   resolveChildExecutionSettings,
 } from "@/core/collaboration/execution-contract";
 import type { ExecutionContract } from "@/core/collaboration/types";
 import { createLogger } from "@/core/logger";
+import {
+  getDialogStepTracePath,
+  isDialogFullTraceEnabled,
+  isDialogStepTraceEnabled,
+  resetDialogStepTrace,
+  traceDialogActorSystemEvent,
+  traceDialogFlowEvent,
+  traceDialogSessionStarted,
+} from "./dialog-step-trace";
 import { splitStructuredMediaReply } from "@/core/media/structured-media";
 import {
   buildExecutionContractFromLegacyDialogExecutionPlan,
@@ -61,8 +79,6 @@ import { getRoleBoundaryPolicyProfile } from "./execution-policy";
 import {
   DEFAULT_DIALOG_WORKER_BUDGET_SECONDS,
   DEFAULT_DIALOG_WORKER_IDLE_LEASE_SECONDS,
-  TIMEOUT_CHECK_INTERVAL_MS,
-  formatTimeoutError,
   isTimeoutErrorMessage,
   normalizePositiveSeconds,
 } from "./timeout-policy";
@@ -77,6 +93,7 @@ const generateId = (): string => {
 const ASK_AGENT_TIMEOUT_MS = 120_000; // 2 min default
 const MAX_SPAWN_DEPTH = 3; // 最大 spawn 链深度
 const MAX_CHILDREN_PER_AGENT = 5; // 单个 Agent 同时运行的子任务上限
+const MAX_ACTIVE_DIALOG_CHILDREN = 3; // Dialog 软并发上限：超出后进入待派发队列
 const ANNOUNCE_RETRY_DELAYS_MS = [5_000, 10_000, 20_000] as const;
 const ANNOUNCE_HARD_EXPIRY_MS = 30 * 60 * 1000; // 30 分钟硬超时
 const RESULT_SHAREABLE_ARTIFACT_SOURCES = new Set(["message", "tool_write", "tool_edit"]);
@@ -87,6 +104,287 @@ const USER_SHAREABLE_ARTIFACT_DIR_PATTERNS = [
   /^\/tmp(?:\/|$)/i,
   /^\/var\/folders(?:\/|$)/i,
 ] as const;
+const INLINE_ONLY_EXECUTOR_ALLOW_TOOL_NAMES = [
+  "task_done",
+  "list_*",
+  "read_*",
+  "search_*",
+  "web_search",
+  "calculate",
+] as const;
+
+function uniqueNonEmptyStrings(values: Array<string | null | undefined>): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const normalized = String(value ?? "").trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(normalized);
+  }
+  return result;
+}
+
+const STRICT_NON_CODING_EXECUTOR_DENY_TOOL_NAMES = [
+  "list_*",
+  "search_*",
+  "web_search",
+  "read_file",
+  "read_file_range",
+  "write_file",
+  "str_replace_edit",
+  "json_edit",
+  "export_document",
+  "export_spreadsheet",
+  "run_shell_command",
+  "persistent_shell",
+  "delegate_subtask",
+  "enter_plan_mode",
+  "exit_plan_mode",
+] as const;
+const INLINE_ONLY_CONTENT_TASK_PATTERNS = [
+  /课程|培训|课纲|课程候选|课程名称|课程介绍|课程主题|课题/u,
+  /excel|xlsx|xls|csv|表格|工作簿/iu,
+  /文档|报告|方案|清单|汇总|提案/u,
+] as const;
+const GENERAL_TO_EXECUTOR_PROMOTION_PATTERNS = [
+  /课程|培训|课纲|课程候选|课程名称|课程介绍|课程主题|课题|清单/u,
+  /excel|xlsx|xls|csv|表格|工作簿/iu,
+] as const;
+const STRONG_CODE_TASK_PATTERNS = [
+  /repo|repository|codebase|仓库|项目结构|工程|源码/i,
+  /代码|编码|编程|函数|类|模块|接口|重构|修复|debug|bug|报错/i,
+  /\/[^\s"'`]+\.(?:ts|tsx|js|jsx|py|rs|go|java|kt|swift|vue|html|css|scss|less)\b/i,
+] as const;
+const COURSE_CONTENT_TASK_PATTERNS = [
+  /课程|培训|课纲|课程候选|课程名称|课程介绍|课程主题|培训目标|培训对象/u,
+  /基于.*(?:excel|xlsx|xls|csv|表格|工作簿)/iu,
+  /按主题.*(?:生成|整理|汇总).*(?:课程|条目|清单)/u,
+] as const;
+const REVIEW_LIKE_TASK_PATTERNS = [
+  /review|reviewer|审查|审阅|评审|审核|安全/u,
+] as const;
+const VALIDATION_LIKE_TASK_PATTERNS = [
+  /tester|test|qa|验证|回归|验收|测试/u,
+] as const;
+const CONTENT_EXECUTOR_ALLOW_TOOL_NAMES = [
+  "read_document",
+  "calculate",
+  "task_done",
+] as const;
+const CONTENT_EXECUTOR_DENY_TOOL_NAMES = [
+  "spawn_task",
+  "delegate_subtask",
+  "wait_for_spawned_tasks",
+  "send_message",
+  "agents",
+  "ask_user",
+  "ask_clarification",
+  "send_local_media",
+  "enter_plan_mode",
+  "exit_plan_mode",
+  "memory_*",
+  "list_*",
+  "read_file",
+  "read_file_range",
+  "search_*",
+  "web_search",
+  "write_file",
+  "str_replace_edit",
+  "json_edit",
+  "export_document",
+  "export_spreadsheet",
+  "run_shell_command",
+  "persistent_shell",
+  "delete_file",
+  "native_*",
+  "database_execute",
+  "ssh_*",
+] as const;
+const INLINE_STRUCTURED_RESULT_ALLOW_TOOL_NAMES = [
+  "task_done",
+] as const;
+const INLINE_STRUCTURED_RESULT_DENY_TOOL_NAMES = [
+  ...CONTENT_EXECUTOR_DENY_TOOL_NAMES,
+  "read_document",
+  "calculate",
+] as const;
+const CODING_INTENT_TOOL_NAMES = new Set([
+  "write_file",
+  "str_replace_edit",
+  "json_edit",
+  "run_shell_command",
+  "persistent_shell",
+  "export_document",
+  "export_spreadsheet",
+]);
+
+function mergeToolPolicies(
+  ...policies: Array<ToolPolicy | undefined>
+): ToolPolicy | undefined {
+  const allow = [...new Set(
+    policies.flatMap((policy) => policy?.allow ?? [])
+      .map((item) => String(item ?? "").trim())
+      .filter(Boolean),
+  )];
+  const deny = [...new Set(
+    policies.flatMap((policy) => policy?.deny ?? [])
+      .map((item) => String(item ?? "").trim())
+      .filter(Boolean),
+  )];
+  if (allow.length === 0 && deny.length === 0) return undefined;
+  return {
+    ...(allow.length > 0 ? { allow } : {}),
+    ...(deny.length > 0 ? { deny } : {}),
+  };
+}
+
+function taskLooksLikeCourseContentDelivery(task: string): boolean {
+  const normalizedTask = String(task ?? "").trim();
+  if (!normalizedTask) return false;
+  return COURSE_CONTENT_TASK_PATTERNS.some((pattern) => pattern.test(normalizedTask));
+}
+
+function taskExplicitlyRequestsReview(task: string): boolean {
+  const normalizedTask = String(task ?? "").trim();
+  return REVIEW_LIKE_TASK_PATTERNS.some((pattern) => pattern.test(normalizedTask));
+}
+
+function taskExplicitlyRequestsValidation(task: string): boolean {
+  const normalizedTask = String(task ?? "").trim();
+  return VALIDATION_LIKE_TASK_PATTERNS.some((pattern) => pattern.test(normalizedTask));
+}
+
+function overrideToolPolicyEnablesCoding(policy?: ToolPolicy): boolean {
+  const allow = policy?.allow ?? [];
+  return allow.some((toolName) => CODING_INTENT_TOOL_NAMES.has(String(toolName ?? "").trim()));
+}
+
+function isInlineOnlyNonCodingExecutorTask(params: {
+  roleBoundary?: SpawnedTaskRoleBoundary;
+  task: string;
+}): boolean {
+  if (params.roleBoundary !== "executor") return false;
+  const normalizedTask = String(params.task ?? "").trim();
+  const contentLike = INLINE_ONLY_CONTENT_TASK_PATTERNS.some((pattern) => pattern.test(normalizedTask));
+  const strongCodeLike = STRONG_CODE_TASK_PATTERNS.some((pattern) => pattern.test(normalizedTask));
+  if (taskLooksLikeCourseContentDelivery(normalizedTask)) return true;
+  if (contentLike && !strongCodeLike) return true;
+  const inferred = inferCodingExecutionProfile({ query: params.task });
+  return !inferred.profile.codingMode;
+}
+
+function shouldPromoteGeneralTaskToExecutor(task: string): boolean {
+  const normalizedTask = String(task ?? "").trim();
+  if (!normalizedTask) return false;
+  if (taskLooksLikeCourseContentDelivery(normalizedTask)) return true;
+  const contentLike = GENERAL_TO_EXECUTOR_PROMOTION_PATTERNS.some((pattern) => pattern.test(normalizedTask));
+  const strongCodeLike = STRONG_CODE_TASK_PATTERNS.some((pattern) => pattern.test(normalizedTask));
+  return contentLike && !strongCodeLike;
+}
+
+function buildStrictContentExecutorToolPolicy(overrideToolPolicy?: ToolPolicy): ToolPolicy {
+  const deny = uniqueNonEmptyStrings([
+    ...CONTENT_EXECUTOR_DENY_TOOL_NAMES,
+    ...(overrideToolPolicy?.deny ?? []),
+  ]);
+  return {
+    allow: [...CONTENT_EXECUTOR_ALLOW_TOOL_NAMES],
+    ...(deny.length > 0 ? { deny } : {}),
+  };
+}
+
+function buildInlineStructuredResultToolPolicy(overrideToolPolicy?: ToolPolicy): ToolPolicy {
+  const deny = uniqueNonEmptyStrings([
+    ...INLINE_STRUCTURED_RESULT_DENY_TOOL_NAMES,
+    ...(overrideToolPolicy?.deny ?? []),
+  ]);
+  return {
+    allow: [...INLINE_STRUCTURED_RESULT_ALLOW_TOOL_NAMES],
+    ...(deny.length > 0 ? { deny } : {}),
+  };
+}
+
+function resolveDialogSubtaskExecutionIntent(params: {
+  roleBoundary?: SpawnedTaskRoleBoundary;
+  task: string;
+  overrideToolPolicy?: ToolPolicy;
+  explicitExecutionIntent?: DialogSubtaskExecutionIntent;
+}): DialogSubtaskExecutionIntent {
+  if (params.explicitExecutionIntent) return params.explicitExecutionIntent;
+  const normalizedTask = String(params.task ?? "").trim();
+  if (params.roleBoundary === "reviewer" && taskExplicitlyRequestsReview(normalizedTask)) return "reviewer";
+  if (params.roleBoundary === "validator" && taskExplicitlyRequestsValidation(normalizedTask)) return "validator";
+  if (taskLooksLikeCourseContentDelivery(normalizedTask)) {
+    return overrideToolPolicyEnablesCoding(params.overrideToolPolicy) ? "coding_executor" : "content_executor";
+  }
+  if (params.roleBoundary === "reviewer") return "reviewer";
+  if (params.roleBoundary === "validator") return "validator";
+  if (params.roleBoundary === "executor") {
+    if (overrideToolPolicyEnablesCoding(params.overrideToolPolicy)) return "coding_executor";
+    return isInlineOnlyNonCodingExecutorTask({ roleBoundary: params.roleBoundary, task: normalizedTask })
+      ? "content_executor"
+      : "coding_executor";
+  }
+  return "general";
+}
+
+function buildExecutionIntentToolPolicy(params: {
+  executionIntent: DialogSubtaskExecutionIntent;
+  resultContract?: "default" | "inline_structured_result";
+  overrideToolPolicy?: ToolPolicy;
+}): ToolPolicy | undefined {
+  switch (params.executionIntent) {
+    case "content_executor":
+      return params.resultContract === "inline_structured_result"
+        ? buildInlineStructuredResultToolPolicy(params.overrideToolPolicy)
+        : buildStrictContentExecutorToolPolicy(params.overrideToolPolicy);
+    case "coding_executor":
+      return mergeToolPolicies(getRoleBoundaryPolicyProfile("executor").toolPolicy, params.overrideToolPolicy);
+    case "reviewer":
+      return mergeToolPolicies(getRoleBoundaryPolicyProfile("reviewer").toolPolicy, params.overrideToolPolicy);
+    case "validator":
+      return mergeToolPolicies(getRoleBoundaryPolicyProfile("validator").toolPolicy, params.overrideToolPolicy);
+    default:
+      return params.overrideToolPolicy;
+  }
+}
+
+function buildExecutorTaskSpecificToolPolicy(params: {
+  roleBoundary?: SpawnedTaskRoleBoundary;
+  task: string;
+}): ToolPolicy | undefined {
+  if (!isInlineOnlyNonCodingExecutorTask(params)) return undefined;
+  return {
+    allow: [...INLINE_ONLY_EXECUTOR_ALLOW_TOOL_NAMES],
+    deny: [...STRICT_NON_CODING_EXECUTOR_DENY_TOOL_NAMES],
+  };
+}
+
+function sanitizeInlineOnlyExecutorTask(task: string): string {
+  const normalized = task.trim();
+  if (!normalized) return normalized;
+
+  return normalized
+    .replace(
+      /生成一批课程候选\s*json/giu,
+      "直接在 terminal result 返回完整课程候选列表（每条至少包含课程名称和课程介绍）",
+    )
+    .replace(
+      /(?:输出|结果|内容|课程候选|最终结果|最终内容|产物)[^。；;\n]{0,80}?(?:保存到|写入到|写到|落到|输出到|导出到)\s*`?(\/[^\s`，。,；;]+)`?/giu,
+      "直接在 terminal result 中返回结果，不要写入中间文件",
+    )
+    .replace(
+      /(?:文件(?:路径)?|输出路径)[:：]\s*`?(\/[^\s`，。,；;]+\.(?:json|txt|md|csv|xlsx?|docx?))`?/giu,
+      "不要生成中间文件",
+    )
+    .replace(
+      /并返回摘要/gu,
+      "并在末尾附一行简短摘要（前面必须先给完整结果）",
+    )
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
 
 // 错误分类：对标 OpenClaw announce 机制
 const TRANSIENT_ERROR_PATTERNS = [
@@ -106,6 +404,33 @@ const PERMANENT_ERROR_PATTERNS = [
   /invalid.*target/i,
 ] as const;
 
+type DeferredSpawnRequest = {
+  id: string;
+  spawnerActorId: string;
+  targetActorId: string;
+  task: string;
+  queuedAt: number;
+  label?: string;
+  context?: string;
+  attachments?: string[];
+  images?: string[];
+  timeoutSeconds?: number;
+  mode?: SpawnMode;
+  cleanup?: "delete" | "keep";
+  expectsCompletionMessage?: boolean;
+  roleBoundary?: SpawnedTaskRoleBoundary;
+  profile: DialogSubtaskProfile;
+  executionIntent?: DialogSubtaskExecutionIntent;
+  createIfMissing?: boolean;
+  createChildSpec?: {
+    description?: string;
+    capabilities?: AgentCapability[];
+    workspace?: string;
+  };
+  overrides?: SpawnTaskOverrides;
+  plannedDelegationId?: string;
+};
+
 function isTransientAnnounceError(error: unknown): boolean {
   const msg = error instanceof Error ? error.message : String(error);
   if (!msg) return false;
@@ -117,6 +442,16 @@ function isTransientAnnounceError(error: unknown): boolean {
 
   // 检查是否是 transient 错误
   return TRANSIENT_ERROR_PATTERNS.some((p) => p.test(msg));
+}
+
+function isRetryableDeferredSpawnError(message: string): boolean {
+  return [
+    /max active children reached/i,
+    /已达到并发子任务上限/u,
+    /already running a task/i,
+    /正在执行其他任务/u,
+    /请等待空闲/u,
+  ].some((pattern) => pattern.test(message));
 }
 
 type EphemeralChildRoleBoundary = {
@@ -137,6 +472,7 @@ function buildEphemeralChildBoundary(role: SpawnedTaskRoleBoundary): EphemeralCh
         systemPromptAppend: [
           "你当前是独立审查子 Agent。",
           "默认不要修改文件、不要运行写操作、不要直接接管实现任务。",
+          "不要使用 send_message / ask_user / ask_clarification / delegate_subtask / enter_plan_mode / exit_plan_mode；最终结论直接写进 terminal result。",
           "重点输出发现、风险、证据和建议修复方向；如果认为必须改代码，应回传上游协调者，由其决定是否另派实现任务。",
         ].join("\n"),
       };
@@ -148,6 +484,7 @@ function buildEphemeralChildBoundary(role: SpawnedTaskRoleBoundary): EphemeralCh
         systemPromptAppend: [
           "你当前是验证子 Agent。",
           "默认不要修改代码；重点做复现、测试、验收和回归检查。",
+          "不要使用 send_message / ask_user / ask_clarification / delegate_subtask / enter_plan_mode / exit_plan_mode；最终结论直接写进 terminal result。",
           "可以运行测试、构建或检查命令，但若被实现缺口阻塞，应明确说明阻塞点和建议的上游动作。",
         ].join("\n"),
       };
@@ -159,7 +496,9 @@ function buildEphemeralChildBoundary(role: SpawnedTaskRoleBoundary): EphemeralCh
         systemPromptAppend: [
           "你当前是执行子 Agent。",
           "聚焦实现、修复或探索，不要抢协调权。",
-          "如需额外审查或验证，优先把结果和缺口回传给上游协调者，再由其继续分派。",
+          "不要使用 send_message / ask_user / ask_clarification / delegate_subtask / enter_plan_mode / exit_plan_mode；最终结果、验证结论和 blocker 直接写进 terminal result。",
+          "如果任务属于课程生成、内容整理、方案撰写、资料汇总这类非 coding 工作，默认直接在 terminal result 返回完整结果，不要写中间 JSON / TSV / Markdown 文件。",
+          "如需额外审查或验证，优先把结果和缺口写进终态结果回传给上游协调者，再由其继续分派。",
         ].join("\n"),
       };
     default:
@@ -170,6 +509,7 @@ function buildEphemeralChildBoundary(role: SpawnedTaskRoleBoundary): EphemeralCh
         systemPromptAppend: [
           "你当前是通用支援子 Agent。",
           "聚焦补充分析、资料整理和局部线索确认，默认不要修改文件或继续派发新的子任务。",
+          "不要使用 send_message / ask_user / ask_clarification / delegate_subtask / enter_plan_mode / exit_plan_mode；最终结论直接写进 terminal result。",
           "如果发现需要新增实现、审查或验证线程，请把建议与原因回传给上游协调者，由其继续派工。",
         ].join("\n"),
       };
@@ -244,8 +584,9 @@ function buildDelegatedTaskPrompt(params: {
   context?: string;
   attachments?: readonly string[];
   executionHint?: string;
+  inlineOnly?: boolean;
 }): string {
-  const task = params.task.trim() || "未命名任务";
+  const task = (params.inlineOnly ? sanitizeInlineOnlyExecutorTask(params.task) : params.task).trim() || "未命名任务";
   const label = params.label?.trim();
   const context = params.context?.trim();
   const attachments = (params.attachments ?? [])
@@ -283,6 +624,9 @@ function buildDelegatedTaskPrompt(params: {
       ? "- 优先围绕下方工作集和补充上下文涉及的文件、目录或模块开展工作。"
       : "- 优先围绕任务描述和补充上下文涉及的范围开展工作，不要无边界发散。",
     "- 如需越过当前范围，请确认确有必要，并在结果里说明原因。",
+    ...(params.inlineOnly
+      ? ["- 这是非 coding 的内容执行任务：不要读取或复用 Downloads / 历史目录里的旧 JSON、旧产物或重跑文件。"]
+      : []),
   );
 
   if (context) {
@@ -299,6 +643,13 @@ function buildDelegatedTaskPrompt(params: {
     "- 返回时给出结论、关键证据和下一步建议，不要只回复“已处理”或“看过了”。",
     "- 若任务涉及代码、文件、页面或验证，请优先提供文件路径、关键修改点、命令或测试结果等可核查信息。",
     "- 若未完成，请明确说明阻塞原因、已完成部分和建议的后续动作。",
+    ...(params.inlineOnly
+      ? [
+          "- 不要写入任何中间 JSON / 临时文件；直接在 terminal result 返回结构化结果，由父 Agent 统一导出最终交付。",
+          "- 如果任务是在整理课程、表格、文档或候选清单，先给完整结果，再在末尾补一行简短摘要；不要只回摘要。",
+          "- 当你使用 `task_done` 结束任务时，确保完整结果已经出现在 answer / streaming answer 中，避免只留下 summary。",
+        ]
+      : []),
   );
 
   if (executionHint) {
@@ -478,12 +829,45 @@ function isLowSignalCoordinationMessage(content: string): boolean {
 const actorSystemLogger = createLogger("ActorSystem");
 const log = (message: string, data?: unknown) => actorSystemLogger.debug(message, data);
 const logWarn = (message: string, data?: unknown) => actorSystemLogger.warn(message, data);
+let lastTracedActorSystemSessionId: string | null = null;
+let lastTracedActorSystemCreatedAt = 0;
 
 function previewActorSystemText(value?: string, maxLength = 120): string | undefined {
   const normalized = String(value ?? "").replace(/\s+/g, " ").trim();
   if (!normalized) return undefined;
   if (normalized.length <= maxLength) return normalized;
   return `${normalized.slice(0, Math.max(1, maxLength - 3)).trimEnd()}...`;
+}
+
+function deriveEphemeralActorName(params: {
+  targetActorId?: string;
+  label?: string;
+  description?: string;
+  task?: string;
+  roleBoundary?: SpawnedTaskRoleBoundary;
+}): string {
+  const candidates = [
+    params.targetActorId,
+    params.label,
+    params.description,
+    previewActorSystemText(params.task, 32),
+  ];
+
+  for (const candidate of candidates) {
+    const normalized = String(candidate ?? "").replace(/\s+/g, " ").trim();
+    if (normalized) return normalized;
+  }
+
+  switch (params.roleBoundary) {
+    case "reviewer":
+      return "Independent Reviewer";
+    case "validator":
+      return "QA Validator";
+    case "executor":
+      return "Task Executor";
+    default:
+      return "Temporary Worker";
+  }
 }
 
 type SystemEventHandler = (event: ActorEvent | DialogMessage) => void;
@@ -615,25 +999,112 @@ export class ActorSystem {
   private eventHandlers: SystemEventHandler[] = [];
   private pendingReplies = new Map<string, PendingReply>();
   private pendingInteractions = new Map<string, PendingInteraction>();
-  private spawnedTasks = new Map<string, SpawnedTaskRecord>();
   private artifactRecords = new Map<string, DialogArtifactRecord>();
   private sessionUploads = new Map<string, SessionUploadRecord>();
   private stagedResultMedia = new Map<string, Pick<DialogMessage, "images" | "attachments">>();
+  private deferredSpawnRequests = new Map<string, DeferredSpawnRequest[]>();
+  private deferredSpawnDispatchingOwners = new Set<string>();
   private coordinatorActorId: string | null = null;
   private activeExecutionContract: ExecutionContract | null = null;
   private legacyDialogExecutionPlanRuntimeState: LegacyDialogExecutionPlanRuntimeState | null = null;
   private dialogRoomCompaction: DialogRoomCompactionState | null = null;
-  private focusedSpawnedSessionRunId: string | null = null;
+  private dialogExecutionMode: DialogExecutionMode = "execute";
   private options: ActorSystemOptions;
   readonly sessionId: string;
   private hooks = new Map<HookType, Array<HookHandler<any>>>();
   private modifyHooks = new Map<ModifyHookType, Array<ModifyHookHandler<any>>>();
   private _cron: ActorCron;
+  private readonly dialogSubtaskRuntime: DialogSubtaskRuntime;
   private supportActorCleanupScheduled = false;
+
+  private traceFlow(
+    event: string,
+    detail?: Record<string, unknown>,
+    actorId?: string | null,
+  ): void {
+    traceDialogFlowEvent({
+      sessionId: this.sessionId,
+      actorId: actorId ?? this.coordinatorActorId ?? undefined,
+      event,
+      detail,
+    });
+  }
 
   constructor(options: ActorSystemOptions = {}) {
     this.options = options;
     this.sessionId = generateId();
+    if (isDialogStepTraceEnabled()) {
+      traceDialogSessionStarted(this.sessionId);
+      if (isDialogFullTraceEnabled()) {
+        const createdAt = Date.now();
+        if (
+          lastTracedActorSystemSessionId
+          && createdAt - lastTracedActorSystemCreatedAt <= 1_500
+        ) {
+          traceDialogFlowEvent({
+            sessionId: this.sessionId,
+            event: "system_instance_replaced",
+            detail: {
+              previous_session: lastTracedActorSystemSessionId.slice(0, 8),
+              elapsed_ms: createdAt - lastTracedActorSystemCreatedAt,
+            },
+          });
+        }
+        this.traceFlow("system_instance_created");
+        lastTracedActorSystemSessionId = this.sessionId;
+        lastTracedActorSystemCreatedAt = createdAt;
+      }
+      void getDialogStepTracePath()
+        .then((path) => {
+          actorSystemLogger.info("dialog step trace enabled", {
+            sessionId: this.sessionId,
+            path,
+          });
+        })
+        .catch((error) => {
+          actorSystemLogger.warn("dialog step trace path resolve failed", {
+            sessionId: this.sessionId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+    }
+    this.dialogSubtaskRuntime = new DialogSubtaskRuntime({
+      sessionId: this.sessionId,
+      getActor: (actorId) => this.get(actorId),
+      getActorName: (actorId) => this.getActorName(actorId),
+      getActorNames: () => this.getActorNamesMap(),
+      emitEvent: (event) => this.emitEvent(event as ActorEvent),
+      appendSpawnEvent: (spawnerActorId, targetActorId, task, runId) =>
+        appendSpawnEvent(this.sessionId, spawnerActorId, targetActorId, task, runId),
+      appendAnnounceEvent: (runId, status, result, error) =>
+        appendAnnounceEvent(this.sessionId, runId, status, result, error),
+      announceWithRetry: (fromActorId, toActorId, content, runId) =>
+        this.announceWithRetry(fromActorId, toActorId, content, runId),
+      finalizeSpawnedTaskHistoryWindow: (record, targetActor) =>
+        this.finalizeSpawnedTaskHistoryWindow(record, targetActor),
+      cancelPendingInteractionsForActor: (actorId) =>
+        this.cancelPendingInteractionsForActor(actorId),
+      killActor: (actorId) => this.kill(actorId),
+      getArtifactRecordsSnapshot: () => this.getArtifactRecordsSnapshot(),
+      onTaskSettled: ({ record, targetActorId, targetName, status, task }) => {
+        void this.runHooks<SpawnTaskEndHookContext>("onSpawnTaskEnd", {
+          system: this,
+          actorId: targetActorId,
+          actorName: targetName,
+          timestamp: Date.now(),
+          spawnerId: record.spawnerActorId,
+          targetId: targetActorId,
+          task,
+          runId: record.runId,
+          status,
+          result: record.result,
+          error: record.error,
+        });
+        this.dispatchDeferredSpawnTasks(record.spawnerActorId);
+        this.tryFinalizeExecutionContract();
+        this.scheduleExecutionContractProgressCheck();
+      },
+    });
     this._cron = new ActorCron(this);
   }
 
@@ -645,9 +1116,7 @@ export class ActorSystem {
       const coordinatorId = this.coordinatorActorId;
       if (!coordinatorId) return;
       if (this.pendingInteractions.size > 0 || this.pendingReplies.size > 0) return;
-      const hasActiveSpawnedTasks = [...this.spawnedTasks.values()].some((record) =>
-        record.status === "running" || (record.mode === "session" && record.sessionOpen),
-      );
+      const hasActiveSpawnedTasks = this.dialogSubtaskRuntime.hasActiveSpawnedTasks();
       if (hasActiveSpawnedTasks) return;
 
       const supportActors = this.getAll().filter((actor) => actor.id !== coordinatorId);
@@ -673,6 +1142,29 @@ export class ActorSystem {
 
   set defaultProductMode(mode: "dialog" | "review") {
     this.options.defaultProductMode = mode === "review" ? "review" : "dialog";
+  }
+
+  getDialogExecutionMode(): DialogExecutionMode {
+    return this.dialogExecutionMode;
+  }
+
+  setDialogExecutionMode(mode: DialogExecutionMode, opts?: { force?: boolean }): void {
+    const nextMode: DialogExecutionMode = mode === "plan" ? "plan" : "execute";
+    if (this.dialogExecutionMode === nextMode) return;
+    const busyActors = this.getAll().filter((actor) => actor.status !== "idle");
+    if (!opts?.force && (busyActors.length > 0 || this.dialogSubtaskRuntime.hasActiveSpawnedTasks())) {
+      throw new Error("当前仍有运行中的主线程或子任务，暂时不能切换规划模式。");
+    }
+    this.dialogExecutionMode = nextMode;
+    for (const actor of this.actors.values()) {
+      actor.setDialogExecutionMode(nextMode);
+    }
+    this.emitEvent({
+      type: "dialog_execution_mode_changed",
+      actorId: this.coordinatorActorId ?? "",
+      timestamp: Date.now(),
+      detail: { mode: nextMode },
+    });
   }
 
   // ── Actor Lifecycle ──
@@ -703,19 +1195,26 @@ export class ActorSystem {
       confirmDangerousAction: this.options.confirmDangerousAction,
       actorSystem: this,
     });
+    actor.setDialogExecutionMode(this.dialogExecutionMode);
 
     actor.on((event) => {
       this.emitEvent(event);
       if (event.type === "step" || event.type === "message_received") {
-        this.touchSpawnedSessionActivity(event.actorId, event.timestamp);
+        const step = event.type === "step"
+          ? (event.detail as { step?: { content?: string; streaming?: boolean } } | undefined)?.step
+          : undefined;
+        const progressSummary = step && !step.streaming && typeof step.content === "string"
+          ? step.content.slice(0, 240)
+          : undefined;
+        this.dialogSubtaskRuntime.touchSessionActivity(event.actorId, event.timestamp, progressSummary);
       }
       if (event.type === "task_started") {
-        this.markSpawnedSessionTaskStarted(event.actorId, event.timestamp);
+        this.dialogSubtaskRuntime.markSessionTaskStarted(event.actorId, event.timestamp);
       }
       if (event.type === "task_completed" || event.type === "task_error") {
         const detail = (event.detail ?? {}) as Record<string, unknown>;
         const normalizedError = String(detail.error ?? "");
-        this.markSpawnedSessionTaskEnded(
+        this.dialogSubtaskRuntime.markSessionTaskEnded(
           event.actorId,
           event.type === "task_completed"
             ? "completed"
@@ -766,7 +1265,7 @@ export class ActorSystem {
     });
     this.cascadeAbortSpawns(actorId);
     actor.stop();
-    for (const record of this.spawnedTasks.values()) {
+    for (const record of this.dialogSubtaskRuntime.getSpawnedTasksSnapshot()) {
       if (record.targetActorId === actorId || record.spawnerActorId === actorId) {
         this.closeSpawnedSessionRecord(record);
       }
@@ -782,14 +1281,9 @@ export class ActorSystem {
   /** 停止并移除所有 Actor */
   killAll(): void {
     this._cron.cancelAll();
-    for (const record of this.spawnedTasks.values()) {
-      if (record.timeoutId) clearInterval(record.timeoutId);
-      this.closeSpawnedSessionRecord(record);
-    }
-    this.spawnedTasks.clear();
+    this.dialogSubtaskRuntime.clearAll();
     this.artifactRecords.clear();
     this.sessionUploads.clear();
-    this.focusedSpawnedSessionRunId = null;
     this.dialogRoomCompaction = null;
     for (const actor of this.actors.values()) {
       actor.stop();
@@ -805,6 +1299,16 @@ export class ActorSystem {
   /** 获取一个 Actor */
   get(actorId: string): AgentActor | undefined {
     return this.actors.get(actorId);
+  }
+
+  private getActorName(actorId: string): string {
+    return this.actors.get(actorId)?.role.name ?? actorId;
+  }
+
+  private getActorNamesMap(): ReadonlyMap<string, string> {
+    return new Map(
+      [...this.actors.values()].map((actor) => [actor.id, actor.role.name] as const),
+    );
   }
 
   /** 获取所有 Actor */
@@ -905,6 +1409,10 @@ export class ActorSystem {
 
   private getExecutionContractSurface(): ExecutionContract["surface"] {
     return this.activeExecutionContract?.surface ?? "local_dialog";
+  }
+
+  getCurrentSurface(): ExecutionContract["surface"] {
+    return this.getExecutionContractSurface();
   }
 
   private ensureRuntimeExecutionContract(): ExecutionContract | null {
@@ -1011,6 +1519,7 @@ export class ActorSystem {
       description?: string;
       capabilities?: AgentCapability[];
       roleBoundary?: SpawnedTaskRoleBoundary;
+      executionIntent?: DialogSubtaskExecutionIntent;
       workspace?: string;
       toolPolicy?: ToolPolicy;
       timeoutSeconds?: number;
@@ -1034,6 +1543,14 @@ export class ActorSystem {
           description: opts.description,
           capabilities: opts.capabilities,
         });
+    const resolvedExecutionIntent = opts.executionIntent
+      ?? (inferredBoundary.role === "reviewer"
+        ? "reviewer"
+        : inferredBoundary.role === "validator"
+          ? "validator"
+          : inferredBoundary.role === "executor"
+            ? "coding_executor"
+            : "general");
     const explicitToolPolicy = opts.toolPolicy ?? opts.overrides?.toolPolicy;
     const resolvedChildSettings = resolveChildExecutionSettings({
       roleBoundary: inferredBoundary.role,
@@ -1050,6 +1567,11 @@ export class ActorSystem {
       overrideThinkingLevel: opts.overrides?.thinkingLevel,
       overrideMiddlewareOverrides: opts.overrides?.middlewareOverrides,
     });
+    resolvedChildSettings.toolPolicy = buildExecutionIntentToolPolicy({
+      executionIntent: resolvedExecutionIntent,
+      resultContract: opts.overrides?.resultContract,
+      overrideToolPolicy: explicitToolPolicy,
+    }) ?? resolvedChildSettings.toolPolicy;
     const spawnerBasePrompt = spawner.getSystemPromptOverride() ?? spawner.role.systemPrompt;
     const systemPromptBlocks = [
       spawnerBasePrompt || DIALOG_FULL_ROLE.systemPrompt,
@@ -1057,7 +1579,25 @@ export class ActorSystem {
       opts.description ? `你的职责定位：${opts.description}` : "",
       opts.capabilities?.length ? `优先能力聚焦：${opts.capabilities.join("、")}` : "",
       inferredBoundary.systemPromptAppend ? `默认职责边界：${inferredBoundary.systemPromptAppend}` : "",
+      resolvedExecutionIntent === "content_executor"
+        ? opts.overrides?.resultContract === "inline_structured_result"
+          ? "执行意图：content_executor。当前启用 inline_structured_result 合同：你必须直接在 terminal result 返回完整结构化结果，禁止写文件、导出文件、搜索外网、再次派工。"
+          : "执行意图：content_executor。你只能读取当前文档、做轻量计算并通过 terminal result 返回结构化内容，禁止写文件、搜索外网、再次派工。"
+        : resolvedExecutionIntent === "coding_executor"
+          ? "执行意图：coding_executor。你负责实现或修复，但仍禁止消息回流型工具和再次派工。"
+          : "",
       opts.overrides?.systemPromptAppend ? `额外约束：${opts.overrides.systemPromptAppend}` : "",
+      [
+        "## 子任务执行规范（必读）",
+        opts.overrides?.resultContract === "inline_structured_result"
+          ? "- 当前子任务已锁定 inline_structured_result 合同：直接在 terminal result 返回完整结果，不要写任何中间 JSON / TSV / Markdown / Excel 文件。"
+          : "- 如果任务属于内容整理、方案撰写、清单汇总这类非 coding 子任务，默认直接在 terminal result 返回完整结果，不要写任何中间 JSON / TSV / Markdown / Excel 文件。",
+        "- 只有明确的 coding / 实现类任务，且当前工具策略允许时，才可以写文件或导出最终产物。",
+        "- 默认只读取当前用户提供的文档和本轮 artifacts；不要扫描目录、历史 Downloads 或旧文件。",
+        "- 读取同一文件只需调用一次 `read_document` / `read_file`，不要反复读取同一文件。",
+        "- 尽量一次性完成目标，避免在执行过程中输出冗长的「步骤计划」或「执行方案」文本。",
+        "- 最终 answer 只需要一两句话说明完成情况和产出文件路径。",
+      ].join("\n"),
     ].filter(Boolean);
 
     try {
@@ -1178,7 +1718,7 @@ export class ActorSystem {
     const contract = this.activeExecutionContract;
     if (!contract || contract.state !== "active") return;
 
-    const allRunning = [...this.spawnedTasks.values()].filter((r) => r.status === "running");
+    const allRunning = this.dialogSubtaskRuntime.getSpawnedTasksSnapshot().filter((r) => r.status === "running");
     if (allRunning.length > 0) return;
 
     const recipientIds = contract.initialRecipientActorIds ?? [];
@@ -1188,7 +1728,7 @@ export class ActorSystem {
     });
     if (!allIdle) return;
 
-    const hasError = [...this.spawnedTasks.values()].some(
+    const hasError = this.dialogSubtaskRuntime.getSpawnedTasksSnapshot().some(
       (r) => r.status === "error" || r.status === "aborted",
     );
     const newState = hasError ? "failed" : "completed";
@@ -1218,7 +1758,7 @@ export class ActorSystem {
 
     this._sessionStallTimer = setTimeout(() => {
       this._sessionStallTimer = null;
-      const running = [...this.spawnedTasks.values()].filter((r) => r.status === "running");
+      const running = this.dialogSubtaskRuntime.getSpawnedTasksSnapshot().filter((r) => r.status === "running");
       if (running.length > 0) return;
 
       const busyActors = [...this.actors.values()].filter((a) => a.status !== "idle");
@@ -1324,57 +1864,203 @@ export class ActorSystem {
   }
 
   private getOpenSpawnedSessionByRunId(runId: string): SpawnedTaskRecord | undefined {
-    const record = this.spawnedTasks.get(runId);
-    if (!record || record.mode !== "session" || !record.sessionOpen) return undefined;
-    return record;
+    return this.dialogSubtaskRuntime.getOpenSessionByRunId(runId);
   }
 
   private getOpenSpawnedSessionByTarget(targetActorId: string): SpawnedTaskRecord | undefined {
-    return [...this.spawnedTasks.values()]
-      .filter((record) => record.mode === "session" && record.sessionOpen && record.targetActorId === targetActorId)
-      .sort((a, b) => (b.lastActiveAt ?? b.spawnedAt) - (a.lastActiveAt ?? a.spawnedAt))[0];
+    return this.dialogSubtaskRuntime.getOpenSessionByTarget(targetActorId);
   }
 
   private getOwningSpawnedTaskForActor(actorId: string): SpawnedTaskRecord | undefined {
-    return [...this.spawnedTasks.values()]
-      .filter((record) =>
-        record.targetActorId === actorId
-        && (
-          record.status === "running"
-          || (record.mode === "session" && record.sessionOpen)
-        ))
-      .sort((a, b) => (b.lastActiveAt ?? b.spawnedAt) - (a.lastActiveAt ?? a.spawnedAt))[0];
+    return this.dialogSubtaskRuntime.getOwningTaskForActor(actorId);
+  }
+
+  getDeferredSpawnRequests(actorId: string): DeferredSpawnRequest[] {
+    return [...(this.deferredSpawnRequests.get(actorId) ?? [])];
+  }
+
+  getPendingDeferredSpawnTaskCount(actorId: string): number {
+    return this.getDeferredSpawnRequests(actorId).length;
+  }
+
+  enqueueDeferredSpawnTask(
+    spawnerActorId: string,
+    targetActorId: string,
+    task: string,
+    opts?: {
+      label?: string;
+      context?: string;
+      attachments?: string[];
+      images?: string[];
+      timeoutSeconds?: number;
+      mode?: SpawnMode;
+      cleanup?: "delete" | "keep";
+      expectsCompletionMessage?: boolean;
+      roleBoundary?: SpawnedTaskRoleBoundary;
+      createIfMissing?: boolean;
+      createChildSpec?: {
+        description?: string;
+        capabilities?: AgentCapability[];
+        workspace?: string;
+      };
+      overrides?: SpawnTaskOverrides;
+      plannedDelegationId?: string;
+    },
+  ): DeferredSpawnRequest {
+    let resolvedRoleBoundary: SpawnedTaskRoleBoundary = opts?.roleBoundary ?? "general";
+    if (!opts?.roleBoundary && resolvedRoleBoundary === "general" && shouldPromoteGeneralTaskToExecutor(task)) {
+      resolvedRoleBoundary = "executor";
+    }
+    const resolvedExecutionIntent = resolveDialogSubtaskExecutionIntent({
+      roleBoundary: resolvedRoleBoundary,
+      task,
+      overrideToolPolicy: opts?.overrides?.toolPolicy,
+      explicitExecutionIntent: opts?.overrides?.executionIntent,
+    });
+    if (resolvedExecutionIntent === "content_executor" || resolvedExecutionIntent === "coding_executor") {
+      resolvedRoleBoundary = "executor";
+    } else if (resolvedExecutionIntent === "reviewer") {
+      resolvedRoleBoundary = "reviewer";
+    } else if (resolvedExecutionIntent === "validator") {
+      resolvedRoleBoundary = "validator";
+    }
+    const request: DeferredSpawnRequest = {
+      id: generateId(),
+      spawnerActorId,
+      targetActorId,
+      task,
+      queuedAt: Date.now(),
+      label: opts?.label,
+      context: opts?.context,
+      attachments: opts?.attachments?.length ? [...new Set(opts.attachments)] : undefined,
+      images: opts?.images?.length ? [...new Set(opts.images)] : undefined,
+      timeoutSeconds: normalizePositiveSeconds(opts?.timeoutSeconds),
+      mode: opts?.mode,
+      cleanup: opts?.cleanup,
+      expectsCompletionMessage: opts?.expectsCompletionMessage,
+      roleBoundary: resolvedRoleBoundary,
+      profile: resolveDialogSubtaskProfile(resolvedRoleBoundary),
+      executionIntent: resolvedExecutionIntent,
+      createIfMissing: opts?.createIfMissing,
+      createChildSpec: opts?.createChildSpec,
+      overrides: opts?.overrides,
+      plannedDelegationId: opts?.plannedDelegationId,
+    };
+    const queue = this.deferredSpawnRequests.get(spawnerActorId) ?? [];
+    queue.push(request);
+    this.deferredSpawnRequests.set(spawnerActorId, queue);
+    this.traceFlow("spawn_queued", {
+      queue_id: request.id,
+      queue_position: queue.length,
+      pending_dispatch_count: queue.length,
+      profile: request.profile,
+      execution_intent: request.executionIntent,
+      phase: request.mode ?? "run",
+      target: targetActorId.trim() || undefined,
+      preview: previewActorSystemText(task),
+    }, spawnerActorId);
+    return request;
+  }
+
+  dispatchDeferredSpawnTasks(actorId: string): number {
+    const queue = this.deferredSpawnRequests.get(actorId);
+    if (!queue?.length) return 0;
+    if (this.deferredSpawnDispatchingOwners.has(actorId)) return 0;
+
+    this.deferredSpawnDispatchingOwners.add(actorId);
+    let dispatched = 0;
+    try {
+      while (queue.length > 0) {
+        const activeCount = this.getActiveSpawnedTasks(actorId).length;
+        if (activeCount >= MAX_ACTIVE_DIALOG_CHILDREN) break;
+
+        const next = queue[0];
+        const result = this.spawnTask(actorId, next.targetActorId, next.task, {
+          label: next.label,
+          context: next.context,
+          attachments: next.attachments,
+          images: next.images,
+          timeoutSeconds: next.timeoutSeconds,
+          mode: next.mode,
+          cleanup: next.cleanup,
+          expectsCompletionMessage: next.expectsCompletionMessage,
+          roleBoundary: next.roleBoundary,
+          createIfMissing: next.createIfMissing,
+          createChildSpec: next.createChildSpec,
+          overrides: next.executionIntent
+            ? {
+                ...(next.overrides ?? {}),
+                executionIntent: next.executionIntent,
+              }
+            : next.overrides,
+          plannedDelegationId: next.plannedDelegationId,
+        });
+
+        if (!("runId" in result)) {
+          if (isRetryableDeferredSpawnError(result.error)) {
+            break;
+          }
+
+          queue.shift();
+          this.traceFlow("spawn_queue_failed", {
+            queue_id: next.id,
+            status: "error",
+            preview: previewActorSystemText(result.error),
+          }, actorId);
+          try {
+            this.send(actorId, actorId, `[Task failed: ${next.label ?? next.task.slice(0, 30)}]\n\nError: ${result.error}`, {
+              bypassPlanCheck: true,
+              relatedRunId: next.id,
+            });
+          } catch (error) {
+            actorSystemLogger.warn("deferred spawn failure self-notify failed", {
+              actorId,
+              queueId: next.id,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+          continue;
+        }
+
+        queue.shift();
+        dispatched += 1;
+        this.traceFlow("spawn_queue_dispatched", {
+          queue_id: next.id,
+          run_id: result.runId,
+          pending_dispatch_count: queue.length,
+          target: result.targetActorId,
+          profile: result.runtime?.profile ?? result.roleBoundary ?? next.profile,
+          execution_intent: result.executionIntent ?? next.executionIntent,
+          preview: previewActorSystemText(next.task),
+        }, actorId);
+      }
+    } finally {
+      if (queue.length === 0) {
+        this.deferredSpawnRequests.delete(actorId);
+      }
+      this.deferredSpawnDispatchingOwners.delete(actorId);
+    }
+
+    if (dispatched > 0) {
+      this.dialogSubtaskRuntime.notifySpawnedTaskUpdate(actorId);
+    }
+    return dispatched;
   }
 
   private closeSpawnedSessionRecord(record: SpawnedTaskRecord, closedAt = Date.now()): void {
-    if (!record.sessionOpen) return;
-    record.sessionOpen = false;
-    record.sessionClosedAt = closedAt;
-    record.lastActiveAt = closedAt;
-    const targetActor = this.actors.get(record.targetActorId);
-    record.sessionHistoryEndIndex = targetActor?.getSessionHistory().length ?? record.sessionHistoryEndIndex;
-    if (this.focusedSpawnedSessionRunId === record.runId) {
-      this.focusedSpawnedSessionRunId = null;
-    }
+    this.dialogSubtaskRuntime.closeSession(record, closedAt);
   }
 
   private markSpawnedSessionTaskStarted(actorId: string, timestamp: number): void {
-    for (const record of this.spawnedTasks.values()) {
-      if (record.mode !== "session" || !record.sessionOpen || record.targetActorId !== actorId) continue;
-      record.status = "running";
-      record.completedAt = undefined;
-      record.error = undefined;
-      record.timeoutReason = undefined;
-      record.lastActiveAt = timestamp;
-      record.sessionHistoryEndIndex = undefined;
-    }
+    this.dialogSubtaskRuntime.markSessionTaskStarted(actorId, timestamp);
   }
 
-  private touchSpawnedSessionActivity(actorId: string, timestamp: number): void {
-    for (const record of this.spawnedTasks.values()) {
-      if (record.mode !== "session" || !record.sessionOpen || record.targetActorId !== actorId) continue;
-      record.lastActiveAt = timestamp;
-    }
+  private touchSpawnedSessionActivity(
+    actorId: string,
+    timestamp: number,
+    progressSummary?: string,
+  ): void {
+    this.dialogSubtaskRuntime.touchSessionActivity(actorId, timestamp, progressSummary);
   }
 
   private markSpawnedSessionTaskEnded(
@@ -1383,16 +2069,7 @@ export class ActorSystem {
     timestamp: number,
     detail?: { result?: string; error?: string },
   ): void {
-    for (const record of this.spawnedTasks.values()) {
-      if (record.mode !== "session" || !record.sessionOpen || record.targetActorId !== actorId) continue;
-      record.status = status;
-      record.completedAt = timestamp;
-      record.result = detail?.result ?? record.result;
-      record.error = detail?.error ?? (status !== "completed" ? record.error : undefined);
-      record.lastActiveAt = timestamp;
-      const targetActor = this.actors.get(record.targetActorId);
-      record.sessionHistoryEndIndex = targetActor?.getSessionHistory().length ?? record.sessionHistoryEndIndex;
-    }
+    this.dialogSubtaskRuntime.markSessionTaskEnded(actorId, status, timestamp, detail);
   }
 
   // ── Messaging ──
@@ -1409,6 +2086,7 @@ export class ActorSystem {
     images?: string[];
     bypassPlanCheck?: boolean;
     relatedRunId?: string;
+    spawnedTaskResult?: import("./dialog-subtask-runtime").DialogStructuredSubtaskResult;
   }): DialogMessage {
     const target = this.actors.get(to);
     if (!target) throw new Error(`Actor ${to} not found`);
@@ -1435,11 +2113,23 @@ export class ActorSystem {
       _briefContent: opts?._briefContent,
       kind: from === "user" ? "user_input" : "agent_message",
       relatedRunId: opts?.relatedRunId,
+      spawnedTaskResult: opts?.spawnedTaskResult,
       ...(from !== "user" ? this.buildDialogMessageRecallPatch(from) : {}),
       ...(opts?.images?.length ? { images: opts.images } : {}),
     };
 
+    if (from === "user") {
+      this.traceFlow("user_turn_received", {
+        kind: "send",
+        preview: previewActorSystemText(content),
+      }, to);
+    }
     target.receive(msg);
+    this.traceFlow("dispatch_delivered", {
+      status: "delivered",
+      to,
+      preview: previewActorSystemText(content),
+    }, to);
     if (from === "user" && !opts?.bypassPlanCheck) {
       this.activateExecutionContract(msg.id);
     }
@@ -1576,6 +2266,11 @@ export class ActorSystem {
     appendDialogMessage(this.sessionId, msg);
 
     if (from === "user") {
+      this.traceFlow("user_turn_received", {
+        kind: "broadcast_and_resolve",
+        preview: previewActorSystemText(content),
+        count: activePending.length,
+      });
       actorSystemLogger.info("broadcastAndResolve start", {
         messageId: msg.id,
         from,
@@ -1603,6 +2298,11 @@ export class ActorSystem {
       }
 
       if (planRecipientIds?.length) {
+        this.traceFlow("dispatch_started", {
+          phase: "contract_plan",
+          count: planRecipientIds.length,
+          preview: previewActorSystemText(content),
+        });
         const recipients = planRecipientIds
           .map((actorId) => this.actors.get(actorId))
           .filter((actor): actor is AgentActor => Boolean(actor));
@@ -1617,6 +2317,11 @@ export class ActorSystem {
             executionStrategy: activeContract?.executionStrategy ?? "contract_plan",
           });
           recipient.receive(msg);
+          this.traceFlow("dispatch_delivered", {
+            phase: "contract_plan",
+            status: "delivered",
+            to: recipient.id,
+          }, recipient.id);
         }
       } else {
         const agentsAwaitingReply = new Set(
@@ -1626,6 +2331,11 @@ export class ActorSystem {
         );
         const coordinator = this.getCoordinator((a) => !agentsAwaitingReply.has(a.id));
         if (coordinator) {
+          this.traceFlow("dispatch_started", {
+            phase: "coordinator",
+            count: 1,
+            preview: previewActorSystemText(content),
+          }, coordinator.id);
           log(`broadcastAndResolve(coordinator): delivering to coordinator ${coordinator.role.name}`);
           actorSystemLogger.info("broadcastAndResolve deliver coordinator", {
             messageId: msg.id,
@@ -1637,9 +2347,19 @@ export class ActorSystem {
             executionStrategy: activeContract?.executionStrategy ?? "coordinator",
           });
           coordinator.receive(msg);
+          this.traceFlow("dispatch_delivered", {
+            phase: "coordinator",
+            status: "delivered",
+            to: coordinator.id,
+          }, coordinator.id);
         } else {
           const fallbackCoordinator = this.getCoordinator();
           if (fallbackCoordinator) {
+            this.traceFlow("dispatch_started", {
+              phase: "fallback_coordinator",
+              count: 1,
+              preview: previewActorSystemText(content),
+            }, fallbackCoordinator.id);
             log(
               `broadcastAndResolve(fallback): queueing to ${fallbackCoordinator.role.name} despite pending interactions/state=${fallbackCoordinator.status}`,
             );
@@ -1653,6 +2373,11 @@ export class ActorSystem {
               pendingInteractions: activePending.length,
             });
             fallbackCoordinator.receive(msg);
+            this.traceFlow("dispatch_delivered", {
+              phase: "fallback_coordinator",
+              status: "delivered",
+              to: fallbackCoordinator.id,
+            }, fallbackCoordinator.id);
           } else if (activePending.length > 0) {
             log(`broadcastAndResolve: no available coordinator, pending interactions resolved`);
             actorSystemLogger.warn("broadcastAndResolve no coordinator after pending interaction handling", {
@@ -1786,8 +2511,21 @@ export class ActorSystem {
       plannedDelegationId?: string;
     },
   ): SpawnedTaskRecord | { error: string } {
+    const rejectSpawn = (message: string): { error: string } => {
+      this.traceFlow("spawn_rejected", {
+        status: "rejected",
+        preview: previewActorSystemText(message),
+      }, spawnerActorId);
+      return { error: message };
+    };
+    this.traceFlow("spawn_requested", {
+      status: "requested",
+      phase: opts?.mode ?? "run",
+      target: targetActorId.trim() || undefined,
+      preview: previewActorSystemText(task),
+    }, spawnerActorId);
     const spawner = this.actors.get(spawnerActorId);
-    if (!spawner) return { error: `Spawner ${spawnerActorId} not found` };
+    if (!spawner) return rejectSpawn(`Spawner ${spawnerActorId} not found`);
     const activeContract = this.ensureRuntimeExecutionContract();
     const requestedDelegationId = opts?.plannedDelegationId?.trim() || undefined;
     const requestedTimeoutSeconds = normalizePositiveSeconds(opts?.timeoutSeconds);
@@ -1799,14 +2537,14 @@ export class ActorSystem {
       plannedDelegationId: requestedDelegationId,
     });
     if (requestedDelegationId && !plannedSpawn) {
-      return { error: `[execution_contract] 未找到已批准的建议委派 ${requestedDelegationId}` };
+      return rejectSpawn(`[execution_contract] 未找到已批准的建议委派 ${requestedDelegationId}`);
     }
     if (!resolvedTargetActorId) {
       resolvedTargetActorId = plannedSpawn?.targetActorId?.trim() ?? "";
     }
     const resolvedTask = task.trim() || plannedSpawn?.task?.trim();
     if (!resolvedTask) {
-      return { error: "[sessions_spawn] task 不能为空" };
+      return rejectSpawn("[sessions_spawn] task 不能为空");
     }
     let target = this.actors.get(resolvedTargetActorId);
     if (!target) {
@@ -1820,31 +2558,85 @@ export class ActorSystem {
     if (!explicitRoleBoundary && resolvedRoleBoundary === "general" && plannedSpawn?.roleBoundary) {
       resolvedRoleBoundary = plannedSpawn.roleBoundary;
     }
+    if (!explicitRoleBoundary && resolvedRoleBoundary === "general" && shouldPromoteGeneralTaskToExecutor(resolvedTask)) {
+      resolvedRoleBoundary = "executor";
+    }
+    const explicitExecutionIntent = opts?.overrides?.executionIntent ?? plannedSpawn?.overrides?.executionIntent;
     const resolvedCreateChildSpec = {
       description: opts?.createChildSpec?.description ?? plannedSpawn?.childDescription,
       capabilities: opts?.createChildSpec?.capabilities ?? plannedSpawn?.childCapabilities,
       workspace: opts?.createChildSpec?.workspace ?? plannedSpawn?.childWorkspace,
     };
-    const resolvedOverrides = {
+    const resolvedOverrides: SpawnTaskOverrides = {
       ...(typeof plannedSpawn?.childMaxIterations === "number"
         ? { maxIterations: plannedSpawn.childMaxIterations }
         : {}),
+      ...(plannedSpawn?.overrides ?? {}),
       ...(opts?.overrides ?? {}),
     };
+    let resolvedExecutionIntent = resolveDialogSubtaskExecutionIntent({
+      roleBoundary: resolvedRoleBoundary,
+      task: resolvedTask,
+      overrideToolPolicy: resolvedOverrides.toolPolicy,
+      explicitExecutionIntent,
+    });
+    if (resolvedExecutionIntent === "content_executor" || resolvedExecutionIntent === "coding_executor") {
+      resolvedRoleBoundary = "executor";
+    } else if (resolvedExecutionIntent === "reviewer") {
+      resolvedRoleBoundary = "reviewer";
+    } else if (resolvedExecutionIntent === "validator") {
+      resolvedRoleBoundary = "validator";
+    }
+    this.traceFlow("profile_inferred", {
+      phase: "spawn",
+      status: resolvedRoleBoundary,
+      execution_intent: resolvedExecutionIntent,
+      tool_policy_source: resolvedExecutionIntent === "content_executor"
+        ? "content_executor_intent"
+        : resolvedExecutionIntent === "coding_executor"
+          ? "coding_executor_intent"
+          : explicitRoleBoundary
+            ? "explicit_role_boundary"
+            : "heuristic_role_boundary",
+      preview: previewActorSystemText(resolvedTask),
+    }, spawnerActorId);
     if (!target && (opts?.createIfMissing || plannedSpawn?.createIfMissing)) {
-      const childActorName = plannedSpawn?.targetActorName?.trim() || targetActorId.trim() || resolvedTargetActorId;
+      const childActorName = deriveEphemeralActorName({
+        targetActorId: plannedSpawn?.targetActorName?.trim() || targetActorId.trim() || resolvedTargetActorId,
+        label: opts?.label,
+        description: resolvedCreateChildSpec.description,
+        task: resolvedTask,
+        roleBoundary: resolvedRoleBoundary,
+      });
       if (resolvedRoleBoundary === "general") {
         resolvedRoleBoundary = inferEphemeralChildBoundary({
           name: childActorName,
           description: resolvedCreateChildSpec.description,
           capabilities: resolvedCreateChildSpec.capabilities,
         }).role;
+        resolvedExecutionIntent = resolveDialogSubtaskExecutionIntent({
+          roleBoundary: resolvedRoleBoundary,
+          task: resolvedTask,
+          overrideToolPolicy: resolvedOverrides.toolPolicy,
+          explicitExecutionIntent,
+        });
+      }
+      const executorTaskSpecificToolPolicy = buildExecutorTaskSpecificToolPolicy({
+        roleBoundary: resolvedRoleBoundary,
+        task: resolvedTask,
+      });
+      if (executorTaskSpecificToolPolicy) {
+        resolvedOverrides.toolPolicy = mergeToolPolicies(
+          resolvedOverrides.toolPolicy,
+          executorTaskSpecificToolPolicy,
+        );
       }
       const created = this.createEphemeralAgent(spawnerActorId, {
         name: childActorName,
         description: resolvedCreateChildSpec.description,
         capabilities: resolvedCreateChildSpec.capabilities,
         roleBoundary: resolvedRoleBoundary,
+        executionIntent: resolvedExecutionIntent,
         workspace: resolvedCreateChildSpec.workspace,
         toolPolicy: resolvedOverrides.toolPolicy,
         timeoutSeconds: requestedTimeoutSeconds
@@ -1853,23 +2645,44 @@ export class ActorSystem {
         overrides: resolvedOverrides,
       });
       if ("error" in created) {
-        return { error: created.error };
+        return rejectSpawn(created.error);
       }
       target = created;
       resolvedTargetActorId = created.id;
     }
-    if (!target) return { error: `Target ${targetActorId} not found` };
+    if (!target) return rejectSpawn(`Target ${targetActorId} not found`);
     if (resolvedRoleBoundary === "general" && target.persistent === false) {
       resolvedRoleBoundary = inferEphemeralChildBoundary({
         name: target.role.name,
         capabilities: target.capabilities?.tags,
         description: target.capabilities?.description,
       }).role;
+      resolvedExecutionIntent = resolveDialogSubtaskExecutionIntent({
+        roleBoundary: resolvedRoleBoundary,
+        task: resolvedTask,
+        overrideToolPolicy: resolvedOverrides.toolPolicy,
+        explicitExecutionIntent,
+      });
     }
+    const executorTaskSpecificToolPolicy = buildExecutorTaskSpecificToolPolicy({
+      roleBoundary: resolvedRoleBoundary,
+      task: resolvedTask,
+    });
+    if (executorTaskSpecificToolPolicy) {
+      resolvedOverrides.toolPolicy = mergeToolPolicies(
+        resolvedOverrides.toolPolicy,
+        executorTaskSpecificToolPolicy,
+      );
+    }
+    resolvedOverrides.toolPolicy = buildExecutionIntentToolPolicy({
+      executionIntent: resolvedExecutionIntent,
+      resultContract: resolvedOverrides.resultContract,
+      overrideToolPolicy: resolvedOverrides.toolPolicy,
+    }) ?? resolvedOverrides.toolPolicy;
     try {
       this.assertActorSpawnAllowed(spawnerActorId, resolvedTargetActorId);
     } catch (error) {
-      return { error: error instanceof Error ? error.message : String(error) };
+      return rejectSpawn(error instanceof Error ? error.message : String(error));
     }
 
     if (Object.keys(resolvedOverrides).length > 0) {
@@ -1880,18 +2693,14 @@ export class ActorSystem {
     const existingOpenSession = this.getOpenSpawnedSessionByTarget(resolvedTargetActorId);
     if (mode === "session" && existingOpenSession) {
       if (existingOpenSession.spawnerActorId !== spawnerActorId) {
-        return {
-          error: `[sessions_spawn] ${target.role.name} 已绑定到另一个子会话（runId=${existingOpenSession.runId}）`,
-        };
+        return rejectSpawn(`[sessions_spawn] ${target.role.name} 已绑定到另一个子会话（runId=${existingOpenSession.runId}）`);
       }
       if (
         plannedSpawn?.id
         && existingOpenSession.plannedDelegationId
         && existingOpenSession.plannedDelegationId !== plannedSpawn.id
       ) {
-        return {
-          error: `[sessions_spawn] ${target.role.name} 当前保留会话已绑定到另一条建议委派（runId=${existingOpenSession.runId}）`,
-        };
+        return rejectSpawn(`[sessions_spawn] ${target.role.name} 当前保留会话已绑定到另一条建议委派（runId=${existingOpenSession.runId}）`);
       }
       existingOpenSession.contractId = activeContract?.contractId ?? existingOpenSession.contractId;
       existingOpenSession.plannedDelegationId = plannedSpawn?.id ?? existingOpenSession.plannedDelegationId;
@@ -1905,37 +2714,34 @@ export class ActorSystem {
     }
 
     if (mode === "run" && target.status === "running") {
-      return { error: `[sessions_spawn] ${target.role.name} is already running a task (mode='run' requires idle target)` };
+      return rejectSpawn(`[sessions_spawn] ${target.role.name} is already running a task (mode='run' requires idle target)`);
     }
     if (mode === "session" && target.status === "running") {
-      return { error: `[sessions_spawn] ${target.role.name} 正在执行其他任务，请等待空闲后再创建新的子会话` };
+      return rejectSpawn(`[sessions_spawn] ${target.role.name} 正在执行其他任务，请等待空闲后再创建新的子会话`);
     }
 
     const parentRecord = this.getOwningSpawnedTaskForActor(spawnerActorId);
     if (parentRecord) {
-      return {
-        error: "[sessions_spawn] 当前默认只允许顶层协调者创建子线程；请把新增分工建议回传给父 Agent，由父 Agent 继续派工。",
-      };
+      return rejectSpawn("[sessions_spawn] 当前默认只允许顶层协调者创建子线程；请把新增分工建议回传给父 Agent，由父 Agent 继续派工。");
     }
 
     const coordinatorId = this.getCoordinatorId();
     if (coordinatorId && spawnerActorId !== coordinatorId) {
-      return {
-        error: `[sessions_spawn] 当前默认只允许协调者 ${this.actors.get(coordinatorId)?.role.name ?? coordinatorId} 创建子线程`,
-      };
+      return rejectSpawn(`[sessions_spawn] 当前默认只允许协调者 ${this.actors.get(coordinatorId)?.role.name ?? coordinatorId} 创建子线程`);
     }
 
     const depth = this.getSpawnDepth(spawnerActorId);
     if (depth >= MAX_SPAWN_DEPTH) {
-      return { error: `[sessions_spawn] spawn not allowed at this depth (current: ${depth}, max: ${MAX_SPAWN_DEPTH})` };
+      return rejectSpawn(`[sessions_spawn] spawn not allowed at this depth (current: ${depth}, max: ${MAX_SPAWN_DEPTH})`);
     }
 
     const activeChildren = this.getActiveSpawnedTasks(spawnerActorId).length;
     if (activeChildren >= MAX_CHILDREN_PER_AGENT) {
-      return { error: `[sessions_spawn] max active children reached (${activeChildren}/${MAX_CHILDREN_PER_AGENT})` };
+      return rejectSpawn(`[sessions_spawn] max active children reached (${activeChildren}/${MAX_CHILDREN_PER_AGENT})`);
     }
 
     const runId = generateId();
+    const spawnedAt = Date.now();
     const spawnerName = spawner.role.name;
     const targetName = target.role.name;
     const label = opts?.label ?? plannedSpawn?.label ?? task.slice(0, 30);
@@ -1946,13 +2752,12 @@ export class ActorSystem {
       : baseBudgetSeconds;
     const idleLeaseSeconds = normalizePositiveSeconds(target.idleLeaseSeconds)
       ?? DEFAULT_DIALOG_WORKER_IDLE_LEASE_SECONDS;
-    const timeoutMs = budgetSeconds * 1000;
     const cleanup = opts?.cleanup ?? (opts?.createIfMissing && mode === "run" ? "delete" : "keep");
     const expectsCompletionMessage = opts?.expectsCompletionMessage ?? true;
-    const rootRunId = runId;
     const effectiveContext = opts?.context ?? plannedSpawn?.context;
     const roleBoundaryInstruction = buildSpawnTaskRoleBoundaryInstruction(resolvedRoleBoundary);
     const executionHint = buildSpawnTaskExecutionHint(resolvedTask);
+    const inlineOnlyExecutorTask = Boolean(executorTaskSpecificToolPolicy);
     const fullTask = buildDelegatedTaskPrompt({
       spawnerName,
       task: resolvedTask,
@@ -1961,13 +2766,14 @@ export class ActorSystem {
       context: effectiveContext,
       attachments: opts?.attachments,
       executionHint,
+      inlineOnly: inlineOnlyExecutorTask,
     });
     const effectiveRunOverrides: import("./types").SpawnTaskOverrides = {
       ...resolvedOverrides,
       timeoutSeconds: budgetSeconds,
       idleLeaseSeconds,
     };
-
+    const runtimeProfile = resolveDialogSubtaskProfile(resolvedRoleBoundary);
     const record: SpawnedTaskRecord = {
       runId,
       spawnerActorId,
@@ -1976,13 +2782,18 @@ export class ActorSystem {
       plannedDelegationId: plannedSpawn?.id,
       dispatchSource: plannedSpawn ? "contract_suggestion" : "manual",
       parentRunId: undefined,
-      rootRunId,
+      rootRunId: runId,
       roleBoundary: resolvedRoleBoundary,
+      executionIntent: resolvedExecutionIntent,
+      resultContract: resolvedOverrides.resultContract,
+      deliveryTargetId: resolvedOverrides.deliveryTargetId,
+      deliveryTargetLabel: resolvedOverrides.deliveryTargetLabel,
+      sheetName: resolvedOverrides.sheetName,
       task: resolvedTask,
       label,
       images: opts?.images?.length ? [...new Set(opts.images)] : undefined,
       status: "running",
-      spawnedAt: Date.now(),
+      spawnedAt,
       budgetSeconds,
       idleLeaseSeconds,
       mode,
@@ -1990,171 +2801,16 @@ export class ActorSystem {
       cleanup,
       sessionHistoryStartIndex: target.getSessionHistory().length,
       sessionOpen: mode === "session",
-      lastActiveAt: Date.now(),
-    };
-    const markRecordActive = (timestamp = Date.now()) => {
-      record.lastActiveAt = Math.max(record.lastActiveAt ?? 0, timestamp);
-    };
-
-    this.spawnedTasks.set(runId, record);
-    appendSpawnEvent(this.sessionId, spawnerActorId, resolvedTargetActorId, resolvedTask, runId);
-
-    // 同步到 TaskCenter（如果可用）
-    try {
-      const { getTaskQueue } = require("@/core/task-center/task-queue");
-      const q = getTaskQueue();
-      q.create({
-        id: `spawn-${runId}`,
-        title: label,
-        description: resolvedTask.slice(0, 200),
-        type: "agent_spawn",
-        priority: "normal",
-        params: { runId, spawnerActorId, targetActorId: resolvedTargetActorId },
-        createdBy: spawnerName,
-        assignee: targetName,
+      lastActiveAt: spawnedAt,
+      runtime: {
+        subtaskId: runId,
+        profile: runtimeProfile,
+        startedAt: spawnedAt,
         timeoutSeconds: budgetSeconds,
-        tags: [mode, targetName],
-      });
-    } catch { /* TaskCenter not available */ }
-    log(`🚀 spawnTask START: ${spawnerName} → ${targetName}, task="${resolvedTask.slice(0, 60)}", runId=${runId}, mode=${mode}, budget=${budgetSeconds}s, idleLease=${idleLeaseSeconds}s, depth=${depth + 1}, targetStatus=${target.status}`);
-
-    // Emit structured spawned_task_started event (deer-flow SSE pattern)
-    const taskEventBase: Omit<SpawnedTaskEventDetail, "status" | "elapsed"> = {
-      runId,
-      spawnerActorId,
-      targetActorId: resolvedTargetActorId,
-      targetName,
-      spawnerName,
-      contractId: activeContract?.contractId,
-      plannedDelegationId: plannedSpawn?.id,
-      dispatchSource: plannedSpawn ? "contract_suggestion" : "manual",
-      parentRunId: undefined,
-      rootRunId,
-      mode,
-      roleBoundary: resolvedRoleBoundary,
-      label,
-      task: resolvedTask,
-      budgetSeconds,
-      idleLeaseSeconds,
+        eventCount: 0,
+      },
     };
-    let detachRunningListener: (() => void) | undefined;
-    const cleanupRunningListener = () => {
-      if (!detachRunningListener) return;
-      detachRunningListener();
-      detachRunningListener = undefined;
-    };
-    const abortSpawnedTaskForTimeout = (reason: "idle" | "budget") => {
-      if (record.status !== "running") return;
-      cleanupRunningListener();
-      const now = Date.now();
-      const duration = now - record.spawnedAt;
-      const reasonSeconds = reason === "idle" ? idleLeaseSeconds : budgetSeconds;
-      const timeoutError = formatTimeoutError(reason, reasonSeconds);
-      log(`⏱️ spawnTask TIMEOUT: ${targetName} (runId=${runId}), duration=${duration}ms, reason=${reason}, budget=${budgetSeconds}s, idleLease=${idleLeaseSeconds}s, targetStatus=${target.status}, aborting...`);
-      record.status = "aborted";
-      record.completedAt = now;
-      record.lastActiveAt = now;
-      record.timeoutReason = reason;
-      record.error = timeoutError;
-      if (record.timeoutId) {
-        clearInterval(record.timeoutId);
-        record.timeoutId = undefined;
-      }
-      target.abort(timeoutError);
-      this.finalizeSpawnedTaskHistoryWindow(record, target);
-      appendAnnounceEvent(this.sessionId, runId, "aborted", undefined, timeoutError);
-      try {
-        const { getTaskQueue } = require("@/core/task-center/task-queue");
-        getTaskQueue().fail(`spawn-${runId}`, timeoutError);
-      } catch { /* noop */ }
 
-      if (expectsCompletionMessage) {
-        const followUpHint = reason === "idle"
-          ? "长时间无进展，主 Agent 应接管或改派更窄范围的子任务。"
-          : "已超过总预算，主 Agent 应接管收尾或明确真实 blocker。";
-        this.announceWithRetry(
-          resolvedTargetActorId,
-          spawnerActorId,
-          `[Task timeout: ${label}]\n\n${timeoutError}\n${followUpHint}`,
-          runId,
-        );
-      }
-
-      this.emitEvent({
-        type: "task_error",
-        actorId: resolvedTargetActorId,
-        timestamp: now,
-        detail: {
-          runId,
-          reason: "timeout",
-          timeoutReason: reason,
-          error: timeoutError,
-        },
-      });
-      this.emitEvent({
-        type: "spawned_task_timeout",
-        actorId: resolvedTargetActorId,
-        timestamp: now,
-        detail: {
-          ...taskEventBase,
-          status: "aborted" as const,
-          elapsed: duration,
-          error: record.error,
-          timeoutReason: reason,
-        } satisfies SpawnedTaskEventDetail,
-      });
-
-      if (cleanup === "delete" && mode !== "session" && !target.persistent) {
-        this.kill(resolvedTargetActorId);
-      } else if (cleanup === "delete" && mode !== "session" && target.persistent) {
-        log(`spawnTask cleanup skipped on timeout: ${targetName} is persistent (runId=${runId})`);
-      }
-    };
-    this.emitEvent({
-      type: "spawned_task_started",
-      actorId: resolvedTargetActorId,
-      timestamp: Date.now(),
-      detail: { ...taskEventBase, status: "running" as const, elapsed: 0 },
-    });
-
-    record.timeoutId = setInterval(() => {
-      if (record.status !== "running") return;
-      const now = Date.now();
-      if (now - record.spawnedAt >= timeoutMs) {
-        abortSpawnedTaskForTimeout("budget");
-        return;
-      }
-      const lastActiveAt = record.lastActiveAt ?? record.spawnedAt;
-      if (now - lastActiveAt >= idleLeaseSeconds * 1000) {
-        abortSpawnedTaskForTimeout("idle");
-      }
-    }, TIMEOUT_CHECK_INTERVAL_MS);
-
-    detachRunningListener = target.on((event) => {
-      if (record.status !== "running") return;
-      markRecordActive(event.timestamp);
-      if (event.type !== "step") return;
-      const step = (event.detail as { step?: { content?: string; type?: string; streaming?: boolean } } | undefined)?.step;
-      if (!step || step.streaming) return;
-
-      const message = typeof step.content === "string"
-        ? step.content.slice(0, 240)
-        : "";
-      this.emitEvent({
-        type: "spawned_task_running",
-        actorId: resolvedTargetActorId,
-        timestamp: event.timestamp,
-        detail: {
-          ...taskEventBase,
-          status: "running" as const,
-          elapsed: Date.now() - record.spawnedAt,
-          message,
-          stepType: step.type as SpawnedTaskEventDetail["stepType"],
-        } satisfies SpawnedTaskEventDetail,
-      });
-    });
-
-    // 触发 onSpawnTask 钩子
     void this.runHooks<SpawnTaskHookContext>("onSpawnTask", {
       system: this,
       actorId: resolvedTargetActorId,
@@ -2167,146 +2823,82 @@ export class ActorSystem {
       runId,
     });
 
-    // 执行任务并设置 Announce Flow 回调（含重试机制）
-    // 子任务结果仅通过 announce 回送给委派者，避免全局广播造成协作噪音。
-    void target.assignTask(fullTask, opts?.images, {
-      publishResult: false,
+    this.traceFlow("spawn_accepted", {
+      run_id: runId,
+      status: "accepted",
+      phase: mode,
+      target: resolvedTargetActorId,
+      execution_intent: resolvedExecutionIntent,
+      preview: previewActorSystemText(resolvedTask),
+    }, spawnerActorId);
+
+    return this.dialogSubtaskRuntime.startTask({
+      record,
+      target,
+      fullTask,
+      images: opts?.images,
       runOverrides: effectiveRunOverrides,
-    }).then((taskResult) => {
-      cleanupRunningListener();
-      if (record.status !== "running") return;
-      if (record.timeoutId) clearInterval(record.timeoutId);
-      record.timeoutId = undefined;
-
-      if (taskResult.status === "completed" && taskResult.result) {
-        const validation = validateSpawnedTaskResult({
-          task: record,
-          result: taskResult.result,
-          artifacts: this.getArtifactRecordsSnapshot(),
-        });
-        if (!validation.accepted) {
-          record.status = "error";
-          record.completedAt = Date.now();
-          record.lastActiveAt = record.completedAt;
-          record.error = validation.reason ?? "子任务结果未通过有效性校验";
-          this.finalizeSpawnedTaskHistoryWindow(record, target);
-          log(
-            `❌ spawnTask INVALID_RESULT: ${targetName}, error=${record.error}, runId=${runId}, duration=${Date.now() - record.spawnedAt}ms, resultPreview="${taskResult.result.slice(0, 120)}"`,
-          );
-          appendAnnounceEvent(this.sessionId, runId, "error", undefined, record.error);
-          try { const { getTaskQueue } = require("@/core/task-center/task-queue"); getTaskQueue().fail(`spawn-${runId}`, record.error || "invalid result"); } catch { /* noop */ }
-
-          if (expectsCompletionMessage) {
-            this.announceWithRetry(resolvedTargetActorId, spawnerActorId, `[Task failed: ${label}]\n\nError: ${record.error}`, runId);
-          }
-          this.cancelPendingInteractionsForActor(resolvedTargetActorId);
-        } else {
-          record.status = "completed";
-          record.completedAt = Date.now();
-          record.lastActiveAt = record.completedAt;
-          record.result = taskResult.result;
-          this.finalizeSpawnedTaskHistoryWindow(record, target);
-          log(`✅ spawnTask COMPLETED: ${targetName} → announce to ${spawnerName}, runId=${runId}, duration=${Date.now() - record.spawnedAt}ms`);
-          appendAnnounceEvent(this.sessionId, runId, "completed", taskResult.result);
-          try { const { getTaskQueue } = require("@/core/task-center/task-queue"); getTaskQueue().complete(`spawn-${runId}`, taskResult.result?.slice(0, 500)); } catch { /* noop */ }
-
-          if (expectsCompletionMessage) {
-            const shortResult = taskResult.result && taskResult.result.length > 200
-              ? `${taskResult.result.slice(0, 200)}...\n\n（💡 完整详细报告已在后台送达协调者）`
-              : taskResult.result;
-            this.announceWithRetry(resolvedTargetActorId, spawnerActorId, `[Task completed: ${label}]\n\n${shortResult}`, runId);
-          }
-        }
-      } else {
-        record.status = taskResult.status === "aborted" ? "aborted" : "error";
-        record.completedAt = Date.now();
-        record.lastActiveAt = record.completedAt;
-        record.error = taskResult.error ?? "unknown error";
-        this.finalizeSpawnedTaskHistoryWindow(record, target);
-        log(`❌ spawnTask FAILED: ${targetName}, status=${taskResult.status}, error=${record.error}, runId=${runId}, duration=${Date.now() - record.spawnedAt}ms`);
-        appendAnnounceEvent(this.sessionId, runId, record.status, undefined, record.error);
-        try { const { getTaskQueue } = require("@/core/task-center/task-queue"); getTaskQueue().fail(`spawn-${runId}`, record.error || "unknown"); } catch { /* noop */ }
-
-        if (expectsCompletionMessage) {
-          this.announceWithRetry(resolvedTargetActorId, spawnerActorId, `[Task failed: ${label}]\n\nError: ${record.error}`, runId);
-        }
-        this.cancelPendingInteractionsForActor(resolvedTargetActorId);
-      }
-
-      this.emitEvent({ type: "task_completed", actorId: resolvedTargetActorId, timestamp: Date.now(), detail: { runId } });
-
-      // Emit structured spawned_task lifecycle event
-      const elapsed = Date.now() - record.spawnedAt;
-      if (record.status === "completed") {
-        this.emitEvent({
-          type: "spawned_task_completed",
-          actorId: resolvedTargetActorId,
-          timestamp: Date.now(),
-          detail: {
-            ...taskEventBase,
-            status: "completed" as const,
-            elapsed,
-            result: record.result?.slice(0, 500),
-          } satisfies SpawnedTaskEventDetail,
-        });
-      } else {
-        this.emitEvent({
-          type: "spawned_task_failed",
-          actorId: resolvedTargetActorId,
-          timestamp: Date.now(),
-          detail: {
-            ...taskEventBase,
-            status: record.status,
-            elapsed,
-            error: record.error,
-          } satisfies SpawnedTaskEventDetail,
-        });
-      }
-
-      // 触发 onSpawnTaskEnd 钩子
-      void this.runHooks<SpawnTaskEndHookContext>("onSpawnTaskEnd", {
-        system: this,
-        actorId: resolvedTargetActorId,
-        actorName: targetName,
-        timestamp: Date.now(),
-        spawnerId: spawnerActorId,
-        targetId: resolvedTargetActorId,
-        task,
-        runId,
-        status: record.status,
-        result: record.result,
-        error: record.error,
-      });
-
-      // 根据 cleanup 策略决定是否删除子 agent（仅非持久 Agent 可删除）
-      if (cleanup === "delete" && mode !== "session" && !target.persistent) {
-        log(`spawnTask cleanup: deleting target ${targetName} (runId=${runId})`);
-        this.kill(resolvedTargetActorId);
-      } else if (cleanup === "delete" && mode !== "session" && target.persistent) {
-        log(`spawnTask cleanup skipped: ${targetName} is persistent (runId=${runId})`);
-      }
-
-      this.tryFinalizeExecutionContract();
-      this.scheduleExecutionContractProgressCheck();
     });
-
-    return record;
   }
 
   /** 获取某个 Agent 派发的所有 spawned tasks */
   getSpawnedTasks(actorId: string): SpawnedTaskRecord[] {
-    return [...this.spawnedTasks.values()].filter((r) => r.spawnerActorId === actorId);
+    return this.dialogSubtaskRuntime.getSpawnedTasks(actorId);
+  }
+
+  buildWaitForSpawnedTasksResult(actorId: string) {
+    const base = this.dialogSubtaskRuntime.buildWaitForSpawnedTasksResult(actorId);
+    const pendingDispatches = this.getDeferredSpawnRequests(actorId);
+    const pendingDispatchCount = pendingDispatches.length;
+    const plannedCount = base.tasks.length + pendingDispatchCount;
+
+    let summary = base.summary;
+    if (pendingDispatchCount > 0) {
+      summary = base.pending_count > 0
+        ? `当前有 ${base.pending_count} 个子任务运行中，另有 ${pendingDispatchCount} 个子任务排队待派发。`
+        : `当前有 ${pendingDispatchCount} 个子任务排队待派发，系统会在空位出现后自动补派。`;
+    }
+
+    return {
+      ...base,
+      wait_complete: base.wait_complete && pendingDispatchCount === 0,
+      aggregation_ready: base.aggregation_ready && pendingDispatchCount === 0,
+      summary,
+      planned_count: plannedCount,
+      pending_dispatch_count: pendingDispatchCount,
+      pending_dispatches: pendingDispatches.map((request, index) => ({
+        queue_id: request.id,
+        target_actor_id: request.targetActorId,
+        target_actor_name: this.getActorName(request.targetActorId),
+        label: request.label,
+        task: request.task,
+        mode: request.mode ?? "run",
+        role_boundary: request.roleBoundary,
+        profile: request.profile,
+        execution_intent: request.executionIntent,
+        queued_at: request.queuedAt,
+        queue_position: index + 1,
+      })),
+    };
+  }
+
+  collectStructuredSpawnedTaskResults(
+    actorId: string,
+    opts?: {
+      terminalOnly?: boolean;
+      excludeRunIds?: Iterable<string>;
+    },
+  ) {
+    return this.dialogSubtaskRuntime.collectStructuredSpawnedTaskResults(actorId, opts);
+  }
+
+  waitForSpawnedTaskUpdate(actorId: string, timeoutMs: number): Promise<{ reason: "task_update" | "timeout" }> {
+    return this.dialogSubtaskRuntime.waitForSpawnedTaskUpdate(actorId, timeoutMs);
   }
 
   /** 清理已完成的任务记录（可选调用） */
   pruneSpawnedTasks(): number {
-    const before = this.spawnedTasks.size;
-    for (const [runId, record] of this.spawnedTasks) {
-      if (record.status !== "running") {
-        this.spawnedTasks.delete(runId);
-      }
-    }
-    const removed = before - this.spawnedTasks.size;
+    const removed = this.dialogSubtaskRuntime.pruneCompletedTasks();
     if (removed > 0) {
       log(`pruneSpawnedTasks: removed ${removed} completed tasks`);
     }
@@ -2315,43 +2907,46 @@ export class ActorSystem {
 
   /** 获取某个 Agent 的 running 状态 spawned tasks */
   getActiveSpawnedTasks(actorId: string): SpawnedTaskRecord[] {
-    return [...this.spawnedTasks.values()].filter((r) => r.spawnerActorId === actorId && r.status === "running");
+    return this.dialogSubtaskRuntime.getActiveSpawnedTasks(actorId);
+  }
+
+  getDialogSpawnConcurrencyLimit(): number {
+    return MAX_ACTIVE_DIALOG_CHILDREN;
+  }
+
+  abortActiveRunSpawnedTasks(spawnerActorId: string, error = "父任务被终止"): number {
+    const aborted = this.dialogSubtaskRuntime.abortActiveRunTasksForSpawner(spawnerActorId, error);
+    if (aborted > 0) {
+      this.tryFinalizeExecutionContract();
+      this.scheduleExecutionContractProgressCheck();
+    }
+    return aborted;
   }
 
   /** 获取所有 spawned tasks 快照 */
   getSpawnedTasksSnapshot(): SpawnedTaskRecord[] {
-    return [...this.spawnedTasks.values()];
+    return this.dialogSubtaskRuntime.getSpawnedTasksSnapshot();
   }
 
   getSpawnedTask(runId: string): SpawnedTaskRecord | undefined {
-    return this.spawnedTasks.get(runId);
+    return this.dialogSubtaskRuntime.getSpawnedTask(runId);
   }
 
   getFocusedSpawnedSessionRunId(): string | null {
-    return this.focusedSpawnedSessionRunId;
+    return this.dialogSubtaskRuntime.getFocusedSessionRunId();
   }
 
   focusSpawnedSession(runId: string | null): void {
-    if (runId === null) {
-      this.focusedSpawnedSessionRunId = null;
-      return;
-    }
-    const record = this.getOpenSpawnedSessionByRunId(runId);
-    if (!record) {
-      throw new Error(`Spawned session ${runId} 不存在或已关闭`);
-    }
-    this.focusedSpawnedSessionRunId = runId;
-    record.lastActiveAt = Date.now();
+    this.dialogSubtaskRuntime.focusSession(runId);
   }
 
   closeSpawnedSession(runId: string): void {
-    const record = this.getOpenSpawnedSessionByRunId(runId);
+    const record = this.dialogSubtaskRuntime.closeSessionByRunId(runId);
     if (!record) return;
-    this.closeSpawnedSessionRecord(record);
   }
 
   abortSpawnedTask(runId: string, opts?: { error?: string }): void {
-    const record = this.spawnedTasks.get(runId);
+    const record = this.dialogSubtaskRuntime.getSpawnedTask(runId);
     if (!record) return;
     if (record.status !== "running" && !(record.mode === "session" && record.sessionOpen)) return;
 
@@ -2393,17 +2988,11 @@ export class ActorSystem {
     }
     const sessionMessage = chunks.filter(Boolean).join("\n\n");
 
-    record.lastActiveAt = Date.now();
-    record.status = "running";
-    record.completedAt = undefined;
-    record.error = undefined;
-    record.timeoutReason = undefined;
-    if (opts?.label) {
-      record.label = opts.label;
-    }
-    if (opts?.images?.length) {
-      record.images = [...new Set([...(record.images ?? []), ...opts.images])];
-    }
+    this.dialogSubtaskRuntime.resetSessionTaskForResume(record, {
+      timestamp: Date.now(),
+      label: opts?.label,
+      images: opts?.images,
+    });
 
     this.send(fromActorId, record.targetActorId, sessionMessage, {
       images: opts?.images,
@@ -2423,12 +3012,10 @@ export class ActorSystem {
     if (!record) {
       throw new Error(`Spawned session ${runId} 不存在或已关闭`);
     }
-    record.lastActiveAt = Date.now();
-    record.status = "running";
-    record.completedAt = undefined;
-    record.error = undefined;
-    record.timeoutReason = undefined;
-    this.focusedSpawnedSessionRunId = runId;
+    this.dialogSubtaskRuntime.resetSessionTaskForResume(record, {
+      timestamp: Date.now(),
+    });
+    this.dialogSubtaskRuntime.focusSession(runId);
     return this.send("user", record.targetActorId, content, {
       _briefContent: opts?._briefContent,
       images: opts?.images,
@@ -2457,7 +3044,7 @@ export class ActorSystem {
     };
     this.artifactRecords.set(pathKey, normalized);
     if (normalized.relatedRunId) {
-      const spawnedTask = this.spawnedTasks.get(normalized.relatedRunId);
+      const spawnedTask = this.dialogSubtaskRuntime.getSpawnedTask(normalized.relatedRunId);
       if (spawnedTask) {
         spawnedTask.lastActiveAt = Math.max(
           spawnedTask.lastActiveAt ?? 0,
@@ -2631,47 +3218,12 @@ export class ActorSystem {
    * 返回扁平列表，每个 record 带 depth 字段表示层级。
    */
   getDescendantTasks(actorId: string): Array<SpawnedTaskRecord & { depth: number }> {
-    const result: Array<SpawnedTaskRecord & { depth: number }> = [];
-    const visited = new Set<string>();
-    const taskByParentRunId = new Map<string, SpawnedTaskRecord[]>();
-
-    for (const record of this.spawnedTasks.values()) {
-      if (!record.parentRunId) continue;
-      const bucket = taskByParentRunId.get(record.parentRunId) ?? [];
-      bucket.push(record);
-      taskByParentRunId.set(record.parentRunId, bucket);
-    }
-
-    const collect = (records: SpawnedTaskRecord[], depth: number) => {
-      for (const child of records) {
-        if (visited.has(child.runId)) continue;
-        visited.add(child.runId);
-        result.push({ ...child, depth });
-        const descendants = taskByParentRunId.get(child.runId) ?? [];
-        collect(descendants, depth + 1);
-      }
-    };
-
-    const roots = this.getSpawnedTasks(actorId).sort((a, b) => a.spawnedAt - b.spawnedAt);
-    collect(roots, 1);
-    return result;
+    return this.dialogSubtaskRuntime.getDescendantTasks(actorId);
   }
 
   /** 计算 spawn 链深度（通过 spawnedTasks 回溯 spawner 链） */
   private getSpawnDepth(actorId: string): number {
-    let depth = 0;
-    let currentRecord = this.getOwningSpawnedTaskForActor(actorId);
-    const visited = new Set<string>();
-    while (true) {
-      if (!currentRecord) break;
-      if (visited.has(currentRecord.runId)) break;
-      visited.add(currentRecord.runId);
-      depth++;
-      currentRecord = currentRecord.parentRunId
-        ? this.spawnedTasks.get(currentRecord.parentRunId)
-        : undefined;
-    }
-    return depth;
+    return this.dialogSubtaskRuntime.getSpawnDepth(actorId);
   }
 
   /**
@@ -2703,7 +3255,7 @@ export class ActorSystem {
 
   /** 级联 abort 某个 Agent 的所有 running / open spawned tasks */
   private cascadeAbortSpawns(actorId: string, error = "父任务被终止"): void {
-    const activeSpawns = [...this.spawnedTasks.values()].filter((record) =>
+    const activeSpawns = this.dialogSubtaskRuntime.getSpawnedTasksSnapshot().filter((record) =>
       record.spawnerActorId === actorId
       && (record.status === "running" || (record.mode === "session" && record.sessionOpen)),
     );
@@ -2721,52 +3273,15 @@ export class ActorSystem {
       error: string;
     },
   ): void {
-    if (record.timeoutId) {
-      clearInterval(record.timeoutId);
-      record.timeoutId = undefined;
-    }
-    const abortedAt = Date.now();
     const targetActor = this.actors.get(record.targetActorId);
-    record.status = "aborted";
-    record.completedAt = abortedAt;
-    record.error = options.error;
-    record.lastActiveAt = abortedAt;
+    this.dialogSubtaskRuntime.abortTask(record, {
+      error: options.error,
+      targetActor,
+    });
 
     if (targetActor) {
-      targetActor.abort(options.error);
-      this.finalizeSpawnedTaskHistoryWindow(record, targetActor);
       this.cascadeAbortSpawns(record.targetActorId, options.error);
-    } else {
-      this.finalizeSpawnedTaskHistoryWindow(record);
     }
-
-    this.cancelPendingInteractionsForActor(record.targetActorId);
-    if (record.mode === "session") {
-      this.closeSpawnedSessionRecord(record, abortedAt);
-    }
-
-    this.emitEvent({
-      type: "spawned_task_failed",
-      actorId: record.targetActorId,
-      timestamp: abortedAt,
-      detail: {
-        runId: record.runId,
-        spawnerActorId: record.spawnerActorId,
-        targetActorId: record.targetActorId,
-        targetName: targetActor?.role.name ?? record.targetActorId,
-        spawnerName: this.actors.get(record.spawnerActorId)?.role.name ?? record.spawnerActorId,
-        contractId: record.contractId,
-        plannedDelegationId: record.plannedDelegationId,
-        dispatchSource: record.dispatchSource,
-        parentRunId: record.parentRunId,
-        rootRunId: record.rootRunId,
-        mode: record.mode,
-        roleBoundary: record.roleBoundary,
-        task: record.task,
-        status: "aborted" as const,
-        error: options.error,
-      } satisfies SpawnedTaskEventDetail,
-    });
   }
 
   /**
@@ -2780,7 +3295,7 @@ export class ActorSystem {
     runId: string,
     attempt = 0,
   ): void {
-    const spawnedAt = this.spawnedTasks.get(runId)?.spawnedAt ?? Date.now();
+    const spawnedAt = this.dialogSubtaskRuntime.getSpawnedTask(runId)?.spawnedAt ?? Date.now();
     if (Date.now() - spawnedAt > ANNOUNCE_HARD_EXPIRY_MS) {
       logWarn(`announce HARD EXPIRY: runId=${runId}, skipping delivery after 30min`);
       this.emitEvent({
@@ -2810,8 +3325,10 @@ export class ActorSystem {
         });
         return;
       }
+      const spawnedTaskResult = this.dialogSubtaskRuntime.getStructuredSubtaskResult(runId);
       this.send(fromActorId, toActorId, content, {
         relatedRunId: runId,
+        spawnedTaskResult,
       });
     } catch (err) {
       const errSummary = summarizeError(err);
@@ -2848,6 +3365,7 @@ export class ActorSystem {
     opts?: {
       fanoutToPeers?: boolean;
       suppressLowSignal?: boolean;
+      phase?: "final" | "failure" | "intermediate";
     },
   ): DialogMessage | null {
     const trimmed = content.trim();
@@ -2860,7 +3378,7 @@ export class ActorSystem {
     const coordinatorId = this.getCoordinatorId();
     const fromNonCoordinator = coordinatorId ? actorId !== coordinatorId : false;
     const suppressLowSignal = opts?.suppressLowSignal ?? true;
-    const relatedRunId = this.getOpenSpawnedSessionByTarget(actorId)?.runId;
+    const relatedRunId = this.dialogSubtaskRuntime.getRelatedRunIdForActor(actorId);
 
     if (suppressLowSignal && fromNonCoordinator && isLowSignalCoordinationMessage(visibleContent)) {
       log(`publishResult: suppress low-signal message from ${actorName}`);
@@ -2904,6 +3422,12 @@ export class ActorSystem {
     this.dialogHistory.push(msg);
     appendDialogMessage(this.sessionId, msg);
     this.emitEvent(msg);
+    this.traceFlow("publish_result", {
+      phase: opts?.phase ?? "final",
+      run_id: relatedRunId,
+      status: "published",
+      preview: previewActorSystemText(visibleContent),
+    }, actorId);
 
     if (opts?.fanoutToPeers) {
       for (const other of this.actors.values()) {
@@ -2975,7 +3499,7 @@ export class ActorSystem {
     const options = normalizedOpts.options;
     const replyMode = normalizedOpts.replyMode ?? "single";
     const approvalRequest = normalizedOpts.approvalRequest;
-    const relatedRunId = this.getOpenSpawnedSessionByTarget(actorId)?.runId;
+    const relatedRunId = this.dialogSubtaskRuntime.getRelatedRunIdForActor(actorId);
     if (approvalRequest?.targetPath) {
       this.recordArtifact({
         actorId,
@@ -3061,7 +3585,7 @@ export class ActorSystem {
     const pendingInteraction = this.pendingInteractions.get(messageId);
     const sourceMessage = this.dialogHistory.find((message) => message.id === messageId);
     const relatedRunId = sourceMessage?.relatedRunId
-      ?? (pendingInteraction ? this.getOpenSpawnedSessionByTarget(pendingInteraction.fromActorId)?.runId : undefined);
+      ?? (pendingInteraction ? this.dialogSubtaskRuntime.getRelatedRunIdForActor(pendingInteraction.fromActorId) : undefined);
     if (pendingInteraction) {
       const msg: DialogMessage = {
         id: generateId(),
@@ -3303,19 +3827,20 @@ export class ActorSystem {
 
   restoreDialogHistory(history: DialogMessage[]): void {
     this.dialogHistory = [...history];
-    log("Restored", history.length, "dialog messages from persisted session");
+    log(`Restored ${history.length} dialog messages from persisted session`);
   }
 
   /** 恢复子任务记录（用于 session 恢复后 UI 显示） */
   restoreSpawnedTasks(records: Array<Omit<SpawnedTaskRecord, "timeoutId">>): void {
     for (const record of records) {
       const { dispatchSource = "manual", ...restoredRecord } = record;
-      this.spawnedTasks.set(record.runId, {
+      const nextRecord: SpawnedTaskRecord = {
         ...restoredRecord,
         dispatchSource,
-      });
+      };
+      this.dialogSubtaskRuntime.restoreRecord(nextRecord);
     }
-    log("Restored", records.length, "spawned task records");
+    log(`Restored ${records.length} spawned task records`);
   }
 
   /** 恢复指定 Actor 的会话记忆 */
@@ -3323,7 +3848,7 @@ export class ActorSystem {
     const actor = this.actors.get(actorId);
     if (actor) {
       actor.loadSessionHistory(history);
-      log(`Restored session history for actor ${actor.role.name}:`, history.length, "entries");
+      log(`Restored session history for actor ${actor.role.name}: ${history.length} entries`);
     }
   }
 
@@ -3341,9 +3866,15 @@ export class ActorSystem {
     archiveSession(oldSessionId, summary);
     this.dialogHistory = [];
     (this as any).sessionId = generateId();
+    this.traceFlow("session_reset", {
+      previous_session: oldSessionId.slice(0, 8),
+      preview: previewActorSystemText(summary),
+    });
+    resetDialogStepTrace();
+    traceDialogSessionStarted(this.sessionId);
     this.artifactRecords.clear();
     this.sessionUploads.clear();
-    this.focusedSpawnedSessionRunId = null;
+    this.dialogSubtaskRuntime.focusSession(null);
     this.dialogRoomCompaction = null;
 
     // 清空每个 Agent 的会话记忆
@@ -3369,12 +3900,9 @@ export class ActorSystem {
       });
     }
 
-    // 清空 spawnedTasks
-    for (const record of this.spawnedTasks.values()) {
-      if (record.timeoutId) clearInterval(record.timeoutId);
-      this.closeSpawnedSessionRecord(record);
-    }
-    this.spawnedTasks.clear();
+    this.dialogSubtaskRuntime.clearAll();
+    this.deferredSpawnRequests.clear();
+    this.deferredSpawnDispatchingOwners.clear();
     this.activeExecutionContract = null;
     this.legacyDialogExecutionPlanRuntimeState = null;
 
@@ -3576,6 +4104,7 @@ export class ActorSystem {
   }
 
   emitEvent(event: ActorEvent | DialogMessage): void {
+    traceDialogActorSystemEvent(this.sessionId, event);
     for (const handler of this.eventHandlers) {
       try { handler(event); } catch { /* non-critical */ }
     }
@@ -3597,7 +4126,7 @@ export class ActorSystem {
       executionContract: this.getActiveExecutionContract(),
       dialogHistory: [...this.dialogHistory],
       pendingReplies: this.pendingReplies.size + this.pendingInteractions.size,
-      spawnedTasks: [...this.spawnedTasks.values()].map((r) => ({
+      spawnedTasks: this.dialogSubtaskRuntime.getSpawnedTasksSnapshot().map((r) => ({
         runId: r.runId,
         spawner: r.spawnerActorId,
         target: r.targetActorId,
@@ -3616,7 +4145,7 @@ export class ActorSystem {
 
   /** 获取 spawnedTasks Map 引用（用于持久化） */
   getSpawnedTasksMap(): Map<string, SpawnedTaskRecord> {
-    return this.spawnedTasks;
+    return this.dialogSubtaskRuntime.getSpawnedTasksMap();
   }
 
   // ── Hook System ──

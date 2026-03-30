@@ -18,6 +18,7 @@ import type {
   CollaborationSurface,
   ExecutionContractDraft,
 } from "./types";
+import type { StructuredDeliveryManifest } from "@/core/agent/actor/structured-delivery-strategy";
 
 function cloneDialogMessage(message: DialogMessage): DialogMessage {
   return {
@@ -101,7 +102,62 @@ function clonePlannedDelegations(
   return delegations.map((delegation) => ({
     ...delegation,
     ...(delegation.childCapabilities ? { childCapabilities: [...delegation.childCapabilities] } : {}),
+    ...(delegation.overrides ? { overrides: { ...delegation.overrides } } : {}),
   }));
+}
+
+function cloneStructuredDeliveryManifest(
+  manifest: StructuredDeliveryManifest,
+): StructuredDeliveryManifest {
+  return {
+    ...manifest,
+    ...(manifest.targets
+      ? {
+          targets: manifest.targets.map((target) => ({
+            ...target,
+            ...(target.promptSpec
+              ? {
+                  promptSpec: {
+                    ...target.promptSpec,
+                    ...(target.promptSpec.inputItems ? { inputItems: [...target.promptSpec.inputItems] } : {}),
+                    ...(target.promptSpec.constraints ? { constraints: [...target.promptSpec.constraints] } : {}),
+                    ...(target.promptSpec.completionInstructions
+                      ? { completionInstructions: [...target.promptSpec.completionInstructions] }
+                      : {}),
+                  },
+                }
+              : {}),
+            ...(target.dispatchSpec
+              ? {
+                  dispatchSpec: {
+                    ...target.dispatchSpec,
+                    ...(target.dispatchSpec.overrides ? { overrides: { ...target.dispatchSpec.overrides } } : {}),
+                  },
+                }
+              : {}),
+            ...(target.metadata ? { metadata: { ...target.metadata } } : {}),
+          })),
+        }
+      : {}),
+    ...(manifest.resultSchema
+      ? {
+          resultSchema: {
+            ...manifest.resultSchema,
+            fields: manifest.resultSchema.fields.map((field) => ({ ...field })),
+          },
+        }
+      : {}),
+    ...(manifest.exportSpec
+      ? {
+          exportSpec: {
+            ...manifest.exportSpec,
+            ...(manifest.exportSpec.targetLabels
+              ? { targetLabels: [...manifest.exportSpec.targetLabels] }
+              : {}),
+          },
+        }
+      : {}),
+  };
 }
 
 export function cloneExecutionContractDraft(
@@ -116,6 +172,9 @@ export function cloneExecutionContractDraft(
     allowedMessagePairs: cloneActorPairs(draft.allowedMessagePairs),
     allowedSpawnPairs: cloneActorPairs(draft.allowedSpawnPairs),
     plannedDelegations: clonePlannedDelegations(draft.plannedDelegations),
+    ...(draft.structuredDeliveryManifest
+      ? { structuredDeliveryManifest: cloneStructuredDeliveryManifest(draft.structuredDeliveryManifest) }
+      : {}),
   };
 }
 

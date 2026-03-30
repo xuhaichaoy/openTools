@@ -1884,10 +1884,30 @@ fn extract_freemind_text(path: &str) -> Result<String, String> {
 // ── Excel Export (write .xlsx from JSON data) ──
 
 #[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum SpreadsheetCell {
+    String(String),
+    Number(f64),
+    Boolean(bool),
+    Null(()),
+}
+
+impl SpreadsheetCell {
+    fn display_text(&self) -> String {
+        match self {
+            SpreadsheetCell::String(value) => value.clone(),
+            SpreadsheetCell::Number(value) => value.to_string(),
+            SpreadsheetCell::Boolean(value) => value.to_string(),
+            SpreadsheetCell::Null(()) => String::new(),
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
 struct SheetData {
     name: Option<String>,
     headers: Vec<String>,
-    rows: Vec<Vec<String>>,
+    rows: Vec<Vec<SpreadsheetCell>>,
 }
 
 #[tauri::command]
@@ -1924,14 +1944,29 @@ pub async fn export_spreadsheet(
 
         for (row_idx, row) in sheet.rows.iter().enumerate() {
             for (col_idx, cell) in row.iter().enumerate() {
-                if let Ok(num) = cell.parse::<f64>() {
-                    worksheet
-                        .write_number((row_idx + 1) as u32, col_idx as u16, num)
-                        .map_err(|e| format!("写入数字失败: {}", e))?;
-                } else {
-                    worksheet
-                        .write_string((row_idx + 1) as u32, col_idx as u16, cell)
-                        .map_err(|e| format!("写入文本失败: {}", e))?;
+                match cell {
+                    SpreadsheetCell::Number(num) => {
+                        worksheet
+                            .write_number((row_idx + 1) as u32, col_idx as u16, *num)
+                            .map_err(|e| format!("写入数字失败: {}", e))?;
+                    }
+                    SpreadsheetCell::Boolean(value) => {
+                        worksheet
+                            .write_boolean((row_idx + 1) as u32, col_idx as u16, *value)
+                            .map_err(|e| format!("写入布尔值失败: {}", e))?;
+                    }
+                    SpreadsheetCell::Null(_) => {}
+                    SpreadsheetCell::String(text) => {
+                        if let Ok(num) = text.parse::<f64>() {
+                            worksheet
+                                .write_number((row_idx + 1) as u32, col_idx as u16, num)
+                                .map_err(|e| format!("写入数字失败: {}", e))?;
+                        } else {
+                            worksheet
+                                .write_string((row_idx + 1) as u32, col_idx as u16, text)
+                                .map_err(|e| format!("写入文本失败: {}", e))?;
+                        }
+                    }
                 }
             }
         }
@@ -1940,7 +1975,7 @@ pub async fn export_spreadsheet(
             let mut max_len = header.len();
             for row in &sheet.rows {
                 if let Some(cell) = row.get(col) {
-                    max_len = max_len.max(cell.len());
+                    max_len = max_len.max(cell.display_text().len());
                 }
             }
             let width = (max_len as f64 * 1.2).min(60.0).max(8.0);

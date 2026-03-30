@@ -435,8 +435,8 @@ describe("useAgentRunActions", () => {
       };
       codingHint?: string;
     };
-    expect(options.runProfile?.codingMode).toBe(true);
-    expect(String(options.codingHint || "")).toContain("Coding Execution Policy");
+    expect(options.runProfile).toBeUndefined();
+    expect(options.codingHint).toBeUndefined();
   });
 
   it("starts a fresh session for standalone artifact tasks unrelated to a heavy project context", async () => {

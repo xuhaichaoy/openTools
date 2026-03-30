@@ -24,8 +24,17 @@ describe("execution-policy", () => {
       accessMode: "read_only",
       approvalMode: "strict",
     });
+    expect(reviewer.toolPolicy?.allow).toEqual(expect.arrayContaining([
+      "task_done",
+      "list_*",
+      "read_*",
+      "search_*",
+    ]));
     expect(reviewer.toolPolicy?.deny).toEqual(expect.arrayContaining([
       "spawn_task",
+      "delegate_subtask",
+      "enter_plan_mode",
+      "exit_plan_mode",
       "write_file",
       "run_shell_command",
     ]));
@@ -34,14 +43,34 @@ describe("execution-policy", () => {
       accessMode: "auto",
       approvalMode: "normal",
     });
+    expect(validator.toolPolicy?.allow).toEqual(expect.arrayContaining([
+      "task_done",
+      "run_shell_command",
+      "persistent_shell",
+    ]));
     expect(validator.toolPolicy?.deny).not.toContain("run_shell_command");
 
     expect(executor.executionPolicy).toEqual({
       accessMode: "full_access",
-      approvalMode: "normal",
+      approvalMode: "permissive",
     });
+    expect(executor.toolPolicy?.allow).toEqual(expect.arrayContaining([
+      "task_done",
+      "write_file",
+      "str_replace_edit",
+      "json_edit",
+      "run_shell_command",
+    ]));
     expect(executor.toolPolicy?.deny).toEqual(expect.arrayContaining([
       "spawn_task",
+      "delegate_subtask",
+      "wait_for_spawned_tasks",
+      "send_message",
+      "agents",
+      "ask_user",
+      "ask_clarification",
+      "enter_plan_mode",
+      "exit_plan_mode",
       "delete_file",
     ]));
   });
@@ -97,8 +126,8 @@ describe("execution-policy", () => {
       accessMode: "full_access",
       approvalMode: "off",
     })).toEqual({
-      accessMode: "full_access",
-      approvalMode: "strict",
+      accessMode: "read_only",
+      approvalMode: "normal",
     });
 
     expect(buildMiddlewareOverridesForExecutionPolicy(

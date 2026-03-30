@@ -56,8 +56,8 @@ type AgentStoreState = ReturnType<typeof useAgentStore.getState>;
 export const AGENT_EXECUTION_HEARTBEAT_INTERVAL_MS = 10_000;
 export const AGENT_EXECUTION_TIMEOUT_MS = 600_000;
 export const AGENT_EXECUTION_TIMEOUT_LARGE_PROJECT_MS = 1_800_000;
-export const AGENT_MODEL_STALL_TIMEOUT_MS = 90_000;
-export const AGENT_MODEL_STALL_TIMEOUT_LARGE_PROJECT_MS = 180_000;
+export const AGENT_MODEL_STALL_TIMEOUT_MS = 45_000;
+export const AGENT_MODEL_STALL_TIMEOUT_LARGE_PROJECT_MS = 120_000;
 
 interface UseAgentExecutionParams {
   ai?: MToolsAI;
@@ -313,6 +313,25 @@ export function useAgentExecution({
         getResolvedAIConfigForMode("agent"),
       );
       let scrollTimer: ReturnType<typeof setTimeout> | null = null;
+      const inferWaitingStageFromObservation = (
+        content: string,
+      ): ExecutionWaitingStage | null => {
+        const normalized = content.trim();
+        if (!normalized) return null;
+        if (normalized.includes("等待用户确认执行")) {
+          return "user_confirm";
+        }
+        if (
+          /自动重试/.test(normalized)
+          && /(网络|流传输|API 错误|连接异常|503|502|504|rate limit|timeout|卡住)/i.test(normalized)
+        ) {
+          return "model_retrying";
+        }
+        if (/模型长时间无进展|模型长时间无响应|stream.*stall|流.*卡住|卡住超过/i.test(normalized)) {
+          return "model_stream_stalled";
+        }
+        return null;
+      };
 
       const applyStep = (step: AgentStep, markProgress = true) => {
         const nextSteps = applyIncomingAgentStep(collectedSteps, step);
@@ -326,11 +345,11 @@ export function useAgentExecution({
           setWaitingStageIfChanged("model_generating");
         } else if (step.type === "action") {
           setWaitingStageIfChanged("tool_waiting");
-        } else if (
-          step.type === "observation" &&
-          step.content.includes("等待用户确认执行")
-        ) {
-          setWaitingStageIfChanged("user_confirm");
+        } else if (step.type === "observation") {
+          const waitingStage = inferWaitingStageFromObservation(step.content);
+          if (waitingStage) {
+            setWaitingStageIfChanged(waitingStage);
+          }
         } else if (step.type === "thought") {
           setWaitingStageIfChanged("model_first_token");
         }
@@ -695,11 +714,8 @@ export function useAgentExecution({
           if (latestStep.type === "answer" && latestStep.streaming) {
             return "model_generating";
           }
-          if (
-            latestStep.type === "observation" &&
-            latestStep.content.includes("等待用户确认执行")
-          ) {
-            return "user_confirm";
+          if (latestStep.type === "observation") {
+            return inferWaitingStageFromObservation(latestStep.content) ?? "model_first_token";
           }
           if (latestStep.type === "action" && latestStep.toolName) {
             return "tool_waiting";

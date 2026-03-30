@@ -15,6 +15,8 @@ export type WorkbenchTab =
 export type RunningPhase = "executing";
 export type ExecutionWaitingStage =
   | "model_first_token"
+  | "model_retrying"
+  | "model_stream_stalled"
   | "model_generating"
   | "tool_waiting"
   | "user_confirm";
@@ -23,6 +25,10 @@ export function getExecutionWaitingStageLabel(stage: ExecutionWaitingStage): str
   switch (stage) {
     case "model_first_token":
       return "模型首个响应";
+    case "model_retrying":
+      return "模型连接异常，自动重试";
+    case "model_stream_stalled":
+      return "模型流无进展";
     case "model_generating":
       return "模型生成回答";
     case "tool_waiting":

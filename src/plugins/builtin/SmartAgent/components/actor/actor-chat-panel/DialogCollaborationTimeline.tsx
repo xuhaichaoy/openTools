@@ -19,12 +19,24 @@ import type {
   SpawnedTaskStatus,
 } from "@/core/agent/actor/types";
 import { formatDurationSeconds } from "@/core/agent/actor/timeout-policy";
+import type { LocalDialogLiveContinuationState } from "./local-dialog-projection";
 
 const GROUP_JOIN_WINDOW_MS = 6000;
 const GROUP_CONTRACT_MAX_GAP_MS = 120000;
 const MILESTONE_EVENT_LIMIT = 12;
+const INTERIM_PARENT_REPLY_PATTERNS = [
+  /(现在|正在|继续|准备).*(验证|整理|汇总|整合|输出|收尾)/u,
+  /我开始.*(汇总|整合|整理|收尾)/u,
+  /任务产物已存在.*现在.*最终结果/u,
+  /已收到.*(?:反馈|结果).*(?:现在|正在).*(汇总|验证|输出)/u,
+  /稍后.*(汇总|输出)|继续.*(整理|汇总|验证)/u,
+];
+const CONCRETE_PARENT_REPLY_PATTERNS = [
+  /最终产物|文件路径|保存到|导出为|已创建|已生成|已修改|验证通过|测试通过|构建通过|真实缺口|阻塞原因|无法完成/u,
+  /\/[^\s"'`]+\.(?:tsx?|jsx?|vue|html|css|scss|less|json|rs|py|go|java|kt|swift|md|docx?|pdf|xlsx?|csv|pptx?)/i,
+];
 
-type GroupPhase = "dispatching" | "running" | "awaiting_aggregation" | "aggregated";
+type GroupPhase = "dispatching" | "running" | "aggregating" | "awaiting_aggregation" | "aggregated";
 
 export interface LocalCollaborationTimelineWorker {
   runId: string;
@@ -178,6 +190,11 @@ function buildGroupPhaseMeta(phase: GroupPhase): {
         label: "已回流",
         className: "bg-emerald-500/10 text-emerald-700",
       };
+    case "aggregating":
+      return {
+        label: "汇总中",
+        className: "bg-amber-500/10 text-amber-700",
+      };
     case "awaiting_aggregation":
       return {
         label: "等待汇总",
@@ -194,6 +211,10 @@ function buildGroupPhaseMeta(phase: GroupPhase): {
         className: "bg-sky-500/10 text-sky-700",
       };
   }
+}
+
+function buildGroupTitle(workerCount: number): string {
+  return `并行协作 · ${workerCount} 个子任务`;
 }
 
 function eventTypePriority(eventType: SpawnedTaskLifecycleEventType): number {
@@ -230,14 +251,29 @@ function buildMilestoneText(worker: LocalCollaborationTimelineWorker, event: Spa
   }
 }
 
-function findParentReplyAfter(dialogHistory: readonly DialogMessage[], actorId: string, afterTimestamp: number): DialogMessage | null {
+function findParentReplyAfter(
+  dialogHistory: readonly DialogMessage[],
+  actorId: string,
+  afterTimestamp: number,
+  beforeTimestamp?: number,
+): DialogMessage | null {
   return dialogHistory.find((message) =>
     message.from === actorId
     && message.from !== "user"
     && message.timestamp >= afterTimestamp
+    && (typeof beforeTimestamp !== "number" || message.timestamp < beforeTimestamp)
     && (!message.to || message.to === "user")
     && (message.kind === "agent_message" || message.kind === "agent_result"),
   ) ?? null;
+}
+
+function isLikelyInterimParentReply(content: string | undefined): boolean {
+  const normalized = String(content ?? "").trim();
+  if (!normalized) return false;
+  if (CONCRETE_PARENT_REPLY_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    return false;
+  }
+  return INTERIM_PARENT_REPLY_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
 function buildWorkerDetail(worker: LocalCollaborationTimelineWorker): string {
@@ -306,7 +342,7 @@ function buildWorkerFromSources(params: {
   const startEvent = events.find((event) => event.eventType === "spawned_task_started") ?? firstEvent;
   const latestEvent = events[events.length - 1];
   const latestProgressEvent = [...events].reverse().find((event) =>
-    event.eventType === "spawned_task_running" && compactText(event.message),
+    event.eventType === "spawned_task_running" && compactText(event.progressSummary ?? event.message),
   );
   const terminalEvent = [...events].reverse().find((event) =>
     event.eventType === "spawned_task_completed"
@@ -332,6 +368,9 @@ function buildWorkerFromSources(params: {
     ?? task?.completedAt
     ?? task?.spawnedAt
     ?? startedAt;
+  const runtimeProgress = compactText(task?.runtime?.progressSummary, 140);
+  const runtimeResult = compactText(task?.runtime?.terminalResult, 140);
+  const runtimeError = compactText(task?.runtime?.terminalError, 140);
   const status = task?.status
     ?? terminalEvent?.status
     ?? latestEvent?.status
@@ -353,12 +392,19 @@ function buildWorkerFromSources(params: {
     label: task?.label ?? compactText(latestEvent?.label, 72) ?? targetName,
     task: task?.task ?? latestEvent?.task ?? startEvent?.task ?? targetName,
     status,
-    startedAt,
+    startedAt: task?.runtime?.startedAt ?? startedAt,
     updatedAt,
-    completedAt: terminalEvent?.timestamp ?? task?.completedAt,
-    latestMessage: compactText(latestProgressEvent?.message ?? latestEvent?.message, 140),
-    resultPreview: compactText(task?.result ?? terminalEvent?.result, 140),
-    errorMessage: compactText(task?.error ?? terminalEvent?.error, 140),
+    completedAt: task?.runtime?.completedAt ?? terminalEvent?.timestamp ?? task?.completedAt,
+    latestMessage: runtimeProgress
+      ?? compactText(
+        latestProgressEvent?.progressSummary
+          ?? latestProgressEvent?.message
+          ?? latestEvent?.progressSummary
+          ?? latestEvent?.message,
+        140,
+      ),
+    resultPreview: runtimeResult ?? compactText(task?.result ?? terminalEvent?.terminalResult ?? terminalEvent?.result, 140),
+    errorMessage: runtimeError ?? compactText(task?.error ?? terminalEvent?.terminalError ?? terminalEvent?.error, 140),
     timeoutReason: task?.timeoutReason ?? terminalEvent?.timeoutReason,
     budgetSeconds: task?.budgetSeconds ?? latestEvent?.budgetSeconds ?? startEvent?.budgetSeconds,
     idleLeaseSeconds: task?.idleLeaseSeconds ?? latestEvent?.idleLeaseSeconds ?? startEvent?.idleLeaseSeconds,
@@ -371,8 +417,9 @@ export function buildLocalCollaborationTimelineGroups(params: {
   spawnedTasks: readonly SpawnedTaskRecord[];
   dialogHistory: readonly DialogMessage[];
   actorNameById?: ReadonlyMap<string, string>;
+  parentActivityByActorId?: ReadonlyMap<string, LocalDialogLiveContinuationState>;
 }): LocalCollaborationTimelineGroup[] {
-  const { events, spawnedTasks, dialogHistory, actorNameById } = params;
+  const { events, spawnedTasks, dialogHistory, actorNameById, parentActivityByActorId } = params;
   const taskByRunId = new Map(spawnedTasks.map((task) => [task.runId, task] as const));
   const eventsByRunId = new Map<string, SpawnedTaskLifecycleEvent[]>();
 
@@ -432,6 +479,14 @@ export function buildLocalCollaborationTimelineGroups(params: {
     });
   }
 
+  const latestGroupStartedAtBySpawnerActorId = new Map<string, number>();
+  groupedWorkers.forEach((group) => {
+    const previous = latestGroupStartedAtBySpawnerActorId.get(group.spawnerActorId) ?? 0;
+    if (group.startedAt >= previous) {
+      latestGroupStartedAtBySpawnerActorId.set(group.spawnerActorId, group.startedAt);
+    }
+  });
+
   return groupedWorkers.map((group) => {
     const sortedWorkers = [...group.workers].sort((left, right) =>
       left.startedAt - right.startedAt || left.updatedAt - right.updatedAt,
@@ -443,15 +498,47 @@ export function buildLocalCollaborationTimelineGroups(params: {
     const completedAt = runningCount === 0
       ? sortedWorkers.reduce((max, worker) => Math.max(max, worker.completedAt ?? worker.updatedAt), group.startedAt)
       : undefined;
-    const latestParentReply = completedAt
-      ? findParentReplyAfter(dialogHistory, group.spawnerActorId, completedAt)
+    const nextSiblingGroup = groupedWorkers.find((candidate) =>
+      candidate.startedAt > group.startedAt
+      && candidate.spawnerActorId === group.spawnerActorId,
+    );
+    const directParentReply = completedAt
+      ? findParentReplyAfter(
+          dialogHistory,
+          group.spawnerActorId,
+          completedAt,
+          nextSiblingGroup?.startedAt,
+        )
       : null;
+    const eventualParentReply = completedAt
+      ? (directParentReply ?? findParentReplyAfter(
+          dialogHistory,
+          group.spawnerActorId,
+          completedAt,
+        ))
+      : null;
+    const directParentReplyIsInterim = isLikelyInterimParentReply(directParentReply?.content);
+    const hasConcreteParentReply = Boolean(
+      eventualParentReply && !isLikelyInterimParentReply(eventualParentReply.content),
+    );
+    const parentActivity = parentActivityByActorId?.get(group.spawnerActorId);
+    const isLatestGroupForSpawner = (latestGroupStartedAtBySpawnerActorId.get(group.spawnerActorId) ?? group.startedAt) === group.startedAt;
+    const hasActiveParentAggregation = Boolean(
+      (parentActivity?.phase === "aggregating" || parentActivity?.phase === "repairing")
+      || parentActivity?.isContinuingAfterOrchestration
+      && completedAt
+      && (parentActivity.latestContinuationTimestamp ?? 0) >= completedAt,
+    );
     const dispatchOnly = runningCount > 0 && sortedWorkers.every((worker) =>
       worker.events.length === 0 || worker.events.every((event) => event.eventType === "spawned_task_started"),
     );
     const phase: GroupPhase = runningCount > 0
       ? dispatchOnly ? "dispatching" : "running"
-      : latestParentReply ? "aggregated" : "awaiting_aggregation";
+      : hasConcreteParentReply
+        ? "aggregated"
+        : directParentReplyIsInterim || hasActiveParentAggregation
+          ? "aggregating"
+          : "awaiting_aggregation";
     const activeWorkerNames = sortedWorkers
       .filter((worker) => worker.status === "running")
       .map((worker) => worker.targetName)
@@ -471,8 +558,18 @@ export function buildLocalCollaborationTimelineGroups(params: {
         return `正在继续处理 ${sortedWorkers.length} 个 worker 的协作任务。`;
       }
       if (phase === "aggregated") {
-        return compactText(latestParentReply?.content, 160)
-          ?? `全部 ${sortedWorkers.length} 个 worker 已返回，${group.spawnerName} 已回流汇总结果。`;
+        if (directParentReply && !directParentReplyIsInterim) {
+          return compactText(directParentReply.content, 160)
+            ?? `全部 ${sortedWorkers.length} 个 worker 已返回，${group.spawnerName} 已回流汇总结果。`;
+        }
+        return `全部 ${sortedWorkers.length} 个 worker 已返回，${group.spawnerName} 已在后续消息中完成统一汇总。`;
+      }
+      if (phase === "aggregating" && directParentReply) {
+        return compactText(directParentReply.content, 160)
+          ?? `全部 ${sortedWorkers.length} 个 worker 已返回，${group.spawnerName} 正在继续综合最终结果。`;
+      }
+      if (phase === "aggregating" && isLatestGroupForSpawner && parentActivity?.latestContinuationPreview) {
+        return parentActivity.latestContinuationPreview;
       }
       if (failedCount > 0) {
         return `全部 ${sortedWorkers.length} 个 worker 已返回，其中 ${failedCount} 个失败，等待 ${group.spawnerName} 汇总。`;
@@ -508,14 +605,14 @@ export function buildLocalCollaborationTimelineGroups(params: {
       updatedAt,
       completedAt,
       phase,
-      title: `Spawning ${sortedWorkers.length} ${sortedWorkers.length === 1 ? "worker" : "workers"}`,
+      title: buildGroupTitle(sortedWorkers.length),
       summary,
       totalWorkers: sortedWorkers.length,
       runningCount,
       completedCount,
       failedCount,
       activeWorkerNames,
-      latestParentReply: compactText(latestParentReply?.content, 160),
+      latestParentReply: compactText(directParentReply?.content, 160),
       workers: sortedWorkers,
       milestones,
     } satisfies LocalCollaborationTimelineGroup;

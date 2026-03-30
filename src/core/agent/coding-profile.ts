@@ -48,13 +48,32 @@ const CODE_FILENAMES = new Set([
   "go.sum",
 ]);
 
-const CODING_KEYWORDS = [
+const HARD_CODING_KEYWORDS = [
   /修复|排查|调试|debug|bug|报错|异常|堆栈/i,
   /代码|编码|编程|实现|改文件|写文件|函数|类|模块|接口|重构/i,
   /repo|repository|codebase|仓库|项目结构|工程|源码/i,
-  /test|测试|单测|lint|build|编译|打包|类型检查|review/i,
   /typescript|javascript|python|rust|java|go|react|vue|node/i,
 ];
+
+const SOFT_CODING_KEYWORDS = [
+  /test|测试|单测|lint|build|编译|打包|类型检查/i,
+  /code review|\breview\b/i,
+  /审查|评审|审阅|代码质量|可维护性|边界条件|回归风险/i,
+];
+
+const STRUCTURED_OUTPUT_KEYWORDS = [
+  /excel|xlsx|xls|csv|tsv|表格|工作簿|sheet/i,
+  /导出|输出|保存|生成|填写|汇总|整理|产出/i,
+];
+
+const CONTENT_DELIVERY_KEYWORDS = [
+  /课程|培训|课纲|大纲|方案|候选|清单|名单|目录|条目|文案|介绍|排期|题库|素材/i,
+  /产品运营|开发安全运维|数据算法通识|销售|客服|市场|运营/i,
+];
+
+const DOCUMENT_ATTACHMENT_EXTENSIONS = new Set([
+  "xlsx", "xls", "csv", "tsv", "pdf", "doc", "docx", "ppt", "pptx",
+]);
 
 const LARGE_PROJECT_KEYWORDS = [
   /大型项目|大项目|整个项目|整个仓库|全仓|全项目|跨模块|多模块|代码库/i,
@@ -79,6 +98,29 @@ function hasAnyKeyword(texts: string[], patterns: RegExp[]): boolean {
 
 function normalizePath(path?: string | null): string {
   return String(path ?? "").trim().toLowerCase();
+}
+
+function hasDocumentAttachment(paths: readonly string[]): boolean {
+  return paths.some((path) => {
+    const normalized = normalizePath(path);
+    const filename = normalized.split("/").pop() || normalized;
+    const ext = filename.includes(".") ? filename.split(".").pop() : "";
+    return Boolean(ext && DOCUMENT_ATTACHMENT_EXTENSIONS.has(ext));
+  });
+}
+
+function looksLikeStructuredContentDeliveryTask(params: {
+  texts: string[];
+  attachmentPaths: readonly string[];
+  hasHardCodingEvidence: boolean;
+  hasExplicitCodingIntent: boolean;
+}): boolean {
+  if (params.hasExplicitCodingIntent || params.hasHardCodingEvidence) return false;
+  const hasStructuredOutputSignal = hasAnyKeyword(params.texts, STRUCTURED_OUTPUT_KEYWORDS);
+  const hasContentSignal = hasAnyKeyword(params.texts, CONTENT_DELIVERY_KEYWORDS);
+  const hasDocumentSignal = hasDocumentAttachment(params.attachmentPaths);
+  return (hasStructuredOutputSignal && hasContentSignal)
+    || (hasDocumentSignal && hasContentSignal);
 }
 
 export function isLikelyCodingPath(path?: string | null): boolean {
@@ -128,8 +170,25 @@ export function inferCodingExecutionProfile(params: {
   const reasons: string[] = [];
   let codingMode = false;
   let largeProjectMode = false;
+  const fileContextLooksLikeCode = Boolean(
+    fileContextBlock
+      && /```|package\.json|tsconfig|cargo\.toml|import |export |function |class /i.test(fileContextBlock),
+  );
+  const hasExplicitCodingIntent = params.handoff?.intent === "coding";
+  const hasHardCodingKeyword = hasAnyKeyword(texts, HARD_CODING_KEYWORDS);
+  const hasSoftCodingKeyword = hasAnyKeyword(texts, SOFT_CODING_KEYWORDS);
+  const hasHardCodingEvidence = hasExplicitCodingIntent
+    || codingPaths.length > 0
+    || fileContextLooksLikeCode
+    || hasHardCodingKeyword;
+  const structuredContentDeliveryTask = looksLikeStructuredContentDeliveryTask({
+    texts,
+    attachmentPaths,
+    hasHardCodingEvidence,
+    hasExplicitCodingIntent,
+  });
 
-  if (params.handoff?.intent === "coding") {
+  if (hasExplicitCodingIntent) {
     codingMode = true;
     reasons.push("handoff 已标记为编码任务");
   }
@@ -137,13 +196,20 @@ export function inferCodingExecutionProfile(params: {
     codingMode = true;
     reasons.push(`检测到 ${codingPaths.length} 个代码相关文件/路径`);
   }
-  if (hasAnyKeyword(texts, CODING_KEYWORDS)) {
+  if (!codingMode && !structuredContentDeliveryTask && hasHardCodingKeyword) {
     codingMode = true;
     reasons.push("任务描述包含明显的代码实现/调试关键词");
   }
-  if (fileContextBlock && /```|package\.json|tsconfig|cargo\.toml|import |export |function |class /i.test(fileContextBlock)) {
+  if (!codingMode && !structuredContentDeliveryTask && fileContextLooksLikeCode) {
     codingMode = true;
     reasons.push("附带上下文看起来像源码或工程配置");
+  }
+  if (!codingMode && !structuredContentDeliveryTask && hasSoftCodingKeyword && hasHardCodingEvidence) {
+    codingMode = true;
+    reasons.push("任务描述包含代码评审/验证信号，且已存在明确编码上下文");
+  }
+  if (!codingMode && structuredContentDeliveryTask) {
+    reasons.push("识别为表格/内容交付任务，默认不自动启用 Coding");
   }
 
   if (codingMode) {

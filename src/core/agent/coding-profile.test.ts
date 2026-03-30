@@ -54,6 +54,21 @@ describe("coding-profile", () => {
     expect(resolved.autoDetected).toBe(false);
   });
 
+  it("does not auto-enable coding for spreadsheet content delivery tasks", () => {
+    const resolved = inferCodingExecutionProfile({
+      query: "请根据附件 xlsx 生成 20 门课程候选，并最终导出 Excel 文件",
+      attachmentPaths: ["/tmp/uploads/课程清单.xlsx"],
+    });
+
+    expect(resolved.profile).toEqual({
+      codingMode: false,
+      largeProjectMode: false,
+      openClawMode: false,
+    });
+    expect(resolved.autoDetected).toBe(false);
+    expect(resolved.reasons).toContain("识别为表格/内容交付任务，默认不自动启用 Coding");
+  });
+
   it("reminds coding mode to directly create clear standalone artifacts when appropriate", () => {
     const hint = buildAgentCodingSystemHint({
       codingMode: true,

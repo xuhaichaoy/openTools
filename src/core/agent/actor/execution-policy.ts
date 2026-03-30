@@ -2,6 +2,7 @@ import type {
   AccessMode,
   ApprovalLevel,
   ApprovalMode,
+  DialogExecutionMode,
   ExecutionPolicy,
   MiddlewareOverrides,
   SpawnedTaskRoleBoundary,
@@ -30,6 +31,22 @@ export type DefaultDialogActorPolicyKind = "lead" | "support" | "external_im";
 
 export const DEFAULT_ACCESS_MODE: AccessMode = "auto";
 export const DEFAULT_APPROVAL_MODE: ApprovalMode = "normal";
+export const DIALOG_PLAN_MODE_EXECUTION_POLICY: NormalizedExecutionPolicy = {
+  accessMode: "read_only",
+  approvalMode: "strict",
+};
+export const DIALOG_PLAN_MODE_TOOL_POLICY: ToolPolicy = {
+  deny: [
+    "spawn_task",
+    "wait_for_spawned_tasks",
+    "send_message",
+    "agents",
+    "send_local_media",
+    "schedule_task",
+    "cancel_schedule",
+    "memory_save",
+  ],
+};
 
 const ACCESS_MODE_PRIORITY: AccessMode[] = ["read_only", "auto", "full_access"];
 const APPROVAL_MODE_PRIORITY: ApprovalMode[] = ["strict", "normal", "permissive", "off"];
@@ -89,16 +106,58 @@ const READ_ONLY_ACCESS_POLICY: ToolPolicy = {
   ],
 };
 
+const CHILD_COMMUNICATION_DENY = [
+  "spawn_task",
+  "delegate_subtask",
+  "wait_for_spawned_tasks",
+  "send_message",
+  "agents",
+  "ask_user",
+  "ask_clarification",
+  "send_local_media",
+  "enter_plan_mode",
+  "exit_plan_mode",
+  "memory_*",
+] as const;
+
+const REVIEWER_CHILD_ALLOW = [
+  "task_done",
+  "list_*",
+  "read_*",
+  "search_*",
+  "web_search",
+  "calculate",
+] as const;
+
+const VALIDATOR_CHILD_ALLOW = [
+  ...REVIEWER_CHILD_ALLOW,
+  "run_shell_command",
+  "persistent_shell",
+] as const;
+
+const EXECUTOR_CHILD_ALLOW = [
+  ...VALIDATOR_CHILD_ALLOW,
+  "write_file",
+  "str_replace_edit",
+  "json_edit",
+  "export_document",
+  "export_spreadsheet",
+] as const;
+
+const GENERAL_CHILD_ALLOW = [...REVIEWER_CHILD_ALLOW] as const;
+
 const REVIEWER_CHILD_POLICY: ToolPolicy = {
+  allow: [...REVIEWER_CHILD_ALLOW],
   deny: [
-    "spawn_task",
+    ...CHILD_COMMUNICATION_DENY,
     ...(READ_ONLY_ACCESS_POLICY.deny ?? []),
   ],
 };
 
 const VALIDATOR_CHILD_POLICY: ToolPolicy = {
+  allow: [...VALIDATOR_CHILD_ALLOW],
   deny: [
-    "spawn_task",
+    ...CHILD_COMMUNICATION_DENY,
     "write_file",
     "str_replace_edit",
     "json_edit",
@@ -110,10 +169,17 @@ const VALIDATOR_CHILD_POLICY: ToolPolicy = {
 };
 
 const EXECUTOR_CHILD_POLICY: ToolPolicy = {
-  deny: ["spawn_task", "delete_file", "native_*", "ssh_*"],
+  allow: [...EXECUTOR_CHILD_ALLOW],
+  deny: [
+    ...CHILD_COMMUNICATION_DENY,
+    "delete_file",
+    "native_*",
+    "ssh_*",
+  ],
 };
 
 const GENERAL_CHILD_POLICY: ToolPolicy = {
+  allow: [...GENERAL_CHILD_ALLOW],
   deny: [...(REVIEWER_CHILD_POLICY.deny ?? [])],
 };
 
@@ -127,7 +193,7 @@ const ROLE_BOUNDARY_POLICY_PROFILES: Record<SpawnedTaskRoleBoundary, ExecutionPo
     toolPolicy: VALIDATOR_CHILD_POLICY,
   },
   executor: {
-    executionPolicy: { accessMode: "full_access", approvalMode: "normal" },
+    executionPolicy: { accessMode: "full_access", approvalMode: "permissive" },
     toolPolicy: EXECUTOR_CHILD_POLICY,
   },
   general: {
@@ -186,6 +252,10 @@ export function getAccessModeLabel(mode?: AccessMode | null): string {
 
 export function getApprovalModeLabel(mode?: ApprovalMode | ApprovalLevel | null): string {
   return APPROVAL_MODE_OPTIONS.find((item) => item.value === (mode ?? DEFAULT_APPROVAL_MODE))?.label ?? "正常审核";
+}
+
+export function getDialogExecutionModeLabel(mode?: DialogExecutionMode | null): string {
+  return mode === "plan" ? "规划模式" : "执行模式";
 }
 
 export function normalizeExecutionPolicy(

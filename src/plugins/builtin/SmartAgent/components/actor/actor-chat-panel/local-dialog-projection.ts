@@ -31,6 +31,194 @@ const COLLABORATION_SUMMARY_MARKERS = [
   /仅确认完成状态/u,
   /wait_for_spawned_tasks|memory_search|agents/u,
 ];
+const LOW_SIGNAL_CONTINUATION_TOOL_NAMES = new Set([
+  "sequential_thinking",
+]);
+const REPAIR_CONTINUATION_PATTERNS = [
+  /纠偏|修复|repair|blocker|未通过结果校验/u,
+  /重新导出|补齐交付|再次导出/u,
+];
+const PUBLISHED_CONTINUATION_PATTERNS = [
+  /最终产物|文件路径|保存到|导出为|已创建|已生成|已修改|验证通过|测试通过|构建通过|真实缺口|阻塞原因|无法完成/u,
+  /\/[^\s"'`]+\.(?:tsx?|jsx?|vue|html|css|scss|less|json|rs|py|go|java|kt|swift|md|docx?|pdf|xlsx?|csv|pptx?)/i,
+];
+
+export type LocalDialogContinuationPhase =
+  | "waiting_children"
+  | "aggregating"
+  | "repairing"
+  | "published";
+
+export interface LocalDialogLiveContinuationState {
+  latestOrchestrationIndex: number;
+  latestContinuationIndex: number;
+  latestContinuationTimestamp?: number;
+  latestContinuationPreview?: string;
+  isContinuingAfterOrchestration: boolean;
+  phase?: LocalDialogContinuationPhase;
+}
+
+function compactProjectionText(value: string | undefined, maxLength = 160): string | undefined {
+  const normalized = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!normalized) return undefined;
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(1, maxLength - 3)).trimEnd()}...`;
+}
+
+function findLastStepIndex(
+  steps: readonly AgentStep[],
+  predicate: (step: AgentStep) => boolean,
+): number {
+  for (let index = steps.length - 1; index >= 0; index -= 1) {
+    const step = steps[index];
+    if (step && predicate(step)) return index;
+  }
+  return -1;
+}
+
+function isOrchestrationAction(step: AgentStep): boolean {
+  return step.type === "action"
+    && (
+      step.toolName === "spawn_task"
+      || step.toolName === "wait_for_spawned_tasks"
+      || step.toolName === "agents"
+    );
+}
+
+function isSpawnStreamingStep(step: AgentStep): boolean {
+  return step.type === "tool_streaming" && buildToolStreamingPreview(step.content).kind === "spawn";
+}
+
+function isPureOrchestrationObservation(content: string | undefined): boolean {
+  const normalized = String(content ?? "").trim();
+  if (!normalized || (!normalized.startsWith("{") && !normalized.startsWith("["))) {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(normalized) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+    const value = parsed as Record<string, unknown>;
+    if (
+      typeof value.pending_count === "number"
+      && typeof value.completed_count === "number"
+      && typeof value.failed_count === "number"
+      && Array.isArray(value.tasks)
+    ) {
+      return true;
+    }
+    return Array.isArray(value.agents) && Array.isArray(value.task_tree);
+  } catch {
+    return false;
+  }
+}
+
+function parseStructuredObject(content: string | undefined): Record<string, unknown> | null {
+  const normalized = String(content ?? "").trim();
+  if (!normalized || (!normalized.startsWith("{") && !normalized.startsWith("["))) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(normalized) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    return parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function isLowSignalStructuredReasoning(content: string | undefined): boolean {
+  const parsed = parseStructuredObject(content);
+  if (!parsed) return false;
+  return typeof parsed.thought_number === "number"
+    && typeof parsed.total_thoughts === "number"
+    && "next_thought_needed" in parsed;
+}
+
+function isLiveContinuationStep(step: AgentStep): boolean {
+  if (step.type === "answer") {
+    return Boolean(step.streaming && step.content?.trim());
+  }
+  if (step.type === "thinking" || step.type === "thought") {
+    return Boolean(step.content?.trim());
+  }
+  if (step.type === "tool_streaming") {
+    return buildToolStreamingPreview(step.content).kind !== "spawn";
+  }
+  if (step.type === "action") {
+    if (step.toolName && LOW_SIGNAL_CONTINUATION_TOOL_NAMES.has(step.toolName)) {
+      return false;
+    }
+    return !isOrchestrationAction(step);
+  }
+  if (step.type === "observation" || step.type === "error") {
+    if (step.toolName && LOW_SIGNAL_CONTINUATION_TOOL_NAMES.has(step.toolName)) {
+      return false;
+    }
+    return Boolean(step.content?.trim())
+      && !isPureOrchestrationObservation(step.content)
+      && !isLowSignalStructuredReasoning(step.content);
+  }
+  return false;
+}
+
+function getLiveContinuationPreview(step: AgentStep | undefined): string | undefined {
+  if (!step) return undefined;
+  if (step.type === "tool_streaming") {
+    const preview = buildToolStreamingPreview(step.content);
+    return preview.kind === "spawn"
+      ? undefined
+      : compactProjectionText(`${preview.title} ${preview.body}`.trim());
+  }
+  return compactProjectionText(step.content);
+}
+
+function detectContinuationPhase(params: {
+  latestOrchestrationIndex: number;
+  latestContinuationIndex: number;
+  latestContinuationStep?: AgentStep;
+}): LocalDialogContinuationPhase | undefined {
+  if (params.latestOrchestrationIndex < 0) return undefined;
+  if (params.latestContinuationIndex <= params.latestOrchestrationIndex) {
+    return "waiting_children";
+  }
+  const step = params.latestContinuationStep;
+  const content = String(step?.content ?? "").trim();
+  if (content) {
+    if (REPAIR_CONTINUATION_PATTERNS.some((pattern) => pattern.test(content))) {
+      return "repairing";
+    }
+    if (step?.type === "answer" && !step.streaming && PUBLISHED_CONTINUATION_PATTERNS.some((pattern) => pattern.test(content))) {
+      return "published";
+    }
+  }
+  return "aggregating";
+}
+
+export function getLocalDialogLiveContinuationState(
+  steps: readonly AgentStep[] = [],
+): LocalDialogLiveContinuationState {
+  const latestOrchestrationIndex = Math.max(
+    findLastStepIndex(steps, isOrchestrationAction),
+    findLastStepIndex(steps, isSpawnStreamingStep),
+  );
+  const latestContinuationIndex = findLastStepIndex(steps, isLiveContinuationStep);
+  const latestContinuationStep = latestContinuationIndex >= 0
+    ? steps[latestContinuationIndex]
+    : undefined;
+
+  return {
+    latestOrchestrationIndex,
+    latestContinuationIndex,
+    latestContinuationTimestamp: latestContinuationStep?.timestamp,
+    latestContinuationPreview: getLiveContinuationPreview(latestContinuationStep),
+    isContinuingAfterOrchestration: latestContinuationIndex > latestOrchestrationIndex,
+    phase: detectContinuationPhase({
+      latestOrchestrationIndex,
+      latestContinuationIndex,
+      latestContinuationStep,
+    }),
+  };
+}
 
 export function shouldHideLocalDialogStreamingAnswer(
   content: string | null | undefined,
@@ -127,16 +315,7 @@ export function shouldHideLocalDialogLiveActor(params: {
   const { actorId, steps = [], workerActorIds, hasCollaborationGroups } = params;
   if (workerActorIds.has(actorId)) return true;
   if (!hasCollaborationGroups || steps.length === 0) return false;
-
-  const latestAction = [...steps].reverse().find((step) => step.type === "action");
-  if (latestAction?.toolName === "spawn_task" || latestAction?.toolName === "wait_for_spawned_tasks") {
-    return true;
-  }
-
-  const latestToolStreaming = [...steps].reverse().find((step) => step.type === "tool_streaming");
-  if (latestToolStreaming && buildToolStreamingPreview(latestToolStreaming.content).kind === "spawn") {
-    return true;
-  }
-
-  return false;
+  const continuationState = getLocalDialogLiveContinuationState(steps);
+  if (continuationState.latestOrchestrationIndex < 0) return false;
+  return !continuationState.isContinuingAfterOrchestration;
 }

@@ -143,4 +143,49 @@ describe("actor-system-store restore", () => {
       updatedAt: 210,
     });
   });
+
+  it("restores persisted dialog execution mode as plan mode", async () => {
+    const runtimeSessionId = "dialog-session-plan-mode";
+    localStorage.setItem("dialog_session_pointer", runtimeSessionId);
+    mockLoadSessionFromDisk.mockResolvedValue({
+      sessionId: runtimeSessionId,
+      createdAt: 100,
+      updatedAt: 200,
+      entries: [],
+      actorConfigs: [],
+      snapshot: {
+        version: 10,
+        sessionId: runtimeSessionId,
+        dialogHistory: [],
+        actorConfigs: [
+          {
+            id: "agent-lead-plan",
+            roleName: "Lead",
+            maxIterations: 40,
+            executionPolicy: {
+              accessMode: "auto",
+              approvalMode: "permissive",
+            },
+          },
+        ],
+        dialogExecutionMode: "plan",
+        savedAt: 1710000000000,
+      },
+    });
+
+    useActorSystemStore.getState().init();
+    await flushMicrotasks();
+    await flushMicrotasks();
+    await vi.runAllTimersAsync();
+    await flushMicrotasks();
+
+    const state = useActorSystemStore.getState();
+
+    expect(state.dialogExecutionMode).toBe("plan");
+    expect(state._system?.getDialogExecutionMode()).toBe("plan");
+    expect(state.actors[0]?.normalizedExecutionPolicy).toEqual({
+      accessMode: "read_only",
+      approvalMode: "strict",
+    });
+  });
 });

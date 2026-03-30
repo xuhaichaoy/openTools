@@ -66,6 +66,8 @@ export interface MToolsAI {
     onDone?: (full: string) => void;
     onThinking?: (chunk: string) => void;
     onToolArgs?: (chunk: string) => void;
+    /** 完整调试用：回传关键 LLM 流边界事件 */
+    onTraceEvent?: (event: string, detail?: Record<string, unknown>) => void;
     /** 运行时模型覆盖（用于多 Agent 场景下每个 Agent 使用不同模型） */
     modelOverride?: string;
     /** 运行时思考深度（用于 Actor/Dialog 等多 Agent 执行） */

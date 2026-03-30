@@ -176,14 +176,15 @@ export function useAgentRunActions({
     );
     const query = composeInputWithAttachmentSummary(userText, attachmentSummary);
     const systemHint = fileContextBlock.trim() || undefined;
-    const forceNewSession = shouldStartFreshSession(query, {
+  const forceNewSession = shouldStartFreshSession(query, {
       currentSession,
       hasImages,
       hasAttachmentPaths: (attachmentPaths?.length ?? 0) > 0,
       hasSystemHint: Boolean(systemHint),
       pendingSourceHandoff,
     });
-    const runProfile = effectiveRunProfile.profile.codingMode
+    const manualCodingEnabled = codingMode || largeProjectMode || openClawMode;
+    const runProfile = manualCodingEnabled
       ? effectiveRunProfile.profile
       : undefined;
     const codingHint = buildAgentCodingSystemHint(runProfile);

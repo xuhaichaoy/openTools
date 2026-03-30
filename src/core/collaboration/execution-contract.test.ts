@@ -92,6 +92,12 @@ describe("execution-contract", () => {
       targetActorId: "reviewer",
       roleBoundary: "reviewer",
     });
+    expect(draft.structuredDeliveryManifest).toMatchObject({
+      source: "heuristic",
+      deliveryContract: "general",
+      parentContract: "general",
+    });
+    expect(contract.structuredDeliveryManifest).toEqual(draft.structuredDeliveryManifest);
     expect(doesExecutionContractMatchActorRoster(contract, ACTOR_ROSTER)).toBe(true);
     expect(doesExecutionContractMatchActorRoster(contract, [
       ...ACTOR_ROSTER,
@@ -148,5 +154,62 @@ describe("execution-contract", () => {
       disable: ["Telemetry", "PromptBuild"],
       approvalLevel: "strict",
     });
+  });
+
+  it("deep-clones structured delivery prompt and dispatch specs", () => {
+    const draft = {
+      draftId: "draft-structured-1",
+      surface: "local_dialog",
+      executionStrategy: "coordinator",
+      summary: "structured delivery draft",
+      createdAt: 1,
+      input: { content: "请按结构化目标执行" },
+      actorRoster: ACTOR_ROSTER,
+      inputHash: "input-hash",
+      actorRosterHash: "roster-hash",
+      initialRecipientActorIds: ["coordinator"],
+      participantActorIds: ["coordinator"],
+      allowedMessagePairs: [],
+      allowedSpawnPairs: [],
+      plannedDelegations: [],
+      structuredDeliveryManifest: {
+        source: "planner",
+        strategyId: "generic_structured_rows",
+        deliveryContract: "structured_content",
+        parentContract: "structured_content",
+        requiresSpreadsheetOutput: false,
+        applyInitialIsolation: true,
+        targets: [
+          {
+            id: "target-a",
+            label: "主题 A",
+            promptSpec: {
+              objective: "围绕主题 A 生成结构化内容",
+              inputItems: ["输入 1"],
+              constraints: ["不要写文件"],
+              completionInstructions: ["直接 task_done"],
+            },
+            dispatchSpec: {
+              label: "主题 A 生成",
+              roleBoundary: "executor",
+              createIfMissing: true,
+              overrides: {
+                executionIntent: "content_executor",
+                resultContract: "inline_structured_result",
+              },
+            },
+          },
+        ],
+      },
+    } as const;
+
+    const contract = sealExecutionContract(draft, { contractId: "contract-structured-1", approvedAt: 2 });
+    draft.structuredDeliveryManifest?.targets?.[0]?.promptSpec?.inputItems?.push("输入 2");
+    if (draft.structuredDeliveryManifest?.targets?.[0]?.dispatchSpec?.overrides) {
+      draft.structuredDeliveryManifest.targets[0].dispatchSpec.overrides.executionIntent = "coding_executor";
+    }
+
+    expect(contract.structuredDeliveryManifest?.targets?.[0]?.promptSpec?.inputItems).toEqual(["输入 1"]);
+    expect(contract.structuredDeliveryManifest?.targets?.[0]?.dispatchSpec?.overrides?.executionIntent).toBe("content_executor");
   });
 });

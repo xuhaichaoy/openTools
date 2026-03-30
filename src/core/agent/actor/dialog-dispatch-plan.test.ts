@@ -1,6 +1,8 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
 import {
   buildDialogDispatchPlanBundle,
+  buildExecutionContractDraftFromDialog,
+  buildClusterPresentationFromDraft,
   inferDialogDispatchInsight,
   type DialogPlanningActor,
 } from "./dialog-dispatch-plan";
@@ -168,5 +170,98 @@ describe("dialog-dispatch-plan", () => {
       "Implementer",
     ]);
     expect(delegatedPlan?.runtimePlan.plannedSpawns?.every((spawn) => spawn.createIfMissing)).toBe(true);
+  });
+
+  it("does not mark spreadsheet content delivery as coding insight", () => {
+    const insight = inferDialogDispatchInsight({
+      content: "请根据附件 xlsx 生成课程候选，并最终导出 Excel 文件",
+      attachmentPaths: ["/repo/uploads/课程候选.xlsx"],
+    });
+
+    expect(insight.codingProfile.profile.codingMode).toBe(false);
+    expect(insight.autoModeLabel).toBeNull();
+    expect(insight.focus).toBeNull();
+  });
+
+  it("builds a planner-owned structured delivery manifest into the dialog draft and approval notes", () => {
+    const draft = buildExecutionContractDraftFromDialog({
+      actors: ACTORS,
+      routingMode: "coordinator",
+      content: [
+        "根据课程主题生成课程清单，最终给我一个 Excel 文件。",
+        "1. AI应用开发工程化实战",
+        "2. 智能体开发与知识库落地",
+        "3. 大模型安全治理与测试",
+        "4. AI产品需求转化与方案设计",
+        "5. AI产品运营增长与商业闭环",
+        "6. 银行AI解决方案咨询方法论",
+        "7. 数据分析与经营洞察实战",
+        "8. 全员AI办公赋能与协同提效",
+        "9. AI通识与智能素养提升",
+      ].join("\n"),
+      attachmentPaths: ["/repo/uploads/课程候选.xlsx"],
+      coordinatorActorId: "coordinator",
+    });
+
+    expect(draft).not.toBeNull();
+    expect(draft?.structuredDeliveryManifest).toMatchObject({
+      source: "planner",
+      strategyId: "deterministic_course_workbook",
+      deliveryContract: "spreadsheet",
+      parentContract: "single_workbook",
+    });
+    expect(draft?.structuredDeliveryManifest?.targets?.map((target) => target.label)).toEqual([
+      "技术方向课程",
+      "产品运营方向课程",
+      "数据与通识方向课程",
+    ]);
+    expect(draft?.plannedDelegations).toHaveLength(3);
+    expect(draft?.plannedDelegations.map((delegation) => delegation.label)).toEqual([
+      "技术方向课程生成",
+      "产品运营方向课程生成",
+      "数据与通识方向课程生成",
+    ]);
+    expect(draft?.plannedDelegations.every((delegation) => (
+      delegation.roleBoundary === "executor"
+      && delegation.createIfMissing === true
+      && delegation.overrides?.executionIntent === "content_executor"
+      && delegation.overrides?.resultContract === "inline_structured_result"
+    ))).toBe(true);
+    expect(draft?.plannedDelegations.map((delegation) => delegation.overrides?.deliveryTargetLabel)).toEqual([
+      "技术方向课程",
+      "产品运营方向课程",
+      "数据与通识方向课程",
+    ]);
+    expect(draft?.participantActorIds).toEqual(expect.arrayContaining([
+      "delivery-target-技术方向课程",
+      "delivery-target-产品运营方向课程",
+      "delivery-target-数据与通识方向课程",
+    ]));
+    expect(draft?.allowedSpawnPairs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ fromActorId: "coordinator", toActorId: "delivery-target-技术方向课程" }),
+      expect.objectContaining({ fromActorId: "coordinator", toActorId: "delivery-target-产品运营方向课程" }),
+      expect.objectContaining({ fromActorId: "coordinator", toActorId: "delivery-target-数据与通识方向课程" }),
+    ]));
+
+    const presentation = buildClusterPresentationFromDraft({
+      draft: draft!,
+      actors: ACTORS.map((actor) => ({ id: actor.id, roleName: actor.roleName })),
+    });
+
+    expect(presentation.notes).toContain("交付合同：spreadsheet / single_workbook");
+    expect(presentation.notes).toContain("交付目标：技术方向课程、产品运营方向课程、数据与通识方向课程");
+    expect(presentation.notes).toContain("结构化字段：课程名称、课程介绍");
+  });
+
+  it("respects manual coding mode in dialog insight", () => {
+    const insight = inferDialogDispatchInsight({
+      content: "请根据附件 xlsx 生成课程候选，并最终导出 Excel 文件",
+      attachmentPaths: ["/repo/uploads/课程候选.xlsx"],
+      manualCodingMode: true,
+    });
+
+    expect(insight.codingProfile.profile.codingMode).toBe(true);
+    expect(insight.modeSource).toBe("manual");
+    expect(insight.autoModeLabel).toBe("Coding");
   });
 });

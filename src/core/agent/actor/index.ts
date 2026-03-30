@@ -93,12 +93,39 @@ export type {
 } from "./middlewares";
 export { ActorCron } from "./actor-cron";
 export type { CronJob, CronJobStatus } from "./actor-cron";
+export {
+  applyTaskExecutorLifecycle,
+  ensureTaskExecutorRuntime,
+  resetTaskExecutorRuntimeForResume,
+  TaskExecutorRuntimeCore,
+} from "./task-executor-runtime-core";
+export {
+  getStructuredDeliveryStrategies,
+  resolveRequestedSpreadsheetExtensions,
+  resolveStructuredDeliveryManifest,
+  resolveStructuredDeliveryStrategyById,
+  resolveStructuredDeliveryStrategy,
+  taskLooksLikeCourseContentDelivery,
+  taskLooksLikeStructuredSpreadsheetDelivery,
+  taskRequestsSpreadsheetOutput,
+} from "./structured-delivery-strategy";
+export type {
+  TaskExecutorLifecyclePatch,
+  TaskExecutorLifecycleRecord,
+  TaskExecutorRuntimeState,
+  TaskExecutorTerminalStatus,
+  TaskExecutorTimeoutReason,
+  TaskExecutorTimeoutTrigger,
+  TaskExecutorUpdateReason,
+} from "./task-executor-runtime-core";
 export type {
   ActorConfig,
   ActorEvent,
   ActorEventType,
   ActorStatus,
   ActorTask,
+  DialogSubtaskProfile,
+  DialogSubtaskRuntimeState,
   InboxMessage,
   InboxMessagePriority,
   DialogMessage,

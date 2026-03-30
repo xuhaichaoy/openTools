@@ -1,4 +1,5 @@
 import type { InboxMessage } from "./types";
+import type { DialogStructuredSubtaskResult } from "./dialog-subtask-runtime";
 
 const TASK_FAILED_PATTERN = /^\[(?:Task failed|任务失败):\s*([^\]\n]+)\]/iu;
 const TASK_COMPLETED_PATTERN = /^\[(?:Task completed|任务完成):\s*([^\]\n]+)\]/iu;
@@ -7,6 +8,7 @@ export interface FollowUpMessageSummary {
   userMessageCount: number;
   userImageCount: number;
   actorMessageCount: number;
+  structuredTaskCount: number;
   hasTaskFailure: boolean;
   hasTaskCompletion: boolean;
   failedTaskLabels: string[];
@@ -30,6 +32,83 @@ function uniqueNonEmpty(values: string[]): string[] {
     result.push(normalized);
   }
   return result;
+}
+
+function compactPromptText(value: string | undefined, maxLength = 320): string | undefined {
+  const normalized = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!normalized) return undefined;
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(1, maxLength - 3)).trimEnd()}...`;
+}
+
+function extractStructuredPathCandidates(
+  structuredTasks: readonly DialogStructuredSubtaskResult[],
+): string[] {
+  const paths: string[] = [];
+  for (const task of structuredTasks) {
+    for (const artifact of task.artifacts ?? []) {
+      if (artifact.path?.trim()) {
+        paths.push(artifact.path.trim());
+      }
+    }
+    for (const source of [task.progressSummary, task.terminalResult, task.terminalError]) {
+      if (!source) continue;
+      const matches = source.match(/\/[^\s"'`]+/g) ?? [];
+      for (const match of matches) {
+        const normalized = match.replace(/[),.;:]+$/g, "").trim();
+        if (normalized) paths.push(normalized);
+      }
+    }
+  }
+  return uniqueNonEmpty(paths);
+}
+
+export function buildStructuredTaskSummaryBlock(
+  structuredTasks: readonly DialogStructuredSubtaskResult[],
+): string {
+  if (structuredTasks.length === 0) return "";
+
+  const completedCount = structuredTasks.filter((task) => task.status === "completed").length;
+  const failedCount = structuredTasks.filter((task) => task.status === "error").length;
+  const timedOutCount = structuredTasks.filter((task) => task.timeoutReason).length;
+  const abortedCount = structuredTasks.filter((task) => task.status === "aborted").length;
+  const runningCount = structuredTasks.filter((task) => task.status === "running").length;
+  const pathCandidates = extractStructuredPathCandidates(structuredTasks).slice(0, 12);
+
+  const headerLines = [
+    "## 结构化子任务摘要（本轮最终综合的主输入）",
+    `- 子任务总数：${structuredTasks.length}`,
+    `- 完成：${completedCount}；失败：${failedCount}；中止：${abortedCount}；超时：${timedOutCount}；运行中：${runningCount}`,
+    "- 聚合范围：仅允许引用当前 run 关联的结构化结果与 artifacts，禁止回头扫描 Downloads / 历史目录 / 记忆结果。",
+    pathCandidates.length > 0
+      ? `- 产物 / 路径摘要：${pathCandidates.join("、")}`
+      : "- 产物 / 路径摘要：暂无可直接抽取的明确路径，请优先引用各子任务终态里的文件路径、验证结论和 blocker。",
+  ];
+
+  const taskLines = structuredTasks.flatMap((task, index) => {
+    const title = `${index + 1}. ${task.targetActorName}${task.label ? ` · ${task.label}` : ""}`;
+    const statusLines = [
+      `- profile: ${task.profile}`,
+      task.executionIntent ? `- execution_intent: ${task.executionIntent}` : "",
+      `- status: ${task.status}${task.timeoutReason ? ` (${task.timeoutReason})` : ""}`,
+      task.progressSummary ? `- progress: ${compactPromptText(task.progressSummary)}` : "",
+      task.terminalResult ? `- terminal_result: ${compactPromptText(task.terminalResult)}` : "",
+      task.terminalError ? `- terminal_error: ${compactPromptText(task.terminalError)}` : "",
+      task.resultKind ? `- result_kind: ${task.resultKind}` : "",
+      typeof task.rowCount === "number" ? `- row_count: ${task.rowCount}` : "",
+      task.blocker ? `- blocker: ${compactPromptText(task.blocker)}` : "",
+      task.artifacts?.length
+        ? `- artifacts: ${task.artifacts
+          .slice(0, 6)
+          .map((artifact) => compactPromptText(artifact.path, 120))
+          .filter(Boolean)
+          .join("；")}`
+        : "",
+    ].filter(Boolean);
+    return [title, ...statusLines];
+  });
+
+  return [...headerLines, "", ...taskLines].join("\n");
 }
 
 function extractTaskLabel(content: string, pattern: RegExp): string | null {
@@ -70,6 +149,7 @@ export function summarizeFollowUpMessages(
     userMessageCount,
     userImageCount,
     actorMessageCount,
+    structuredTaskCount: 0,
     hasTaskFailure: failedTaskLabels.length > 0,
     hasTaskCompletion: completedTaskLabels.length > 0,
     failedTaskLabels: uniqueNonEmpty(failedTaskLabels),
@@ -77,12 +157,87 @@ export function summarizeFollowUpMessages(
   };
 }
 
+function summarizeStructuredTasks(
+  structuredTasks: readonly DialogStructuredSubtaskResult[],
+): FollowUpMessageSummary {
+  const failedTaskLabels = structuredTasks
+    .filter((task) => task.status === "error" || task.status === "aborted")
+    .map((task) => task.label ?? task.task);
+  const completedTaskLabels = structuredTasks
+    .filter((task) => task.status === "completed")
+    .map((task) => task.label ?? task.task);
+
+  return {
+    userMessageCount: 0,
+    userImageCount: 0,
+    actorMessageCount: structuredTasks.length,
+    structuredTaskCount: structuredTasks.length,
+    hasTaskFailure: failedTaskLabels.length > 0,
+    hasTaskCompletion: completedTaskLabels.length > 0,
+    failedTaskLabels: uniqueNonEmpty(failedTaskLabels),
+    completedTaskLabels: uniqueNonEmpty(completedTaskLabels),
+  };
+}
+
+function mergeFollowUpSummaries(
+  messageSummary: FollowUpMessageSummary,
+  structuredSummary: FollowUpMessageSummary,
+): FollowUpMessageSummary {
+  return {
+    userMessageCount: messageSummary.userMessageCount + structuredSummary.userMessageCount,
+    userImageCount: messageSummary.userImageCount + structuredSummary.userImageCount,
+    actorMessageCount: messageSummary.actorMessageCount + structuredSummary.actorMessageCount,
+    structuredTaskCount: messageSummary.structuredTaskCount + structuredSummary.structuredTaskCount,
+    hasTaskFailure: messageSummary.hasTaskFailure || structuredSummary.hasTaskFailure,
+    hasTaskCompletion: messageSummary.hasTaskCompletion || structuredSummary.hasTaskCompletion,
+    failedTaskLabels: uniqueNonEmpty([
+      ...messageSummary.failedTaskLabels,
+      ...structuredSummary.failedTaskLabels,
+    ]),
+    completedTaskLabels: uniqueNonEmpty([
+      ...messageSummary.completedTaskLabels,
+      ...structuredSummary.completedTaskLabels,
+    ]),
+  };
+}
+
+function renderStructuredTasks(
+  structuredTasks: readonly DialogStructuredSubtaskResult[],
+): string[] {
+  return structuredTasks.map((task) => {
+    const lines = [
+      `[结构化子任务结果] ${task.targetActorName}${task.label ? ` · ${task.label}` : ""}`,
+      `- run_id: ${task.runId}`,
+      `- profile: ${task.profile}`,
+      task.executionIntent ? `- execution_intent: ${task.executionIntent}` : "",
+      `- status: ${task.status}`,
+      task.progressSummary ? `- progress: ${task.progressSummary}` : "",
+      task.terminalResult ? `- result: ${task.terminalResult.slice(0, 320)}` : "",
+      task.terminalError ? `- error: ${task.terminalError.slice(0, 320)}` : "",
+      task.resultKind ? `- result_kind: ${task.resultKind}` : "",
+      typeof task.rowCount === "number" ? `- row_count: ${task.rowCount}` : "",
+      task.blocker ? `- blocker: ${task.blocker.slice(0, 240)}` : "",
+    ].filter(Boolean);
+    return lines.join("\n");
+  });
+}
+
 export function buildFollowUpPromptFromRenderedMessages(params: {
   renderedMessages: string[];
   summary: FollowUpMessageSummary;
+  structuredTasks?: readonly DialogStructuredSubtaskResult[];
 }): FollowUpPromptDescriptor {
-  const { renderedMessages, summary } = params;
-  const messageBlock = renderedMessages.join("\n");
+  const { renderedMessages } = params;
+  const structuredTasks = params.structuredTasks ?? [];
+  const summary = mergeFollowUpSummaries(
+    params.summary,
+    summarizeStructuredTasks(structuredTasks),
+  );
+  const blocks = [
+    renderedMessages.join("\n"),
+    ...renderStructuredTasks(structuredTasks),
+  ].filter(Boolean);
+  const messageBlock = blocks.join("\n");
   const failedSummary = summary.failedTaskLabels.length
     ? `失败子任务：${summary.failedTaskLabels.join("、")}`
     : "存在子任务失败。";
@@ -142,8 +297,12 @@ export function buildFollowUpPromptFromRenderedMessages(params: {
 export function buildFinalSynthesisPrompt(params?: {
   hadFailedSpawnFollowUp?: boolean;
   failedTaskLabels?: string[];
+  structuredTasks?: readonly DialogStructuredSubtaskResult[];
+  deliveryPlanBlock?: string;
 }): string {
   const failedTaskSummary = uniqueNonEmpty(params?.failedTaskLabels ?? []);
+  const structuredTasks = params?.structuredTasks ?? [];
+  const structuredSummaryBlock = buildStructuredTaskSummaryBlock(structuredTasks);
   const failureLine = params?.hadFailedSpawnFollowUp
     ? `注意：本轮至少有一个子任务失败${failedTaskSummary.length ? `（${failedTaskSummary.join("、")}）` : ""}。`
     : "";
@@ -154,16 +313,22 @@ export function buildFinalSynthesisPrompt(params?: {
   return [
     "你派发的子任务现在都已经结束。",
     failureLine,
-    "请基于当前会话中的已有结果和刚收到的子任务反馈，输出给上游的最终综合答复。",
+    structuredSummaryBlock,
+    params?.deliveryPlanBlock ?? "",
+    structuredTasks.length > 0
+      ? "请直接以上面的结构化子任务摘要作为主要事实来源，输出给上游的最终综合答复。"
+      : "请基于当前会话中的已有结果和刚收到的子任务反馈，输出给上游的最终综合答复。",
     "要求：",
     "1. 直接给结论，不要再说“稍后整理”“继续汇总”之类的中间态话术。",
-    "2. 明确列出已经完成的部分与最终判断。",
-    "3. 如果仍有缺口，只说明真实缺口，不要重复之前已经完成的工作。",
+    "2. 明确列出已经完成的部分、真实产物路径、验证结论与最终判断。",
+    "3. 如果子任务里已经给出 terminal_result / terminal_error / progress / artifacts，不要重新猜测；优先直接引用这些结构化事实。",
+    "4. 只允许引用当前 run 关联的 artifacts；禁止回头扫描 Downloads、历史文件、memory_search 结果或旧产物目录。",
+    "5. 如果仍有缺口，只说明真实缺口，不要重复之前已经完成的工作。",
     params?.hadFailedSpawnFollowUp
-      ? "4. 既然出现过子任务失败，先完成一次主协调复核：自己接管补齐，或说明你已经带着明确输出与验收标准完成过一次重派。"
+      ? "6. 既然出现过子任务失败，先完成一次主协调复核：自己接管补齐，或说明你已经带着明确输出与验收标准完成过一次重派。"
       : "",
     params?.hadFailedSpawnFollowUp
-      ? "5. 禁止只输出过程纪要、分段任务汇总、执行计划或状态盘点。"
+      ? "7. 禁止只输出过程纪要、分段任务汇总、执行计划或状态盘点。"
       : "",
     takeoverLine,
   ].filter(Boolean).join("\n");

@@ -38,6 +38,7 @@ import { buildDialogSpawnedTaskHandoff } from "@/core/agent/actor/spawned-task-c
 import {
   describeCodingExecutionProfile,
   inferCodingExecutionProfile,
+  normalizeCodingExecutionProfile,
 } from "@/core/agent/coding-profile";
 import { useActorSystemStore, type ActorSnapshot } from "@/store/actor-system-store";
 import { useAIStore } from "@/store/ai-store";
@@ -80,6 +81,15 @@ import { KnowledgeGraph } from "@/core/knowledge/knowledge-graph";
 import { queueAssistantMemoryCandidates } from "@/core/ai/assistant-memory";
 import { shouldAutoSaveAssistantMemory } from "@/core/ai/assistant-config";
 import { DIALOG_FULL_ROLE } from "@/core/agent/actor/agent-actor";
+import {
+  getDialogStepTraceMode,
+  getDialogStepTracePath,
+  isDialogStepTraceEnabled,
+  resetDialogStepTrace,
+  setDialogStepTraceMode,
+  traceDialogFlowEvent,
+  traceDialogSessionStarted,
+} from "@/core/agent/actor/dialog-step-trace";
 import { getSpawnedTaskRoleBoundaryMeta } from "@/core/agent/actor/spawned-task-role-boundary";
 import type {
   DialogArtifactRecord,
@@ -134,6 +144,7 @@ import {
   mergeLocalDialogTranscriptItems,
 } from "./actor-chat-panel/DialogCollaborationTimeline";
 import {
+  getLocalDialogLiveContinuationState,
   shouldHideLocalDialogLiveActor,
   shouldHideLocalDialogMessage,
   shouldRenderLocalDialogStreamingAnswer,
@@ -363,6 +374,19 @@ function describeAgentActivity(
         return "执行计算";
       case "sequential_thinking":
         return `推理分析中`;
+      case "wait_for_spawned_tasks":
+        return "等待子任务结果";
+      case "agents":
+        switch (String(input.action ?? "").trim()) {
+          case "list":
+            return "查看协作状态";
+          case "steer":
+            return "补充子任务方向";
+          case "kill":
+            return "终止子任务";
+          default:
+            return "处理协作状态";
+        }
       case "ckg_search_function":
       case "ckg_search_class":
       case "ckg_search_class_method":
@@ -417,6 +441,24 @@ function describeAgentActivity(
         if (target) return `子任务已派发给 ${target}`;
         return "子任务已派发，等待进展";
       }
+      if (name === "wait_for_spawned_tasks") {
+        const preview = summarizeObservationPreview(latest.content, 120);
+        return preview ?? "已同步子任务结果，继续汇总";
+      }
+      if (name === "agents") {
+        const action = String(prevAction.toolInput?.action ?? "").trim();
+        if (action === "list") {
+          return "已同步协作状态";
+        }
+        if (action === "steer") {
+          const target = String(prevAction.toolInput?.target ?? "").trim();
+          return target ? `已补充 ${target} 的方向` : "已补充子任务方向";
+        }
+        if (action === "kill") {
+          const target = String(prevAction.toolInput?.target ?? "").trim();
+          return target ? `已终止 ${target}` : "已终止目标子任务";
+        }
+      }
       return `${name} 完成，继续处理`;
     }
     return `处理结果中`;
@@ -464,6 +506,19 @@ function buildActionDetail(toolName: string, input: Record<string, unknown>): st
       return `检索记忆: "${String(input.query ?? "").slice(0, 48)}"`;
     case "spawn_task":
       return `派发: ${String(input.target_agent ?? "")} - ${String(input.task ?? "").slice(0, 60)}`;
+    case "wait_for_spawned_tasks":
+      return "等待已派发子任务返回结构化结果";
+    case "agents":
+      switch (String(input.action ?? "").trim()) {
+        case "list":
+          return "查看当前协作状态与任务树";
+        case "steer":
+          return `补充方向: ${String(input.target ?? "")} - ${String(input.directive ?? "").slice(0, 60)}`;
+        case "kill":
+          return `终止目标: ${String(input.target ?? "")}`;
+        default:
+          return "查看协作状态";
+      }
     default:
       return toolName;
   }
@@ -504,6 +559,31 @@ function summarizeObservationPreview(content: string | undefined, max = 120): st
 
       if (parsed && typeof parsed === "object") {
         const objectValue = parsed as Record<string, unknown>;
+        if (
+          typeof objectValue.pending_count === "number"
+          && typeof objectValue.completed_count === "number"
+          && typeof objectValue.failed_count === "number"
+          && Array.isArray(objectValue.tasks)
+        ) {
+          const pendingCount = Number(objectValue.pending_count ?? 0);
+          const completedCount = Number(objectValue.completed_count ?? 0);
+          const failedCount = Number(objectValue.failed_count ?? 0);
+          if (pendingCount > 0) {
+            return `子任务运行中：待完成 ${pendingCount}，已完成 ${completedCount}，失败 ${failedCount}`;
+          }
+          if (failedCount > 0) {
+            return `子任务已收齐：完成 ${completedCount}，失败 ${failedCount}`;
+          }
+          return `子任务已全部完成，共 ${completedCount} 个`;
+        }
+
+        if (Array.isArray(objectValue.agents) && Array.isArray(objectValue.task_tree)) {
+          const runningTaskCount = objectValue.task_tree
+            .filter((item) => item && typeof item === "object" && (item as Record<string, unknown>).status === "running")
+            .length;
+          return `协作状态已同步：${objectValue.agents.length} 个 Agent，${runningTaskCount} 个运行中子任务`;
+        }
+
         const results = Array.isArray(objectValue.results) ? objectValue.results : null;
         if (results) {
           const firstResult = results.find((item) => item && typeof item === "object") as Record<string, unknown> | undefined;
@@ -620,6 +700,7 @@ function buildDialogAgentHandoff(params: {
   artifacts: DialogArtifact[];
   sessionUploads: SessionUploadRecord[];
   spawnedTasks: SpawnedTaskRecord[];
+  manualCodingMode?: boolean;
   dialogContextSummary?: DialogContextSummary | null;
   dialogRoomCompaction?: DialogRoomCompactionState | null;
   sourceSessionId?: string;
@@ -635,6 +716,7 @@ function buildDialogAgentHandoff(params: {
     artifacts,
     sessionUploads,
     spawnedTasks,
+    manualCodingMode,
     dialogContextSummary,
     dialogRoomCompaction,
     sourceSessionId,
@@ -713,10 +795,9 @@ function buildDialogAgentHandoff(params: {
   const latestUserMessage = [...recentMessages]
     .reverse()
     .find((message) => message.from === "user" && (message._briefContent || message.content).trim());
-  const inferredCoding = inferCodingExecutionProfile({
-    query,
-    attachmentPaths,
-  });
+  const inferredCodingProfile = manualCodingMode
+    ? normalizeCodingExecutionProfile({ codingMode: true })
+    : normalizeCodingExecutionProfile({ codingMode: false });
 
   return normalizeAICenterHandoff({
     query,
@@ -727,7 +808,7 @@ function buildDialogAgentHandoff(params: {
       latestUserMessage?._briefContent || latestUserMessage?.content,
       120,
     ) || "延续 Dialog 房间中的当前协作任务",
-    intent: inferredCoding.profile.codingMode ? "coding" : "delivery",
+    intent: inferredCodingProfile.codingMode ? "coding" : "delivery",
     keyPoints: [
       dialogRoomCompaction
         ? `已压缩更早的 ${dialogRoomCompaction.compactedMessageCount} 条房间消息`
@@ -781,6 +862,7 @@ const MARKDOWN_REMARK_PLUGINS = [remarkGfm];
 const FILE_PATH_REGEX = /(?:\/[\w.\-/]+\.(?:xlsx|csv|pdf|docx|pptx|xls))/g;
 const NEW_MESSAGE_TARGET = "__new_message__";
 const DIALOG_PLAN_APPROVAL_KEY = "dialog-plan-approval-enabled";
+const DIALOG_MANUAL_CODING_KEY = "dialog-manual-coding-enabled";
 // ── Main Panel ──
 
 export function ActorChatPanel({
@@ -814,6 +896,13 @@ export function ActorChatPanel({
       return false;
     }
   });
+  const [manualCodingMode, setManualCodingMode] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(DIALOG_MANUAL_CODING_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
   const [lastPlanReview, setLastPlanReview] = useState<DialogPlanReview | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const chatScrollRef = useRef<HTMLDivElement>(null);
@@ -837,12 +926,12 @@ export function ActorChatPanel({
   const {
     active: systemActive, actors, dialogHistory, pendingUserInteractions, spawnedTasks, spawnedTaskEvents, artifacts: structuredArtifacts,
     sessionUploads, queuedFollowUps, dialogRoomCompaction,
-    coordinatorActorId, actorTodos, sourceHandoff: incomingHandoff, contextSnapshot, collaborationSnapshot,
+    coordinatorActorId, actorTodos, sourceHandoff: incomingHandoff, contextSnapshot, collaborationSnapshot, dialogExecutionMode,
     init, spawnActor, killActor, destroyAll,
     abortAll, closeSpawnedSession, abortSpawnedSession, resetSession, removeFollowUp, clearQueuedFollowUps,
     dispatchDialogInput, replyToPendingInteraction, applyDraftExecutionContract, runQueuedFollowUp,
     sync, routeTask, getSystem, setSourceHandoff,
-    setCoordinator, reorderActors, updateActorConfig,
+    setCoordinator, reorderActors, updateActorConfig, setDialogExecutionMode,
   } = useActorSystemStore(
     useShallow((state) => ({
       active: active ? state.active : false,
@@ -860,6 +949,7 @@ export function ActorChatPanel({
       sourceHandoff: active ? state.sourceHandoff : null,
       contextSnapshot: active ? state.contextSnapshot : null,
       collaborationSnapshot: active ? state.collaborationSnapshot : null,
+      dialogExecutionMode: active ? state.dialogExecutionMode : "execute",
       init: state.init,
       spawnActor: state.spawnActor,
       killActor: state.killActor,
@@ -881,6 +971,7 @@ export function ActorChatPanel({
       setCoordinator: state.setCoordinator,
       reorderActors: state.reorderActors,
       updateActorConfig: state.updateActorConfig,
+      setDialogExecutionMode: state.setDialogExecutionMode,
     })),
   );
 
@@ -917,6 +1008,8 @@ export function ActorChatPanel({
   const pendingAICenterHandoff = useAppStore((s) => (active ? s.pendingAICenterHandoff : null));
   const config = useAIStore((s) => s.config);
   const { toast } = useToast();
+  const [dialogTraceMode, setDialogTraceModeState] = useState(() => getDialogStepTraceMode());
+  const [dialogStepTracePath, setDialogStepTracePath] = useState<string | null>(null);
   const [dialogSavedChannels, setDialogSavedChannels] = useState<SavedChannelEntry[]>([]);
   const [dialogChannelStatuses, setDialogChannelStatuses] = useState<Record<string, ChannelStatus>>({});
   const [dialogChannelConnectPending, setDialogChannelConnectPending] = useState<
@@ -1532,6 +1625,13 @@ export function ActorChatPanel({
       // ignore
     }
   }, [requirePlanApproval]);
+  useEffect(() => {
+    try {
+      localStorage.setItem(DIALOG_MANUAL_CODING_KEY, manualCodingMode ? "1" : "0");
+    } catch {
+      // ignore
+    }
+  }, [manualCodingMode]);
 
   const scrollDialogToBottom = useCallback((instant = false) => {
     const container = chatScrollRef.current;
@@ -1643,14 +1743,24 @@ export function ActorChatPanel({
     pendingUserInteractions.forEach((interaction) => map.set(interaction.messageId, interaction));
     return map;
   }, [pendingUserInteractions]);
+  const collaborationParentActivityByActorId = useMemo(
+    () => new Map(
+      runningActors.map((actor) => [
+        actor.id,
+        getLocalDialogLiveContinuationState(actor.currentTask?.steps ?? []),
+      ] as const),
+    ),
+    [runningActors],
+  );
   const collaborationTimelineGroups = useMemo(
     () => buildLocalCollaborationTimelineGroups({
       events: spawnedTaskEvents,
       spawnedTasks,
       dialogHistory,
       actorNameById,
+      parentActivityByActorId: collaborationParentActivityByActorId,
     }),
-    [actorNameById, dialogHistory, spawnedTaskEvents, spawnedTasks],
+    [actorNameById, collaborationParentActivityByActorId, dialogHistory, spawnedTaskEvents, spawnedTasks],
   );
   const collaborationWorkerActorIds = useMemo(
     () => new Set(collaborationTimelineGroups.flatMap((group) => group.workers.map((worker) => worker.targetActorId))),
@@ -1923,6 +2033,7 @@ export function ActorChatPanel({
       artifacts,
       sessionUploads,
       spawnedTasks,
+      manualCodingMode,
       dialogContextSummary,
       dialogRoomCompaction,
       sourceSessionId: getSystem()?.sessionId,
@@ -1934,7 +2045,7 @@ export function ActorChatPanel({
       handoff,
       navigate: false,
     });
-  }, [actorById, artifacts, dialogContextSummary, dialogHistory, dialogRoomCompaction, getSystem, sessionUploads, spawnedTasks]);
+  }, [actorById, artifacts, dialogContextSummary, dialogHistory, dialogRoomCompaction, getSystem, manualCodingMode, sessionUploads, spawnedTasks]);
   const handleContinueSpawnedTaskWithAgent = useCallback((runId: string) => {
     const task = spawnedTasks.find((item) => item.runId === runId);
     if (!task) return;
@@ -1988,6 +2099,89 @@ export function ActorChatPanel({
     setInputNotice(null);
     inputRef.current?.focus();
   }, []);
+  const handleToggleQuickPlanApproval = useCallback(() => {
+    setRequirePlanApproval((current) => {
+      const next = !current;
+      toast("info", next ? "已开启发送前计划审批" : "已切换为直接发送");
+      return next;
+    });
+  }, [toast]);
+  const hasActiveExecutionInRoom = useMemo(() => (
+    actors.some((actor) => actor.status !== "idle")
+    || spawnedTasks.some((task) => task.status === "running" || (task.mode === "session" && task.sessionOpen))
+  ), [actors, spawnedTasks]);
+  const handleToggleManualCodingMode = useCallback(() => {
+    setManualCodingMode((current) => {
+      const next = !current;
+      toast(
+        "info",
+        next
+          ? (hasActiveExecutionInRoom
+            ? "已开启 Dialog Coding：对后续新消息生效；当前运行中的任务不重建。"
+            : "已开启 Dialog Coding：后续新消息按 Coding 路线分派。")
+          : (hasActiveExecutionInRoom
+            ? "已关闭 Dialog Coding：对后续新消息生效；当前运行中的任务不重建。"
+            : "已关闭 Dialog Coding：后续新消息按普通协作处理。"),
+      );
+      return next;
+    });
+  }, [hasActiveExecutionInRoom, toast]);
+  const handleToggleDialogExecutionMode = useCallback(() => {
+    ensureSystem();
+    if (hasActiveExecutionInRoom) {
+      toast("warning", "当前仍有运行中的主线程或子任务，请等待房间空闲后再切换规划模式。");
+      return;
+    }
+    const nextMode = dialogExecutionMode === "plan" ? "execute" : "plan";
+    try {
+      setDialogExecutionMode(nextMode);
+      toast("info", nextMode === "plan"
+        ? "已切换到规划模式：本轮只读分析，不执行落地操作"
+        : "已切回执行模式：可以继续实际实现与派工");
+      if (nextMode === "plan") {
+        setInputNotice("当前为规划模式：主 Agent 只做分析、方案和风险评估，不执行修改或派工。");
+      } else if (inputNotice?.includes("规划模式")) {
+        setInputNotice(null);
+      }
+    } catch (error) {
+      toast("warning", error instanceof Error ? error.message : "切换规划模式失败");
+    }
+  }, [dialogExecutionMode, ensureSystem, hasActiveExecutionInRoom, inputNotice, setDialogExecutionMode, toast]);
+  const handleCopyDialogStepTracePath = useCallback(() => {
+    const tracePath = dialogStepTracePath?.trim();
+    if (!tracePath) {
+      toast("warning", "调试日志路径尚未就绪，请稍后再试");
+      return;
+    }
+    if (!globalThis.navigator?.clipboard?.writeText) {
+      toast("warning", "当前环境不支持剪贴板复制");
+      return;
+    }
+    globalThis.navigator.clipboard.writeText(tracePath).then(() => {
+      toast("success", "已复制调试日志路径");
+    }).catch(() => {
+      toast("warning", "复制路径失败");
+    });
+  }, [dialogStepTracePath, toast]);
+  const handleToggleDialogFullTrace = useCallback(() => {
+    const nextMode = dialogTraceMode === "full" ? "off" : "full";
+    setDialogStepTraceMode(nextMode);
+    setDialogTraceModeState(nextMode);
+    if (nextMode === "full") {
+      resetDialogStepTrace();
+      const system = getSystem();
+      if (system) {
+        traceDialogSessionStarted(system.sessionId);
+        traceDialogFlowEvent({
+          sessionId: system.sessionId,
+          event: "full_trace_enabled",
+        });
+      }
+      toast("info", "已开启完整调试：后续会把全链路写入本地 txt");
+      return;
+    }
+    toast("info", "已关闭完整调试日志");
+  }, [dialogTraceMode, getSystem, toast]);
   const handleAbortChildSession = useCallback(async (runId: string) => {
     const task = spawnedTasks.find((item) => item.runId === runId && item.mode === "session" && item.sessionOpen);
     if (!task) return;
@@ -2187,6 +2381,7 @@ export function ActorChatPanel({
           content: nextItem.content,
           attachmentSummary: nextItem.briefContent,
           attachmentPaths: nextItem.attachmentPaths,
+          manualCodingMode,
         });
         const selectedRoute = nextItem.routingMode === "smart"
           ? routeTask(nextItem.content, dispatchInsight.preferredCapabilities)[0] ?? null
@@ -2197,6 +2392,7 @@ export function ActorChatPanel({
           content: nextItem.content,
           attachmentSummary: nextItem.briefContent,
           attachmentPaths: nextItem.attachmentPaths ?? [],
+          manualCodingMode,
           mentionedTargetId: directTargetActorId ?? null,
           selectedRoute,
           coordinatorActorId,
@@ -2207,6 +2403,7 @@ export function ActorChatPanel({
           content: nextItem.content,
           attachmentSummary: nextItem.briefContent,
           attachmentPaths: nextItem.attachmentPaths ?? [],
+          manualCodingMode,
           mentionedTargetId: directTargetActorId ?? null,
           selectedRoute,
           coordinatorActorId,
@@ -2278,6 +2475,7 @@ export function ActorChatPanel({
     coordinatorActorId,
     dispatchDialogInput,
     getSystem,
+    manualCodingMode,
     queueDialogUserMemoryCapture,
     queuedFollowUps,
     removeFollowUp,
@@ -2376,6 +2574,7 @@ export function ActorChatPanel({
       content: finalContent,
       attachmentSummary: planAttachmentSummary,
       attachmentPaths: inputAttachmentPaths,
+      manualCodingMode,
       handoff: incomingHandoff,
     });
     const smartRoutes = !targetId && routingMode === "smart" && finalContent
@@ -2417,6 +2616,7 @@ export function ActorChatPanel({
         content: finalContent,
         attachmentSummary: planAttachmentSummary,
         attachmentPaths: inputAttachmentPaths,
+        manualCodingMode,
         handoff: incomingHandoff,
         mentionedTargetId: targetId,
         selectedRoute: selectedSmartRoute,
@@ -2428,6 +2628,7 @@ export function ActorChatPanel({
         content: finalContent,
         attachmentSummary: planAttachmentSummary,
         attachmentPaths: inputAttachmentPaths,
+        manualCodingMode,
         handoff: incomingHandoff,
         mentionedTargetId: targetId,
         selectedRoute: selectedSmartRoute,
@@ -2504,7 +2705,7 @@ export function ActorChatPanel({
     clearAttachments();
     setSourceHandoff(null);
     inputRef.current?.focus();
-  }, [input, hasAttachments, imagePaths, attachments, fileContextBlock, attachmentSummary, ensureSystem, pendingUserInteractions, pendingInteractionByMessageId, selectedPendingMessageId, parseMention, actors, routingMode, routeTask, clearAttachments, requirePlanApproval, coordinatorActorId, queueDialogUserMemoryCapture, inputAttachmentPaths, incomingHandoff, actorSupportsImageInput, toast, dispatchDialogInput, applyDraftExecutionContract, getSystem, setSourceHandoff, activeDialogView, pendingSteerTargetActorId, reviewExecutionContractBoundary]);
+  }, [input, hasAttachments, imagePaths, attachments, fileContextBlock, attachmentSummary, ensureSystem, pendingUserInteractions, pendingInteractionByMessageId, selectedPendingMessageId, parseMention, actors, routingMode, routeTask, clearAttachments, requirePlanApproval, coordinatorActorId, queueDialogUserMemoryCapture, inputAttachmentPaths, incomingHandoff, actorSupportsImageInput, toast, dispatchDialogInput, applyDraftExecutionContract, getSystem, setSourceHandoff, activeDialogView, pendingSteerTargetActorId, reviewExecutionContractBoundary, manualCodingMode]);
 
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value;
@@ -2724,6 +2925,7 @@ export function ActorChatPanel({
       content,
       attachmentSummary: brief,
       attachmentPaths: inputAttachmentPaths,
+      manualCodingMode,
       handoff: incomingHandoff,
     });
     const smartRoute = !targetId && routingMode === "smart" && content
@@ -2736,12 +2938,13 @@ export function ActorChatPanel({
       content,
       attachmentSummary: brief,
       attachmentPaths: inputAttachmentPaths,
+      manualCodingMode,
       handoff: incomingHandoff,
       mentionedTargetId: targetId,
       selectedRoute: smartRoute,
       coordinatorActorId,
     });
-  }, [input, fileContextBlock, imagePaths, selectedPendingMessageId, pendingInteractionByMessageId, pendingUserInteractions, parseMention, attachmentSummary, routingMode, routeTask, actors, coordinatorActorId, inputAttachmentPaths, incomingHandoff]);
+  }, [input, fileContextBlock, imagePaths, selectedPendingMessageId, pendingInteractionByMessageId, pendingUserInteractions, parseMention, attachmentSummary, routingMode, routeTask, actors, coordinatorActorId, inputAttachmentPaths, incomingHandoff, manualCodingMode]);
   const draftDispatchPlan = draftDispatchBundle?.clusterPlan ?? null;
   const draftDispatchInsight = draftDispatchBundle?.insight ?? null;
   const contextBreakdown = useMemo(
@@ -2779,8 +2982,9 @@ export function ActorChatPanel({
       content: latestUserMessage.content,
       attachmentSummary: latestAttachmentSummary,
       attachmentPaths: latestUserMessage.images ?? [],
+      manualCodingMode,
     });
-  }, [dialogHistory, draftDispatchInsight]);
+  }, [dialogHistory, draftDispatchInsight, manualCodingMode]);
   const activeDispatchInsight = draftDispatchInsight ?? latestUserDispatchInsight ?? lastCommittedDispatchInsight;
   const hasActiveCollaborationFlow = useMemo(
     () =>
@@ -2849,6 +3053,35 @@ export function ActorChatPanel({
     queuedFollowUps.length,
     runningActors.length,
   ]);
+  const dialogStepTraceEnabled = useMemo(
+    () => activeDialogView === "local" && isDialogStepTraceEnabled(),
+    [activeDialogView],
+  );
+  const dialogFullTraceEnabled = dialogStepTraceEnabled && dialogTraceMode === "full";
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!active || !dialogStepTraceEnabled) {
+      setDialogStepTracePath(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+    void getDialogStepTracePath()
+      .then((path) => {
+        if (!cancelled) {
+          setDialogStepTracePath(path);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setDialogStepTracePath(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [active, dialogStepTraceEnabled]);
 
   useEffect(() => {
     if (dialogHistory.length === 0) {
@@ -3070,6 +3303,26 @@ export function ActorChatPanel({
                       {badge.label}
                     </span>
                   ))}
+                </div>
+              )}
+
+              {activeDialogView === "local" && dialogStepTraceEnabled && (
+                <div className="flex min-w-0 items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1 text-[10px] text-[var(--color-text-secondary)]">
+                  <FileDown className="h-3 w-3 text-[var(--color-text-tertiary)]" />
+                  <span className="shrink-0">调试日志</span>
+                  <span
+                    className="max-w-[280px] truncate text-[var(--color-text-tertiary)]"
+                    title={dialogStepTracePath ?? "正在解析路径..."}
+                  >
+                    {dialogStepTracePath ?? "正在解析路径..."}
+                  </span>
+                  <button
+                    onClick={handleCopyDialogStepTracePath}
+                    className="inline-flex shrink-0 items-center gap-1 rounded-full border border-[var(--color-border)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)]/25 hover:text-[var(--color-text)]"
+                    title="复制调试日志路径"
+                  >
+                    复制路径
+                  </button>
                 </div>
               )}
 
@@ -3770,6 +4023,8 @@ export function ActorChatPanel({
                           ? `向 ${pendingSteerTargetLabel} 发送 steer 指令...`
                           : pendingUserInteractions.length > 0
                             ? `有 ${pendingUserInteractions.length} 条待回复交互，先选择要回复的问题...`
+                            : dialogExecutionMode === "plan"
+                              ? "输入规划问题给主 Agent；当前只做只读分析、方案设计和风险评估"
                             : isReviewSurface
                               ? "输入审查任务给主 Agent；它会按只读审查边界组织协作，不直接改业务文件"
                               : "输入消息给主 Agent，必要时它会自动复用后台线程或分派子 Agent"}
@@ -3782,7 +4037,7 @@ export function ActorChatPanel({
                 </div>
 
                 <div className="flex flex-col gap-2 border-t border-[var(--color-border)] px-3 py-1.5 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="flex flex-wrap items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                     <AttachDropdown
                       onFileClick={() => {
                         if ("__TAURI_INTERNALS__" in window) {
@@ -3795,15 +4050,144 @@ export function ActorChatPanel({
                       accent="accent"
                     />
                     <RoutingModeButton value={routingMode} onChange={setRoutingMode} />
-                    {activeDispatchInsight?.autoModeLabel && (
+                    {actors.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleToggleManualCodingMode}
+                        aria-pressed={manualCodingMode}
+                        title={manualCodingMode
+                          ? "当前开启：后续新消息按 Coding 路线分派"
+                          : "当前关闭：Dialog 不自动走 Coding，需手动开启"}
+                        className={`inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[10px] transition-colors ${
+                          manualCodingMode
+                            ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 hover:border-emerald-500/45 hover:bg-emerald-500/15"
+                            : "border-[var(--color-border)] bg-[var(--color-bg)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/25 hover:text-[var(--color-text)]"
+                        }`}
+                      >
+                        <Brain className="w-3 h-3" />
+                        <span>Coding</span>
+                        <span
+                          className={`relative inline-flex h-4 w-7 shrink-0 rounded-full transition-colors ${
+                            manualCodingMode ? "bg-emerald-500/80" : "bg-[var(--color-border)]"
+                          }`}
+                        >
+                          <span
+                            className={`absolute top-0.5 h-3 w-3 rounded-full bg-white shadow-sm transition-transform ${
+                              manualCodingMode ? "translate-x-3.5" : "translate-x-0.5"
+                            }`}
+                          />
+                        </span>
+                      </button>
+                    )}
+                    {actors.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleToggleDialogFullTrace}
+                        aria-pressed={dialogFullTraceEnabled}
+                        title={dialogFullTraceEnabled
+                          ? "当前开启：记录完整 Dialog/Agent/Subagent/LLM/tool 调试链路"
+                          : "当前关闭：不写完整调试日志"}
+                        className={`inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[10px] transition-colors ${
+                          dialogFullTraceEnabled
+                            ? "border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-700 hover:border-fuchsia-500/45 hover:bg-fuchsia-500/15"
+                            : "border-[var(--color-border)] bg-[var(--color-bg)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/25 hover:text-[var(--color-text)]"
+                        }`}
+                      >
+                        <FileDown className="w-3 h-3" />
+                        <span>完整调试</span>
+                        <span
+                          className={`relative inline-flex h-4 w-7 shrink-0 rounded-full transition-colors ${
+                            dialogFullTraceEnabled ? "bg-fuchsia-500/80" : "bg-[var(--color-border)]"
+                          }`}
+                        >
+                          <span
+                            className={`absolute top-0.5 h-3 w-3 rounded-full bg-white shadow-sm transition-transform ${
+                              dialogFullTraceEnabled ? "translate-x-3.5" : "translate-x-0.5"
+                            }`}
+                          />
+                        </span>
+                      </button>
+                    )}
+                    {actors.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleToggleDialogExecutionMode}
+                        aria-pressed={dialogExecutionMode === "plan"}
+                        disabled={hasActiveExecutionInRoom}
+                        title={hasActiveExecutionInRoom
+                          ? "当前仍有运行中的主线程或子任务，暂时不能切换规划模式"
+                          : dialogExecutionMode === "plan"
+                            ? "当前开启：只读分析，不执行修改或派工"
+                            : "当前关闭：房间处于正常执行模式"}
+                        className={`inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[10px] transition-colors ${
+                          dialogExecutionMode === "plan"
+                            ? "border-sky-500/30 bg-sky-500/10 text-sky-700 hover:border-sky-500/45 hover:bg-sky-500/15"
+                            : "border-[var(--color-border)] bg-[var(--color-bg)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/25 hover:text-[var(--color-text)]"
+                        } ${hasActiveExecutionInRoom ? "cursor-not-allowed opacity-60" : ""}`}
+                      >
+                        <ListChecks className="w-3 h-3" />
+                        <span>规划模式</span>
+                        <span
+                          className={`relative inline-flex h-4 w-7 shrink-0 rounded-full transition-colors ${
+                            dialogExecutionMode === "plan" ? "bg-sky-500/80" : "bg-[var(--color-border)]"
+                          }`}
+                        >
+                          <span
+                            className={`absolute top-0.5 h-3 w-3 rounded-full bg-white shadow-sm transition-transform ${
+                              dialogExecutionMode === "plan" ? "translate-x-3.5" : "translate-x-0.5"
+                            }`}
+                          />
+                        </span>
+                      </button>
+                    )}
+                    {actors.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleToggleQuickPlanApproval}
+                        aria-pressed={requirePlanApproval}
+                        title={requirePlanApproval
+                          ? "当前开启：发送前会先审批执行计划"
+                          : "当前关闭：消息将直接进入执行"}
+                        className={`inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[10px] transition-colors ${
+                          requirePlanApproval
+                            ? "border-amber-500/30 bg-amber-500/10 text-amber-700 hover:border-amber-500/45 hover:bg-amber-500/15"
+                            : "border-[var(--color-border)] bg-[var(--color-bg)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/25 hover:text-[var(--color-text)]"
+                        }`}
+                      >
+                        <ShieldCheck className="w-3 h-3" />
+                        <span>计划审批</span>
+                        <span
+                          className={`relative inline-flex h-4 w-7 shrink-0 rounded-full transition-colors ${
+                            requirePlanApproval ? "bg-amber-500/80" : "bg-[var(--color-border)]"
+                          }`}
+                        >
+                          <span
+                            className={`absolute top-0.5 h-3 w-3 rounded-full bg-white shadow-sm transition-transform ${
+                              requirePlanApproval ? "translate-x-3.5" : "translate-x-0.5"
+                            }`}
+                          />
+                        </span>
+                      </button>
+                    )}
+                    {manualCodingMode && activeDispatchInsight?.autoModeLabel && (
                       <span
                         className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-[10px] text-emerald-700"
                         title={activeDispatchInsight.reasons.join(" · ")}
                       >
-                        {draftDispatchInsight ? "自动" : "当前任务"} {activeDispatchInsight.autoModeLabel}
+                        {activeDispatchInsight.modeSource === "manual" ? "手动" : (draftDispatchInsight ? "自动" : "当前任务")} {activeDispatchInsight.autoModeLabel}
                         {activeDispatchInsight.focusLabel
                           ? ` · ${activeDispatchInsight.focusLabel}`
                           : ""}
+                      </span>
+                    )}
+                    {dialogExecutionMode === "plan" && (
+                      <span className="rounded-full border border-sky-500/20 bg-sky-500/10 px-2.5 py-1 text-[10px] text-sky-700">
+                        只读规划中
+                      </span>
+                    )}
+                    {dialogFullTraceEnabled && (
+                      <span className="rounded-full border border-fuchsia-500/20 bg-fuchsia-500/10 px-2.5 py-1 text-[10px] text-fuchsia-700">
+                        完整调试中
                       </span>
                     )}
                     {selectedPendingInteractionLabel ? (
@@ -3896,7 +4280,7 @@ export function ActorChatPanel({
                       {effectiveMainBudgetLabel}
                     </div>
                     <div className="mt-1 text-[10px] text-[var(--color-text-secondary)]">
-                      当前协调者 {coordinatorActor?.roleName ?? "Lead"} 的实际预算；超时后显示主线程原因
+                      当前协调者 {coordinatorActor?.roleName ?? "Lead"} 的实际预算；等待子任务期间暂停主预算，child 仍按各自预算执行
                     </div>
                   </div>
                   <div className="rounded-xl border border-[var(--color-border)]/80 bg-[var(--color-bg-secondary)]/40 px-3 py-2">

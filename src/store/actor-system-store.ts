@@ -8,6 +8,8 @@ import type {
   AgentCapabilities,
   ActorConfig,
   ActorStatus,
+  DialogExecutionMode,
+  DialogSubtaskRuntimeState,
   DialogArtifactRecord,
   DialogRoomCompactionState,
   DialogQueuedFollowUp,
@@ -131,6 +133,7 @@ interface PersistedSpawnedTask {
   sessionOpen?: boolean;
   lastActiveAt?: number;
   sessionClosedAt?: number;
+  runtime?: DialogSubtaskRuntimeState;
 }
 
 interface PersistedSession {
@@ -168,6 +171,7 @@ interface PersistedSession {
   contextSnapshot?: DialogContextSnapshot | null;
   dialogRoomCompaction?: DialogRoomCompactionState | null;
   collaborationSnapshot?: CollaborationSessionSnapshot | null;
+  dialogExecutionMode?: DialogExecutionMode;
   sessionId?: string;
   savedAt: number;
 }
@@ -274,6 +278,7 @@ function buildSessionSnapshot(
   contextSnapshot?: DialogContextSnapshot | null,
   dialogRoomCompaction?: DialogRoomCompactionState | null,
   collaborationSnapshot?: CollaborationSessionSnapshot | null,
+  dialogExecutionMode?: DialogExecutionMode,
   sessionId?: string,
 ): PersistedSession {
   const persistedTasks: PersistedSpawnedTask[] = [];
@@ -307,6 +312,14 @@ function buildSessionSnapshot(
         sessionOpen: r.sessionOpen,
         lastActiveAt: r.lastActiveAt,
         sessionClosedAt: r.sessionClosedAt,
+        runtime: r.runtime
+          ? {
+              ...r.runtime,
+              progressSummary: r.runtime.progressSummary?.slice(0, 240),
+              terminalResult: r.runtime.terminalResult?.slice(0, 1000),
+              terminalError: r.runtime.terminalError?.slice(0, 1000),
+            }
+          : undefined,
       });
     }
   }
@@ -321,8 +334,8 @@ function buildSessionSnapshot(
       maxIterations: a.hasExplicitMaxIterationsConfig ? a.configuredMaxIterations : undefined,
       systemPrompt: a.getSystemPromptOverride(),
       capabilities: a.capabilities,
-      toolPolicy: a.toolPolicyConfig,
-      executionPolicy: a.normalizedExecutionPolicy,
+      toolPolicy: a.persistedToolPolicyConfig,
+      executionPolicy: a.persistedNormalizedExecutionPolicy,
       workspace: a.workspace,
       timeoutSeconds: a.timeoutSeconds,
       idleLeaseSeconds: a.idleLeaseSeconds,
@@ -362,6 +375,7 @@ function buildSessionSnapshot(
     collaborationSnapshot: collaborationSnapshot
       ? cloneCollaborationSnapshotForPersistence(collaborationSnapshot)
       : null,
+    dialogExecutionMode,
     sessionId,
     savedAt: Date.now(),
   };
@@ -1097,23 +1111,27 @@ function buildDialogSpawnedRuntimeSummary(
     if (checkpointSummary) return checkpointSummary;
   }
   const taskPreview = summarizeAISessionRuntimeText(record.task, 110);
-  if (typeof record.error === "string" && record.error.trim()) {
-    const errorPreview = summarizeAISessionRuntimeText(record.error, 120);
+  const runtimeProgress = summarizeAISessionRuntimeText(record.runtime?.progressSummary, 140);
+  const terminalError = record.runtime?.terminalError ?? record.error;
+  const terminalResult = record.runtime?.terminalResult ?? record.result;
+  if (typeof terminalError === "string" && terminalError.trim()) {
+    const errorPreview = summarizeAISessionRuntimeText(terminalError, 120);
     return errorPreview ? `失败 · ${targetName} · ${errorPreview}` : `失败 · ${targetName}`;
   }
-  if (typeof record.result === "string" && record.result.trim()) {
-    const resultPreview = summarizeAISessionRuntimeText(record.result, 140);
+  if (typeof terminalResult === "string" && terminalResult.trim()) {
+    const resultPreview = summarizeAISessionRuntimeText(terminalResult, 140);
     return resultPreview ? `完成 · ${targetName} · ${resultPreview}` : `完成 · ${targetName}`;
   }
   if (record.mode === "session" && record.sessionOpen) {
-    return taskPreview
-      ? `开放子会话 · ${targetName} · ${taskPreview}`
+    const sessionPreview = runtimeProgress ?? taskPreview;
+    return sessionPreview
+      ? `开放子会话 · ${targetName} · ${sessionPreview}`
       : `开放子会话 · ${targetName}`;
   }
   switch (record.status) {
     case "running":
-      return taskPreview
-        ? `运行中 · ${targetName} · ${taskPreview}`
+      return (runtimeProgress ?? taskPreview)
+        ? `运行中 · ${targetName} · ${runtimeProgress ?? taskPreview}`
         : `运行中 · ${targetName}`;
     case "completed":
       return taskPreview
@@ -1285,6 +1303,7 @@ async function saveSessionSnapshot(system: ActorSystem): Promise<void> {
     useActorSystemStore.getState().contextSnapshot,
     resolveLiveDialogRoomCompaction(system, useActorSystemStore.getState().dialogRoomCompaction),
     collaborationSnapshot,
+    system.getDialogExecutionMode(),
     system.sessionId,
   );
 
@@ -1382,7 +1401,7 @@ function restoreSnapshot(system: ActorSystem, persisted: PersistedSession): Rest
   if (recoveredCompaction) {
     system.setDialogRoomCompaction(recoveredCompaction);
   }
-  // 恢复子任务记录（UI 展示用，不会恢复运行态）
+  // 恢复子任务记录；仍不会续跑 in-flight worker，但会把陈旧 running 任务收敛为可解释的中断态。
   if (persisted.spawnedTasks?.length) {
     system.restoreSpawnedTasks(
       persisted.spawnedTasks.map((t) => ({
@@ -1413,6 +1432,7 @@ function restoreSnapshot(system: ActorSystem, persisted: PersistedSession): Rest
         sessionOpen: t.sessionOpen,
         lastActiveAt: t.lastActiveAt,
         sessionClosedAt: t.sessionClosedAt,
+        runtime: t.runtime ? { ...t.runtime } : undefined,
       })),
     );
   }
@@ -1423,6 +1443,7 @@ function restoreSnapshot(system: ActorSystem, persisted: PersistedSession): Rest
       // ignore stale focus pointer
     }
   }
+  system.setDialogExecutionMode(persisted.dialogExecutionMode ?? "execute", { force: true });
 
   return {
     dialogRoomCompaction: recoveredCompaction,
@@ -1514,6 +1535,8 @@ interface ActorSystemState {
   collaborationSnapshot: CollaborationSessionSnapshot | null;
   /** 协作展示态 */
   presentationState: CollaborationPresentationState | null;
+  /** 当前 Dialog 执行模式 */
+  dialogExecutionMode: DialogExecutionMode;
   /** 当前 ActorSystem 实例引用（不序列化） */
   _system: ActorSystem | null;
 
@@ -1591,6 +1614,7 @@ interface ActorSystemState {
     middlewareOverrides?: MiddlewareOverrides;
     capabilities?: AgentCapabilities;
   }) => void;
+  setDialogExecutionMode: (mode: DialogExecutionMode) => void;
 }
 
 function snapshotActor(actor: AgentActor): ActorSnapshot {
@@ -1661,6 +1685,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
   controller: null,
   collaborationSnapshot: null,
   presentationState: null,
+  dialogExecutionMode: "execute",
   pendingUserInteractions: [],
   _system: null,
 
@@ -1843,6 +1868,13 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
     get().sync();
   },
 
+  setDialogExecutionMode: (mode) => {
+    const system = get()._system;
+    if (!system) return;
+    system.setDialogExecutionMode(mode);
+    get().sync();
+  },
+
   destroyAll: () => {
     const system = get()._system;
     if (system) {
@@ -1874,6 +1906,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
       controller: null,
       collaborationSnapshot: null,
       presentationState: null,
+      dialogExecutionMode: "execute",
       pendingUserInteractions: [],
     });
   },
@@ -2172,6 +2205,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
         dialogRoomCompaction: null,
         collaborationSnapshot: null,
         presentationState: null,
+        dialogExecutionMode: "execute",
         pendingUserInteractions: [],
       });
       return;
@@ -2229,6 +2263,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
       dialogRoomCompaction: cloneDialogRoomCompaction(dialogRoomCompaction),
       collaborationSnapshot: collaborationSnapshot ? cloneCollaborationSnapshot(collaborationSnapshot) : null,
       presentationState: collaborationSnapshot ? { ...collaborationSnapshot.presentationState } : null,
+      dialogExecutionMode: system.getDialogExecutionMode(),
       pendingUserInteractions,
     });
     syncDialogRuntimeSession(system.sessionId, {

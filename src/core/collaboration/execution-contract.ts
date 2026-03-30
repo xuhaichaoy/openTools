@@ -11,6 +11,10 @@ import {
   normalizeExecutionPolicy,
   resolveExecutionPolicyInheritance,
 } from "@/core/agent/actor/execution-policy";
+import {
+  resolveStructuredDeliveryManifest,
+  type StructuredDeliveryManifest,
+} from "@/core/agent/actor/structured-delivery-strategy";
 import type {
   CollaborationActorPair,
   CollaborationActorRosterEntry,
@@ -64,7 +68,11 @@ function mergeToolPolicies(
   override?: ToolPolicy,
 ): ToolPolicy | undefined {
   if (!base && !override) return undefined;
-  const allow = [...new Set([...(base?.allow ?? []), ...(override?.allow ?? [])])];
+  const baseAllow = unique(base?.allow);
+  const overrideAllow = unique(override?.allow);
+  const allow = baseAllow.length > 0 && overrideAllow.length > 0
+    ? baseAllow.filter((item) => overrideAllow.includes(item))
+    : [...new Set([...baseAllow, ...overrideAllow])];
   const deny = [...new Set([...(base?.deny ?? []), ...(override?.deny ?? [])])];
   return {
     ...(allow.length > 0 ? { allow } : {}),
@@ -186,6 +194,15 @@ function normalizePlannedDelegation(
     childCapabilities: unique(spawn.childCapabilities).sort() as AgentCapability[],
     childWorkspace: spawn.childWorkspace?.trim() || undefined,
     childMaxIterations: spawn.childMaxIterations,
+    overrides: spawn.overrides
+      ? {
+          ...(spawn.overrides.executionIntent ? { executionIntent: spawn.overrides.executionIntent } : {}),
+          ...(spawn.overrides.resultContract ? { resultContract: spawn.overrides.resultContract } : {}),
+          ...(spawn.overrides.deliveryTargetId ? { deliveryTargetId: spawn.overrides.deliveryTargetId.trim() } : {}),
+          ...(spawn.overrides.deliveryTargetLabel ? { deliveryTargetLabel: spawn.overrides.deliveryTargetLabel.trim() } : {}),
+          ...(spawn.overrides.sheetName ? { sheetName: spawn.overrides.sheetName.trim() } : {}),
+        }
+      : undefined,
   };
 }
 
@@ -195,6 +212,52 @@ function normalizePlannedDelegations(
   return (spawns ?? [])
     .map((spawn) => normalizePlannedDelegation(spawn))
     .filter((spawn): spawn is CollaborationPlannedDelegation => Boolean(spawn));
+}
+
+function cloneStructuredDeliveryManifest(
+  manifest: StructuredDeliveryManifest,
+): StructuredDeliveryManifest {
+  return {
+    ...manifest,
+    targets: manifest.targets?.map((target) => ({
+      ...target,
+      ...(target.promptSpec
+        ? {
+            promptSpec: {
+              ...target.promptSpec,
+              ...(target.promptSpec.inputItems ? { inputItems: [...target.promptSpec.inputItems] } : {}),
+              ...(target.promptSpec.constraints ? { constraints: [...target.promptSpec.constraints] } : {}),
+              ...(target.promptSpec.completionInstructions
+                ? { completionInstructions: [...target.promptSpec.completionInstructions] }
+                : {}),
+            },
+          }
+        : {}),
+      ...(target.dispatchSpec
+        ? {
+            dispatchSpec: {
+              ...target.dispatchSpec,
+              ...(target.dispatchSpec.overrides ? { overrides: { ...target.dispatchSpec.overrides } } : {}),
+            },
+          }
+        : {}),
+      ...(target.metadata ? { metadata: { ...target.metadata } } : {}),
+    })),
+    resultSchema: manifest.resultSchema
+      ? {
+          ...manifest.resultSchema,
+          fields: manifest.resultSchema.fields.map((field) => ({ ...field })),
+        }
+      : undefined,
+    exportSpec: manifest.exportSpec
+      ? {
+          ...manifest.exportSpec,
+          ...(manifest.exportSpec.targetLabels
+            ? { targetLabels: [...manifest.exportSpec.targetLabels] }
+            : {}),
+        }
+      : undefined,
+  };
 }
 
 function normalizeDraft(draft: ExecutionContractDraft): ExecutionContractDraft {
@@ -211,6 +274,9 @@ function normalizeDraft(draft: ExecutionContractDraft): ExecutionContractDraft {
     allowedMessagePairs: normalizeActorPairs(draft.allowedMessagePairs),
     allowedSpawnPairs: normalizeActorPairs(draft.allowedSpawnPairs),
     plannedDelegations: normalizePlannedDelegations(draft.plannedDelegations),
+    structuredDeliveryManifest: draft.structuredDeliveryManifest
+      ? cloneStructuredDeliveryManifest(draft.structuredDeliveryManifest)
+      : undefined,
   };
 }
 
@@ -233,6 +299,7 @@ export function buildExecutionContractDraftFromDialogBundle(params: {
   bundle: DialogDispatchPlanBundle;
   input: CollaborationInputDescriptor | string;
   actorRoster?: readonly RosterHashInput[];
+  structuredDeliveryManifest?: StructuredDeliveryManifest;
   createdAt?: number;
   draftId?: string;
 }): ExecutionContractDraft {
@@ -260,6 +327,9 @@ export function buildExecutionContractDraftFromDialogBundle(params: {
     allowedMessagePairs: normalizeActorPairs(runtimePlan.allowedMessagePairs),
     allowedSpawnPairs: normalizeActorPairs(runtimePlan.allowedSpawnPairs),
     plannedDelegations: normalizePlannedDelegations(runtimePlan.plannedSpawns),
+    structuredDeliveryManifest: params.structuredDeliveryManifest
+      ? cloneStructuredDeliveryManifest(params.structuredDeliveryManifest)
+      : resolveStructuredDeliveryManifest(normalizedInput.content),
   };
   return normalizeDraft(draft);
 }
@@ -303,6 +373,7 @@ export function buildOpenExecutionContractDraft(params: {
     allowedMessagePairs,
     allowedSpawnPairs,
     plannedDelegations: [],
+    structuredDeliveryManifest: resolveStructuredDeliveryManifest(""),
   };
 }
 
@@ -321,7 +392,13 @@ export function cloneExecutionContract(contract: ExecutionContract): ExecutionCo
       ...(delegation.childCapabilities
         ? { childCapabilities: [...delegation.childCapabilities] }
         : {}),
+      ...(delegation.overrides
+        ? { overrides: { ...delegation.overrides } }
+        : {}),
     })),
+    structuredDeliveryManifest: contract.structuredDeliveryManifest
+      ? cloneStructuredDeliveryManifest(contract.structuredDeliveryManifest)
+      : undefined,
   };
 }
 
@@ -428,7 +505,13 @@ export function sealExecutionContract(
       ...(delegation.childCapabilities
         ? { childCapabilities: [...delegation.childCapabilities] }
         : {}),
+      ...(delegation.overrides
+        ? { overrides: { ...delegation.overrides } }
+        : {}),
     })),
+    structuredDeliveryManifest: normalizedDraft.structuredDeliveryManifest
+      ? cloneStructuredDeliveryManifest(normalizedDraft.structuredDeliveryManifest)
+      : undefined,
     approvedAt,
     state: usingRuntimeInputs ? "sealed" : (contractOptions?.state ?? "sealed"),
   };
@@ -467,6 +550,9 @@ export function buildExecutionContractFromDialogPlan(params: {
     allowedMessagePairs: normalizeActorPairs(params.plan.allowedMessagePairs),
     allowedSpawnPairs: normalizeActorPairs(params.plan.allowedSpawnPairs),
     plannedDelegations: normalizePlannedDelegations(params.plan.plannedSpawns),
+    structuredDeliveryManifest: resolveStructuredDeliveryManifest(
+      typeof params.input === "string" ? params.input : params.input?.content ?? params.plan.summary,
+    ),
     approvedAt: params.plan.approvedAt,
     state: normalizeContractState(params.plan.state),
   };
@@ -500,6 +586,7 @@ export function buildExecutionContractDraftFromLegacyPlan(
     allowedMessagePairs: normalizeActorPairs(plan.allowedMessagePairs),
     allowedSpawnPairs: normalizeActorPairs(plan.allowedSpawnPairs),
     plannedDelegations: normalizePlannedDelegations(plan.plannedSpawns),
+    structuredDeliveryManifest: resolveStructuredDeliveryManifest(normalizedInput.content),
   });
 }
 
@@ -554,6 +641,7 @@ export function toDialogExecutionPlan(contract: ExecutionContract): LegacyCompat
       childCapabilities: delegation.childCapabilities ? [...delegation.childCapabilities] : undefined,
       childWorkspace: delegation.childWorkspace,
       childMaxIterations: delegation.childMaxIterations,
+      overrides: delegation.overrides ? { ...delegation.overrides } : undefined,
     })),
     state: mapState(),
   };
