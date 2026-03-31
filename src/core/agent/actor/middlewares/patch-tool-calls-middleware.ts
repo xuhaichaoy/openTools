@@ -112,7 +112,7 @@ export class PatchToolCallsMiddleware implements ActorMiddleware {
       const originalExecute = tool.execute;
       return {
         ...tool,
-        execute: async (params: Record<string, unknown>) => {
+        execute: async (params: Record<string, unknown>, signal?: AbortSignal) => {
           let patched = { ...params };
 
           // 1. If params is a string (some models do this), parse it
@@ -152,7 +152,7 @@ export class PatchToolCallsMiddleware implements ActorMiddleware {
             }
           }
 
-          return originalExecute(patched);
+          return originalExecute(patched, signal);
         },
       };
     });

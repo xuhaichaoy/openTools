@@ -9,6 +9,7 @@ import {
   mergeLocalDialogTranscriptItems,
 } from "./DialogCollaborationTimeline";
 import type {
+  DialogFlowTraceEvent,
   DialogMessage,
   SpawnedTaskLifecycleEvent,
   SpawnedTaskRecord,
@@ -91,6 +92,17 @@ function createMessage(
     priority: input.priority ?? "normal",
     kind: input.kind ?? "agent_result",
     to: input.to,
+  };
+}
+
+function createFlowEvent(
+  input: Partial<DialogFlowTraceEvent> & Pick<DialogFlowTraceEvent, "event" | "timestamp">,
+): DialogFlowTraceEvent {
+  return {
+    event: input.event,
+    actorId: input.actorId,
+    timestamp: input.timestamp,
+    detail: input.detail,
   };
 }
 
@@ -367,6 +379,207 @@ describe("DialogCollaborationTimeline", () => {
     expect(group.summary).toContain("正在综合最终结果");
   });
 
+  it("shows repairing when workers are done and the parent enters a repair continuation", () => {
+    const [group] = buildLocalCollaborationTimelineGroups({
+      events: [],
+      spawnedTasks: [
+        createTask({
+          runId: "run-live-repair",
+          spawnerActorId: "coordinator",
+          targetActorId: "worker-a",
+          task: "生成课程结果",
+          label: "课程结果",
+          status: "completed",
+          spawnedAt: 1000,
+          completedAt: 3000,
+          result: "/Users/demo/Downloads/result.xlsx",
+          mode: "run",
+          expectsCompletionMessage: true,
+          cleanup: "keep",
+        }),
+      ],
+      dialogHistory: [],
+      actorNameById: new Map([
+        ["coordinator", "Coordinator"],
+        ["worker-a", "Worker A"],
+      ]),
+      parentActivityByActorId: new Map([
+        ["coordinator", {
+          latestOrchestrationIndex: 1,
+          latestContinuationIndex: 3,
+          latestContinuationTimestamp: 3600,
+          latestContinuationPreview: "host export 被 quality gate 拦截，系统正在按 repair plan 补派 1 个 repair shards。",
+          isContinuingAfterOrchestration: true,
+          phase: "repairing",
+        }],
+      ]),
+    });
+
+    expect(group.phase).toBe("repairing");
+    expect(group.summary).toContain("repair plan");
+    expect(group.milestones.map((item) => item.text)).toContain(
+      "Coordinator 进入修复轮：host export 被 quality gate 拦截，系统正在按 repair plan 补派 1 个 repair shards。",
+    );
+  });
+
+  it("keeps a batch in repairing when the first direct parent reply is a repair update", () => {
+    const [group] = buildLocalCollaborationTimelineGroups({
+      events: [],
+      spawnedTasks: [
+        createTask({
+          runId: "run-direct-repair",
+          spawnerActorId: "coordinator",
+          targetActorId: "worker-a",
+          task: "生成课程结果",
+          label: "课程结果",
+          status: "completed",
+          spawnedAt: 1000,
+          completedAt: 3000,
+          result: "/Users/demo/Downloads/result.xlsx",
+          mode: "run",
+          expectsCompletionMessage: true,
+          cleanup: "keep",
+        }),
+      ],
+      dialogHistory: [
+        createMessage({
+          id: "msg-repair",
+          from: "coordinator",
+          content: "host export 被 quality gate 拦截，系统正在按 repair plan 补派 1 个 repair shards。",
+          timestamp: 3600,
+          kind: "agent_message",
+        }),
+      ],
+      actorNameById: new Map([
+        ["coordinator", "Coordinator"],
+        ["worker-a", "Worker A"],
+      ]),
+    });
+
+    expect(group.phase).toBe("repairing");
+    expect(group.summary).toContain("repair plan");
+    expect(group.milestones.map((item) => item.text)).toContain(
+      "Coordinator 进入修复轮：host export 被 quality gate 拦截，系统正在按 repair plan 补派 1 个 repair shards。",
+    );
+    expect(group.latestParentReply).toContain("repair plan");
+  });
+
+  it("shows retry export success after a repair reply and a later final export reply", () => {
+    const [group] = buildLocalCollaborationTimelineGroups({
+      events: [],
+      spawnedTasks: [
+        createTask({
+          runId: "run-repair-publish",
+          spawnerActorId: "coordinator",
+          targetActorId: "worker-a",
+          task: "生成课程结果",
+          label: "课程结果",
+          status: "completed",
+          spawnedAt: 1000,
+          completedAt: 3000,
+          result: "/Users/demo/Downloads/result.xlsx",
+          mode: "run",
+          expectsCompletionMessage: true,
+          cleanup: "keep",
+        }),
+      ],
+      dialogHistory: [
+        createMessage({
+          id: "msg-repair",
+          from: "coordinator",
+          content: "host export 被 quality gate 拦截，系统正在按 repair plan 补派 1 个 repair shards。",
+          timestamp: 3600,
+          kind: "agent_message",
+        }),
+        createMessage({
+          id: "msg-final-export",
+          from: "coordinator",
+          content: "已重新导出最终工作簿，文件路径：/Users/demo/Downloads/final-courses.xlsx",
+          timestamp: 4200,
+          kind: "agent_result",
+        }),
+      ],
+      actorNameById: new Map([
+        ["coordinator", "Coordinator"],
+        ["worker-a", "Worker A"],
+      ]),
+    });
+
+    expect(group.phase).toBe("aggregated");
+    expect(group.summary).toContain("/Users/demo/Downloads/final-courses.xlsx");
+    expect(group.latestParentReply).toContain("final-courses.xlsx");
+    expect(group.milestones.map((item) => item.text)).toEqual(expect.arrayContaining([
+      "Coordinator 进入修复轮：host export 被 quality gate 拦截，系统正在按 repair plan 补派 1 个 repair shards。",
+      "Coordinator 重试导出成功：已重新导出最终工作簿，文件路径：/Users/demo/Downloads/final-courses.xlsx",
+    ]));
+  });
+
+  it("treats published parent activity as aggregated and shows a host export success milestone", () => {
+    const [group] = buildLocalCollaborationTimelineGroups({
+      events: [],
+      spawnedTasks: [
+        createTask({
+          runId: "run-live-published",
+          spawnerActorId: "coordinator",
+          targetActorId: "worker-a",
+          task: "生成课程结果",
+          label: "课程结果",
+          status: "completed",
+          spawnedAt: 1000,
+          completedAt: 3000,
+          result: "/Users/demo/Downloads/result.xlsx",
+          mode: "run",
+          expectsCompletionMessage: true,
+          cleanup: "keep",
+        }),
+      ],
+      dialogHistory: [],
+      actorNameById: new Map([
+        ["coordinator", "Coordinator"],
+        ["worker-a", "Worker A"],
+      ]),
+      parentActivityByActorId: new Map([
+        ["coordinator", {
+          latestOrchestrationIndex: 1,
+          latestContinuationIndex: 4,
+          latestContinuationTimestamp: 4200,
+          latestContinuationPreview: "重试导出成功：/Users/demo/Downloads/final-courses.xlsx",
+          isContinuingAfterOrchestration: true,
+          phase: "published",
+          hostMilestones: [
+            {
+              id: "repair-started-1",
+              kind: "repair_started" as const,
+              timestamp: 3400,
+              summary: "进入修复轮：host export 被 quality gate 拦截，系统正在按 repair plan 补派 1 个 repair shards。",
+            },
+            {
+              id: "export-started-1",
+              kind: "export_started" as const,
+              timestamp: 3800,
+              summary: "开始重试导出工作簿：final-courses.xlsx",
+            },
+            {
+              id: "export-succeeded-1",
+              kind: "export_succeeded" as const,
+              timestamp: 4200,
+              summary: "重试导出成功：/Users/demo/Downloads/final-courses.xlsx",
+              artifactPath: "/Users/demo/Downloads/final-courses.xlsx",
+            },
+          ],
+        }],
+      ]),
+    });
+
+    expect(group.phase).toBe("aggregated");
+    expect(group.summary).toContain("final-courses.xlsx");
+    expect(group.milestones.map((item) => item.text)).toEqual(expect.arrayContaining([
+      "Coordinator 进入修复轮：host export 被 quality gate 拦截，系统正在按 repair plan 补派 1 个 repair shards。",
+      "Coordinator 开始重试导出工作簿：final-courses.xlsx",
+      "Coordinator 重试导出成功：/Users/demo/Downloads/final-courses.xlsx",
+    ]));
+  });
+
   it("marks earlier worker batches as aggregated once a later final reply exists without duplicating that reply", () => {
     const groups = buildLocalCollaborationTimelineGroups({
       events: [],
@@ -477,6 +690,100 @@ describe("DialogCollaborationTimeline", () => {
     expect(groups[1].summary).toContain("正在综合最终结果并导出 Excel");
   });
 
+  it("replays direct host trace milestones for completed sibling groups without relying on live parent state", () => {
+    const groups = buildLocalCollaborationTimelineGroups({
+      events: [],
+      spawnedTasks: [
+        createTask({
+          runId: "run-trace-a",
+          spawnerActorId: "coordinator",
+          targetActorId: "worker-a",
+          task: "第一组课程主题",
+          label: "第一组",
+          status: "completed",
+          spawnedAt: 1000,
+          completedAt: 2000,
+          mode: "run",
+          expectsCompletionMessage: true,
+          cleanup: "keep",
+        }),
+        createTask({
+          runId: "run-trace-b",
+          spawnerActorId: "coordinator",
+          targetActorId: "worker-b",
+          task: "第二组课程主题",
+          label: "第二组",
+          status: "completed",
+          spawnedAt: 9000,
+          completedAt: 10000,
+          mode: "run",
+          expectsCompletionMessage: true,
+          cleanup: "keep",
+        }),
+      ],
+      dialogHistory: [],
+      actorNameById: new Map([
+        ["coordinator", "Coordinator"],
+        ["worker-a", "Worker A"],
+        ["worker-b", "Worker B"],
+      ]),
+      hostTraceEventsByActorId: new Map([
+        ["coordinator", [
+          createFlowEvent({
+            event: "repair_round_started",
+            actorId: "coordinator",
+            timestamp: 2600,
+            detail: {
+              accepted_count: 1,
+              preview: "第一组修复补派",
+            },
+          }),
+          createFlowEvent({
+            event: "tool_call_started",
+            actorId: "coordinator",
+            timestamp: 3000,
+            detail: {
+              phase: "host_export",
+              tool: "export_spreadsheet",
+              preview: "batch-one.xlsx",
+            },
+          }),
+          createFlowEvent({
+            event: "host_export_completed",
+            actorId: "coordinator",
+            timestamp: 3400,
+            detail: {
+              phase: "host_export",
+              preview: "/Users/demo/Downloads/batch-one.xlsx",
+            },
+          }),
+          createFlowEvent({
+            event: "aggregation_started",
+            actorId: "coordinator",
+            timestamp: 10300,
+            detail: {
+              count: 8,
+            },
+          }),
+        ]],
+      ]),
+    });
+
+    expect(groups).toHaveLength(2);
+    expect(groups[0].phase).toBe("aggregated");
+    expect(groups[0].summary).toContain("batch-one.xlsx");
+    expect(groups[0].milestones.map((item) => item.text)).toEqual(expect.arrayContaining([
+      "Coordinator 进入修复轮：第一组修复补派",
+      "Coordinator 开始重试导出工作簿：batch-one.xlsx",
+      "Coordinator 重试导出成功：/Users/demo/Downloads/batch-one.xlsx",
+    ]));
+    expect(groups[1].phase).toBe("aggregating");
+    expect(groups[1].summary).toContain("开始汇总子任务结果");
+    expect(groups[1].milestones.map((item) => item.text)).toEqual(expect.arrayContaining([
+      "Coordinator 开始汇总子任务结果：当前聚合 8 个结构化结果。",
+    ]));
+  });
+
   it("merges collaboration blocks into the local transcript by timestamp", () => {
     const transcriptItems = mergeLocalDialogTranscriptItems({
       messages: [
@@ -573,6 +880,43 @@ describe("DialogCollaborationTimeline", () => {
     expect(container?.textContent).toContain("Cicero");
     expect(container?.textContent).toContain("正在检查 DialogMessage 和 store 对齐情况");
     expect(container?.textContent).toContain("session worker");
+  });
+
+  it("renders a repairing badge for repair-round collaboration cards", () => {
+    const group = {
+      id: "group-repair",
+      spawnerActorId: "coordinator",
+      spawnerName: "Coordinator",
+      startedAt: 1000,
+      updatedAt: 4000,
+      phase: "repairing" as const,
+      title: "并行协作 · 1 个子任务",
+      summary: "host export 被 quality gate 拦截，系统正在补派 repair shard。",
+      totalWorkers: 1,
+      runningCount: 0,
+      completedCount: 1,
+      failedCount: 0,
+      activeWorkerNames: [],
+      workers: [],
+      milestones: [{
+        id: "repair-1",
+        timestamp: 3500,
+        tone: "neutral" as const,
+        text: "Coordinator 进入修复轮：host export 被 quality gate 拦截，系统正在补派 repair shard。",
+      }],
+    };
+
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    act(() => {
+      root?.render(<DialogCollaborationTimelineCard group={group} />);
+    });
+
+    expect(container.textContent).toContain("修复中");
+    expect(container.textContent).toContain("quality gate");
+    expect(container.textContent).toContain("进入修复轮");
   });
 
   it("distinguishes idle timeout from budget exceeded in worker rows", () => {

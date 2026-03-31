@@ -285,6 +285,25 @@ describe("ActorSystem dialog execution mode", () => {
     expect(system.get("lead")?.dialogExecutionMode).toBe("execute");
     expect(system.get("reviewer")?.dialogExecutionMode).toBe("execute");
   });
+
+  it("keeps dialog subagent mode independent from plan mode", () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("lead", "Lead"));
+
+    expect(system.getDialogSubagentEnabled()).toBe(false);
+
+    system.setDialogSubagentEnabled(true);
+    system.setDialogExecutionMode("plan");
+
+    expect(system.getDialogSubagentEnabled()).toBe(true);
+    expect(system.getDialogExecutionMode()).toBe("plan");
+
+    system.setDialogExecutionMode("execute");
+    system.setDialogSubagentEnabled(false);
+
+    expect(system.getDialogExecutionMode()).toBe("execute");
+    expect(system.getDialogSubagentEnabled()).toBe(false);
+  });
 });
 
 describe("ActorSystem.broadcastAndResolve", () => {
@@ -1280,14 +1299,86 @@ describe("ActorSystem.spawnTask", () => {
     expect(record.resultContract).toBe("inline_structured_result");
     expect(record.deliveryTargetLabel).toBe("技术方向课程");
     expect(record.sheetName).toBe("技术方向课程");
-    expect(child?.toolPolicyConfig?.allow).toEqual(["task_done"]);
+    expect(child?.toolPolicyConfig?.allow).toEqual(["task_done", "read_document", "read_file_range"]);
     expect(child?.toolPolicyConfig?.deny).toEqual(expect.arrayContaining([
-      "read_document",
       "read_file",
-      "read_file_range",
       "write_file",
       "export_spreadsheet",
     ]));
+  });
+
+  it("passes scoped source shards directly into child prompts and records", () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+
+    system.armExecutionContract(buildExecutionContract({
+      contractId: "contract-sheet-bound-source-shard",
+      summary: "Coordinator 可创建带 scoped source shard 的内容执行子任务",
+      approvedAt: Date.now(),
+      initialRecipientActorIds: ["coordinator"],
+      participantActorIds: ["coordinator"],
+      allowedMessagePairs: [],
+      allowedSpawnPairs: [],
+    }));
+
+    const record = system.spawnTask(
+      "coordinator",
+      "Course Planner",
+      "围绕以下主题，为「技术方向课程」工作表生成课程候选，直接返回结构化结果。",
+      {
+        createIfMissing: true,
+        createChildSpec: {
+          description: "负责技术方向课程生成",
+          capabilities: ["documentation"],
+        },
+        cleanup: "keep",
+        overrides: {
+          executionIntent: "content_executor",
+          resultContract: "inline_structured_result",
+          deliveryTargetLabel: "技术方向课程",
+          sheetName: "技术方向课程",
+          scopedSourceItems: [
+            {
+              id: "source-item-7",
+              label: "银行AI解决方案咨询方法论",
+              order: 7,
+              topicIndex: 7,
+              topicTitle: "银行AI解决方案咨询方法论",
+              trainingAudience: "咨询顾问",
+            },
+            {
+              id: "source-item-8",
+              label: "数据分析与经营洞察实战",
+              order: 8,
+              topicIndex: 8,
+              topicTitle: "数据分析与经营洞察实战",
+              trainingTarget: "提升数据洞察能力",
+            },
+          ],
+        },
+      },
+    );
+
+    expect("error" in record).toBe(false);
+    if ("error" in record) return;
+
+    const child = system.get(record.targetActorId) as unknown as {
+      lastAssignedQuery?: string;
+      getSystemPromptOverride?: () => string | undefined;
+    };
+
+    expect(record.scopedSourceItems).toEqual([
+      expect.objectContaining({ id: "source-item-7", topicTitle: "银行AI解决方案咨询方法论" }),
+      expect.objectContaining({ id: "source-item-8", topicTitle: "数据分析与经营洞察实战" }),
+    ]);
+    expect(child?.lastAssignedQuery).toContain("## 当前分片真相（系统下传）");
+    expect(child?.lastAssignedQuery).toContain("source-item-7");
+    expect(child?.lastAssignedQuery).toContain("银行AI解决方案咨询方法论");
+    expect(child?.lastAssignedQuery).toContain("提升数据洞察能力");
+    expect(child?.getSystemPromptOverride?.()).toContain("当前已随派工下传 2 个 scoped source items");
+    expect((child as unknown as { toolPolicyConfig?: { deny?: string[] } })?.toolPolicyConfig?.deny).toEqual(
+      expect.arrayContaining(["read_document", "read_file", "read_file_range"]),
+    );
   });
 
   it("lets explicit roleBoundary override temporary child inference", () => {
@@ -1448,6 +1539,7 @@ describe("ActorSystem.spawnTask", () => {
           roleBoundary: "executor",
           createIfMissing: true,
           overrides: {
+            workerProfileId: "spreadsheet_worker",
             executionIntent: "content_executor",
             resultContract: "inline_structured_result",
             deliveryTargetId: "tech-sheet",
@@ -1469,11 +1561,36 @@ describe("ActorSystem.spawnTask", () => {
     if ("error" in record) return;
 
     expect(record.plannedDelegationId).toBe("delegation-structured-1");
+    expect(record.workerProfileId).toBe("spreadsheet_worker");
     expect(record.executionIntent).toBe("content_executor");
     expect(record.resultContract).toBe("inline_structured_result");
     expect(record.deliveryTargetId).toBe("tech-sheet");
     expect(record.deliveryTargetLabel).toBe("技术方向课程");
     expect(record.sheetName).toBe("技术方向课程");
+  });
+
+  it("queues retryable max-active-children spawn failures for deferred spreadsheet repair dispatch", () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+    const workers = ["worker-1", "worker-2", "worker-3", "worker-4", "worker-5"]
+      .map((id, index) => system.spawn(buildActorConfig(id, `Worker ${index + 1}`)));
+
+    workers.forEach((worker, index) => {
+      const record = system.spawnTask("coordinator", worker.id, `先跑第 ${index + 1} 批任务`, { cleanup: "keep" });
+      expect("error" in record).toBe(false);
+    });
+
+    const queued = system.enqueueDeferredSpawnTask("coordinator", "repair-worker", "补齐缺失主题", {
+      cleanup: "keep",
+      roleBoundary: "executor",
+      overrides: {
+        workerProfileId: "spreadsheet_worker",
+        resultContract: "inline_structured_result",
+      },
+    });
+
+    expect(queued.overrides?.workerProfileId).toBe("spreadsheet_worker");
+    expect(queued.overrides?.resultContract).toBe("inline_structured_result");
   });
 
   it("dispatches deferred child tasks after earlier workers settle", async () => {

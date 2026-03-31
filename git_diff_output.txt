@@ -1,0 +1,814 @@
+diff --git a/src/core/agent/actor/actor-system.test.ts b/src/core/agent/actor/actor-system.test.ts
+index cfef246..74859b6 100644
+--- a/src/core/agent/actor/actor-system.test.ts
++++ b/src/core/agent/actor/actor-system.test.ts
+@@ -1236,6 +1236,60 @@ describe("ActorSystem.spawnTask", () => {
+     expect(child?.getSystemPromptOverride?.()).not.toContain("必须通过 `write_file` 或 `export_spreadsheet` 工具实际写入文件");
+   });
+ 
++  it("locks inline-structured content executors away from rereading the source document", () => {
++    const system = new ActorSystem();
++    system.spawn(buildActorConfig("coordinator", "Coordinator"));
++
++    system.armExecutionContract(buildExecutionContract({
++      contractId: "contract-sheet-bound-content-executor",
++      summary: "Coordinator 可创建受限的 sheet-bound content executor",
++      approvedAt: Date.now(),
++      initialRecipientActorIds: ["coordinator"],
++      participantActorIds: ["coordinator"],
++      allowedMessagePairs: [],
++      allowedSpawnPairs: [],
++    }));
++
++    const record = system.spawnTask(
++      "coordinator",
++      "Course Planner",
++      "围绕以下主题，为「技术方向课程」工作表生成课程候选，直接返回结构化结果。",
++      {
++        createIfMissing: true,
++        createChildSpec: {
++          description: "负责技术方向课程生成",
++          capabilities: ["documentation"],
++        },
++        cleanup: "keep",
++        overrides: {
++          executionIntent: "content_executor",
++          resultContract: "inline_structured_result",
++          deliveryTargetLabel: "技术方向课程",
++          sheetName: "技术方向课程",
++        },
++      },
++    );
++
++    expect("error" in record).toBe(false);
++    if ("error" in record) return;
++
++    const child = system.get(record.targetActorId) as unknown as {
++      toolPolicyConfig?: { allow?: string[]; deny?: string[] };
++    };
++    expect(record.executionIntent).toBe("content_executor");
++    expect(record.resultContract).toBe("inline_structured_result");
++    expect(record.deliveryTargetLabel).toBe("技术方向课程");
++    expect(record.sheetName).toBe("技术方向课程");
++    expect(child?.toolPolicyConfig?.allow).toEqual(["task_done"]);
++    expect(child?.toolPolicyConfig?.deny).toEqual(expect.arrayContaining([
++      "read_document",
++      "read_file",
++      "read_file_range",
++      "write_file",
++      "export_spreadsheet",
++    ]));
++  });
++
+   it("lets explicit roleBoundary override temporary child inference", () => {
+     const system = new ActorSystem();
+     system.spawn(buildActorConfig("coordinator", "Coordinator"));
+diff --git a/src/core/agent/actor/actor-system.ts b/src/core/agent/actor/actor-system.ts
+index ec18bb2..21f2be9 100644
+--- a/src/core/agent/actor/actor-system.ts
++++ b/src/core/agent/actor/actor-system.ts
+@@ -201,6 +201,14 @@ const CONTENT_EXECUTOR_DENY_TOOL_NAMES = [
+   "database_execute",
+   "ssh_*",
+ ] as const;
++const INLINE_STRUCTURED_RESULT_ALLOW_TOOL_NAMES = [
++  "task_done",
++] as const;
++const INLINE_STRUCTURED_RESULT_DENY_TOOL_NAMES = [
++  ...CONTENT_EXECUTOR_DENY_TOOL_NAMES,
++  "read_document",
++  "calculate",
++] as const;
+ const CODING_INTENT_TOOL_NAMES = new Set([
+   "write_file",
+   "str_replace_edit",
+@@ -286,6 +294,17 @@ function buildStrictContentExecutorToolPolicy(overrideToolPolicy?: ToolPolicy):
+   };
+ }
+ 
++function buildInlineStructuredResultToolPolicy(overrideToolPolicy?: ToolPolicy): ToolPolicy {
++  const deny = uniqueNonEmptyStrings([
++    ...INLINE_STRUCTURED_RESULT_DENY_TOOL_NAMES,
++    ...(overrideToolPolicy?.deny ?? []),
++  ]);
++  return {
++    allow: [...INLINE_STRUCTURED_RESULT_ALLOW_TOOL_NAMES],
++    ...(deny.length > 0 ? { deny } : {}),
++  };
++}
++
+ function resolveDialogSubtaskExecutionIntent(params: {
+   roleBoundary?: SpawnedTaskRoleBoundary;
+   task: string;
+@@ -312,11 +331,14 @@ function resolveDialogSubtaskExecutionIntent(params: {
+ 
+ function buildExecutionIntentToolPolicy(params: {
+   executionIntent: DialogSubtaskExecutionIntent;
++  resultContract?: "default" | "inline_structured_result";
+   overrideToolPolicy?: ToolPolicy;
+ }): ToolPolicy | undefined {
+   switch (params.executionIntent) {
+     case "content_executor":
+-      return buildStrictContentExecutorToolPolicy(params.overrideToolPolicy);
++      return params.resultContract === "inline_structured_result"
++        ? buildInlineStructuredResultToolPolicy(params.overrideToolPolicy)
++        : buildStrictContentExecutorToolPolicy(params.overrideToolPolicy);
+     case "coding_executor":
+       return mergeToolPolicies(getRoleBoundaryPolicyProfile("executor").toolPolicy, params.overrideToolPolicy);
+     case "reviewer":
+@@ -1545,7 +1567,11 @@ export class ActorSystem {
+       overrideThinkingLevel: opts.overrides?.thinkingLevel,
+       overrideMiddlewareOverrides: opts.overrides?.middlewareOverrides,
+     });
+-    resolvedChildSettings.toolPolicy = buildExecutionIntentToolPolicy({ executionIntent: resolvedExecutionIntent, overrideToolPolicy: explicitToolPolicy }) ?? resolvedChildSettings.toolPolicy;
++    resolvedChildSettings.toolPolicy = buildExecutionIntentToolPolicy({
++      executionIntent: resolvedExecutionIntent,
++      resultContract: opts.overrides?.resultContract,
++      overrideToolPolicy: explicitToolPolicy,
++    }) ?? resolvedChildSettings.toolPolicy;
+     const spawnerBasePrompt = spawner.getSystemPromptOverride() ?? spawner.role.systemPrompt;
+     const systemPromptBlocks = [
+       spawnerBasePrompt || DIALOG_FULL_ROLE.systemPrompt,
+@@ -1554,14 +1580,18 @@ export class ActorSystem {
+       opts.capabilities?.length ? `优先能力聚焦：${opts.capabilities.join("、")}` : "",
+       inferredBoundary.systemPromptAppend ? `默认职责边界：${inferredBoundary.systemPromptAppend}` : "",
+       resolvedExecutionIntent === "content_executor"
+-        ? "执行意图：content_executor。你只能读取当前文档、做轻量计算并通过 terminal result 返回结构化内容，禁止写文件、搜索外网、再次派工。"
++        ? opts.overrides?.resultContract === "inline_structured_result"
++          ? "执行意图：content_executor。当前启用 inline_structured_result 合同：你必须直接在 terminal result 返回完整结构化结果，禁止写文件、导出文件、搜索外网、再次派工。"
++          : "执行意图：content_executor。你只能读取当前文档、做轻量计算并通过 terminal result 返回结构化内容，禁止写文件、搜索外网、再次派工。"
+         : resolvedExecutionIntent === "coding_executor"
+           ? "执行意图：coding_executor。你负责实现或修复，但仍禁止消息回流型工具和再次派工。"
+           : "",
+       opts.overrides?.systemPromptAppend ? `额外约束：${opts.overrides.systemPromptAppend}` : "",
+       [
+         "## 子任务执行规范（必读）",
+-        "- 如果任务属于课程生成、内容整理、方案撰写、清单汇总这类非 coding 子任务，默认直接在 terminal result 返回完整结果，不要写任何中间 JSON / TSV / Markdown / Excel 文件。",
++        opts.overrides?.resultContract === "inline_structured_result"
++          ? "- 当前子任务已锁定 inline_structured_result 合同：直接在 terminal result 返回完整结果，不要写任何中间 JSON / TSV / Markdown / Excel 文件。"
++          : "- 如果任务属于内容整理、方案撰写、清单汇总这类非 coding 子任务，默认直接在 terminal result 返回完整结果，不要写任何中间 JSON / TSV / Markdown / Excel 文件。",
+         "- 只有明确的 coding / 实现类任务，且当前工具策略允许时，才可以写文件或导出最终产物。",
+         "- 默认只读取当前用户提供的文档和本轮 artifacts；不要扫描目录、历史 Downloads 或旧文件。",
+         "- 读取同一文件只需调用一次 `read_document` / `read_file`，不要反复读取同一文件。",
+@@ -2645,6 +2675,7 @@ export class ActorSystem {
+     }
+     resolvedOverrides.toolPolicy = buildExecutionIntentToolPolicy({
+       executionIntent: resolvedExecutionIntent,
++      resultContract: resolvedOverrides.resultContract,
+       overrideToolPolicy: resolvedOverrides.toolPolicy,
+     }) ?? resolvedOverrides.toolPolicy;
+     try {
+@@ -2753,6 +2784,10 @@ export class ActorSystem {
+       rootRunId: runId,
+       roleBoundary: resolvedRoleBoundary,
+       executionIntent: resolvedExecutionIntent,
++      resultContract: resolvedOverrides.resultContract,
++      deliveryTargetId: resolvedOverrides.deliveryTargetId,
++      deliveryTargetLabel: resolvedOverrides.deliveryTargetLabel,
++      sheetName: resolvedOverrides.sheetName,
+       task: resolvedTask,
+       label,
+       images: opts?.images?.length ? [...new Set(opts.images)] : undefined,
+diff --git a/src/core/agent/actor/agent-actor.ts b/src/core/agent/actor/agent-actor.ts
+index 842f772..d921f72 100644
+--- a/src/core/agent/actor/agent-actor.ts
++++ b/src/core/agent/actor/agent-actor.ts
+@@ -9,10 +9,10 @@ import {
+ } from "@/plugins/builtin/SmartAgent/core/react-agent";
+ import { applyIncomingAgentStep } from "@/plugins/builtin/SmartAgent/core/agent-task-state";
+ import {
++  createBuiltinAgentTools,
+   type AskUserQuestion,
+   type AskUserAnswers,
+ } from "@/plugins/builtin/SmartAgent/core/default-tools";
+-import { inferCodingExecutionProfile } from "@/core/agent/coding-profile";
+ import type { AgentRole } from "@/core/agent/cluster/types";
+ import type { ActorSystem } from "./actor-system";
+ import {
+@@ -54,6 +54,13 @@ import {
+ } from "./timeout-policy";
+ import { isLikelyExecutionPlanReply } from "./result-shape-detection";
+ import { traceDialogFlowEvent } from "./dialog-step-trace";
++import {
++  resolveRequestedSpreadsheetExtensions,
++  resolveStructuredDeliveryManifest,
++  resolveStructuredDeliveryStrategy,
++  taskLooksLikeCourseContentDelivery,
++  taskRequestsSpreadsheetOutput,
++} from "./structured-delivery-strategy";
+ import type {
+   AgentCapabilities,
+   ActorConfig,
+@@ -155,21 +162,6 @@ const CONCRETE_FINAL_RESULT_PATTERNS = [
+   /\bimport\s+|\bexport\s+|\bfunction\s+\w+|\bclass\s+\w+|\bconst\s+\w+\s*=|\blet\s+\w+\s*=/i,
+   /最终产物|产物位置|文件路径|保存到|导出为|已创建|已生成|已修改|已修复|验证通过|测试通过|构建通过|lint\s*通过|阻塞原因|无法完成|缺失条件|真实缺口/i,
+ ];
+-const SPREADSHEET_OUTPUT_TASK_PATTERNS = [
+-  /(?:最终|最后|输出|导出|保存|生成|给我|给出|返回).{0,18}(?:excel|xlsx|xls|csv|表格|工作簿)(?:文件|表格|工作簿)?/iu,
+-  /(?:excel|xlsx|xls|csv|表格|工作簿)(?:文件|表格|工作簿).{0,12}(?:输出|导出|保存|生成|给我|给出|返回|最终|最后)/iu,
+-] as const;
+-const COURSE_CONTENT_DELIVERY_PATTERNS = [
+-  /课程|培训|课纲|课程候选|课程名称|课程介绍|培训目标|培训对象|课程清单/u,
+-  /按主题.*(?:生成|整理|汇总).*(?:课程|条目|清单)/u,
+-  /基于.*(?:excel|xlsx|xls|csv|表格|工作簿).*(?:生成|整理|汇总).*(?:课程|条目|清单)/iu,
+-] as const;
+-const STRONG_CODING_TASK_PATTERNS = [
+-  /repo|repository|codebase|仓库|项目结构|工程|源码/i,
+-  /代码|编码|编程|函数|类|模块|接口|重构|修复|debug|bug|报错/i,
+-  /\/[^\s"'`]+\.(?:ts|tsx|js|jsx|py|rs|go|java|kt|swift|vue|html|css|scss|less)/i,
+-] as const;
+-const SINGLE_WORKBOOK_SHEET_NAMES = ["技术方向课程", "产品运营方向课程", "数据与通识方向课程"] as const;
+ const INITIAL_STRUCTURED_DELIVERY_ALLOWED_TOOL_NAMES = [
+   "read_document",
+   "spawn_task",
+@@ -280,45 +272,14 @@ function resolveAggregationAllowedToolNames(): string[] {
+   return [...AGGREGATION_ALLOWED_TOOL_NAMES];
+ }
+ 
+-function taskRequestsSpreadsheetOutput(task: string | null | undefined): boolean {
+-  const normalized = String(task ?? "").trim();
+-  if (!normalized) return false;
+-  return SPREADSHEET_OUTPUT_TASK_PATTERNS.some((pattern) => pattern.test(normalized));
+-}
+-
+-function taskLooksLikeCourseContentDelivery(task: string | null | undefined): boolean {
+-  const normalized = String(task ?? "").trim();
+-  if (!normalized) return false;
+-  return COURSE_CONTENT_DELIVERY_PATTERNS.some((pattern) => pattern.test(normalized));
+-}
+-
+-function taskLooksLikeStructuredSpreadsheetDelivery(task: string | null | undefined): boolean {
+-  const normalized = String(task ?? "").trim();
+-  if (!normalized) return false;
+-  const courseContentLike = taskLooksLikeCourseContentDelivery(normalized);
+-  const spreadsheetMentioned = /(?:excel|xlsx|xls|csv|表格|工作簿)/iu.test(normalized);
+-  if (courseContentLike && spreadsheetMentioned) return true;
+-  if (!taskRequestsSpreadsheetOutput(normalized)) return false;
+-  if (courseContentLike) return true;
+-  const strongCoding = STRONG_CODING_TASK_PATTERNS.some((pattern) => pattern.test(normalized));
+-  if (strongCoding) return false;
+-  const inferred = inferCodingExecutionProfile({ query: normalized });
+-  return !inferred.profile.codingMode;
+-}
+-
+-function resolveRequestedSpreadsheetExtensions(task: string | null | undefined): string[] {
+-  const normalized = String(task ?? "").trim();
+-  if (!normalized) return ["xlsx", "xls", "csv"];
+-  if (/(?:excel|xlsx|xls)/iu.test(normalized)) return ["xlsx", "xls"];
+-  if (/(?:csv)/iu.test(normalized)) return ["csv"];
+-  return ["xlsx", "xls", "csv"];
+-}
+-
+ function buildStructuredDeliveryPlanBlock(params: {
+   taskText: string;
+   structuredResults: readonly DialogStructuredSubtaskResult[];
+ }): string | undefined {
+   if (!taskRequestsSpreadsheetOutput(params.taskText)) return undefined;
++  const strategy = resolveStructuredDeliveryStrategy(params.taskText);
++  const strategyPlanBlock = strategy?.buildDeliveryPlanBlock?.(params);
++  if (strategyPlanBlock) return strategyPlanBlock;
+   const courseWorkbookMode = taskLooksLikeCourseContentDelivery(params.taskText);
+   const lines = [
+     "## 系统锁定的最终交付计划",
+@@ -329,8 +290,8 @@ function buildStructuredDeliveryPlanBlock(params: {
+   ];
+   if (courseWorkbookMode) {
+     lines.push(
+-      `- 当前启用 single_workbook_mode，优先输出固定 sheet：${SINGLE_WORKBOOK_SHEET_NAMES.join('、')}。`,
+-      "- 若任一方向缺失，请明确 blocker，不要改成交付多个分散文件。",
++      "- 当前启用 single_workbook_mode，优先按当前 run 的 delivery targets 聚合到单一工作簿。",
++      "- 若任一关键分组缺失，请明确 blocker，不要改成交付多个分散文件。",
+     );
+   }
+   if (params.structuredResults.length > 0) {
+@@ -1502,9 +1463,7 @@ export class AgentActor {
+           "- 禁止停留在“继续整理 / 稍后汇总 / 我先检查”这类中间态话术。",
+         ].join("\n");
+         const allowedTools = spreadsheetOnly
+-          ? (params?.stage === "failure_follow_up"
+-              ? ["task_done"]
+-              : ["task_done", "export_spreadsheet"])
++          ? ["task_done", "export_spreadsheet"]
+           : resolveAggregationAllowedToolNames();
+         return {
+           ...(opts?.runOverrides ?? {}),
+@@ -1863,6 +1822,159 @@ export class AgentActor {
+ 
+       let finalValidation = validateFinalResult(result);
+       const structuredTaskResults = [...accumulatedStructuredTaskResults.values()];
++      const structuredDeliveryStrategy = !getActiveOwnerRecord()
++        ? resolveStructuredDeliveryStrategy(query)
++        : null;
++      const shouldAttemptDeterministicHostExport = Boolean(
++        !getActiveOwnerRecord()
++        && structuredDeliveryStrategy?.buildHostExportPlan
++        && structuredTaskResults.length > 0
++        && structuredTaskResults.every((taskResult) => taskResult.status === "completed")
++        && !hadFailedSpawnFollowUp,
++      );
++      if (shouldAttemptDeterministicHostExport) {
++        const hostExportPlan = structuredDeliveryStrategy?.buildHostExportPlan?.({
++          taskText: query,
++          structuredResults: structuredTaskResults,
++        });
++        if (!hostExportPlan) {
++          traceTaskFlow("host_export_blocked", {
++            phase: "host_export",
++            status: "missing_plan",
++            buffered_structured_count: structuredTaskResults.length,
++            artifact_scope: "current_run",
++            preview: "structured delivery strategy returned no host export plan",
++          });
++        } else if ("blocker" in hostExportPlan) {
++          traceTaskFlow("host_export_blocked", {
++            phase: "host_export",
++            status: "blocked",
++            buffered_structured_count: structuredTaskResults.length,
++            artifact_scope: "current_run",
++            preview: previewActorText(hostExportPlan.blocker),
++          });
++        } else {
++          const builtinTools = createBuiltinAgentTools(
++            async () => true,
++            this.askUser,
++            {
++              getCurrentQuery: () => query,
++              scheduleClawHubResume: async () => undefined,
++            },
++          );
++          const exportTool = builtinTools.tools.find((tool) => tool.name === hostExportPlan.toolName);
++          if (!exportTool) {
++            traceTaskFlow("host_export_blocked", {
++              phase: "host_export",
++              status: "missing_tool",
++              buffered_structured_count: structuredTaskResults.length,
++              artifact_scope: "current_run",
++              preview: `${hostExportPlan.toolName} unavailable`,
++            });
++          } else {
++            traceTaskFlow("single_workbook_mode", {
++              phase: "host_export",
++              status: "enabled",
++              delivery_contract: hostExportPlan.deliveryContract,
++              parent_contract: hostExportPlan.parentContract,
++              artifact_scope: "current_run",
++              preview: previewActorText(hostExportPlan.targetPreview),
++            });
++            traceTaskFlow("export_plan_selected", {
++              phase: "host_export",
++              status: hostExportPlan.deliveryContract,
++              delivery_contract: hostExportPlan.deliveryContract,
++              parent_contract: hostExportPlan.parentContract,
++              artifact_scope: "current_run",
++              count: hostExportPlan.operationCount,
++              preview: previewActorText(hostExportPlan.tracePreview),
++            });
++            const exportParams = hostExportPlan.toolInput;
++            emitTaskStep({
++              type: "action",
++              content: `调用 ${hostExportPlan.toolName}`,
++              toolName: hostExportPlan.toolName,
++              toolInput: exportParams,
++              timestamp: Date.now(),
++            });
++            traceTaskFlow("tool_call_started", {
++              tool: hostExportPlan.toolName,
++              phase: "host_export",
++              count: hostExportPlan.operationCount,
++              preview: previewActorText(hostExportPlan.tracePreview),
++            });
++            const exportResult = await exportTool.execute(exportParams);
++            emitTaskStep({
++              type: "observation",
++              content: typeof exportResult === "string"
++                ? exportResult
++                : JSON.stringify(exportResult),
++              toolName: hostExportPlan.toolName,
++              toolOutput: exportResult,
++              timestamp: Date.now(),
++            });
++            if (typeof exportResult === "object" && exportResult !== null && "error" in exportResult) {
++              traceTaskFlow("tool_call_failed", {
++                tool: hostExportPlan.toolName,
++                phase: "host_export",
++                artifact_scope: "current_run",
++                preview: previewActorText(String(exportResult.error ?? "导出失败")),
++              });
++              traceTaskFlow("host_export_blocked", {
++                phase: "host_export",
++                status: "tool_error",
++                buffered_structured_count: structuredTaskResults.length,
++                artifact_scope: "current_run",
++                preview: previewActorText(String(exportResult.error ?? "导出失败")),
++              });
++            } else {
++              const exportPath = extractPathsByExtensions(
++                typeof exportResult === "string" ? exportResult : JSON.stringify(exportResult),
++                hostExportPlan.expectedArtifactExtensions,
++              )[0];
++              traceTaskFlow("tool_call_completed", {
++                tool: hostExportPlan.toolName,
++                phase: "host_export",
++                artifact_scope: "current_run",
++                preview: previewActorText(exportPath ?? hostExportPlan.tracePreview),
++              });
++              traceTaskFlow("tool_result_recorded", {
++                tool: hostExportPlan.toolName,
++                phase: "host_export",
++                artifact_scope: "current_run",
++                preview: previewActorText(exportPath ?? hostExportPlan.tracePreview),
++              });
++              if (exportPath) {
++                traceTaskFlow("host_export_completed", {
++                  phase: "host_export",
++                  status: "completed",
++                  buffered_structured_count: structuredTaskResults.length,
++                  artifact_scope: "current_run",
++                  preview: previewActorText(exportPath),
++                });
++                traceTaskFlow("export_plan_executed", {
++                  status: "completed",
++                  delivery_contract: hostExportPlan.deliveryContract,
++                  parent_contract: hostExportPlan.parentContract,
++                  artifact_scope: "current_run",
++                  count: 1,
++                  preview: previewActorText(exportPath),
++                });
++                result = hostExportPlan.successReply.replace("__EXPORT_PATH__", exportPath);
++                finalValidation = validateFinalResult(result);
++              } else {
++                traceTaskFlow("host_export_blocked", {
++                  phase: "host_export",
++                  status: "missing_path",
++                  buffered_structured_count: structuredTaskResults.length,
++                  artifact_scope: "current_run",
++                  preview: previewActorText(typeof exportResult === "string" ? exportResult : JSON.stringify(exportResult)),
++                });
++              }
++            }
++          }
++        }
++      }
+       if (
+         structuredTaskResults.length > 0
+         && (waitWasActive || yieldedForSpawnWait || processedSpawnFollowUps > 0)
+@@ -1894,7 +2006,7 @@ export class AgentActor {
+             delivery_contract: "spreadsheet",
+             parent_contract: "single_workbook",
+             artifact_scope: "current_run",
+-            preview: previewActorText(SINGLE_WORKBOOK_SHEET_NAMES.join("、")),
++            preview: "grouped_delivery_targets",
+           });
+           traceTaskFlow("export_plan_selected", {
+             phase: "final_synthesis",
+@@ -2028,7 +2140,7 @@ export class AgentActor {
+             delivery_contract: "spreadsheet",
+             parent_contract: "single_workbook",
+             artifact_scope: "current_run",
+-            preview: previewActorText(SINGLE_WORKBOOK_SHEET_NAMES.join("、")),
++            preview: "grouped_delivery_targets",
+           });
+           traceTaskFlow("export_plan_selected", {
+             phase: "validation_repair",
+@@ -2675,19 +2787,21 @@ export class AgentActor {
+         && (record.status === "running" || (record.mode === "session" && record.sessionOpen))
+       )
+       .sort((left, right) => (right.lastActiveAt ?? right.spawnedAt) - (left.lastActiveAt ?? left.spawnedAt))[0];
++    const structuredDeliveryManifest = !activeOwnerRecord
++      ? resolveStructuredDeliveryManifest(query)
++      : resolveStructuredDeliveryManifest(null);
++    const structuredDeliveryStrategy = !activeOwnerRecord
++      ? structuredDeliveryManifest.strategy
++      : null;
+     const shouldApplyInitialStructuredDeliveryIsolation =
+-      !activeOwnerRecord && taskLooksLikeStructuredSpreadsheetDelivery(query);
+-    const structuredDeliveryContract = taskRequestsSpreadsheetOutput(query)
+-      ? "spreadsheet"
+-      : shouldApplyInitialStructuredDeliveryIsolation
+-        ? "structured_content"
+-        : "general";
++      !activeOwnerRecord && structuredDeliveryManifest.applyInitialIsolation;
++    const structuredDeliveryContract = structuredDeliveryManifest.deliveryContract;
+     if (shouldApplyInitialStructuredDeliveryIsolation) {
+       this.traceFlow("strict_orchestration_enabled", {
+         task_id: this.currentTask?.id,
+         phase: "initial_orchestration",
+         delivery_contract: structuredDeliveryContract,
+-        parent_contract: taskRequestsSpreadsheetOutput(query) ? "single_workbook" : "structured_content",
++        parent_contract: structuredDeliveryManifest.parentContract,
+         preview: previewActorText(query),
+       });
+     }
+@@ -2708,6 +2822,59 @@ export class AgentActor {
+         if (normalized) activeImageRefs.add(normalized);
+       }
+     };
++    const structuredDispatchPlan = shouldApplyInitialStructuredDeliveryIsolation
++      && !/(?:结构化子任务摘要|你派发的子任务现在都已经结束)/u.test(query)
++      ? structuredDeliveryStrategy?.buildInitialDispatchPlan?.(query) ?? null
++      : null;
++    if (structuredDispatchPlan && this.actorSystem) {
++      this.traceFlow("host_spawn_plan_selected", {
++        task_id: this.currentTask?.id,
++        phase: "initial_orchestration",
++        delivery_contract: structuredDispatchPlan.deliveryContract,
++        parent_contract: structuredDispatchPlan.parentContract,
++        count: structuredDispatchPlan.shards.length,
++        preview: previewActorText(structuredDispatchPlan.tracePreview),
++      });
++      const spawnResults = structuredDispatchPlan.shards.map((shard, index) => this.actorSystem?.spawnTask(
++        this.id,
++        `${this.id}-${structuredDispatchPlan.strategyId}-shard-${index + 1}-${this.currentTask?.id ?? generateId()}`,
++        shard.task,
++        {
++          label: shard.label,
++          images,
++          mode: "run",
++          cleanup: "delete",
++          expectsCompletionMessage: true,
++          roleBoundary: shard.roleBoundary ?? "executor",
++          createIfMissing: shard.createIfMissing ?? true,
++          overrides: shard.overrides,
++        },
++      ));
++      const rejectedSpawn = spawnResults.find((result) => result && "error" in result);
++      if (!rejectedSpawn) {
++        this.traceFlow("host_spawn_plan_applied", {
++          task_id: this.currentTask?.id,
++          phase: "initial_orchestration",
++          delivery_contract: structuredDispatchPlan.deliveryContract,
++          parent_contract: structuredDispatchPlan.parentContract,
++          count: structuredDispatchPlan.shards.length,
++          preview: previewActorText(structuredDispatchPlan.shards.map((shard) => shard.label).join("、")),
++        });
++        onStep?.({
++          type: "observation",
++          content: structuredDispatchPlan.observationText ?? `已派发 ${structuredDispatchPlan.shards.length} 个结构化子任务，等待结果。`,
++          timestamp: Date.now(),
++        });
++        return WAIT_FOR_SPAWNED_TASKS_DEFERRED_RESULT;
++      }
++      this.traceFlow("host_spawn_plan_failed", {
++        task_id: this.currentTask?.id,
++        phase: "initial_orchestration",
++        status: "spawn_rejected",
++        count: structuredDispatchPlan.shards.length,
++        preview: previewActorText(rejectedSpawn.error),
++      });
++    }
+     const effectiveModelOverride = runOverrides?.model ?? this.modelOverride;
+     const actorCount = this.actorSystem?.getAll().length ?? 0;
+     const baselineMaxIterations = !this.hasExplicitMaxIterations
+@@ -2885,7 +3052,7 @@ export class AgentActor {
+         ? "structured_partial"
+         : activeOwnerRecord?.executionIntent,
+       parent_contract: !activeOwnerRecord
+-        ? (taskRequestsSpreadsheetOutput(query) ? "single_workbook" : structuredDeliveryContract)
++        ? structuredDeliveryManifest.parentContract
+         : undefined,
+       tool_policy_source: activeOwnerRecord?.executionIntent
+         ? `${activeOwnerRecord.executionIntent}_intent`
+diff --git a/src/core/agent/actor/dialog-subtask-runtime.test.ts b/src/core/agent/actor/dialog-subtask-runtime.test.ts
+index d48f6cf..a0a610a 100644
+--- a/src/core/agent/actor/dialog-subtask-runtime.test.ts
++++ b/src/core/agent/actor/dialog-subtask-runtime.test.ts
+@@ -66,6 +66,10 @@ function createRecord(overrides: Partial<SpawnedTaskRecord> = {}): SpawnedTaskRe
+     parentRunId: overrides.parentRunId,
+     rootRunId: overrides.rootRunId ?? "run-1",
+     roleBoundary: overrides.roleBoundary ?? "executor",
++    resultContract: overrides.resultContract,
++    deliveryTargetId: overrides.deliveryTargetId,
++    deliveryTargetLabel: overrides.deliveryTargetLabel,
++    sheetName: overrides.sheetName,
+     task: overrides.task ?? "执行任务",
+     label: overrides.label ?? "执行任务",
+     images: overrides.images,
+@@ -282,6 +286,9 @@ describe("DialogSubtaskRuntime", () => {
+         status: "running",
+         mode: "run",
+         spawnedAt: 10,
++        resultContract: "inline_structured_result",
++        deliveryTargetLabel: "技术方向课程",
++        sheetName: "技术方向课程",
+       }),
+       target: worker as any,
+       fullTask: "执行任务",
+@@ -295,6 +302,9 @@ describe("DialogSubtaskRuntime", () => {
+     await Promise.resolve();
+ 
+     const result = runtime.getStructuredSubtaskResult("run-artifact-1");
++    expect(result?.resultContract).toBe("inline_structured_result");
++    expect(result?.deliveryTargetLabel).toBe("技术方向课程");
++    expect(result?.sheetName).toBe("技术方向课程");
+     expect(result?.artifacts).toEqual([
+       expect.objectContaining({
+         path: "/Users/demo/Downloads/index.html",
+diff --git a/src/core/agent/actor/dialog-subtask-runtime.ts b/src/core/agent/actor/dialog-subtask-runtime.ts
+index 4075a5a..4779134 100644
+--- a/src/core/agent/actor/dialog-subtask-runtime.ts
++++ b/src/core/agent/actor/dialog-subtask-runtime.ts
+@@ -199,6 +199,10 @@ export interface DialogStructuredSubtaskResult {
+   subtaskId: string;
+   targetActorId: string;
+   targetActorName: string;
++  resultContract?: "default" | "inline_structured_result";
++  deliveryTargetId?: string;
++  deliveryTargetLabel?: string;
++  sheetName?: string;
+   label?: string;
+   task: string;
+   mode: SpawnMode;
+@@ -481,6 +485,10 @@ export function buildDialogStructuredSubtaskResults(
+         subtaskId: runtime.subtaskId,
+         targetActorId: task.targetActorId,
+         targetActorName: actorNameById.get(task.targetActorId) ?? task.targetActorId,
++        resultContract: task.resultContract,
++        deliveryTargetId: task.deliveryTargetId,
++        deliveryTargetLabel: task.deliveryTargetLabel,
++        sheetName: task.sheetName,
+         label: task.label,
+         task: task.task,
+         mode: task.mode,
+diff --git a/src/core/agent/actor/index.ts b/src/core/agent/actor/index.ts
+index 29d1ddb..5aa4884 100644
+--- a/src/core/agent/actor/index.ts
++++ b/src/core/agent/actor/index.ts
+@@ -99,6 +99,15 @@ export {
+   resetTaskExecutorRuntimeForResume,
+   TaskExecutorRuntimeCore,
+ } from "./task-executor-runtime-core";
++export {
++  getStructuredDeliveryStrategies,
++  resolveRequestedSpreadsheetExtensions,
++  resolveStructuredDeliveryManifest,
++  resolveStructuredDeliveryStrategy,
++  taskLooksLikeCourseContentDelivery,
++  taskLooksLikeStructuredSpreadsheetDelivery,
++  taskRequestsSpreadsheetOutput,
++} from "./structured-delivery-strategy";
+ export type {
+   TaskExecutorLifecyclePatch,
+   TaskExecutorLifecycleRecord,
+diff --git a/src/core/agent/actor/types.ts b/src/core/agent/actor/types.ts
+index 09a493d..b4441ff 100644
+--- a/src/core/agent/actor/types.ts
++++ b/src/core/agent/actor/types.ts
+@@ -335,6 +335,14 @@ export interface ActorConfig {
+ export interface SpawnTaskOverrides {
+   /** 显式指定子任务执行意图（默认由系统推断） */
+   executionIntent?: DialogSubtaskExecutionIntent;
++  /** 子任务结果合同：用于固定终态交付语义，而不是靠 prompt 猜 */
++  resultContract?: "default" | "inline_structured_result";
++  /** 通用交付目标 ID，例如 sheet/bucket/section 标识 */
++  deliveryTargetId?: string;
++  /** 通用交付目标标签，例如 sheet 名、章节名、分桶名 */
++  deliveryTargetLabel?: string;
++  /** 专用交付元数据：当前子任务产出应归属的工作表 */
++  sheetName?: string;
+   /** 覆盖 subagent 使用的 LLM 模型 */
+   model?: string;
+   /** 覆盖单次运行总预算（秒） */
+@@ -550,6 +558,14 @@ export interface SpawnedTaskRecord {
+   roleBoundary?: SpawnedTaskRoleBoundary;
+   /** 稳定执行意图：用于固定 child 工具面，不再半继承 parent 工具池 */
+   executionIntent?: DialogSubtaskExecutionIntent;
++  /** 子任务结果合同：用于固定终态交付语义，而不是靠 prompt 猜 */
++  resultContract?: "default" | "inline_structured_result";
++  /** 通用交付目标 ID，例如 sheet/bucket/section 标识 */
++  deliveryTargetId?: string;
++  /** 通用交付目标标签，例如 sheet 名、章节名、分桶名 */
++  deliveryTargetLabel?: string;
++  /** 专用交付元数据：当前子任务产出应归属的工作表 */
++  sheetName?: string;
+   task: string;
+   label?: string;
+   /** 任务启动时继承的图片附件（如截图、设计稿） */
+diff --git a/src/plugins/builtin/SmartAgent/core/default-tools.ts b/src/plugins/builtin/SmartAgent/core/default-tools.ts
+index 4fb4639..7d8dacc 100644
+--- a/src/plugins/builtin/SmartAgent/core/default-tools.ts
++++ b/src/plugins/builtin/SmartAgent/core/default-tools.ts
+@@ -1599,6 +1599,16 @@ export function createBuiltinAgentTools(
+           description: "任务完成摘要（可选）",
+           required: false,
+         },
++        result: {
++          type: "string",
++          description: "完整最终结果（可选）。内容型/结构化子任务请把 JSON 数组或最终明细放这里。",
++          required: false,
++        },
++        answer: {
++          type: "string",
++          description: "完整最终回答（兼容字段，可选）。若提供，系统会优先把它作为最终结果候选。",
++          required: false,
++        },
+       },
+       execute: async (params) => {
+         const summary = String(params.summary || "任务已完成。").trim();
+diff --git a/src/plugins/builtin/SmartAgent/core/react-agent.test.ts b/src/plugins/builtin/SmartAgent/core/react-agent.test.ts
+index ffad38f..633d0d9 100644
+--- a/src/plugins/builtin/SmartAgent/core/react-agent.test.ts
++++ b/src/plugins/builtin/SmartAgent/core/react-agent.test.ts
+@@ -688,6 +688,58 @@ describe("ReActAgent FC compatibility cache", () => {
+     expect(answer).not.toContain("100px，不需要修改");
+   });
+ 
++  it("should prefer explicit task_done result for structured content delivery", async () => {
++    const ai = createMockAI(async ({ onChunk }) => {
++      onChunk("已先整理出课程候选。");
++      return {
++        type: "tool_calls",
++        toolCalls: [
++          {
++            id: "call-task-done-structured-result",
++            type: "function",
++            function: {
++              name: "task_done",
++              arguments: JSON.stringify({
++                summary: "已生成 2 门课程候选",
++                result: JSON.stringify([
++                  { 课程名称: "智能体工程化开发实战", 课程介绍: "覆盖开发、评测与部署。" },
++                  { 课程名称: "RAG 知识库构建与检索优化", 课程介绍: "覆盖索引、召回与检索优化。" },
++                ]),
++              }),
++            },
++          },
++        ],
++      };
++    });
++
++    const tools: AgentTool[] = [
++      {
++        name: "task_done",
++        description: "finish task",
++        parameters: {
++          summary: { type: "string", description: "summary" },
++          result: { type: "string", description: "result" },
++          answer: { type: "string", description: "answer" },
++        },
++        execute: async (params) => ({
++          status: "done",
++          summary: String(params.summary ?? ""),
++        }),
++      },
++    ];
++
++    const agent = new ReActAgent(ai, tools, {
++      maxIterations: 2,
++      fcCompatibilityKey: "prefer-task-done-explicit-structured-result",
++    });
++
++    const answer = await agent.run("基于主题生成课程候选，直接返回结构化 JSON");
++
++    expect(answer).toContain("课程名称");
++    expect(answer).toContain("智能体工程化开发实战");
++    expect(answer.trim().startsWith("[")).toBe(true);
++  });
++
+   it("should stop immediately after task_done without forcing memory recall correction", async () => {
+     let fcCalls = 0;
+     let memorySearchCalls = 0;
+diff --git a/src/plugins/builtin/SmartAgent/core/react-agent.ts b/src/plugins/builtin/SmartAgent/core/react-agent.ts
+index 81a0628..65b7d06 100644
+--- a/src/plugins/builtin/SmartAgent/core/react-agent.ts
++++ b/src/plugins/builtin/SmartAgent/core/react-agent.ts
+@@ -3761,6 +3761,8 @@ ${this.hasDelegateSubtaskTool() ? "- 如有 delegate_subtask 工具可用，可
+       let taskDoneResult: string | undefined;
+       /** task_done params.summary（纯文本，比 JSON outputStr 更适合展示） */
+       let taskDoneSummary: string | undefined;
++      /** task_done params.result / params.answer（用于内容型子任务显式交付完整结果） */
++      let taskDoneExplicitResult: string | undefined;
+ 
+       for (const { tc, toolName, result: pipelineResult } of callResults) {
+         if (pipelineResult.quickAnswer && !quickAnswerFound) {
+@@ -3774,8 +3776,22 @@ ${this.hasDelegateSubtaskTool() ? "- 如有 delegate_subtask 工具可用，可
+           try {
+             const doneParams = parseToolCallArguments(
+               tc.function.arguments || "{}",
+-            ).params as { summary?: string };
++            ).params as { summary?: string; result?: unknown; answer?: unknown };
+             if (doneParams.summary) taskDoneSummary = doneParams.summary.trim();
++            const explicitResultCandidates = [doneParams.result, doneParams.answer]
++              .map((value) => {
++                if (typeof value === "string") return value.trim();
++                if (value == null) return "";
++                try {
++                  return JSON.stringify(value);
++                } catch {
++                  return String(value);
++                }
++              })
++              .filter((value) => value.length > 0);
++            if (explicitResultCandidates.length > 0) {
++              taskDoneExplicitResult = explicitResultCandidates[0];
++            }
+           } catch {
+             /* ignore */
+           }
+@@ -3857,6 +3873,7 @@ ${this.hasDelegateSubtaskTool() ? "- 如有 delegate_subtask 工具可用，可
+           .find((s) => s.type === "answer");
+         const answer =
+           this.pickBestFinalAnswer(userInput, [
++            taskDoneExplicitResult,
+             lastAnswerStep?.content,
+             this.lastStreamingAnswer.length > 50
+               ? this.lastStreamingAnswer

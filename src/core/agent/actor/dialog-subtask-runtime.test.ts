@@ -70,6 +70,7 @@ function createRecord(overrides: Partial<SpawnedTaskRecord> = {}): SpawnedTaskRe
     deliveryTargetId: overrides.deliveryTargetId,
     deliveryTargetLabel: overrides.deliveryTargetLabel,
     sheetName: overrides.sheetName,
+    scopedSourceItems: overrides.scopedSourceItems,
     task: overrides.task ?? "执行任务",
     label: overrides.label ?? "执行任务",
     images: overrides.images,
@@ -312,6 +313,104 @@ describe("DialogSubtaskRuntime", () => {
         relatedRunId: "run-artifact-1",
       }),
     ]);
+  });
+
+  it("preserves scoped source shards in structured child results", async () => {
+    const { runtime, actors } = createRuntimeHarness();
+    const worker = actors.get("worker");
+    if (!worker) throw new Error("missing worker");
+    worker.assignTask = vi.fn(async () => ({
+      status: "completed" as const,
+      result: JSON.stringify({
+        rows: [
+          {
+            sourceItemId: "source-item-7",
+            topicIndex: 7,
+            topicTitle: "银行AI解决方案咨询方法论",
+            课程名称: "银行 AI 咨询方法论实战",
+          },
+        ],
+      }),
+    }));
+
+    runtime.startTask({
+      record: createRecord({
+        runId: "run-scoped-shard-1",
+        status: "running",
+        mode: "run",
+        spawnedAt: 10,
+        resultContract: "inline_structured_result",
+        deliveryTargetLabel: "技术方向课程",
+        sheetName: "技术方向课程",
+        scopedSourceItems: [
+          {
+            id: "source-item-7",
+            label: "银行AI解决方案咨询方法论",
+            order: 7,
+            topicIndex: 7,
+            topicTitle: "银行AI解决方案咨询方法论",
+          },
+        ],
+      }),
+      target: worker as any,
+      fullTask: "执行任务",
+      runOverrides: {
+        timeoutSeconds: 600,
+        idleLeaseSeconds: 180,
+      },
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const result = runtime.getStructuredSubtaskResult("run-scoped-shard-1");
+    expect(result?.scopedSourceItems).toEqual([
+      expect.objectContaining({
+        id: "source-item-7",
+        topicTitle: "银行AI解决方案咨询方法论",
+      }),
+    ]);
+    expect(result?.structuredRows).toEqual([
+      expect.objectContaining({
+        sourceItemId: "source-item-7",
+      }),
+    ]);
+  });
+
+  it("does not treat summary-only inline structured results as valid coverage", async () => {
+    const { runtime, actors } = createRuntimeHarness();
+    const worker = actors.get("worker");
+    if (!worker) throw new Error("missing worker");
+    worker.assignTask = vi.fn(async () => ({
+      status: "completed" as const,
+      result: "已处理完毕，共 3 条，请协调者继续汇总。",
+    }));
+
+    runtime.startTask({
+      record: createRecord({
+        runId: "run-summary-only-1",
+        status: "running",
+        mode: "run",
+        spawnedAt: 10,
+        resultContract: "inline_structured_result",
+        deliveryTargetLabel: "结果清单",
+        sheetName: "结果清单",
+      }),
+      target: worker as any,
+      fullTask: "执行任务",
+      runOverrides: {
+        timeoutSeconds: 600,
+        idleLeaseSeconds: 180,
+      },
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const result = runtime.getStructuredSubtaskResult("run-summary-only-1");
+    expect(result?.resultKind).toBe("blocker");
+    expect(result?.structuredRows).toEqual([]);
+    expect(result?.blocker).toContain("inline_structured_result");
   });
 
   it("keeps child completion announces compact once structured results are available", async () => {

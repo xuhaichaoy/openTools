@@ -158,6 +158,26 @@ describe("spawned-task-result-validator", () => {
     expect(validation.reason).toContain("执行计划");
   });
 
+  it("rejects spreadsheet repair-plan replies even when they mention export later", () => {
+    const validation = validateActorTaskResult({
+      taskText: "根据课程主题生成课程清单，最终给我一个 Excel 文件",
+      result: [
+        "执行计划：",
+        "1. 先补派缺失主题 repair shard",
+        "2. 汇总全部结构化结果后再导出 Excel",
+        "3. 导出完成后返回绝对路径",
+      ].join("\n"),
+      actorId: "coordinator",
+      startedAt: 1000,
+      completedAt: 2000,
+      artifacts: [],
+      steps: [],
+    });
+
+    expect(validation.accepted).toBe(false);
+    expect(validation.reason).toContain("执行计划");
+  });
+
   it("accepts spreadsheet deliverables when xlsx export evidence exists", () => {
     const steps: AgentStep[] = [
       {
@@ -348,6 +368,28 @@ describe("spawned-task-result-validator", () => {
 
     expect(validation.accepted).toBe(false);
     expect(validation.reason).toContain("真实文件路径");
+  });
+
+  it("rejects task-status summaries for spreadsheet delivery when no artifact was actually published", () => {
+    const validation = validateActorTaskResult({
+      taskText: "根据课程主题生成课程清单，最终给我一个 Excel 文件",
+      result: [
+        "我来分析当前任务状态并直接输出最终综合答复。",
+        "## 任务执行状态总览",
+        "**子任务总数：5**",
+        "- ✅ 完成：3个",
+        "- ❌ 中止：2个",
+        "- ⏱️ 超时：0个",
+      ].join("\n"),
+      actorId: "lead",
+      startedAt: 100,
+      completedAt: 200,
+      artifacts: [],
+      steps: [],
+    });
+
+    expect(validation.accepted).toBe(false);
+    expect(validation.reason).toContain("协作过程总结/状态盘点");
   });
 
   it("rejects schedule success claims without real scheduling tool calls", () => {

@@ -89,6 +89,7 @@ export function buildStructuredTaskSummaryBlock(
     const title = `${index + 1}. ${task.targetActorName}${task.label ? ` · ${task.label}` : ""}`;
     const statusLines = [
       `- profile: ${task.profile}`,
+      task.workerProfileId ? `- worker_profile: ${task.workerProfileId}` : "",
       task.executionIntent ? `- execution_intent: ${task.executionIntent}` : "",
       `- status: ${task.status}${task.timeoutReason ? ` (${task.timeoutReason})` : ""}`,
       task.progressSummary ? `- progress: ${compactPromptText(task.progressSummary)}` : "",
@@ -96,6 +97,9 @@ export function buildStructuredTaskSummaryBlock(
       task.terminalError ? `- terminal_error: ${compactPromptText(task.terminalError)}` : "",
       task.resultKind ? `- result_kind: ${task.resultKind}` : "",
       typeof task.rowCount === "number" ? `- row_count: ${task.rowCount}` : "",
+      typeof task.sourceItemCount === "number" ? `- source_item_count: ${task.sourceItemCount}` : "",
+      task.scopedSourceItems?.length ? `- scoped_source_item_count: ${task.scopedSourceItems.length}` : "",
+      task.schemaFields?.length ? `- schema_fields: ${task.schemaFields.join("、")}` : "",
       task.blocker ? `- blocker: ${compactPromptText(task.blocker)}` : "",
       task.artifacts?.length
         ? `- artifacts: ${task.artifacts
@@ -209,6 +213,7 @@ function renderStructuredTasks(
       `[结构化子任务结果] ${task.targetActorName}${task.label ? ` · ${task.label}` : ""}`,
       `- run_id: ${task.runId}`,
       `- profile: ${task.profile}`,
+      task.workerProfileId ? `- worker_profile: ${task.workerProfileId}` : "",
       task.executionIntent ? `- execution_intent: ${task.executionIntent}` : "",
       `- status: ${task.status}`,
       task.progressSummary ? `- progress: ${task.progressSummary}` : "",
@@ -216,6 +221,9 @@ function renderStructuredTasks(
       task.terminalError ? `- error: ${task.terminalError.slice(0, 320)}` : "",
       task.resultKind ? `- result_kind: ${task.resultKind}` : "",
       typeof task.rowCount === "number" ? `- row_count: ${task.rowCount}` : "",
+      typeof task.sourceItemCount === "number" ? `- source_item_count: ${task.sourceItemCount}` : "",
+      task.scopedSourceItems?.length ? `- scoped_source_item_count: ${task.scopedSourceItems.length}` : "",
+      task.schemaFields?.length ? `- schema_fields: ${task.schemaFields.join("、")}` : "",
       task.blocker ? `- blocker: ${task.blocker.slice(0, 240)}` : "",
     ].filter(Boolean);
     return lines.join("\n");
@@ -299,6 +307,8 @@ export function buildFinalSynthesisPrompt(params?: {
   failedTaskLabels?: string[];
   structuredTasks?: readonly DialogStructuredSubtaskResult[];
   deliveryPlanBlock?: string;
+  aggregateOnly?: boolean;
+  hostExportPath?: string;
 }): string {
   const failedTaskSummary = uniqueNonEmpty(params?.failedTaskLabels ?? []);
   const structuredTasks = params?.structuredTasks ?? [];
@@ -324,11 +334,19 @@ export function buildFinalSynthesisPrompt(params?: {
     "3. 如果子任务里已经给出 terminal_result / terminal_error / progress / artifacts，不要重新猜测；优先直接引用这些结构化事实。",
     "4. 只允许引用当前 run 关联的 artifacts；禁止回头扫描 Downloads、历史文件、memory_search 结果或旧产物目录。",
     "5. 如果仍有缺口，只说明真实缺口，不要重复之前已经完成的工作。",
+    params?.aggregateOnly
+      ? "6. 本轮 final synthesis 只能聚合已有 structured rows、terminal facts 和当前 run artifacts；禁止重新生成课程内容、重新压缩主题，或重新编造 workbook rows / export 参数。"
+      : "",
+    params?.aggregateOnly && params?.hostExportPath
+      ? `7. 当前 host 已完成导出，直接围绕导出结果确认路径与覆盖情况：${params.hostExportPath}`
+      : params?.aggregateOnly
+        ? "7. 如果 host 导出尚未成功，只能说明真实 blocker 或缺失条件，不要退回自由生成。"
+        : "",
     params?.hadFailedSpawnFollowUp
-      ? "6. 既然出现过子任务失败，先完成一次主协调复核：自己接管补齐，或说明你已经带着明确输出与验收标准完成过一次重派。"
+      ? `${params?.aggregateOnly ? "8" : "6"}. 既然出现过子任务失败，先完成一次主协调复核：自己接管补齐，或说明你已经带着明确输出与验收标准完成过一次重派。`
       : "",
     params?.hadFailedSpawnFollowUp
-      ? "7. 禁止只输出过程纪要、分段任务汇总、执行计划或状态盘点。"
+      ? `${params?.aggregateOnly ? "9" : "7"}. 禁止只输出过程纪要、分段任务汇总、执行计划或状态盘点。`
       : "",
     takeoverLine,
   ].filter(Boolean).join("\n");

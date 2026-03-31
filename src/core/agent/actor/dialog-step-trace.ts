@@ -14,6 +14,8 @@ let cachedTraceContent = "";
 let resolvedTracePathPromise: Promise<string> | null = null;
 let traceSequence = 0;
 let dialogTraceModeCache: DialogTraceMode | null = null;
+let pendingSessionStartedTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingSessionStartedId: string | null = null;
 
 function hasTauriFileBridge(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -227,19 +229,35 @@ export function shouldTraceDialogStep(step: AgentStep | undefined): boolean {
 
 export function traceDialogSessionStarted(sessionId: string): void {
   if (!isDialogFullTraceEnabled()) return;
-  void getDialogStepTracePath().then((path) => {
-    traceDialogFlowEvent({
-      sessionId,
-      event: "session_started",
-      detail: {
-        path,
-      },
+  if (pendingSessionStartedTimer) {
+    clearTimeout(pendingSessionStartedTimer);
+    pendingSessionStartedTimer = null;
+  }
+  pendingSessionStartedId = sessionId;
+  pendingSessionStartedTimer = setTimeout(() => {
+    const finalSessionId = pendingSessionStartedId;
+    pendingSessionStartedId = null;
+    pendingSessionStartedTimer = null;
+    if (!finalSessionId) return;
+    void getDialogStepTracePath().then((path) => {
+      traceDialogFlowEvent({
+        sessionId: finalSessionId,
+        event: "session_started",
+        detail: {
+          path,
+        },
+      });
     });
-  });
+  }, 80);
 }
 
 export function resetDialogStepTrace(): void {
   if (!hasTauriFileBridge()) return;
+  if (pendingSessionStartedTimer) {
+    clearTimeout(pendingSessionStartedTimer);
+    pendingSessionStartedTimer = null;
+    pendingSessionStartedId = null;
+  }
   appendQueue = appendQueue
     .then(async () => {
       const tracePath = await getDialogStepTracePath();

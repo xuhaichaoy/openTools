@@ -92,6 +92,7 @@ import {
 } from "@/core/agent/actor/dialog-step-trace";
 import { getSpawnedTaskRoleBoundaryMeta } from "@/core/agent/actor/spawned-task-role-boundary";
 import type {
+  DialogFlowTraceEvent,
   DialogArtifactRecord,
   DialogContextSummary,
   DialogMessage,
@@ -145,6 +146,7 @@ import {
 } from "./actor-chat-panel/DialogCollaborationTimeline";
 import {
   getLocalDialogLiveContinuationState,
+  mergeLocalDialogLiveContinuationStateWithTraceEvents,
   shouldHideLocalDialogLiveActor,
   shouldHideLocalDialogMessage,
   shouldRenderLocalDialogStreamingAnswer,
@@ -183,6 +185,7 @@ import {
   assessExecutionContractApproval,
   type ExecutionContractApprovalAssessment,
 } from "@/core/collaboration/contract-approval";
+import { getRuntimeAgentCount } from "./actor-chat-panel/runtime-agent-count";
 
 const TaskCenterPanel = lazy(() => import("../TaskCenterPanel"));
 const KnowledgeGraphView = lazy(() => import("../KnowledgeGraphView"));
@@ -210,6 +213,7 @@ const EMPTY_DIALOG_HISTORY: DialogMessage[] = [];
 const EMPTY_PENDING_INTERACTIONS: PendingInteraction[] = [];
 const EMPTY_SPAWNED_TASKS: SpawnedTaskRecord[] = [];
 const EMPTY_SPAWNED_TASK_EVENTS: SpawnedTaskLifecycleEvent[] = [];
+const EMPTY_DIALOG_FLOW_EVENTS: DialogFlowTraceEvent[] = [];
 const EMPTY_DIALOG_ARTIFACTS: DialogArtifactRecord[] = [];
 const EMPTY_SESSION_UPLOADS: SessionUploadRecord[] = [];
 const EMPTY_QUEUED_FOLLOW_UPS: DialogQueuedFollowUp[] = [];
@@ -924,19 +928,20 @@ export function ActorChatPanel({
   const isReviewSurface = dialogSurfaceMode === "review";
 
   const {
-    active: systemActive, actors, dialogHistory, pendingUserInteractions, spawnedTasks, spawnedTaskEvents, artifacts: structuredArtifacts,
+    active: systemActive, actors, dialogHistory, dialogFlowEvents, pendingUserInteractions, spawnedTasks, spawnedTaskEvents, artifacts: structuredArtifacts,
     sessionUploads, queuedFollowUps, dialogRoomCompaction,
-    coordinatorActorId, actorTodos, sourceHandoff: incomingHandoff, contextSnapshot, collaborationSnapshot, dialogExecutionMode,
+    coordinatorActorId, actorTodos, sourceHandoff: incomingHandoff, contextSnapshot, collaborationSnapshot, dialogExecutionMode, dialogSubagentEnabled,
     init, spawnActor, killActor, destroyAll,
     abortAll, closeSpawnedSession, abortSpawnedSession, resetSession, removeFollowUp, clearQueuedFollowUps,
     dispatchDialogInput, replyToPendingInteraction, applyDraftExecutionContract, runQueuedFollowUp,
     sync, routeTask, getSystem, setSourceHandoff,
-    setCoordinator, reorderActors, updateActorConfig, setDialogExecutionMode,
+    setCoordinator, reorderActors, updateActorConfig, setDialogExecutionMode, setDialogSubagentEnabled,
   } = useActorSystemStore(
     useShallow((state) => ({
       active: active ? state.active : false,
       actors: active ? state.actors : EMPTY_DIALOG_ACTORS,
       dialogHistory: active ? state.dialogHistory : EMPTY_DIALOG_HISTORY,
+      dialogFlowEvents: active ? state.dialogFlowEvents : EMPTY_DIALOG_FLOW_EVENTS,
       pendingUserInteractions: active ? state.pendingUserInteractions : EMPTY_PENDING_INTERACTIONS,
       spawnedTasks: active ? state.spawnedTasks : EMPTY_SPAWNED_TASKS,
       spawnedTaskEvents: active ? state.spawnedTaskEvents : EMPTY_SPAWNED_TASK_EVENTS,
@@ -950,6 +955,7 @@ export function ActorChatPanel({
       contextSnapshot: active ? state.contextSnapshot : null,
       collaborationSnapshot: active ? state.collaborationSnapshot : null,
       dialogExecutionMode: active ? state.dialogExecutionMode : "execute",
+      dialogSubagentEnabled: active ? state.dialogSubagentEnabled : false,
       init: state.init,
       spawnActor: state.spawnActor,
       killActor: state.killActor,
@@ -972,6 +978,7 @@ export function ActorChatPanel({
       reorderActors: state.reorderActors,
       updateActorConfig: state.updateActorConfig,
       setDialogExecutionMode: state.setDialogExecutionMode,
+      setDialogSubagentEnabled: state.setDialogSubagentEnabled,
     })),
   );
 
@@ -1050,6 +1057,10 @@ export function ActorChatPanel({
     actors.forEach((a) => map.set(a.id, a));
     return map;
   }, [actors]);
+  const runtimeAgentCount = useMemo(
+    () => getRuntimeAgentCount(actors),
+    [actors],
+  );
   const coordinatorActor = useMemo(
     () => (coordinatorActorId ? actorById.get(coordinatorActorId) : undefined) ?? actors[0] ?? null,
     [actorById, actors, coordinatorActorId],
@@ -1743,14 +1754,28 @@ export function ActorChatPanel({
     pendingUserInteractions.forEach((interaction) => map.set(interaction.messageId, interaction));
     return map;
   }, [pendingUserInteractions]);
+  const dialogFlowEventsByActorId = useMemo(() => {
+    const map = new Map<string, DialogFlowTraceEvent[]>();
+    dialogFlowEvents.forEach((event) => {
+      const actorId = event.actorId?.trim();
+      if (!actorId) return;
+      const list = map.get(actorId) ?? [];
+      list.push(event);
+      map.set(actorId, list);
+    });
+    return map;
+  }, [dialogFlowEvents]);
   const collaborationParentActivityByActorId = useMemo(
     () => new Map(
-      runningActors.map((actor) => [
+      actors.map((actor) => [
         actor.id,
-        getLocalDialogLiveContinuationState(actor.currentTask?.steps ?? []),
+        mergeLocalDialogLiveContinuationStateWithTraceEvents(
+          getLocalDialogLiveContinuationState(actor.currentTask?.steps ?? []),
+          dialogFlowEventsByActorId.get(actor.id) ?? [],
+        ),
       ] as const),
     ),
-    [runningActors],
+    [actors, dialogFlowEventsByActorId],
   );
   const collaborationTimelineGroups = useMemo(
     () => buildLocalCollaborationTimelineGroups({
@@ -1759,8 +1784,9 @@ export function ActorChatPanel({
       dialogHistory,
       actorNameById,
       parentActivityByActorId: collaborationParentActivityByActorId,
+      hostTraceEventsByActorId: dialogFlowEventsByActorId,
     }),
-    [actorNameById, collaborationParentActivityByActorId, dialogHistory, spawnedTaskEvents, spawnedTasks],
+    [actorNameById, collaborationParentActivityByActorId, dialogFlowEventsByActorId, dialogHistory, spawnedTaskEvents, spawnedTasks],
   );
   const collaborationWorkerActorIds = useMemo(
     () => new Set(collaborationTimelineGroups.flatMap((group) => group.workers.map((worker) => worker.targetActorId))),
@@ -2147,6 +2173,25 @@ export function ActorChatPanel({
       toast("warning", error instanceof Error ? error.message : "切换规划模式失败");
     }
   }, [dialogExecutionMode, ensureSystem, hasActiveExecutionInRoom, inputNotice, setDialogExecutionMode, toast]);
+  const handleToggleDialogSubagentMode = useCallback(() => {
+    ensureSystem();
+    const nextEnabled = !dialogSubagentEnabled;
+    setDialogSubagentEnabled(nextEnabled);
+    toast(
+      "info",
+      nextEnabled
+        ? (
+          hasActiveExecutionInRoom
+            ? "已开启子代理协作：对后续新消息生效；当前运行中的任务保持原样。"
+            : "已开启子代理协作：后续新消息允许主 Agent 按需组织子代理。"
+        )
+        : (
+          hasActiveExecutionInRoom
+            ? "已关闭子代理协作：对后续新消息生效；当前运行中的任务保持原样。"
+            : "已关闭子代理协作：主 Agent 默认先自行完成，不再预设派工。"
+        ),
+    );
+  }, [dialogSubagentEnabled, ensureSystem, hasActiveExecutionInRoom, setDialogSubagentEnabled, toast]);
   const handleCopyDialogStepTracePath = useCallback(() => {
     const tracePath = dialogStepTracePath?.trim();
     if (!tracePath) {
@@ -2330,6 +2375,23 @@ export function ActorChatPanel({
     return { approved: true, assessment };
   }, [actors, contractApprovalActors, openPlanApprovalDialog]);
 
+  const hasLiveSubagentContext = useMemo(() => {
+    const contractState = collaborationSnapshot?.activeContract?.state;
+    if (
+      contractState
+      && contractState !== "completed"
+      && contractState !== "failed"
+      && contractState !== "superseded"
+    ) {
+      return true;
+    }
+    return spawnedTasks.some((task) => (
+      task.status === "running"
+      || (task.mode === "session" && task.sessionOpen)
+    ));
+  }, [collaborationSnapshot, spawnedTasks]);
+  const allowDialogSubagentPlanning = dialogSubagentEnabled || hasLiveSubagentContext;
+
   const handleEditQueuedFollowUpItem = useCallback(async (itemId: string) => {
     const nextItem = queuedFollowUps.find((item) => item.id === itemId);
     if (!nextItem) return;
@@ -2386,7 +2448,9 @@ export function ActorChatPanel({
         const selectedRoute = nextItem.routingMode === "smart"
           ? routeTask(nextItem.content, dispatchInsight.preferredCapabilities)[0] ?? null
           : null;
-        const planBundle = buildDialogDispatchPlanBundle({
+        const allowQueuedExecutionDraft =
+          dialogSubagentEnabled || hasLiveSubagentContext || nextItem.contractStatus !== "missing";
+        const planBundle = allowQueuedExecutionDraft ? buildDialogDispatchPlanBundle({
           actors,
           routingMode: planningRoutingMode,
           content: nextItem.content,
@@ -2396,8 +2460,8 @@ export function ActorChatPanel({
           mentionedTargetId: directTargetActorId ?? null,
           selectedRoute,
           coordinatorActorId,
-        });
-        const executionDraft = buildExecutionContractDraftFromDialog({
+        }) : null;
+        const executionDraft = allowQueuedExecutionDraft ? buildExecutionContractDraftFromDialog({
           actors,
           routingMode: planningRoutingMode,
           content: nextItem.content,
@@ -2407,7 +2471,7 @@ export function ActorChatPanel({
           mentionedTargetId: directTargetActorId ?? null,
           selectedRoute,
           coordinatorActorId,
-        });
+        }) : null;
         if (!executionDraft) {
           setInputNotice("当前排队消息无法自动重建协作契约，请先编辑后重新发送。");
           inputRef.current?.focus();
@@ -2475,6 +2539,8 @@ export function ActorChatPanel({
     coordinatorActorId,
     dispatchDialogInput,
     getSystem,
+    hasLiveSubagentContext,
+    dialogSubagentEnabled,
     manualCodingMode,
     queueDialogUserMemoryCapture,
     queuedFollowUps,
@@ -2610,7 +2676,7 @@ export function ActorChatPanel({
     let sealedContract = null;
     if (!willReplyToInteraction && !isSteerCommand) {
       const planningRoutingMode: DialogRoutingMode = routingMode;
-      const planBundle = buildDialogDispatchPlanBundle({
+      const planBundle = allowDialogSubagentPlanning ? buildDialogDispatchPlanBundle({
         actors,
         routingMode: planningRoutingMode,
         content: finalContent,
@@ -2621,8 +2687,8 @@ export function ActorChatPanel({
         mentionedTargetId: targetId,
         selectedRoute: selectedSmartRoute,
         coordinatorActorId,
-      });
-      const executionDraft = buildExecutionContractDraftFromDialog({
+      }) : null;
+      const executionDraft = allowDialogSubagentPlanning ? buildExecutionContractDraftFromDialog({
         actors,
         routingMode: planningRoutingMode,
         content: finalContent,
@@ -2633,7 +2699,7 @@ export function ActorChatPanel({
         mentionedTargetId: targetId,
         selectedRoute: selectedSmartRoute,
         coordinatorActorId,
-      });
+      }) : null;
 
       if (executionDraft && requirePlanApproval) {
         const reviewed = await reviewExecutionContractBoundary({
@@ -2705,7 +2771,7 @@ export function ActorChatPanel({
     clearAttachments();
     setSourceHandoff(null);
     inputRef.current?.focus();
-  }, [input, hasAttachments, imagePaths, attachments, fileContextBlock, attachmentSummary, ensureSystem, pendingUserInteractions, pendingInteractionByMessageId, selectedPendingMessageId, parseMention, actors, routingMode, routeTask, clearAttachments, requirePlanApproval, coordinatorActorId, queueDialogUserMemoryCapture, inputAttachmentPaths, incomingHandoff, actorSupportsImageInput, toast, dispatchDialogInput, applyDraftExecutionContract, getSystem, setSourceHandoff, activeDialogView, pendingSteerTargetActorId, reviewExecutionContractBoundary, manualCodingMode]);
+  }, [input, hasAttachments, imagePaths, attachments, fileContextBlock, attachmentSummary, ensureSystem, pendingUserInteractions, pendingInteractionByMessageId, selectedPendingMessageId, parseMention, actors, routingMode, routeTask, clearAttachments, requirePlanApproval, coordinatorActorId, queueDialogUserMemoryCapture, inputAttachmentPaths, incomingHandoff, actorSupportsImageInput, toast, dispatchDialogInput, applyDraftExecutionContract, getSystem, setSourceHandoff, activeDialogView, pendingSteerTargetActorId, reviewExecutionContractBoundary, manualCodingMode, allowDialogSubagentPlanning]);
 
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value;
@@ -2912,6 +2978,7 @@ export function ActorChatPanel({
       selectedPendingMessageId && selectedPendingMessageId !== NEW_MESSAGE_TARGET && pendingInteractionByMessageId.get(selectedPendingMessageId),
     ) || (pendingUserInteractions.length > 0 && selectedPendingMessageId !== NEW_MESSAGE_TARGET && pendingUserInteractions.length === 1);
 
+    if (!allowDialogSubagentPlanning) return null;
     if (isReplyingToInteraction) return null;
     if (!trimmed && !hasContext && !hasImages) return null;
 
@@ -2944,7 +3011,7 @@ export function ActorChatPanel({
       selectedRoute: smartRoute,
       coordinatorActorId,
     });
-  }, [input, fileContextBlock, imagePaths, selectedPendingMessageId, pendingInteractionByMessageId, pendingUserInteractions, parseMention, attachmentSummary, routingMode, routeTask, actors, coordinatorActorId, inputAttachmentPaths, incomingHandoff, manualCodingMode]);
+  }, [allowDialogSubagentPlanning, input, fileContextBlock, imagePaths, selectedPendingMessageId, pendingInteractionByMessageId, pendingUserInteractions, parseMention, attachmentSummary, routingMode, routeTask, actors, coordinatorActorId, inputAttachmentPaths, incomingHandoff, manualCodingMode]);
   const draftDispatchPlan = draftDispatchBundle?.clusterPlan ?? null;
   const draftDispatchInsight = draftDispatchBundle?.insight ?? null;
   const contextBreakdown = useMemo(
@@ -3133,11 +3200,11 @@ export function ActorChatPanel({
                       {isReviewSurface ? "只读审查" : "主 Agent 协作"}
                     </span>
                     <span className={`rounded-full px-2 py-0.5 text-[10px] ${
-                      actors.length > 0
+                      runtimeAgentCount > 0
                         ? "bg-emerald-500/10 text-emerald-600"
                         : "bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]"
                     }`}>
-                      {actors.length > 0 ? `${actors.length} 个 Agent` : "等待配置"}
+                      {runtimeAgentCount > 0 ? `${runtimeAgentCount} 个 Agent` : "等待配置"}
                     </span>
                   </div>
                   {headerMetaItems.length > 0 && (
@@ -4027,7 +4094,9 @@ export function ActorChatPanel({
                               ? "输入规划问题给主 Agent；当前只做只读分析、方案设计和风险评估"
                             : isReviewSurface
                               ? "输入审查任务给主 Agent；它会按只读审查边界组织协作，不直接改业务文件"
-                              : "输入消息给主 Agent，必要时它会自动复用后台线程或分派子 Agent"}
+                              : dialogSubagentEnabled
+                                ? "输入消息给主 Agent；必要时它会复用后台线程或分派子 Agent"
+                                : "输入消息给主 Agent；默认由它先自行处理，开启子代理后才会分派协作"}
                     value={input}
                     onChange={handleInputChange}
                     onKeyDown={handleKeyDown}
@@ -4074,6 +4143,35 @@ export function ActorChatPanel({
                           <span
                             className={`absolute top-0.5 h-3 w-3 rounded-full bg-white shadow-sm transition-transform ${
                               manualCodingMode ? "translate-x-3.5" : "translate-x-0.5"
+                            }`}
+                          />
+                        </span>
+                      </button>
+                    )}
+                    {actors.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleToggleDialogSubagentMode}
+                        aria-pressed={dialogSubagentEnabled}
+                        title={dialogSubagentEnabled
+                          ? "当前开启：后续新消息允许主 Agent 组织子代理协作"
+                          : "当前关闭：主 Agent 默认先直接处理，不预设进入子代理派工"}
+                        className={`inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[10px] transition-colors ${
+                          dialogSubagentEnabled
+                            ? "border-violet-500/30 bg-violet-500/10 text-violet-700 hover:border-violet-500/45 hover:bg-violet-500/15"
+                            : "border-[var(--color-border)] bg-[var(--color-bg)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/25 hover:text-[var(--color-text)]"
+                        }`}
+                      >
+                        <Users className="w-3 h-3" />
+                        <span>子代理</span>
+                        <span
+                          className={`relative inline-flex h-4 w-7 shrink-0 rounded-full transition-colors ${
+                            dialogSubagentEnabled ? "bg-violet-500/80" : "bg-[var(--color-border)]"
+                          }`}
+                        >
+                          <span
+                            className={`absolute top-0.5 h-3 w-3 rounded-full bg-white shadow-sm transition-transform ${
+                              dialogSubagentEnabled ? "translate-x-3.5" : "translate-x-0.5"
                             }`}
                           />
                         </span>
@@ -4178,6 +4276,11 @@ export function ActorChatPanel({
                         {activeDispatchInsight.focusLabel
                           ? ` · ${activeDispatchInsight.focusLabel}`
                           : ""}
+                      </span>
+                    )}
+                    {dialogSubagentEnabled && (
+                      <span className="rounded-full border border-violet-500/20 bg-violet-500/10 px-2.5 py-1 text-[10px] text-violet-700">
+                        子代理协作已启用
                       </span>
                     )}
                     {dialogExecutionMode === "plan" && (

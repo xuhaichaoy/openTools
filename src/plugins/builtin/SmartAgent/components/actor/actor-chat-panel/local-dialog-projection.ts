@@ -1,5 +1,5 @@
 import type { AgentStep } from "@/plugins/builtin/SmartAgent/core/react-agent";
-import type { DialogMessage } from "@/core/agent/actor/types";
+import type { DialogFlowTraceEvent, DialogMessage } from "@/core/agent/actor/types";
 import { buildToolStreamingPreview } from "./StreamingBlocks";
 
 const TASK_RESULT_PREFIX = /^\[Task (completed|failed|timeout):/i;
@@ -49,6 +49,22 @@ export type LocalDialogContinuationPhase =
   | "repairing"
   | "published";
 
+export type LocalDialogHostMilestoneKind =
+  | "aggregation_started"
+  | "repair_started"
+  | "repair_completed"
+  | "export_blocked"
+  | "export_started"
+  | "export_succeeded";
+
+export interface LocalDialogHostMilestone {
+  id: string;
+  kind: LocalDialogHostMilestoneKind;
+  timestamp: number;
+  summary: string;
+  artifactPath?: string;
+}
+
 export interface LocalDialogLiveContinuationState {
   latestOrchestrationIndex: number;
   latestContinuationIndex: number;
@@ -56,6 +72,7 @@ export interface LocalDialogLiveContinuationState {
   latestContinuationPreview?: string;
   isContinuingAfterOrchestration: boolean;
   phase?: LocalDialogContinuationPhase;
+  hostMilestones?: LocalDialogHostMilestone[];
 }
 
 function compactProjectionText(value: string | undefined, maxLength = 160): string | undefined {
@@ -172,14 +189,264 @@ function getLiveContinuationPreview(step: AgentStep | undefined): string | undef
   return compactProjectionText(step.content);
 }
 
+function extractPathFromText(value: string | undefined, extensions?: readonly string[]): string | undefined {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) return undefined;
+  const extensionPattern = extensions?.length
+    ? extensions.map((extension) => extension.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")
+    : "[A-Za-z0-9]+";
+  const pattern = new RegExp(`\\/[^\\s"'\\\`]+\\.(?:${extensionPattern})\\b`, "i");
+  return normalized.match(pattern)?.[0];
+}
+
+function extractSpreadsheetExportTarget(step: AgentStep): string | undefined {
+  if (!step.toolInput) return undefined;
+  const outputPath = typeof step.toolInput.outputPath === "string" ? step.toolInput.outputPath.trim() : "";
+  if (outputPath) return outputPath;
+  const fileName = typeof step.toolInput.file_name === "string" ? step.toolInput.file_name.trim() : "";
+  return fileName || undefined;
+}
+
+function extractSpreadsheetExportPath(step: AgentStep): string | undefined {
+  if (typeof step.toolOutput === "string") {
+    const fromOutput = extractPathFromText(step.toolOutput, ["xlsx", "xls", "csv"]);
+    if (fromOutput) return fromOutput;
+  }
+  if (step.toolOutput && typeof step.toolOutput === "object") {
+    const output = step.toolOutput as { path?: unknown; message?: unknown };
+    if (typeof output.path === "string" && output.path.trim()) {
+      return output.path.trim();
+    }
+    if (typeof output.message === "string") {
+      const fromMessage = extractPathFromText(output.message, ["xlsx", "xls", "csv"]);
+      if (fromMessage) return fromMessage;
+    }
+  }
+  return extractPathFromText(step.content, ["xlsx", "xls", "csv"]);
+}
+
+function pushHostMilestone(
+  milestones: LocalDialogHostMilestone[],
+  seenKeys: Set<string>,
+  milestone: LocalDialogHostMilestone | null,
+): void {
+  if (!milestone) return;
+  const key = `${milestone.kind}:${milestone.summary}`;
+  if (seenKeys.has(key)) return;
+  seenKeys.add(key);
+  milestones.push(milestone);
+}
+
+function buildLocalDialogHostMilestones(
+  steps: readonly AgentStep[],
+  latestOrchestrationIndex: number,
+): LocalDialogHostMilestone[] {
+  if (latestOrchestrationIndex < 0) return [];
+  const milestones: LocalDialogHostMilestone[] = [];
+  const seenKeys = new Set<string>();
+  let sawRepair = false;
+
+  steps.slice(latestOrchestrationIndex + 1).forEach((step, index) => {
+    const normalizedContent = String(step.content ?? "").trim();
+    if (
+      normalizedContent
+      && (step.type === "observation" || step.type === "error" || step.type === "answer")
+      && REPAIR_CONTINUATION_PATTERNS.some((pattern) => pattern.test(normalizedContent))
+    ) {
+      sawRepair = true;
+      pushHostMilestone(milestones, seenKeys, {
+        id: `repair-started-${step.timestamp}-${index}`,
+        kind: "repair_started",
+        timestamp: step.timestamp,
+        summary: `进入修复轮：${compactProjectionText(normalizedContent, 140) ?? "正在修复缺口并准备重新导出。"}`,
+      });
+      return;
+    }
+
+    if (step.type === "action" && step.toolName === "export_spreadsheet") {
+      const target = extractSpreadsheetExportTarget(step) ?? "最终工作簿";
+      pushHostMilestone(milestones, seenKeys, {
+        id: `export-started-${step.timestamp}-${index}`,
+        kind: "export_started",
+        timestamp: step.timestamp,
+        summary: `${sawRepair ? "开始重试导出工作簿" : "开始导出工作簿"}：${compactProjectionText(target, 120) ?? "最终工作簿"}`,
+      });
+      return;
+    }
+
+    if (step.toolName === "export_spreadsheet" && (step.type === "observation" || step.type === "answer")) {
+      const exportPath = extractSpreadsheetExportPath(step);
+      if (!exportPath) return;
+      pushHostMilestone(milestones, seenKeys, {
+        id: `export-succeeded-${step.timestamp}-${index}`,
+        kind: "export_succeeded",
+        timestamp: step.timestamp,
+        artifactPath: exportPath,
+        summary: `${sawRepair ? "重试导出成功" : "导出成功"}：${compactProjectionText(exportPath, 140) ?? exportPath}`,
+      });
+    }
+  });
+
+  return milestones.sort((left, right) => left.timestamp - right.timestamp);
+}
+
+export function buildLocalDialogHostMilestonesFromTraceEvents(
+  events: readonly DialogFlowTraceEvent[] = [],
+): LocalDialogHostMilestone[] {
+  const sortedEvents = [...events].sort((left, right) => left.timestamp - right.timestamp);
+  const milestones: LocalDialogHostMilestone[] = [];
+  const seenKeys = new Set<string>();
+  let sawRepair = false;
+
+  sortedEvents.forEach((event, index) => {
+    const detail = event.detail ?? {};
+    if (event.event === "aggregation_started" || event.event === "final_synthesis_started") {
+      const count = typeof detail.count === "number" ? detail.count : undefined;
+      pushHostMilestone(milestones, seenKeys, {
+        id: `trace-aggregation-started-${event.timestamp}-${index}`,
+        kind: "aggregation_started",
+        timestamp: event.timestamp,
+        summary: count && count > 0
+          ? `开始汇总子任务结果：当前聚合 ${count} 个结构化结果。`
+          : "开始汇总子任务结果。",
+      });
+      return;
+    }
+
+    if (event.event === "host_export_blocked") {
+      const preview = compactProjectionText(typeof detail.preview === "string" ? detail.preview : undefined, 140);
+      const status = typeof detail.status === "string" ? detail.status : "";
+      const prefix = status === "blocked"
+        ? "导出被质量门禁拦截"
+        : "导出暂时受阻";
+      pushHostMilestone(milestones, seenKeys, {
+        id: `trace-export-blocked-${event.timestamp}-${index}`,
+        kind: "export_blocked",
+        timestamp: event.timestamp,
+        summary: `${prefix}：${preview ?? "等待修复后继续导出。"}`,
+      });
+      return;
+    }
+
+    if (event.event === "repair_started" || event.event === "validation_repair_started" || event.event === "repair_round_started") {
+      sawRepair = true;
+      const acceptedCount = typeof detail.accepted_count === "number" ? detail.accepted_count : undefined;
+      const preview = compactProjectionText(typeof detail.preview === "string" ? detail.preview : undefined, 140);
+      const summary = preview
+        ? `进入修复轮：${preview}`
+        : typeof acceptedCount === "number" && acceptedCount > 0
+          ? `进入修复轮：系统正在补派 ${acceptedCount} 个 repair shards。`
+          : "进入修复轮：正在修复缺口并准备重新导出。";
+      pushHostMilestone(milestones, seenKeys, {
+        id: `trace-repair-${event.timestamp}-${index}`,
+        kind: "repair_started",
+        timestamp: event.timestamp,
+        summary,
+      });
+      return;
+    }
+
+    if (
+      event.event === "repair_completed"
+      || event.event === "validation_repair_completed"
+      || event.event === "repair_round_completed"
+    ) {
+      const preview = compactProjectionText(typeof detail.preview === "string" ? detail.preview : undefined, 140);
+      pushHostMilestone(milestones, seenKeys, {
+        id: `trace-repair-completed-${event.timestamp}-${index}`,
+        kind: "repair_completed",
+        timestamp: event.timestamp,
+        summary: `修复轮完成：${preview ?? "已完成补齐并返回主协调继续处理。"}`,
+      });
+      return;
+    }
+
+    if (
+      event.event === "tool_call_started"
+      && detail.phase === "host_export"
+      && detail.tool === "export_spreadsheet"
+    ) {
+      const preview = compactProjectionText(typeof detail.preview === "string" ? detail.preview : undefined, 120) ?? "最终工作簿";
+      pushHostMilestone(milestones, seenKeys, {
+        id: `trace-export-started-${event.timestamp}-${index}`,
+        kind: "export_started",
+        timestamp: event.timestamp,
+        summary: `${sawRepair ? "开始重试导出工作簿" : "开始导出工作簿"}：${preview}`,
+      });
+      return;
+    }
+
+    if (event.event === "host_export_completed") {
+      const preview = compactProjectionText(typeof detail.preview === "string" ? detail.preview : undefined, 140);
+      const artifactPath = extractPathFromText(preview, ["xlsx", "xls", "csv"]);
+      pushHostMilestone(milestones, seenKeys, {
+        id: `trace-export-succeeded-${event.timestamp}-${index}`,
+        kind: "export_succeeded",
+        timestamp: event.timestamp,
+        artifactPath,
+        summary: `${sawRepair ? "重试导出成功" : "导出成功"}：${preview ?? artifactPath ?? "最终工作簿"}`,
+      });
+    }
+  });
+
+  return milestones.sort((left, right) => left.timestamp - right.timestamp);
+}
+
+export function mergeLocalDialogHostMilestones(
+  ...groups: Array<readonly LocalDialogHostMilestone[] | undefined>
+): LocalDialogHostMilestone[] {
+  const milestones: LocalDialogHostMilestone[] = [];
+  const seenKeys = new Set<string>();
+  groups.forEach((group) => {
+    group?.forEach((milestone) => {
+      pushHostMilestone(milestones, seenKeys, {
+        ...milestone,
+        artifactPath: milestone.artifactPath,
+      });
+    });
+  });
+  return milestones.sort((left, right) => left.timestamp - right.timestamp);
+}
+
+function deriveContinuationPhaseFromHostMilestones(
+  hostMilestones: readonly LocalDialogHostMilestone[],
+  fallback?: LocalDialogContinuationPhase,
+): LocalDialogContinuationPhase | undefined {
+  const latestHostMilestone = hostMilestones[hostMilestones.length - 1];
+  if (!latestHostMilestone) return fallback;
+  const hasRepairStarted = hostMilestones.some((milestone) => milestone.kind === "repair_started");
+  if (latestHostMilestone.kind === "export_succeeded") {
+    return "published";
+  }
+  if (latestHostMilestone.kind === "repair_started") {
+    return "repairing";
+  }
+  if (
+    latestHostMilestone.kind === "export_started"
+    || latestHostMilestone.kind === "export_blocked"
+    || latestHostMilestone.kind === "aggregation_started"
+  ) {
+    return hasRepairStarted ? "repairing" : "aggregating";
+  }
+  if (latestHostMilestone.kind === "repair_completed") {
+    return hasRepairStarted ? "repairing" : "aggregating";
+  }
+  return fallback;
+}
+
 function detectContinuationPhase(params: {
   latestOrchestrationIndex: number;
   latestContinuationIndex: number;
   latestContinuationStep?: AgentStep;
+  hostMilestones: readonly LocalDialogHostMilestone[];
 }): LocalDialogContinuationPhase | undefined {
   if (params.latestOrchestrationIndex < 0) return undefined;
   if (params.latestContinuationIndex <= params.latestOrchestrationIndex) {
     return "waiting_children";
+  }
+  const hostDrivenPhase = deriveContinuationPhaseFromHostMilestones(params.hostMilestones);
+  if (hostDrivenPhase) {
+    return hostDrivenPhase;
   }
   const step = params.latestContinuationStep;
   const content = String(step?.content ?? "").trim();
@@ -194,6 +461,34 @@ function detectContinuationPhase(params: {
   return "aggregating";
 }
 
+function resolveLatestContinuationProjection(params: {
+  latestContinuationStep?: AgentStep;
+  hostMilestones: readonly LocalDialogHostMilestone[];
+}): {
+  latestContinuationTimestamp?: number;
+  latestContinuationPreview?: string;
+} {
+  const latestStepTimestamp = params.latestContinuationStep?.timestamp;
+  const latestStepPreview = getLiveContinuationPreview(params.latestContinuationStep);
+  const latestHostMilestone = params.hostMilestones[params.hostMilestones.length - 1];
+  if (!latestHostMilestone) {
+    return {
+      latestContinuationTimestamp: latestStepTimestamp,
+      latestContinuationPreview: latestStepPreview,
+    };
+  }
+  if (!latestStepTimestamp || latestHostMilestone.timestamp >= latestStepTimestamp) {
+    return {
+      latestContinuationTimestamp: latestHostMilestone.timestamp,
+      latestContinuationPreview: latestHostMilestone.summary,
+    };
+  }
+  return {
+    latestContinuationTimestamp: latestStepTimestamp,
+    latestContinuationPreview: latestStepPreview,
+  };
+}
+
 export function getLocalDialogLiveContinuationState(
   steps: readonly AgentStep[] = [],
 ): LocalDialogLiveContinuationState {
@@ -205,18 +500,51 @@ export function getLocalDialogLiveContinuationState(
   const latestContinuationStep = latestContinuationIndex >= 0
     ? steps[latestContinuationIndex]
     : undefined;
+  const hostMilestones = buildLocalDialogHostMilestones(steps, latestOrchestrationIndex);
+  const latestContinuationProjection = resolveLatestContinuationProjection({
+    latestContinuationStep,
+    hostMilestones,
+  });
 
   return {
     latestOrchestrationIndex,
     latestContinuationIndex,
-    latestContinuationTimestamp: latestContinuationStep?.timestamp,
-    latestContinuationPreview: getLiveContinuationPreview(latestContinuationStep),
+    latestContinuationTimestamp: latestContinuationProjection.latestContinuationTimestamp,
+    latestContinuationPreview: latestContinuationProjection.latestContinuationPreview,
     isContinuingAfterOrchestration: latestContinuationIndex > latestOrchestrationIndex,
     phase: detectContinuationPhase({
       latestOrchestrationIndex,
       latestContinuationIndex,
       latestContinuationStep,
+      hostMilestones,
     }),
+    hostMilestones,
+  };
+}
+
+export function mergeLocalDialogLiveContinuationStateWithTraceEvents(
+  state: LocalDialogLiveContinuationState,
+  traceEvents: readonly DialogFlowTraceEvent[] = [],
+): LocalDialogLiveContinuationState {
+  const traceMilestones = buildLocalDialogHostMilestonesFromTraceEvents(traceEvents);
+  if (traceMilestones.length === 0) return state;
+  const mergedHostMilestones = mergeLocalDialogHostMilestones(state.hostMilestones, traceMilestones);
+  const latestHostMilestone = mergedHostMilestones[mergedHostMilestones.length - 1];
+  const latestTimestamp = state.latestContinuationTimestamp ?? 0;
+  const useHostProjection = Boolean(latestHostMilestone && latestHostMilestone.timestamp >= latestTimestamp);
+  const mergedPhase = deriveContinuationPhaseFromHostMilestones(mergedHostMilestones, state.phase);
+
+  return {
+    ...state,
+    latestContinuationTimestamp: useHostProjection
+      ? latestHostMilestone?.timestamp
+      : state.latestContinuationTimestamp,
+    latestContinuationPreview: useHostProjection
+      ? latestHostMilestone?.summary
+      : state.latestContinuationPreview,
+    isContinuingAfterOrchestration: state.isContinuingAfterOrchestration || mergedHostMilestones.length > 0,
+    phase: mergedPhase,
+    hostMilestones: mergedHostMilestones,
   };
 }
 

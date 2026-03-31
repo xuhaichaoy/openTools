@@ -108,6 +108,7 @@ const READ_ONLY_ACCESS_POLICY: ToolPolicy = {
 
 const CHILD_COMMUNICATION_DENY = [
   "spawn_task",
+  "delegate_task",
   "delegate_subtask",
   "wait_for_spawned_tasks",
   "send_message",

@@ -26,6 +26,10 @@ export type { SummarizationConfig } from "./summarization-middleware";
 export { SuggestionsMiddleware } from "./suggestions-middleware";
 export { TelemetryMiddleware, getSessionStats, getRecentToolCalls, getAggregateStats, clearTelemetry } from "./telemetry-middleware";
 export type { ToolCallRecord, AgentSessionStats } from "./telemetry-middleware";
+export { DanglingToolCallMiddleware } from "./dangling-tool-call-middleware";
+export { LoopDetectionMiddleware, getDefaultLoopDetectionConfig } from "./loop-detection-middleware";
+export { ThreadDataMiddleware, buildThreadDataPaths } from "./thread-data-middleware";
+export { ToolErrorHandlingMiddleware } from "./tool-error-handling-middleware";
 export { TitleMiddleware, onSessionTitleUpdate, resetTitleGeneration } from "./title-middleware";
 export type { TitleUpdateCallback } from "./title-middleware";
 export { ClarificationMiddleware, ClarificationInterrupt } from "./clarification-middleware";
@@ -48,34 +52,15 @@ import { DialogRoomCompactionMiddleware } from "./dialog-room-compaction-middlew
 import { SummarizationMiddleware } from "./summarization-middleware";
 import { SuggestionsMiddleware } from "./suggestions-middleware";
 import { TelemetryMiddleware } from "./telemetry-middleware";
+import { DanglingToolCallMiddleware } from "./dangling-tool-call-middleware";
+import { LoopDetectionMiddleware } from "./loop-detection-middleware";
+import { ThreadDataMiddleware } from "./thread-data-middleware";
+import { ToolErrorHandlingMiddleware } from "./tool-error-handling-middleware";
 import { TitleMiddleware } from "./title-middleware";
 import { ClarificationMiddleware } from "./clarification-middleware";
 import { SessionUploadsMiddleware } from "./session-uploads-middleware";
 
-/**
- * Default middleware chain order (evolved from deer-flow + Yuxi-Know + cocoindex conventions):
- *
- *   ToolResolver → FCCompatibility → PatchToolCalls → Memory → KnowledgeBase
- *   → Skill → TodoList → Suggestions → ToolPolicy → HumanApproval
- *   → Telemetry → ModelRetry → SpawnLimit → Summarization → PromptBuild
- *
- * New additions:
- * - Summarization: Auto-compress context when approaching token limit (deer-flow)
- * - Suggestions: Generate follow-up question suggestions (deer-flow)
- * - Telemetry: Track tool call metrics for dashboard (Yuxi-Know)
- */
-/**
- * Default middleware chain order:
- *
- *   Title → ToolResolver → FCCompatibility → PatchToolCalls → Memory → KnowledgeBase
- *   → SessionUploads → DialogRoomCompaction → Skill → TodoList → Clarification → Suggestions → ToolPolicy → HumanApproval
- *   → Telemetry → ModelRetry → SpawnLimit → Summarization → PromptBuild
- *
- * New additions:
- * - Title: Auto-generate session title from first user message
- * - Clarification: Inject ask_clarification tool for agent-initiated interruptions
- */
-export function createDefaultMiddlewares(): ActorMiddleware[] {
+export function createSharedRuntimeMiddlewares(): ActorMiddleware[] {
   return [
     new TitleMiddleware(),
     new ToolResolverMiddleware(),
@@ -83,6 +68,7 @@ export function createDefaultMiddlewares(): ActorMiddleware[] {
     new PatchToolCallsMiddleware(),
     new MemoryMiddleware(),
     new KnowledgeBaseMiddleware(),
+    new ThreadDataMiddleware(),
     new SessionUploadsMiddleware(),
     new DialogRoomCompactionMiddleware(),
     new SkillMiddleware(),
@@ -91,10 +77,44 @@ export function createDefaultMiddlewares(): ActorMiddleware[] {
     new SuggestionsMiddleware(),
     new ToolPolicyMiddleware(),
     new HumanApprovalMiddleware(),
+    new ToolErrorHandlingMiddleware(),
     new TelemetryMiddleware(),
     new ModelRetryMiddleware(),
     new SpawnLimitMiddleware(),
+  ];
+}
+
+export function createLeadRuntimeMiddlewares(): ActorMiddleware[] {
+  return [
+    ...createSharedRuntimeMiddlewares(),
+    new DanglingToolCallMiddleware(),
+    new LoopDetectionMiddleware(),
     new SummarizationMiddleware(),
     new PromptBuildMiddleware(),
   ];
+}
+
+export function createSubagentRuntimeMiddlewares(): ActorMiddleware[] {
+  return [
+    ...createSharedRuntimeMiddlewares(),
+    new SummarizationMiddleware(),
+    new PromptBuildMiddleware(),
+  ];
+}
+
+/**
+ * Default middleware chain order:
+ *
+ * Lead:
+ *   SharedRuntime → DanglingToolCall → LoopDetection → Summarization → PromptBuild
+ *
+ * Subagent:
+ *   SharedRuntime → Summarization → PromptBuild
+ */
+export function createDefaultMiddlewares(params?: {
+  isSubagent?: boolean;
+}): ActorMiddleware[] {
+  return params?.isSubagent
+    ? createSubagentRuntimeMiddlewares()
+    : createLeadRuntimeMiddlewares();
 }

@@ -11,6 +11,7 @@ import {
 
 import { getSpawnedTaskRoleBoundaryMeta } from "@/core/agent/actor/spawned-task-role-boundary";
 import type {
+  DialogFlowTraceEvent,
   DialogMessage,
   SpawnedTaskLifecycleEvent,
   SpawnedTaskLifecycleEventType,
@@ -19,7 +20,14 @@ import type {
   SpawnedTaskStatus,
 } from "@/core/agent/actor/types";
 import { formatDurationSeconds } from "@/core/agent/actor/timeout-policy";
-import type { LocalDialogLiveContinuationState } from "./local-dialog-projection";
+import type {
+  LocalDialogHostMilestone,
+  LocalDialogLiveContinuationState,
+} from "./local-dialog-projection";
+import {
+  buildLocalDialogHostMilestonesFromTraceEvents,
+  mergeLocalDialogHostMilestones,
+} from "./local-dialog-projection";
 
 const GROUP_JOIN_WINDOW_MS = 6000;
 const GROUP_CONTRACT_MAX_GAP_MS = 120000;
@@ -35,8 +43,16 @@ const CONCRETE_PARENT_REPLY_PATTERNS = [
   /最终产物|文件路径|保存到|导出为|已创建|已生成|已修改|验证通过|测试通过|构建通过|真实缺口|阻塞原因|无法完成/u,
   /\/[^\s"'`]+\.(?:tsx?|jsx?|vue|html|css|scss|less|json|rs|py|go|java|kt|swift|md|docx?|pdf|xlsx?|csv|pptx?)/i,
 ];
+const REPAIR_PARENT_REPLY_PATTERNS = [
+  /纠偏|修复|repair|quality gate|blocker|未通过结果校验/u,
+  /补派|重新导出|再导出|重新尝试导出/u,
+] as const;
+const HOST_EXPORT_SUCCESS_PARENT_REPLY_PATTERNS = [
+  /导出(?:成功|完成|到了?)|保存到|导出为|文件路径|产物位置|工作簿|已创建|已生成/u,
+  /\/[^\s"'`]+\.(?:xlsx?|csv|docx?|pdf|pptx?)/i,
+] as const;
 
-type GroupPhase = "dispatching" | "running" | "aggregating" | "awaiting_aggregation" | "aggregated";
+type GroupPhase = "dispatching" | "running" | "aggregating" | "repairing" | "awaiting_aggregation" | "aggregated";
 
 export interface LocalCollaborationTimelineWorker {
   runId: string;
@@ -195,6 +211,11 @@ function buildGroupPhaseMeta(phase: GroupPhase): {
         label: "汇总中",
         className: "bg-amber-500/10 text-amber-700",
       };
+    case "repairing":
+      return {
+        label: "修复中",
+        className: "bg-rose-500/10 text-rose-700",
+      };
     case "awaiting_aggregation":
       return {
         label: "等待汇总",
@@ -251,20 +272,20 @@ function buildMilestoneText(worker: LocalCollaborationTimelineWorker, event: Spa
   }
 }
 
-function findParentReplyAfter(
+function listParentRepliesAfter(
   dialogHistory: readonly DialogMessage[],
   actorId: string,
   afterTimestamp: number,
   beforeTimestamp?: number,
-): DialogMessage | null {
-  return dialogHistory.find((message) =>
+): DialogMessage[] {
+  return dialogHistory.filter((message) =>
     message.from === actorId
     && message.from !== "user"
     && message.timestamp >= afterTimestamp
     && (typeof beforeTimestamp !== "number" || message.timestamp < beforeTimestamp)
     && (!message.to || message.to === "user")
     && (message.kind === "agent_message" || message.kind === "agent_result"),
-  ) ?? null;
+  );
 }
 
 function isLikelyInterimParentReply(content: string | undefined): boolean {
@@ -274,6 +295,143 @@ function isLikelyInterimParentReply(content: string | undefined): boolean {
     return false;
   }
   return INTERIM_PARENT_REPLY_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+function isLikelyRepairParentReply(content: string | undefined): boolean {
+  const normalized = String(content ?? "").trim();
+  if (!normalized) return false;
+  if (CONCRETE_PARENT_REPLY_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    return false;
+  }
+  return REPAIR_PARENT_REPLY_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+function isLikelySettledParentReply(content: string | undefined): boolean {
+  const normalized = String(content ?? "").trim();
+  if (!normalized) return false;
+  return !isLikelyRepairParentReply(normalized) && !isLikelyInterimParentReply(normalized);
+}
+
+function isLikelyHostExportSuccessParentReply(content: string | undefined): boolean {
+  const normalized = String(content ?? "").trim();
+  if (!normalized) return false;
+  if (!isLikelySettledParentReply(normalized)) return false;
+  return HOST_EXPORT_SUCCESS_PARENT_REPLY_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+function buildHostRepairMilestone(params: {
+  spawnerName: string;
+  latestGroupForSpawner: boolean;
+  directParentReply: DialogMessage | null;
+  parentActivity?: LocalDialogLiveContinuationState;
+}): LocalCollaborationTimelineMilestone | null {
+  const directRepairReply = params.directParentReply && isLikelyRepairParentReply(params.directParentReply.content)
+    ? params.directParentReply
+    : null;
+  if (directRepairReply) {
+    return {
+      id: `repair-reply-${directRepairReply.id}`,
+      timestamp: directRepairReply.timestamp,
+      tone: "neutral",
+      text: `${params.spawnerName} 进入修复轮：${compactText(directRepairReply.content, 120) ?? "正在修复缺口并准备重新导出。"}`,
+    };
+  }
+  if (
+    params.latestGroupForSpawner
+    && params.parentActivity?.phase === "repairing"
+    && params.parentActivity.latestContinuationTimestamp
+    && params.parentActivity.latestContinuationPreview
+  ) {
+    return {
+      id: `repair-live-${params.spawnerName}-${params.parentActivity.latestContinuationTimestamp}`,
+      timestamp: params.parentActivity.latestContinuationTimestamp,
+      tone: "neutral",
+      text: `${params.spawnerName} 进入修复轮：${compactText(params.parentActivity.latestContinuationPreview, 120) ?? "正在修复缺口并准备重新导出。"}`,
+    };
+  }
+  return null;
+}
+
+function buildHostSuccessMilestone(params: {
+  spawnerName: string;
+  latestGroupForSpawner: boolean;
+  settledParentReply: DialogMessage | null;
+  parentActivity?: LocalDialogLiveContinuationState;
+  hadRepairContext: boolean;
+}): LocalCollaborationTimelineMilestone | null {
+  const successPrefix = params.hadRepairContext ? "重试导出成功" : "导出成功";
+  const directSuccessReply = params.settledParentReply && isLikelyHostExportSuccessParentReply(params.settledParentReply.content)
+    ? params.settledParentReply
+    : null;
+  if (directSuccessReply) {
+    return {
+      id: `publish-reply-${directSuccessReply.id}`,
+      timestamp: directSuccessReply.timestamp,
+      tone: "success",
+      text: `${params.spawnerName} ${successPrefix}：${compactText(directSuccessReply.content, 120) ?? "已输出最终交付产物。"}`,
+    };
+  }
+  if (
+    params.latestGroupForSpawner
+    && params.parentActivity?.phase === "published"
+    && params.parentActivity.latestContinuationTimestamp
+    && isLikelyHostExportSuccessParentReply(params.parentActivity.latestContinuationPreview)
+  ) {
+    return {
+      id: `publish-live-${params.spawnerName}-${params.parentActivity.latestContinuationTimestamp}`,
+      timestamp: params.parentActivity.latestContinuationTimestamp,
+      tone: "success",
+      text: `${params.spawnerName} ${successPrefix}：${compactText(params.parentActivity.latestContinuationPreview, 120) ?? "已输出最终交付产物。"}`,
+    };
+  }
+  return null;
+}
+
+function buildProjectedHostMilestones(params: {
+  spawnerName: string;
+  latestGroupForSpawner: boolean;
+  completedAt?: number;
+  nextSiblingGroupStartedAt?: number;
+  parentActivity?: LocalDialogLiveContinuationState;
+  hostTraceEvents?: readonly DialogFlowTraceEvent[];
+}): Array<LocalCollaborationTimelineMilestone & { hostKind: LocalDialogHostMilestone["kind"] }> {
+  if (!params.completedAt) return [];
+  const traceHostMilestones = buildLocalDialogHostMilestonesFromTraceEvents(
+    (params.hostTraceEvents ?? []).filter((event) =>
+      event.timestamp >= params.completedAt!
+      && (typeof params.nextSiblingGroupStartedAt !== "number" || event.timestamp < params.nextSiblingGroupStartedAt)
+    ),
+  );
+  const liveHostMilestones = params.latestGroupForSpawner
+    ? (params.parentActivity?.hostMilestones ?? []).filter((milestone) =>
+        milestone.timestamp >= params.completedAt!
+        && (typeof params.nextSiblingGroupStartedAt !== "number" || milestone.timestamp < params.nextSiblingGroupStartedAt)
+      )
+    : [];
+  const hostMilestones = mergeLocalDialogHostMilestones(liveHostMilestones, traceHostMilestones);
+  return hostMilestones
+    .filter((milestone) => !params.completedAt || milestone.timestamp >= params.completedAt)
+    .map((milestone, index) => ({
+      id: `projected-${milestone.id}-${index}`,
+      timestamp: milestone.timestamp,
+      tone: milestone.kind === "export_succeeded"
+        ? "success" as const
+        : milestone.kind === "export_blocked"
+          ? "danger" as const
+          : "neutral" as const,
+      text: `${params.spawnerName} ${milestone.summary}`,
+      hostKind: milestone.kind,
+    }));
+}
+
+function hasEventualProjectedHostSuccess(params: {
+  completedAt?: number;
+  hostTraceEvents?: readonly DialogFlowTraceEvent[];
+}): boolean {
+  if (!params.completedAt || !params.hostTraceEvents?.length) return false;
+  return buildLocalDialogHostMilestonesFromTraceEvents(
+    params.hostTraceEvents.filter((event) => event.timestamp >= params.completedAt!),
+  ).some((milestone) => milestone.kind === "export_succeeded");
 }
 
 function buildWorkerDetail(worker: LocalCollaborationTimelineWorker): string {
@@ -418,8 +576,9 @@ export function buildLocalCollaborationTimelineGroups(params: {
   dialogHistory: readonly DialogMessage[];
   actorNameById?: ReadonlyMap<string, string>;
   parentActivityByActorId?: ReadonlyMap<string, LocalDialogLiveContinuationState>;
+  hostTraceEventsByActorId?: ReadonlyMap<string, readonly DialogFlowTraceEvent[]>;
 }): LocalCollaborationTimelineGroup[] {
-  const { events, spawnedTasks, dialogHistory, actorNameById, parentActivityByActorId } = params;
+  const { events, spawnedTasks, dialogHistory, actorNameById, parentActivityByActorId, hostTraceEventsByActorId } = params;
   const taskByRunId = new Map(spawnedTasks.map((task) => [task.runId, task] as const));
   const eventsByRunId = new Map<string, SpawnedTaskLifecycleEvent[]>();
 
@@ -502,30 +661,65 @@ export function buildLocalCollaborationTimelineGroups(params: {
       candidate.startedAt > group.startedAt
       && candidate.spawnerActorId === group.spawnerActorId,
     );
-    const directParentReply = completedAt
-      ? findParentReplyAfter(
+    const parentRepliesInWindow = completedAt
+      ? listParentRepliesAfter(
           dialogHistory,
           group.spawnerActorId,
           completedAt,
           nextSiblingGroup?.startedAt,
         )
-      : null;
-    const eventualParentReply = completedAt
-      ? (directParentReply ?? findParentReplyAfter(
+      : [];
+    const allParentRepliesAfterCompletion = completedAt
+      ? listParentRepliesAfter(
           dialogHistory,
           group.spawnerActorId,
           completedAt,
-        ))
-      : null;
+        )
+      : [];
+    const directParentReply = parentRepliesInWindow[0] ?? null;
+    const windowSettledParentReply = parentRepliesInWindow.find((reply) => isLikelySettledParentReply(reply.content)) ?? null;
+    const eventualSettledParentReply = windowSettledParentReply
+      ?? allParentRepliesAfterCompletion.find((reply) => isLikelySettledParentReply(reply.content))
+      ?? null;
+    const directParentReplyIsRepairing = isLikelyRepairParentReply(directParentReply?.content);
     const directParentReplyIsInterim = isLikelyInterimParentReply(directParentReply?.content);
     const hasConcreteParentReply = Boolean(
-      eventualParentReply && !isLikelyInterimParentReply(eventualParentReply.content),
+      eventualSettledParentReply,
     );
     const parentActivity = parentActivityByActorId?.get(group.spawnerActorId);
+    const hostTraceEvents = hostTraceEventsByActorId?.get(group.spawnerActorId) ?? [];
     const isLatestGroupForSpawner = (latestGroupStartedAtBySpawnerActorId.get(group.spawnerActorId) ?? group.startedAt) === group.startedAt;
+    const projectedHostMilestones = buildProjectedHostMilestones({
+      spawnerName: group.spawnerName,
+      latestGroupForSpawner: isLatestGroupForSpawner,
+      completedAt,
+      nextSiblingGroupStartedAt: nextSiblingGroup?.startedAt,
+      parentActivity,
+      hostTraceEvents,
+    });
+    const eventualTraceSuccess = hasEventualProjectedHostSuccess({
+      completedAt,
+      hostTraceEvents,
+    });
+    const latestProjectedHostMilestone = projectedHostMilestones[projectedHostMilestones.length - 1];
+    const hasProjectedRepairMilestone = projectedHostMilestones.some((milestone) => milestone.hostKind === "repair_started");
+    const hasProjectedAggregationMilestone = projectedHostMilestones.some((milestone) => milestone.hostKind === "aggregation_started");
+    const hasProjectedBlockedMilestone = projectedHostMilestones.some((milestone) => milestone.hostKind === "export_blocked");
+    const hasProjectedSuccessMilestone = projectedHostMilestones.some((milestone) => milestone.hostKind === "export_succeeded");
+    const hasActiveParentRepair = Boolean(
+      parentActivity?.phase === "repairing"
+      && completedAt
+      && (parentActivity.latestContinuationTimestamp ?? 0) >= completedAt,
+    );
+    const hasActiveParentPublished = Boolean(
+      parentActivity?.phase === "published"
+      && completedAt
+      && (parentActivity.latestContinuationTimestamp ?? 0) >= completedAt,
+    );
     const hasActiveParentAggregation = Boolean(
-      (parentActivity?.phase === "aggregating" || parentActivity?.phase === "repairing")
-      || parentActivity?.isContinuingAfterOrchestration
+      (parentActivity?.phase === "aggregating"
+      || parentActivity?.isContinuingAfterOrchestration)
+      && !hasActiveParentPublished
       && completedAt
       && (parentActivity.latestContinuationTimestamp ?? 0) >= completedAt,
     );
@@ -534,9 +728,11 @@ export function buildLocalCollaborationTimelineGroups(params: {
     );
     const phase: GroupPhase = runningCount > 0
       ? dispatchOnly ? "dispatching" : "running"
-      : hasConcreteParentReply
+      : hasConcreteParentReply || hasActiveParentPublished || hasProjectedSuccessMilestone || eventualTraceSuccess
         ? "aggregated"
-        : directParentReplyIsInterim || hasActiveParentAggregation
+        : directParentReplyIsRepairing || hasActiveParentRepair || hasProjectedRepairMilestone
+          ? "repairing"
+        : directParentReplyIsInterim || hasActiveParentAggregation || hasProjectedAggregationMilestone || hasProjectedBlockedMilestone
           ? "aggregating"
           : "awaiting_aggregation";
     const activeWorkerNames = sortedWorkers
@@ -558,11 +754,31 @@ export function buildLocalCollaborationTimelineGroups(params: {
         return `正在继续处理 ${sortedWorkers.length} 个 worker 的协作任务。`;
       }
       if (phase === "aggregated") {
-        if (directParentReply && !directParentReplyIsInterim) {
-          return compactText(directParentReply.content, 160)
+        if (windowSettledParentReply) {
+          return compactText(windowSettledParentReply.content, 160)
             ?? `全部 ${sortedWorkers.length} 个 worker 已返回，${group.spawnerName} 已回流汇总结果。`;
         }
+        if (latestProjectedHostMilestone?.hostKind === "export_succeeded") {
+          return latestProjectedHostMilestone.text;
+        }
+        if (isLatestGroupForSpawner && hasActiveParentPublished && parentActivity?.latestContinuationPreview) {
+          return parentActivity.latestContinuationPreview;
+        }
         return `全部 ${sortedWorkers.length} 个 worker 已返回，${group.spawnerName} 已在后续消息中完成统一汇总。`;
+      }
+      if (phase === "repairing" && directParentReply) {
+        return compactText(directParentReply.content, 160)
+          ?? `全部 ${sortedWorkers.length} 个 worker 已返回，${group.spawnerName} 正在修复缺口并准备重新导出。`;
+      }
+      if (phase === "repairing" && isLatestGroupForSpawner && parentActivity?.latestContinuationPreview) {
+        return parentActivity.latestContinuationPreview;
+      }
+      if (
+        phase === "repairing"
+        && latestProjectedHostMilestone
+        && (latestProjectedHostMilestone.hostKind === "repair_started" || latestProjectedHostMilestone.hostKind === "repair_completed")
+      ) {
+        return latestProjectedHostMilestone.text;
       }
       if (phase === "aggregating" && directParentReply) {
         return compactText(directParentReply.content, 160)
@@ -571,13 +787,24 @@ export function buildLocalCollaborationTimelineGroups(params: {
       if (phase === "aggregating" && isLatestGroupForSpawner && parentActivity?.latestContinuationPreview) {
         return parentActivity.latestContinuationPreview;
       }
+      if (
+        phase === "aggregating"
+        && latestProjectedHostMilestone
+        && (
+          latestProjectedHostMilestone.hostKind === "aggregation_started"
+          || latestProjectedHostMilestone.hostKind === "export_blocked"
+          || latestProjectedHostMilestone.hostKind === "export_started"
+        )
+      ) {
+        return latestProjectedHostMilestone.text;
+      }
       if (failedCount > 0) {
         return `全部 ${sortedWorkers.length} 个 worker 已返回，其中 ${failedCount} 个失败，等待 ${group.spawnerName} 汇总。`;
       }
       return `全部 ${sortedWorkers.length} 个 worker 已返回，等待 ${group.spawnerName} 汇总。`;
     })();
 
-    const milestones = sortedWorkers
+    const workerMilestones = sortedWorkers
       .flatMap((worker) => worker.events
         .map((event) => {
           const text = buildMilestoneText(worker, event);
@@ -596,6 +823,32 @@ export function buildLocalCollaborationTimelineGroups(params: {
         .filter((event): event is LocalCollaborationTimelineMilestone => Boolean(event)))
       .sort((left, right) => left.timestamp - right.timestamp)
       .slice(-MILESTONE_EVENT_LIMIT);
+    const hostRepairMilestone = buildHostRepairMilestone({
+      spawnerName: group.spawnerName,
+      latestGroupForSpawner: isLatestGroupForSpawner,
+      directParentReply,
+      parentActivity,
+    });
+    const hostSuccessMilestone = buildHostSuccessMilestone({
+      spawnerName: group.spawnerName,
+      latestGroupForSpawner: isLatestGroupForSpawner,
+      settledParentReply: windowSettledParentReply,
+      parentActivity,
+      hadRepairContext: Boolean(hostRepairMilestone || directParentReplyIsRepairing || hasActiveParentRepair),
+    });
+    const milestones = [
+      ...workerMilestones,
+      ...projectedHostMilestones.map((milestone) => ({
+        id: milestone.id,
+        timestamp: milestone.timestamp,
+        tone: milestone.tone,
+        text: milestone.text,
+      })),
+      ...(!hasProjectedRepairMilestone && hostRepairMilestone ? [hostRepairMilestone] : []),
+      ...(!hasProjectedSuccessMilestone && hostSuccessMilestone ? [hostSuccessMilestone] : []),
+    ]
+      .sort((left, right) => left.timestamp - right.timestamp)
+      .slice(-MILESTONE_EVENT_LIMIT);
 
     return {
       id: group.id,
@@ -612,7 +865,7 @@ export function buildLocalCollaborationTimelineGroups(params: {
       completedCount,
       failedCount,
       activeWorkerNames,
-      latestParentReply: compactText(directParentReply?.content, 160),
+      latestParentReply: compactText(windowSettledParentReply?.content ?? directParentReply?.content, 160),
       workers: sortedWorkers,
       milestones,
     } satisfies LocalCollaborationTimelineGroup;
@@ -678,6 +931,8 @@ export function DialogCollaborationTimelineCard({
         <span className="mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-2xl bg-sky-500/10 text-sky-700">
           {group.phase === "aggregated" ? (
             <CheckCircle2 className="h-4 w-4" />
+          ) : group.phase === "repairing" ? (
+            <Sparkles className="h-4 w-4" />
           ) : group.phase === "awaiting_aggregation" ? (
             <Clock3 className="h-4 w-4" />
           ) : (

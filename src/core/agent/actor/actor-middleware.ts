@@ -5,6 +5,7 @@ import type {
   DialogExecutionMode,
   ExecutionPolicy,
   InboxMessage,
+  LoopDetectionConfig,
   ToolPolicy,
   MiddlewareOverrides,
 } from "./types";
@@ -12,6 +13,14 @@ import type { AskUserCallback, ConfirmDangerousAction } from "./agent-actor";
 import { createLogger } from "@/core/logger";
 
 const log = createLogger("ActorMiddleware");
+
+export interface ThreadDataContext {
+  sessionId: string;
+  rootPath: string;
+  workspacePath: string;
+  uploadsPath: string;
+  outputsPath: string;
+}
 
 /**
  * ActorRunContext — shared mutable context flowing through the middleware chain.
@@ -55,6 +64,9 @@ export interface ActorRunContext {
   hasCodingWorkflowSkill: boolean;
   fcCompatibilityKey: string;
   contextMessages: Array<{ role: "user" | "assistant"; content: string }>;
+  patchDanglingToolCalls?: boolean;
+  loopDetectionConfig?: LoopDetectionConfig;
+  threadData?: ThreadDataContext;
 
   // ── Callbacks (set by middlewares) ──
   notifyToolCalled?: (toolName: string) => void;

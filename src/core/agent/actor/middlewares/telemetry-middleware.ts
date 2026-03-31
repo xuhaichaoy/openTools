@@ -8,6 +8,7 @@
  */
 
 import type { ActorMiddleware, ActorRunContext } from "../actor-middleware";
+import { isToolFailureResult } from "./tool-error-handling-middleware";
 export interface ToolCallRecord {
   actorId: string;
   toolName: string;
@@ -135,17 +136,25 @@ export class TelemetryMiddleware implements ActorMiddleware {
       const originalExecute = tool.execute;
       return {
         ...tool,
-        execute: async (params: Record<string, unknown>) => {
+        execute: async (params: Record<string, unknown>, signal?: AbortSignal) => {
           const start = Date.now();
           try {
-            const result = await originalExecute(params);
+            const result = await originalExecute(params, signal);
             const duration = Date.now() - start;
+            const success = !isToolFailureResult(result);
             recordToolCall({
               actorId,
               toolName: tool.name,
               timestamp: start,
               durationMs: duration,
-              success: true,
+              success,
+              ...(success
+                ? {}
+                : {
+                    error: typeof (result as Record<string, unknown> | null)?.error === "string"
+                      ? String((result as Record<string, unknown>).error)
+                      : undefined,
+                  }),
             });
             return result;
           } catch (err) {

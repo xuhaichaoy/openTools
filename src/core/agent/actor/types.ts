@@ -84,6 +84,28 @@ export interface DialogExecutionPlanEdge {
   toActorId: string;
 }
 
+export interface ScopedSourceItem {
+  id: string;
+  label: string;
+  raw?: string;
+  order: number;
+  sourcePath?: string;
+  sectionLabel?: string;
+  topicIndex?: number;
+  topicTitle?: string;
+  themeGroup?: string;
+  trainingTarget?: string;
+  trainingAudience?: string;
+  outline?: string;
+}
+
+export function cloneScopedSourceItems(
+  items?: readonly ScopedSourceItem[] | null,
+): ScopedSourceItem[] | undefined {
+  if (!items?.length) return undefined;
+  return items.map((item) => ({ ...item }));
+}
+
 export interface DialogExecutionPlannedSpawn {
   id: string;
   targetActorId: string;
@@ -99,7 +121,7 @@ export interface DialogExecutionPlannedSpawn {
   childMaxIterations?: number;
   overrides?: Pick<
     SpawnTaskOverrides,
-    "executionIntent" | "resultContract" | "deliveryTargetId" | "deliveryTargetLabel" | "sheetName"
+    "workerProfileId" | "executionIntent" | "resultContract" | "deliveryTargetId" | "deliveryTargetLabel" | "sheetName" | "sourceItemIds" | "sourceItemCount" | "scopedSourceItems"
   >;
 }
 
@@ -280,6 +302,14 @@ export interface ToolPolicy {
 export type AccessMode = "read_only" | "auto" | "full_access";
 export type DialogExecutionMode = "execute" | "plan";
 
+export interface LoopDetectionConfig {
+  windowSize?: number;
+  repeatThreshold?: number;
+  consecutiveFailureLimit?: number;
+  consecutiveSameToolLimit?: number;
+  exemptTools?: string[];
+}
+
 /** HumanApproval 策略级别 */
 export type ApprovalMode = "strict" | "normal" | "permissive" | "off";
 /** @deprecated 兼容旧命名，新的主路径统一使用 ApprovalMode。 */
@@ -337,6 +367,8 @@ export interface ActorConfig {
 
 /** spawn_task 时可动态覆盖的 Subagent 配置 */
 export interface SpawnTaskOverrides {
+  /** 显式指定 worker profile（优先于 executionIntent / heuristics） */
+  workerProfileId?: WorkerProfileId;
   /** 显式指定子任务执行意图（默认由系统推断） */
   executionIntent?: DialogSubtaskExecutionIntent;
   /** 子任务结果合同：用于固定终态交付语义，而不是靠 prompt 猜 */
@@ -347,6 +379,12 @@ export interface SpawnTaskOverrides {
   deliveryTargetLabel?: string;
   /** 专用交付元数据：当前子任务产出应归属的工作表 */
   sheetName?: string;
+  /** 当前子任务负责覆盖的源条目 ID 列表 */
+  sourceItemIds?: string[];
+  /** 当前子任务负责覆盖的源条目数量 */
+  sourceItemCount?: number;
+  /** 当前子任务直接收到的 source shard 真相条目 */
+  scopedSourceItems?: ScopedSourceItem[];
   /** 覆盖 subagent 使用的 LLM 模型 */
   model?: string;
   /** 覆盖单次运行总预算（秒） */
@@ -400,6 +438,13 @@ export interface ActorEvent {
   actorId: string;
   timestamp: number;
   detail?: unknown;
+}
+
+export interface DialogFlowTraceEvent {
+  event: string;
+  actorId?: string;
+  timestamp: number;
+  detail?: Record<string, unknown>;
 }
 
 /**
@@ -478,6 +523,9 @@ export interface ActorTask {
   status: "pending" | "running" | "completed" | "error" | "aborted";
   result?: string;
   error?: string;
+  successLocked?: boolean;
+  successLockReason?: string;
+  successArtifactPath?: string;
   steps: AgentStep[];
   startedAt?: number;
   finishedAt?: number;
@@ -530,6 +578,13 @@ export type SpawnMode = "run" | "session";
 export type SpawnedTaskRoleBoundary = "reviewer" | "validator" | "executor" | "general";
 export type DialogSubtaskProfile = "executor" | "reviewer" | "validator" | "general";
 export type DialogSubtaskExecutionIntent = "content_executor" | "coding_executor" | "reviewer" | "validator" | "general";
+export type WorkerProfileId =
+  | "general_worker"
+  | "content_worker"
+  | "coding_worker"
+  | "validator_worker"
+  | "review_worker"
+  | "spreadsheet_worker";
 
 export interface DialogSubtaskRuntimeState {
   subtaskId: string;
@@ -560,6 +615,8 @@ export interface SpawnedTaskRecord {
   rootRunId?: string;
   /** 临时子 Agent 的默认职责边界；常驻 Agent 默认为 general */
   roleBoundary?: SpawnedTaskRoleBoundary;
+  /** 显式 worker profile：用于稳定固定子任务职责、工具面与交付合同 */
+  workerProfileId?: WorkerProfileId;
   /** 稳定执行意图：用于固定 child 工具面，不再半继承 parent 工具池 */
   executionIntent?: DialogSubtaskExecutionIntent;
   /** 子任务结果合同：用于固定终态交付语义，而不是靠 prompt 猜 */
@@ -570,6 +627,12 @@ export interface SpawnedTaskRecord {
   deliveryTargetLabel?: string;
   /** 专用交付元数据：当前子任务产出应归属的工作表 */
   sheetName?: string;
+  /** 当前子任务负责覆盖的源条目 ID 列表 */
+  sourceItemIds?: string[];
+  /** 当前子任务负责覆盖的源条目数量 */
+  sourceItemCount?: number;
+  /** 当前子任务直接收到的 source shard 真相条目 */
+  scopedSourceItems?: ScopedSourceItem[];
   task: string;
   label?: string;
   /** 任务启动时继承的图片附件（如截图、设计稿） */

@@ -25,6 +25,11 @@ const RESULT_EVIDENCE_PATTERNS = [
 ];
 
 const COORDINATION_META_SUMMARY_PATTERNS = [
+  /我来分析当前任务状态/iu,
+  /最终综合答复/u,
+  /任务执行状态总览/u,
+  /子任务总数[:：]/u,
+  /(?:完成|中止|超时)[:：]\s*\d+\s*个/u,
   /已确认源文件/u,
   /已完成\s*\d+\s*个(?:分段|子)?任务/u,
   /当前(?:真实)?缺口|剩余缺口|尚缺|补未齐/u,
@@ -276,6 +281,12 @@ function isExplicitBlockerResult(result: string): boolean {
   return EXPLICIT_BLOCKER_PATTERNS.some((pattern) => pattern.test(result));
 }
 
+function isPlanLikeSpreadsheetReply(result: string): boolean {
+  if (!result || result.length < 40) return false;
+  if (!isLikelyExecutionPlanReply(result)) return false;
+  return /(excel|xlsx|xls|csv|表格|工作簿|导出)/iu.test(result);
+}
+
 function isScheduleMutationTask(task: string): boolean {
   return SCHEDULE_MUTATION_TASK_PATTERNS.some((pattern) => pattern.test(task));
 }
@@ -308,6 +319,12 @@ function isLikelyCoordinationMetaSummary(result: string): boolean {
   if (checklistCount >= 3) score += 1;
 
   return score >= 4;
+}
+
+function isExplicitTaskStatusSummary(result: string): boolean {
+  return /任务执行状态总览/u.test(result)
+    && /子任务总数[:：]/u.test(result)
+    && /(?:完成|中止|超时)[:：]\s*\d+\s*个/u.test(result);
 }
 
 function collectRelatedArtifacts(
@@ -420,7 +437,7 @@ export function validateSpawnedTaskResult(params: {
     };
   }
 
-  if (!hasArtifactEvidence && isLikelyCoordinationMetaSummary(resultText)) {
+  if (!hasArtifactEvidence && (isExplicitTaskStatusSummary(resultText) || isLikelyCoordinationMetaSummary(resultText))) {
     return {
       accepted: false,
       requiresConcreteOutput: true,
@@ -535,6 +552,14 @@ export function validateActorTaskResult(params: {
     };
   }
 
+  if (outputContract?.kind === "spreadsheet" && isPlanLikeSpreadsheetReply(rawResultText)) {
+    return {
+      accepted: false,
+      requiresConcreteOutput: true,
+      reason: "最终答复仍是表格交付的执行计划或补派建议，而不是实际导出结果或真实 blocker。",
+    };
+  }
+
   if (isExplicitlyIncompleteResult(resultText)) {
     return {
       accepted: false,
@@ -548,6 +573,14 @@ export function validateActorTaskResult(params: {
       accepted: false,
       requiresConcreteOutput: true,
       reason: `最终答复包含多个${outputContract.label}路径；本轮必须只交付一个最终工作簿。`,
+    };
+  }
+
+  if (!hasArtifactEvidence && (isExplicitTaskStatusSummary(resultText) || isLikelyCoordinationMetaSummary(resultText))) {
+    return {
+      accepted: false,
+      requiresConcreteOutput: true,
+      reason: "最终答复更像协作过程总结/状态盘点，而不是实际可交付结果。",
     };
   }
 
@@ -581,14 +614,6 @@ export function validateActorTaskResult(params: {
       accepted: false,
       requiresConcreteOutput: true,
       reason: `最终答复更像对历史产物的确认，而不是直接交付${outputContract.label}。请直接给出导出结果、绝对路径或真实 blocker。`,
-    };
-  }
-
-  if (!hasArtifactEvidence && isLikelyCoordinationMetaSummary(resultText)) {
-    return {
-      accepted: false,
-      requiresConcreteOutput: true,
-      reason: "最终答复更像协作过程总结/状态盘点，而不是实际可交付结果。",
     };
   }
 

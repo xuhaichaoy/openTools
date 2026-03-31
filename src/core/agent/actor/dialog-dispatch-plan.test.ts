@@ -188,7 +188,9 @@ describe("dialog-dispatch-plan", () => {
       actors: ACTORS,
       routingMode: "coordinator",
       content: [
-        "根据课程主题生成课程清单，最终给我一个 Excel 文件。",
+        "## 🗂️ 工作上下文 - 项目路径: `/repo/uploads/课程候选.xlsx`",
+        "以下是用户提供的文件内容（路径均为绝对路径），请根据用户指令进行处理。",
+        "### 文件 /repo/uploads/课程候选.xlsx",
         "1. AI应用开发工程化实战",
         "2. 智能体开发与知识库落地",
         "3. 大模型安全治理与测试",
@@ -198,6 +200,7 @@ describe("dialog-dispatch-plan", () => {
         "7. 数据分析与经营洞察实战",
         "8. 全员AI办公赋能与协同提效",
         "9. AI通识与智能素养提升",
+        "用户要求：根据这 9 个主题生成课程清单，需要提供的字段只有课程名称和课程介绍，最终给我一个 Excel 文件。",
       ].join("\n"),
       attachmentPaths: ["/repo/uploads/课程候选.xlsx"],
       coordinatorActorId: "coordinator",
@@ -206,42 +209,32 @@ describe("dialog-dispatch-plan", () => {
     expect(draft).not.toBeNull();
     expect(draft?.structuredDeliveryManifest).toMatchObject({
       source: "planner",
-      strategyId: "deterministic_course_workbook",
+      adapterEnabled: true,
+      strategyId: "dynamic_spreadsheet",
       deliveryContract: "spreadsheet",
       parentContract: "single_workbook",
     });
-    expect(draft?.structuredDeliveryManifest?.targets?.map((target) => target.label)).toEqual([
-      "技术方向课程",
-      "产品运营方向课程",
-      "数据与通识方向课程",
-    ]);
-    expect(draft?.plannedDelegations).toHaveLength(3);
+    expect(new Set(draft?.structuredDeliveryManifest?.targets?.map((target) => target.label))).toEqual(new Set(["结果清单"]));
+    expect(draft?.plannedDelegations).toHaveLength(2);
     expect(draft?.plannedDelegations.map((delegation) => delegation.label)).toEqual([
-      "技术方向课程生成",
-      "产品运营方向课程生成",
-      "数据与通识方向课程生成",
+      "结果清单生成（第1组）",
+      "结果清单生成（第2组）",
     ]);
     expect(draft?.plannedDelegations.every((delegation) => (
       delegation.roleBoundary === "executor"
       && delegation.createIfMissing === true
+      && delegation.overrides?.workerProfileId === "spreadsheet_worker"
       && delegation.overrides?.executionIntent === "content_executor"
       && delegation.overrides?.resultContract === "inline_structured_result"
     ))).toBe(true);
-    expect(draft?.plannedDelegations.map((delegation) => delegation.overrides?.deliveryTargetLabel)).toEqual([
-      "技术方向课程",
-      "产品运营方向课程",
-      "数据与通识方向课程",
-    ]);
-    expect(draft?.participantActorIds).toEqual(expect.arrayContaining([
-      "delivery-target-技术方向课程",
-      "delivery-target-产品运营方向课程",
-      "delivery-target-数据与通识方向课程",
-    ]));
-    expect(draft?.allowedSpawnPairs).toEqual(expect.arrayContaining([
-      expect.objectContaining({ fromActorId: "coordinator", toActorId: "delivery-target-技术方向课程" }),
-      expect.objectContaining({ fromActorId: "coordinator", toActorId: "delivery-target-产品运营方向课程" }),
-      expect.objectContaining({ fromActorId: "coordinator", toActorId: "delivery-target-数据与通识方向课程" }),
-    ]));
+    expect(draft?.plannedDelegations.every((delegation) => delegation.overrides?.deliveryTargetLabel === "结果清单")).toBe(true);
+    expect(draft?.participantActorIds).toEqual(expect.arrayContaining(
+      draft?.plannedDelegations.map((delegation) => delegation.targetActorId) ?? [],
+    ));
+    expect(draft?.allowedSpawnPairs).toEqual(expect.arrayContaining(
+      (draft?.plannedDelegations ?? []).map((delegation) =>
+        expect.objectContaining({ fromActorId: "coordinator", toActorId: delegation.targetActorId })),
+    ));
 
     const presentation = buildClusterPresentationFromDraft({
       draft: draft!,
@@ -249,7 +242,7 @@ describe("dialog-dispatch-plan", () => {
     });
 
     expect(presentation.notes).toContain("交付合同：spreadsheet / single_workbook");
-    expect(presentation.notes).toContain("交付目标：技术方向课程、产品运营方向课程、数据与通识方向课程");
+    expect(presentation.notes).toContain("交付目标：结果清单");
     expect(presentation.notes).toContain("结构化字段：课程名称、课程介绍");
   });
 

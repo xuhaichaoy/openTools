@@ -69,7 +69,7 @@ export interface CollaborationPlannedDelegation {
   childMaxIterations?: number;
   overrides?: Pick<
     SpawnTaskOverrides,
-    "executionIntent" | "resultContract" | "deliveryTargetId" | "deliveryTargetLabel" | "sheetName"
+    "workerProfileId" | "executionIntent" | "resultContract" | "deliveryTargetId" | "deliveryTargetLabel" | "sheetName" | "sourceItemIds" | "sourceItemCount" | "scopedSourceItems"
   >;
 }
 

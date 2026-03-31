@@ -85,7 +85,15 @@ vi.mock("@/plugins/builtin/SmartAgent/core/react-agent", () => ({
 import { AgentActor, DIALOG_FULL_ROLE } from "./agent-actor";
 
 describe("AgentActor structured spreadsheet delivery isolation", () => {
-  it("narrows the initial toolset for upload-wrapped content-to-excel tasks", async () => {
+  it("keeps spreadsheet orchestration prompt-driven on the first turn", async () => {
+    const spawnTask = vi.fn((spawnerActorId: string, targetActorId: string, task: string, opts?: Record<string, unknown>) => ({
+      runId: `${targetActorId}-run`,
+      spawnerActorId,
+      targetActorId,
+      task,
+      label: opts?.label,
+      status: "running",
+    }));
     const actor = new AgentActor({
       id: "lead-structured-delivery",
       role: { ...DIALOG_FULL_ROLE, name: "Lead" },
@@ -96,6 +104,7 @@ describe("AgentActor structured spreadsheet delivery isolation", () => {
         getAll: () => [],
         get: () => null,
         getSpawnedTasksSnapshot: () => [],
+        spawnTask,
       } as never,
     });
 
@@ -109,12 +118,13 @@ describe("AgentActor structured spreadsheet delivery isolation", () => {
     ].join("\n"));
 
     expect(result).toBe("done");
+    expect(spawnTask).not.toHaveBeenCalled();
     expect(hoisted.visibleToolNames).toEqual([
       "read_document",
-      "spawn_task",
-      "wait_for_spawned_tasks",
       "export_spreadsheet",
       "task_done",
+      "write_file",
+      "run_shell_command",
     ]);
   });
 });

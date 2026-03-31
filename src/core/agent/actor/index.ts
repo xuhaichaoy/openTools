@@ -51,6 +51,9 @@ export { runMiddlewareChain } from "./actor-middleware";
 export type { ActorMiddleware, ActorRunContext } from "./actor-middleware";
 export { createDefaultMiddlewares } from "./middlewares";
 export {
+  createLeadRuntimeMiddlewares,
+  createSharedRuntimeMiddlewares,
+  createSubagentRuntimeMiddlewares,
   ToolResolverMiddleware,
   SkillMiddleware,
   MemoryMiddleware,
@@ -80,6 +83,12 @@ export {
   getRecentToolCalls,
   getAggregateStats,
   clearTelemetry,
+  ThreadDataMiddleware,
+  buildThreadDataPaths,
+  DanglingToolCallMiddleware,
+  LoopDetectionMiddleware,
+  getDefaultLoopDetectionConfig,
+  ToolErrorHandlingMiddleware,
 } from "./middlewares";
 export type {
   ApprovalPolicy,
@@ -100,15 +109,34 @@ export {
   TaskExecutorRuntimeCore,
 } from "./task-executor-runtime-core";
 export {
+  enableStructuredDeliveryAdapter,
   getStructuredDeliveryStrategies,
+  getStructuredDeliveryStrategyReferenceId,
+  isStructuredDeliveryAdapterEnabled,
   resolveRequestedSpreadsheetExtensions,
   resolveStructuredDeliveryManifest,
   resolveStructuredDeliveryStrategyById,
   resolveStructuredDeliveryStrategy,
-  taskLooksLikeCourseContentDelivery,
+  taskLooksLikeStructuredContentTask,
   taskLooksLikeStructuredSpreadsheetDelivery,
   taskRequestsSpreadsheetOutput,
 } from "./structured-delivery-strategy";
+export {
+  buildDynamicWorkbook,
+  buildDynamicWorkbookReply,
+  deriveWorkbookFileName,
+  inferColumnsFromRows,
+  validateWorkbookCompleteness,
+} from "./dynamic-workbook-builder";
+export { validateStructuredSpreadsheetQuality } from "./delivery-quality-gate";
+export {
+  buildSourceGroundingSnapshot,
+  inferRequestedOutputSchema,
+} from "./source-grounding";
+export {
+  buildWorkerProfileOverrides,
+  getWorkerProfile,
+} from "./worker-profiles";
 export type {
   TaskExecutorLifecyclePatch,
   TaskExecutorLifecycleRecord,

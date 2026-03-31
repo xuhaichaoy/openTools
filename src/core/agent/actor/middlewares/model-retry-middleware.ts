@@ -168,9 +168,9 @@ export class ModelRetryMiddleware implements ActorMiddleware {
         const originalExecute = tool.execute;
         return {
           ...tool,
-          execute: async (params: Record<string, unknown>) => {
+          execute: async (params: Record<string, unknown>, signal?: AbortSignal) => {
             return Promise.race([
-              originalExecute(params),
+              originalExecute(params, signal),
               new Promise<never>((_, reject) =>
                 setTimeout(
                   () => reject(new Error(`Tool "${tool.name}" execution timeout (${toolTimeoutMs}ms)`)),

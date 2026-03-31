@@ -174,6 +174,7 @@ describe("execution-contract", () => {
       plannedDelegations: [],
       structuredDeliveryManifest: {
         source: "planner",
+        adapterEnabled: true,
         strategyId: "generic_structured_rows",
         deliveryContract: "structured_content",
         parentContract: "structured_content",
@@ -194,6 +195,7 @@ describe("execution-contract", () => {
               roleBoundary: "executor",
               createIfMissing: true,
               overrides: {
+                workerProfileId: "spreadsheet_worker",
                 executionIntent: "content_executor",
                 resultContract: "inline_structured_result",
               },
@@ -206,10 +208,12 @@ describe("execution-contract", () => {
     const contract = sealExecutionContract(draft, { contractId: "contract-structured-1", approvedAt: 2 });
     draft.structuredDeliveryManifest?.targets?.[0]?.promptSpec?.inputItems?.push("输入 2");
     if (draft.structuredDeliveryManifest?.targets?.[0]?.dispatchSpec?.overrides) {
+      draft.structuredDeliveryManifest.targets[0].dispatchSpec.overrides.workerProfileId = "coding_worker";
       draft.structuredDeliveryManifest.targets[0].dispatchSpec.overrides.executionIntent = "coding_executor";
     }
 
     expect(contract.structuredDeliveryManifest?.targets?.[0]?.promptSpec?.inputItems).toEqual(["输入 1"]);
+    expect(contract.structuredDeliveryManifest?.targets?.[0]?.dispatchSpec?.overrides?.workerProfileId).toBe("spreadsheet_worker");
     expect(contract.structuredDeliveryManifest?.targets?.[0]?.dispatchSpec?.overrides?.executionIntent).toBe("content_executor");
   });
 });

@@ -508,11 +508,11 @@ export class HumanApprovalMiddleware implements ActorMiddleware {
       const originalExecute = tool.execute;
       return {
         ...tool,
-        execute: async (params: Record<string, unknown>) => {
+        execute: async (params: Record<string, unknown>, signal?: AbortSignal) => {
           const cacheContext = buildApprovalCacheContext(actorId, tool.name, params);
           const cachedPolicy = resolveCachedApproval(cacheContext.lookupKeys);
           if (cachedPolicy === "always-allow") {
-            return originalExecute(params);
+            return originalExecute(params, signal);
           }
           if (cachedPolicy === "deny") {
             return { error: `工具 ${tool.name} 已被用户拒绝` };
@@ -526,7 +526,7 @@ export class HumanApprovalMiddleware implements ActorMiddleware {
             return { error: approvalAssessment.reason || `工具 ${tool.name} 已被安全策略禁止使用。` };
           }
           if (approvalAssessment.decision === "allow") {
-            return originalExecute(params);
+            return originalExecute(params, signal);
           }
 
           // Use confirmDangerousAction callback if available (for dialog/popup mode)
@@ -539,7 +539,7 @@ export class HumanApprovalMiddleware implements ActorMiddleware {
             if (!approved) {
               return { error: `用户拒绝了 ${tool.name} 的执行请求` };
             }
-            return originalExecute(params);
+            return originalExecute(params, signal);
           }
 
           // Use askUserInChat for chat-based approval
@@ -559,10 +559,10 @@ export class HumanApprovalMiddleware implements ActorMiddleware {
             if (decision.cacheKey) {
               sessionApprovals.set(decision.cacheKey, "always-allow");
             }
-            return originalExecute(params);
+            return originalExecute(params, signal);
           }
           if (decision.policy === "ask-every-time") {
-            return originalExecute(params);
+            return originalExecute(params, signal);
           }
 
           if (decision.cacheKey) {

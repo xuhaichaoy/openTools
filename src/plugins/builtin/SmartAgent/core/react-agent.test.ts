@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MToolsAI, AIToolCall } from "@/core/plugin-system/plugin-interface";
-import { ReActAgent, type AgentTool } from "./react-agent";
+import { ReActAgent, patchDanglingToolCallMessages, type AgentTool } from "./react-agent";
 
 const noopTools: AgentTool[] = [
   {
@@ -29,6 +29,57 @@ function createMockAI(
 }
 
 describe("ReActAgent FC compatibility cache", () => {
+  it("patches dangling tool calls before the next model round", () => {
+    const { messages, patchCount } = patchDanglingToolCallMessages([
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call-read-file",
+            type: "function",
+            function: {
+              name: "read_file",
+              arguments: "{\"path\":\"/tmp/demo.txt\"}",
+            },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: "继续",
+      },
+    ]);
+
+    expect(patchCount).toBe(1);
+    expect(messages).toEqual([
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call-read-file",
+            type: "function",
+            function: {
+              name: "read_file",
+              arguments: "{\"path\":\"/tmp/demo.txt\"}",
+            },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: "[Tool call was interrupted and did not return a result.]",
+        tool_call_id: "call-read-file",
+        name: "read_file",
+      },
+      {
+        role: "user",
+        content: "继续",
+      },
+    ]);
+  });
+
   it("respects authoritative tool lists without auto-injecting delegate or mode tools", () => {
     const ai = createMockAI(async () => ({
       type: "content",
@@ -100,6 +151,74 @@ describe("ReActAgent FC compatibility cache", () => {
     expect(toolNames).toContain("spawn_task");
     expect(toolNames).toContain("wait_for_spawned_tasks");
     expect(toolNames).not.toContain("delegate_subtask");
+  });
+
+  it("should honor runtime loop detection thresholds for repeated tool calls", async () => {
+    let fcCalls = 0;
+    const ai = createMockAI(async () => {
+      fcCalls += 1;
+      if (fcCalls === 1 || fcCalls === 3) {
+        return {
+          type: "tool_calls",
+          toolCalls: [
+            {
+              id: `call-noop-${fcCalls}`,
+              type: "function",
+              function: {
+                name: "noop",
+                arguments: "{\"tag\":\"same\"}",
+              },
+            },
+          ],
+        };
+      }
+      if (fcCalls === 2) {
+        return {
+          type: "tool_calls",
+          toolCalls: [
+            {
+              id: "call-calculate-loop",
+              type: "function",
+              function: {
+                name: "calculate",
+                arguments: "{\"expression\":\"1+1\"}",
+              },
+            },
+          ],
+        };
+      }
+      return {
+        type: "content",
+        content: "已停止重复调用，改为直接总结当前结果。",
+      };
+    });
+
+    const agent = new ReActAgent(ai, [
+      ...noopTools,
+      {
+        name: "calculate",
+        description: "calculate",
+        parameters: {
+          expression: { type: "string", description: "expression" },
+        },
+        execute: async () => "2",
+      },
+    ], {
+      maxIterations: 4,
+      fcCompatibilityKey: "runtime-loop-detection-thresholds",
+      loopDetection: {
+        repeatThreshold: 2,
+      },
+    });
+
+    const answer = await agent.run("继续处理当前任务");
+
+    expect(answer).toContain("直接总结当前结果");
+    const steps = agent.getSteps();
+    expect(steps.some((step) =>
+      step.type === "error"
+      && step.content.includes("工具 noop 被重复调用（相同参数 2+ 次）"),
+    )).toBe(true);
   });
 
   it("should not trigger memory recall correction from wrapped system planning text alone", async () => {
@@ -391,6 +510,64 @@ describe("ReActAgent FC compatibility cache", () => {
     expect(answer).toContain("已导出Word 文档到 /Users/haichao/Downloads/1.docx");
     expect(capturedPath).toBe("/Users/haichao/Downloads/1.docx");
     expect(capturedContent).toContain("课程方案");
+    expect(fcCalls).toBe(1);
+  });
+
+  it("should finish immediately after export_spreadsheet succeeds for xlsx saves", async () => {
+    let fcCalls = 0;
+    let capturedFileName = "";
+    let capturedSheets = "";
+
+    const ai = createMockAI(async () => {
+      fcCalls += 1;
+      return {
+        type: "tool_calls",
+        toolCalls: [
+          {
+            id: "call-export-spreadsheet",
+            type: "function",
+            function: {
+              name: "export_spreadsheet",
+              arguments: JSON.stringify({
+                file_name: "课程清单.xlsx",
+                sheets: JSON.stringify([{
+                  name: "课程清单",
+                  headers: ["课程名称", "课程介绍"],
+                  rows: [["AI课程A", "课程介绍A"]],
+                }]),
+              }),
+            },
+          },
+        ],
+      };
+    });
+
+    const tools: AgentTool[] = [
+      {
+        name: "export_spreadsheet",
+        description: "export xlsx",
+        parameters: {
+          file_name: { type: "string", description: "file name" },
+          sheets: { type: "string", description: "sheets json" },
+        },
+        execute: async (params) => {
+          capturedFileName = String(params.file_name ?? "");
+          capturedSheets = String(params.sheets ?? "");
+          return "已导出 Excel 文件: /Users/haichao/Downloads/课程清单.xlsx";
+        },
+      },
+    ];
+
+    const agent = new ReActAgent(ai, tools, {
+      maxIterations: 4,
+      fcCompatibilityKey: "export-spreadsheet-quick-answer",
+    });
+
+    const answer = await agent.run("将课程清单导出为 Excel 到 Downloads/课程清单.xlsx");
+
+    expect(answer).toContain("已导出 Excel 文件: /Users/haichao/Downloads/课程清单.xlsx");
+    expect(capturedFileName).toBe("课程清单.xlsx");
+    expect(capturedSheets).toContain("课程清单");
     expect(fcCalls).toBe(1);
   });
 

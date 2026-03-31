@@ -4,10 +4,11 @@ import type {
   SpawnTaskOverrides,
   SpawnedTaskRoleBoundary,
 } from "./types";
-import { deterministicCourseWorkbookStrategy } from "./dialog-course-workbook";
+import { dynamicSpreadsheetStrategy } from "./dynamic-spreadsheet-strategy";
+import type { SourceGroundingSnapshot } from "./source-grounding";
 
 export type StructuredDeliveryContract = "general" | "spreadsheet" | "structured_content";
-export type StructuredDeliveryManifestSource = "heuristic" | "strategy" | "planner";
+export type StructuredDeliveryManifestSource = "heuristic" | "strategy" | "planner" | "runtime";
 
 export interface StructuredDeliveryTarget {
   id: string;
@@ -87,6 +88,30 @@ export interface StructuredDeliveryHostExportPlan {
   successReply: string;
 }
 
+export interface StructuredDeliveryRepairSuggestion {
+  label: string;
+  reason: string;
+  sourceItemIds?: string[];
+  missingThemes?: string[];
+  task?: string;
+  roleBoundary?: SpawnedTaskRoleBoundary;
+  createIfMissing?: boolean;
+  overrides?: SpawnTaskOverrides;
+}
+
+export interface StructuredDeliveryRepairPlan {
+  summary: string;
+  nextStepHint?: string;
+  missingSourceItemIds?: string[];
+  missingThemes?: string[];
+  suggestions: StructuredDeliveryRepairSuggestion[];
+}
+
+export interface StructuredDeliveryHostExportBlocker {
+  blocker: string;
+  repairPlan?: StructuredDeliveryRepairPlan;
+}
+
 export interface StructuredDeliveryStrategy {
   id: string;
   deliveryContract: StructuredDeliveryContract;
@@ -106,16 +131,19 @@ export interface StructuredDeliveryStrategy {
     taskText: string;
     manifest: StructuredDeliveryManifest;
     structuredResults: readonly DialogStructuredSubtaskResult[];
-  }): StructuredDeliveryHostExportPlan | { blocker: string } | null;
+  }): StructuredDeliveryHostExportPlan | StructuredDeliveryHostExportBlocker | null;
 }
 
 export interface StructuredDeliveryManifest {
   source: StructuredDeliveryManifestSource;
   strategyId?: string;
+  recommendedStrategyId?: string;
+  adapterEnabled?: boolean;
   deliveryContract: StructuredDeliveryContract;
   parentContract: string;
   requiresSpreadsheetOutput: boolean;
   applyInitialIsolation: boolean;
+  sourceSnapshot?: SourceGroundingSnapshot;
   targets?: StructuredDeliveryTarget[];
   resultSchema?: StructuredDeliveryResultSchema;
   exportSpec?: StructuredDeliveryExportSpec;
@@ -127,10 +155,10 @@ const SPREADSHEET_OUTPUT_TASK_PATTERNS = [
   /(?:excel|xlsx|xls|csv|表格|工作簿)(?:文件|表格|工作簿).{0,12}(?:输出|导出|保存|生成|给我|给出|返回|最终|最后)/iu,
 ] as const;
 
-const COURSE_CONTENT_DELIVERY_PATTERNS = [
-  /课程|培训|课纲|课程候选|课程名称|课程介绍|培训目标|培训对象|课程清单/u,
-  /按主题.*(?:生成|整理|汇总).*(?:课程|条目|清单)/u,
-  /基于.*(?:excel|xlsx|xls|csv|表格|工作簿).*(?:生成|整理|汇总).*(?:课程|条目|清单)/iu,
+const STRUCTURED_CONTENT_TASK_PATTERNS = [
+  /(?:字段|列|schema|结构化|表头|headers?)/iu,
+  /(?:清单|列表|汇总|条目|记录|结果表|结果集|摘要表)/u,
+  /(?:根据|基于).*(?:附件|文档|表格|工作簿|数据|条目).*(?:生成|整理|汇总|输出|填充)/iu,
 ] as const;
 
 const STRONG_CODING_TASK_PATTERNS = [
@@ -140,7 +168,7 @@ const STRONG_CODING_TASK_PATTERNS = [
 ] as const;
 
 const STRUCTURED_DELIVERY_STRATEGIES: StructuredDeliveryStrategy[] = [
-  deterministicCourseWorkbookStrategy,
+  dynamicSpreadsheetStrategy,
 ];
 
 export function getStructuredDeliveryStrategies(): readonly StructuredDeliveryStrategy[] {
@@ -169,20 +197,17 @@ export function taskRequestsSpreadsheetOutput(task: string | null | undefined): 
   return SPREADSHEET_OUTPUT_TASK_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
-export function taskLooksLikeCourseContentDelivery(task: string | null | undefined): boolean {
+export function taskLooksLikeStructuredContentTask(task: string | null | undefined): boolean {
   const normalized = String(task ?? "").trim();
   if (!normalized) return false;
-  return COURSE_CONTENT_DELIVERY_PATTERNS.some((pattern) => pattern.test(normalized));
+  return STRUCTURED_CONTENT_TASK_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
 export function taskLooksLikeStructuredSpreadsheetDelivery(task: string | null | undefined): boolean {
   const normalized = String(task ?? "").trim();
   if (!normalized) return false;
-  const courseContentLike = taskLooksLikeCourseContentDelivery(normalized);
-  const spreadsheetMentioned = /(?:excel|xlsx|xls|csv|表格|工作簿)/iu.test(normalized);
-  if (courseContentLike && spreadsheetMentioned) return true;
   if (!taskRequestsSpreadsheetOutput(normalized)) return false;
-  if (courseContentLike) return true;
+  if (taskLooksLikeStructuredContentTask(normalized)) return true;
   const strongCoding = STRONG_CODING_TASK_PATTERNS.some((pattern) => pattern.test(normalized));
   if (strongCoding) return false;
   const inferred = inferCodingExecutionProfile({ query: normalized });
@@ -322,20 +347,20 @@ export function resolveStructuredDeliveryManifest(
 ): StructuredDeliveryManifest {
   const strategy = resolveStructuredDeliveryStrategy(taskText);
   const requiresSpreadsheetOutput = taskRequestsSpreadsheetOutput(taskText);
-  const applyInitialIsolation = Boolean(
-    strategy
-    || taskLooksLikeStructuredSpreadsheetDelivery(taskText),
-  );
+  const applyInitialIsolation = false;
 
   if (strategy) {
     const strategyManifest = strategy.buildManifest?.(String(taskText ?? "").trim()) ?? null;
     return {
       source: "strategy",
-      strategyId: strategy.id,
+      strategyId: strategyManifest?.adapterEnabled ? (strategyManifest?.strategyId ?? strategy.id) : undefined,
+      recommendedStrategyId: strategyManifest?.recommendedStrategyId ?? strategyManifest?.strategyId ?? strategy.id,
+      adapterEnabled: strategyManifest?.adapterEnabled ?? false,
       deliveryContract: strategyManifest?.deliveryContract ?? strategy.deliveryContract,
       parentContract: strategyManifest?.parentContract ?? strategy.parentContract,
       requiresSpreadsheetOutput,
       applyInitialIsolation: strategyManifest?.applyInitialIsolation ?? applyInitialIsolation,
+      sourceSnapshot: strategyManifest?.sourceSnapshot,
       targets: strategyManifest?.targets,
       resultSchema: strategyManifest?.resultSchema,
       exportSpec: strategyManifest?.exportSpec,
@@ -346,6 +371,8 @@ export function resolveStructuredDeliveryManifest(
   return {
     source: "heuristic",
     strategyId: undefined,
+    recommendedStrategyId: undefined,
+    adapterEnabled: false,
     deliveryContract: requiresSpreadsheetOutput
       ? "spreadsheet"
       : applyInitialIsolation
@@ -358,6 +385,7 @@ export function resolveStructuredDeliveryManifest(
         : "general",
     requiresSpreadsheetOutput,
     applyInitialIsolation,
+    sourceSnapshot: undefined,
     targets: undefined,
     resultSchema: undefined,
     exportSpec: requiresSpreadsheetOutput
@@ -368,4 +396,32 @@ export function resolveStructuredDeliveryManifest(
       : undefined,
     tracePreview: undefined,
   };
+}
+
+export function isStructuredDeliveryAdapterEnabled(
+  manifest: StructuredDeliveryManifest | null | undefined,
+): boolean {
+  if (!manifest) return false;
+  if (manifest.adapterEnabled === true) return true;
+  return manifest.source === "planner";
+}
+
+export function enableStructuredDeliveryAdapter(
+  manifest: StructuredDeliveryManifest,
+  source: StructuredDeliveryManifestSource = manifest.source,
+): StructuredDeliveryManifest {
+  const strategyId = manifest.strategyId ?? manifest.recommendedStrategyId;
+  return {
+    ...manifest,
+    source,
+    strategyId,
+    adapterEnabled: true,
+  };
+}
+
+export function getStructuredDeliveryStrategyReferenceId(
+  manifest: StructuredDeliveryManifest | null | undefined,
+): string | undefined {
+  if (!manifest) return undefined;
+  return manifest.strategyId ?? manifest.recommendedStrategyId;
 }

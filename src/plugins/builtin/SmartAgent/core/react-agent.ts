@@ -16,7 +16,7 @@ import type {
   AIToolDefinition,
   AIToolCall,
 } from "@/core/plugin-system/plugin-interface";
-import type { ExecutionPolicy, ThinkingLevel } from "@/core/agent/actor/types";
+import type { ExecutionPolicy, LoopDetectionConfig, ThinkingLevel } from "@/core/agent/actor/types";
 import { inferCodingExecutionProfile } from "@/core/agent/coding-profile";
 import type { PluginAction } from "@/core/plugin-system/plugin-interface";
 import {
@@ -179,6 +179,10 @@ export interface AgentConfig {
   contextMessages?: Array<{ role: "user" | "assistant"; content: string }>;
   /** 将传入工具列表视为最终真相，禁止自动注入 delegate_subtask / enter_plan_mode / exit_plan_mode */
   authoritativeToolList?: boolean;
+  /** 在送模型前修补历史中缺失的 tool result，避免 dangling tool_calls 污染消息格式 */
+  patchDanglingToolCalls?: boolean;
+  /** 运行时 loop guardrail 配置 */
+  loopDetection?: LoopDetectionConfig;
 }
 
 export interface DangerousActionConfirmationContext {
@@ -817,10 +821,60 @@ function prepareMessagesForModel<
     name?: string;
     [k: string]: unknown;
   },
->(messages: T[], contextLimit: number): T[] {
-  const pruned = pruneProcessedHistoryImages(messages);
+>(messages: T[], contextLimit: number, patchDanglingToolCalls = false): T[] {
+  const patched = patchDanglingToolCalls
+    ? patchDanglingToolCallMessages(messages).messages
+    : messages;
+  const pruned = pruneProcessedHistoryImages(patched);
   const compacted = compactMessages(pruned, contextLimit);
   return enforceToolResultContextBudget(compacted, contextLimit);
+}
+
+export function patchDanglingToolCallMessages<
+  T extends {
+    role: string;
+    content: string | null;
+    tool_calls?: Array<{ id?: string; function?: { name?: string } }>;
+    tool_call_id?: string;
+    name?: string;
+    [k: string]: unknown;
+  },
+>(messages: T[]): { messages: T[]; patchCount: number } {
+  const existingToolCallIds = new Set<string>();
+  for (const message of messages) {
+    if (message.role === "tool" && typeof message.tool_call_id === "string" && message.tool_call_id.trim()) {
+      existingToolCallIds.add(message.tool_call_id.trim());
+    }
+  }
+
+  let patchCount = 0;
+  const patchedToolCallIds = new Set<string>();
+  const patchedMessages: T[] = [];
+  for (const message of messages) {
+    patchedMessages.push(message);
+    if (message.role !== "assistant" || !Array.isArray(message.tool_calls) || message.tool_calls.length === 0) {
+      continue;
+    }
+
+    for (const toolCall of message.tool_calls) {
+      const toolCallId = String(toolCall?.id ?? "").trim();
+      if (!toolCallId || existingToolCallIds.has(toolCallId) || patchedToolCallIds.has(toolCallId)) {
+        continue;
+      }
+      patchedMessages.push({
+        role: "tool",
+        content: "[Tool call was interrupted and did not return a result.]",
+        tool_call_id: toolCallId,
+        name: String(toolCall?.function?.name ?? "unknown_tool"),
+      } as T);
+      patchedToolCallIds.add(toolCallId);
+      patchCount += 1;
+    }
+  }
+
+  return patchCount > 0
+    ? { messages: patchedMessages, patchCount }
+    : { messages, patchCount: 0 };
 }
 
 // ── 工具输出截断 ──
@@ -922,6 +976,29 @@ const LOOP_DETECT_EXEMPT_TOOLS = new Set([
   "native_app_list_interactive",
 ]);
 
+const DEFAULT_LOOP_DETECTION_CONFIG: Required<LoopDetectionConfig> = {
+  windowSize: LOOP_DETECTOR_WINDOW,
+  repeatThreshold: LOOP_DETECTOR_THRESHOLD,
+  consecutiveFailureLimit: DOOM_LOOP_CONSECUTIVE_FAILURES,
+  consecutiveSameToolLimit: SAME_TOOL_CONSECUTIVE_LIMIT,
+  exemptTools: [...LOOP_DETECT_EXEMPT_TOOLS],
+};
+
+function normalizeLoopDetectionConfig(
+  config?: LoopDetectionConfig,
+): Required<LoopDetectionConfig> {
+  return {
+    ...DEFAULT_LOOP_DETECTION_CONFIG,
+    ...(config ?? {}),
+    exemptTools: [
+      ...new Set([
+        ...DEFAULT_LOOP_DETECTION_CONFIG.exemptTools,
+        ...(config?.exemptTools ?? []),
+      ]),
+    ],
+  };
+}
+
 interface FileMutationTrace {
   count: number;
   lastToolName: string;
@@ -929,17 +1006,27 @@ interface FileMutationTrace {
 }
 
 class LoopDetector {
+  private readonly config: Required<LoopDetectionConfig>;
+
+  constructor(config: Required<LoopDetectionConfig>) {
+    this.config = config;
+  }
+
   private recentCalls: string[] = [];
   private consecutiveFailures: Map<string, number> = new Map();
   private disabledTools: Set<string> = new Set();
   private consecutiveToolCounts: Map<string, number> = new Map();
   private lastToolName: string | null = null;
 
+  private isExempt(toolName: string): boolean {
+    return this.config.exemptTools.includes(toolName);
+  }
+
   record(toolName: string, args: Record<string, unknown>): void {
     const key = `${toolName}::${JSON.stringify(args)}`;
     this.recentCalls.push(key);
-    if (this.recentCalls.length > LOOP_DETECTOR_WINDOW * 2) {
-      this.recentCalls = this.recentCalls.slice(-LOOP_DETECTOR_WINDOW * 2);
+    if (this.recentCalls.length > this.config.windowSize * 2) {
+      this.recentCalls = this.recentCalls.slice(-this.config.windowSize * 2);
     }
 
     if (toolName === this.lastToolName) {
@@ -954,18 +1041,18 @@ class LoopDetector {
   }
 
   detect(): { looping: boolean; tool?: string } {
-    if (this.recentCalls.length < LOOP_DETECTOR_THRESHOLD) {
+    if (this.recentCalls.length < this.config.repeatThreshold) {
       return { looping: false };
     }
-    const tail = this.recentCalls.slice(-LOOP_DETECTOR_WINDOW);
+    const tail = this.recentCalls.slice(-this.config.windowSize);
     const counts = new Map<string, number>();
     for (const key of tail) {
       counts.set(key, (counts.get(key) ?? 0) + 1);
     }
     for (const [key, count] of counts) {
-      if (count >= LOOP_DETECTOR_THRESHOLD) {
+      if (count >= this.config.repeatThreshold) {
         const toolName = key.split("::")[0];
-        if (LOOP_DETECT_EXEMPT_TOOLS.has(toolName)) continue;
+        if (this.isExempt(toolName)) continue;
         return { looping: true, tool: toolName };
       }
     }
@@ -980,7 +1067,7 @@ class LoopDetector {
     if (!this.lastToolName) return { looping: false };
     const count = this.consecutiveToolCounts.get(this.lastToolName) ?? 0;
     if (
-      count >= SAME_TOOL_CONSECUTIVE_LIMIT &&
+      count >= this.config.consecutiveSameToolLimit &&
       CONSECUTIVE_LIMIT_TOOLS.has(this.lastToolName)
     ) {
       return { looping: true, tool: this.lastToolName, count };
@@ -989,10 +1076,10 @@ class LoopDetector {
   }
 
   recordFailure(toolName: string): void {
-    if (LOOP_DETECT_EXEMPT_TOOLS.has(toolName)) return;
+    if (this.isExempt(toolName)) return;
     const count = (this.consecutiveFailures.get(toolName) ?? 0) + 1;
     this.consecutiveFailures.set(toolName, count);
-    if (count >= DOOM_LOOP_CONSECUTIVE_FAILURES) {
+    if (count >= this.config.consecutiveFailureLimit) {
       this.disabledTools.add(toolName);
     }
   }
@@ -1083,7 +1170,8 @@ export class ReActAgent {
   private fcCompatibilityKey: string | null = null;
   private running = false;
   private currentSignal?: AbortSignal;
-  private loopDetector = new LoopDetector();
+  private loopDetectionConfig = DEFAULT_LOOP_DETECTION_CONFIG;
+  private loopDetector = new LoopDetector(this.loopDetectionConfig);
   private approvedDangerousKeys = new Set<string>();
   /** 缓存已成功执行的 tool+params → 输出，避免重复执行（LRU, max 200 entries） */
   private successfulCallCache = new Map<string, string>();
@@ -1150,6 +1238,30 @@ export class ReActAgent {
     toolName: string,
     toolOutput: unknown,
   ): string | null {
+    if (toolName === "export_spreadsheet") {
+      if (typeof toolOutput === "string" && toolOutput.trim()) {
+        const normalized = toolOutput.trim();
+        if (/已导出\s*Excel\s*文件[:：]\s*\/[^\s"'`]+?\.(?:xlsx|xls|csv)\b/iu.test(normalized)) {
+          return normalized;
+        }
+      }
+      if (
+        toolOutput
+        && typeof toolOutput === "object"
+      ) {
+        const output = toolOutput as { path?: unknown; message?: unknown };
+        if (typeof output.path === "string" && output.path.trim()) {
+          return `已导出 Excel 文件: ${output.path.trim()}`;
+        }
+        if (
+          typeof output.message === "string"
+          && /已导出\s*Excel\s*文件[:：]\s*\/[^\s"'`]+?\.(?:xlsx|xls|csv)\b/iu.test(output.message)
+        ) {
+          return output.message.trim();
+        }
+      }
+    }
+
     if (
       toolName === "export_document" &&
       toolOutput &&
@@ -1615,6 +1727,8 @@ export class ReActAgent {
   ) {
     this.ai = ai;
     this.config = { ...DEFAULT_CONFIG, ...config };
+    this.loopDetectionConfig = normalizeLoopDetectionConfig(config?.loopDetection);
+    this.loopDetector = new LoopDetector(this.loopDetectionConfig);
     this.onStep = onStep;
     this.history = history;
     this.depth = depth;
@@ -2123,7 +2237,7 @@ export class ReActAgent {
     }
 
     if (this.loopDetector.isDisabled(toolName)) {
-      const msg = `[Doom Loop] 工具 ${toolName} 已被禁用（连续失败 ${DOOM_LOOP_CONSECUTIVE_FAILURES} 次）。请改用其他工具或方式完成任务。`;
+      const msg = `[Doom Loop] 工具 ${toolName} 已被禁用（连续失败 ${this.loopDetectionConfig.consecutiveFailureLimit} 次）。请改用其他工具或方式完成任务。`;
       const errResult: ToolErrorResult = {
         type: ToolErrorType.LoopDetected,
         tool: toolName,
@@ -2230,7 +2344,7 @@ export class ReActAgent {
     this.loopDetector.record(toolName, toolParams);
     const loopCheck = this.loopDetector.detect();
     if (loopCheck.looping) {
-      const msg = `[循环检测] 工具 ${loopCheck.tool} 被重复调用（相同参数 ${LOOP_DETECTOR_THRESHOLD}+ 次）。请换一种方式或使用其他工具完成任务。`;
+      const msg = `[循环检测] 工具 ${loopCheck.tool} 被重复调用（相同参数 ${this.loopDetectionConfig.repeatThreshold}+ 次）。请换一种方式或使用其他工具完成任务。`;
       const errResult: ToolErrorResult = {
         type: ToolErrorType.LoopDetected,
         tool: toolName,
@@ -3502,6 +3616,7 @@ ${this.hasDelegateSubtaskTool() ? "- 如有 delegate_subtask 工具可用，可�
       const preparedMessages = prepareMessagesForModel(
         messages,
         this.config.contextLimit ?? DEFAULT_CONTEXT_LIMIT,
+        this.config.patchDanglingToolCalls === true,
       );
       this.recordTrajectory({
         type: "llm_call",
@@ -3966,6 +4081,7 @@ ${this.hasDelegateSubtaskTool() ? "- 如有 delegate_subtask 工具可用，可�
       const compactedTextMessages = prepareMessagesForModel(
         messages,
         this.config.contextLimit ?? DEFAULT_CONTEXT_LIMIT,
+        this.config.patchDanglingToolCalls === true,
       );
       this.recordTrajectory({
         type: "llm_call",

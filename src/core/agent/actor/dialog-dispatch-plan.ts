@@ -17,6 +17,9 @@ import type {
 import type { ApprovalDialogPresentation } from "@/store/cluster-plan-approval-store";
 import type { ClusterPlan, ClusterStep } from "@/core/agent/cluster/types";
 import {
+  enableStructuredDeliveryAdapter,
+  getStructuredDeliveryStrategyReferenceId,
+  isStructuredDeliveryAdapterEnabled,
   resolveStructuredDeliveryManifest,
   resolveStructuredDeliveryStrategyById,
   type StructuredDeliveryManifest,
@@ -271,17 +274,19 @@ function getPreferredCapabilities(focus: DialogCodingFocus, largeProjectMode: bo
 function toPlannerStructuredDeliveryManifest(
   manifest: StructuredDeliveryManifest,
 ): StructuredDeliveryManifest {
-  return {
-    ...manifest,
-    source: "planner",
-  };
+  return getStructuredDeliveryStrategyReferenceId(manifest)
+    ? enableStructuredDeliveryAdapter(manifest, "planner")
+    : manifest;
 }
 
 function buildStructuredPlannedDelegations(params: {
   taskText: string;
   manifest: StructuredDeliveryManifest;
 }): ExecutionContractDraft["plannedDelegations"] | null {
-  const strategy = resolveStructuredDeliveryStrategyById(params.manifest.strategyId);
+  if (!isStructuredDeliveryAdapterEnabled(params.manifest)) return null;
+  const strategy = resolveStructuredDeliveryStrategyById(
+    getStructuredDeliveryStrategyReferenceId(params.manifest),
+  );
   const dispatchPlan = strategy?.buildInitialDispatchPlan?.({
     taskText: params.taskText,
     manifest: params.manifest,
@@ -299,11 +304,17 @@ function buildStructuredPlannedDelegations(params: {
     createIfMissing: shard.createIfMissing,
     overrides: shard.overrides
       ? {
+          ...(shard.overrides.workerProfileId ? { workerProfileId: shard.overrides.workerProfileId } : {}),
           ...(shard.overrides.executionIntent ? { executionIntent: shard.overrides.executionIntent } : {}),
           ...(shard.overrides.resultContract ? { resultContract: shard.overrides.resultContract } : {}),
           ...(shard.overrides.deliveryTargetId ? { deliveryTargetId: shard.overrides.deliveryTargetId } : {}),
           ...(shard.overrides.deliveryTargetLabel ? { deliveryTargetLabel: shard.overrides.deliveryTargetLabel } : {}),
           ...(shard.overrides.sheetName ? { sheetName: shard.overrides.sheetName } : {}),
+          ...(shard.overrides.sourceItemIds ? { sourceItemIds: [...shard.overrides.sourceItemIds] } : {}),
+          ...(typeof shard.overrides.sourceItemCount === "number" ? { sourceItemCount: shard.overrides.sourceItemCount } : {}),
+          ...(shard.overrides.scopedSourceItems
+            ? { scopedSourceItems: shard.overrides.scopedSourceItems.map((item) => ({ ...item })) }
+            : {}),
         }
       : undefined,
   }));
@@ -1285,10 +1296,19 @@ export function buildClusterPresentationFromDraft(params: {
   )];
   const structuredDeliveryNotes: string[] = [];
   const manifest = params.draft.structuredDeliveryManifest;
-  if (manifest && (manifest.applyInitialIsolation || manifest.deliveryContract !== "general" || manifest.strategyId)) {
+  if (manifest && (manifest.applyInitialIsolation || manifest.deliveryContract !== "general" || getStructuredDeliveryStrategyReferenceId(manifest))) {
     structuredDeliveryNotes.push(`交付合同：${manifest.deliveryContract} / ${manifest.parentContract}`);
+    const strategyReferenceId = getStructuredDeliveryStrategyReferenceId(manifest);
+    if (strategyReferenceId) {
+      structuredDeliveryNotes.push(`adapter：${strategyReferenceId}${manifest.adapterEnabled ? "（已启用）" : "（建议）"}`);
+    }
     if (manifest.targets?.length) {
-      structuredDeliveryNotes.push(`交付目标：${manifest.targets.map((target) => target.label).join("、")}`);
+      structuredDeliveryNotes.push(`交付目标：${[...new Set(manifest.targets.map((target) => target.label))].join("、")}`);
+    }
+    const groundedItemCount = manifest.sourceSnapshot?.items.length
+      ?? manifest.sourceSnapshot?.expectedItemCount;
+    if (typeof groundedItemCount === "number" && groundedItemCount > 0) {
+      structuredDeliveryNotes.push(`源条目数：${groundedItemCount}`);
     }
     if (manifest.resultSchema?.fields?.length) {
       structuredDeliveryNotes.push(`结构化字段：${manifest.resultSchema.fields.map((field) => field.label).join("、")}`);

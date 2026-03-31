@@ -18,6 +18,7 @@ AI-First 桌面效率工具箱，基于 `Tauri v2 + React 19 + TypeScript`。
 - **主 Agent 优先的协作心智**：Dialog 默认由主 Agent 决定是否派工，用户不需要盯着子线程做路由判断
 - **本地 + 渠道双运行时**：既能在桌面本地持续协作，也能接住钉钉 / 飞书对话，并保持 `im_conversation` 独立语义
 - **结构化数据能力开始成型**：不是只有自然语言 prompt，数据库查询 / 导出已经进入 `dbproto/v1 + protocol context` 路径
+- **通用表格交付链路已接入**：表格类任务开始走 `source grounding -> structured child results -> quality gate -> workbook export` 通用路径，不再依赖课程 demo 特化策略
 - **桌面原生扩展能力强**：支持文件、图片、本地路径、MCP、插件、技能，多种能力可以组合进同一任务流
 - **仍在快速收口但方向清晰**：当前已经有协作内核、审批链路和 compaction 基础闭环，后续重点就是统一 session / mode / security 真相
 
@@ -59,6 +60,7 @@ AI-First 桌面效率工具箱，基于 `Tauri v2 + React 19 + TypeScript`。
 - 已支持 `contractDelegations` 投影
 - 已有 `policy -> auto_review -> human` 三层审批链路
 - 已支持房间级上下文压力检测与 compaction 基础闭环
+- 已接入 spreadsheet structured delivery adapter：主 Agent 默认先判断是否需要启用；启用后可使用 source grounding、structured child result、host export、quality gate
 
 当前最接近的心智是：
 
@@ -198,11 +200,7 @@ src-tauri/
 
 ## 推荐阅读
 
-- `./docs/README.md`
-- `./docs/dialog-mode-refactor-status-and-next-wave.md`
-- `./docs/ai-im-channel-dialog-solution.md`
-- `./docs/ai-openclaw-parity-development-roadmap.md`
-- `./docs/data-export-query-and-mcp-status.md`
+- `./docs/claude-code-migration-rfc.md`
 
 ## 当前阶段判断
 
@@ -215,6 +213,11 @@ src-tauri/
 - **MCP 扩展链路可用**
 
 但也仍在继续推进几个关键方向：
+
+- **方向正从 workflow-first 继续纠偏到 agent-first**
+- **structured delivery 已开始退回能力层，而不是默认入口**
+- **worker profile 与 runtime guardrail 已进入收口阶段**
+- **README / docs 仍会继续跟随这轮 agent-first 重构更新**
 
 - `SessionControlPlane` 单一真相
 - 真实产品模式分层

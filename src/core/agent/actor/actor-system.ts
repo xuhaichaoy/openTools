@@ -5,12 +5,14 @@ import {
   type ConfirmDangerousAction,
 } from "./agent-actor";
 import { isLikelyVisualAttachmentPath } from "@/core/ai/ai-center-handoff";
+import { cloneScopedSourceItems } from "./types";
 import type {
   ApprovalRequest,
   AgentCapability,
   AgentCapabilities,
   ActorConfig,
   ActorEvent,
+  DialogFlowTraceEvent,
   DialogSubtaskExecutionIntent,
   DialogSubtaskProfile,
   DialogArtifactRecord,
@@ -26,6 +28,7 @@ import type {
   PendingInteractionType,
   PendingReply,
   SessionUploadRecord,
+  ScopedSourceItem,
   SpawnMode,
   SpawnTaskOverrides,
   SpawnedTaskRecord,
@@ -52,7 +55,6 @@ import { clearSessionApprovals, clearAllTodos, resetTitleGeneration, clearTeleme
 import {
   buildSpawnTaskExecutionHint,
 } from "./spawned-task-result-validator";
-import { inferCodingExecutionProfile } from "@/core/agent/coding-profile";
 import {
   cloneExecutionContract,
   resolveChildExecutionSettings,
@@ -77,6 +79,11 @@ import {
 } from "./dialog-execution-plan-compat";
 import { getRoleBoundaryPolicyProfile } from "./execution-policy";
 import {
+  applyWorkerProfileDefaults,
+  buildWorkerProfileToolPolicy,
+  resolveWorkerProfile,
+} from "./worker-profiles";
+import {
   DEFAULT_DIALOG_WORKER_BUDGET_SECONDS,
   DEFAULT_DIALOG_WORKER_IDLE_LEASE_SECONDS,
   isTimeoutErrorMessage,
@@ -96,6 +103,7 @@ const MAX_CHILDREN_PER_AGENT = 5; // 单个 Agent 同时运行的子任务上限
 const MAX_ACTIVE_DIALOG_CHILDREN = 3; // Dialog 软并发上限：超出后进入待派发队列
 const ANNOUNCE_RETRY_DELAYS_MS = [5_000, 10_000, 20_000] as const;
 const ANNOUNCE_HARD_EXPIRY_MS = 30 * 60 * 1000; // 30 分钟硬超时
+const MAX_DIALOG_FLOW_TRACE_EVENTS = 400;
 const RESULT_SHAREABLE_ARTIFACT_SOURCES = new Set(["message", "tool_write", "tool_edit"]);
 const USER_SHAREABLE_ARTIFACT_DIR_PATTERNS = [
   /(?:^|\/)downloads(?:\/|$)/i,
@@ -104,16 +112,13 @@ const USER_SHAREABLE_ARTIFACT_DIR_PATTERNS = [
   /^\/tmp(?:\/|$)/i,
   /^\/var\/folders(?:\/|$)/i,
 ] as const;
-const INLINE_ONLY_EXECUTOR_ALLOW_TOOL_NAMES = [
-  "task_done",
-  "list_*",
-  "read_*",
-  "search_*",
-  "web_search",
-  "calculate",
+const SCOPED_SOURCE_INLINE_TOOL_DENY = [
+  "read_document",
+  "read_file",
+  "read_file_range",
 ] as const;
 
-function uniqueNonEmptyStrings(values: Array<string | null | undefined>): string[] {
+function uniqueToolPolicyNames(values: Array<string | null | undefined>): string[] {
   const seen = new Set<string>();
   const result: string[] = [];
   for (const value of values) {
@@ -125,239 +130,25 @@ function uniqueNonEmptyStrings(values: Array<string | null | undefined>): string
   return result;
 }
 
-const STRICT_NON_CODING_EXECUTOR_DENY_TOOL_NAMES = [
-  "list_*",
-  "search_*",
-  "web_search",
-  "read_file",
-  "read_file_range",
-  "write_file",
-  "str_replace_edit",
-  "json_edit",
-  "export_document",
-  "export_spreadsheet",
-  "run_shell_command",
-  "persistent_shell",
-  "delegate_subtask",
-  "enter_plan_mode",
-  "exit_plan_mode",
-] as const;
-const INLINE_ONLY_CONTENT_TASK_PATTERNS = [
-  /课程|培训|课纲|课程候选|课程名称|课程介绍|课程主题|课题/u,
-  /excel|xlsx|xls|csv|表格|工作簿/iu,
-  /文档|报告|方案|清单|汇总|提案/u,
-] as const;
-const GENERAL_TO_EXECUTOR_PROMOTION_PATTERNS = [
-  /课程|培训|课纲|课程候选|课程名称|课程介绍|课程主题|课题|清单/u,
-  /excel|xlsx|xls|csv|表格|工作簿/iu,
-] as const;
-const STRONG_CODE_TASK_PATTERNS = [
-  /repo|repository|codebase|仓库|项目结构|工程|源码/i,
-  /代码|编码|编程|函数|类|模块|接口|重构|修复|debug|bug|报错/i,
-  /\/[^\s"'`]+\.(?:ts|tsx|js|jsx|py|rs|go|java|kt|swift|vue|html|css|scss|less)\b/i,
-] as const;
-const COURSE_CONTENT_TASK_PATTERNS = [
-  /课程|培训|课纲|课程候选|课程名称|课程介绍|课程主题|培训目标|培训对象/u,
-  /基于.*(?:excel|xlsx|xls|csv|表格|工作簿)/iu,
-  /按主题.*(?:生成|整理|汇总).*(?:课程|条目|清单)/u,
-] as const;
-const REVIEW_LIKE_TASK_PATTERNS = [
-  /review|reviewer|审查|审阅|评审|审核|安全/u,
-] as const;
-const VALIDATION_LIKE_TASK_PATTERNS = [
-  /tester|test|qa|验证|回归|验收|测试/u,
-] as const;
-const CONTENT_EXECUTOR_ALLOW_TOOL_NAMES = [
-  "read_document",
-  "calculate",
-  "task_done",
-] as const;
-const CONTENT_EXECUTOR_DENY_TOOL_NAMES = [
-  "spawn_task",
-  "delegate_subtask",
-  "wait_for_spawned_tasks",
-  "send_message",
-  "agents",
-  "ask_user",
-  "ask_clarification",
-  "send_local_media",
-  "enter_plan_mode",
-  "exit_plan_mode",
-  "memory_*",
-  "list_*",
-  "read_file",
-  "read_file_range",
-  "search_*",
-  "web_search",
-  "write_file",
-  "str_replace_edit",
-  "json_edit",
-  "export_document",
-  "export_spreadsheet",
-  "run_shell_command",
-  "persistent_shell",
-  "delete_file",
-  "native_*",
-  "database_execute",
-  "ssh_*",
-] as const;
-const INLINE_STRUCTURED_RESULT_ALLOW_TOOL_NAMES = [
-  "task_done",
-] as const;
-const INLINE_STRUCTURED_RESULT_DENY_TOOL_NAMES = [
-  ...CONTENT_EXECUTOR_DENY_TOOL_NAMES,
-  "read_document",
-  "calculate",
-] as const;
-const CODING_INTENT_TOOL_NAMES = new Set([
-  "write_file",
-  "str_replace_edit",
-  "json_edit",
-  "run_shell_command",
-  "persistent_shell",
-  "export_document",
-  "export_spreadsheet",
-]);
-
-function mergeToolPolicies(
-  ...policies: Array<ToolPolicy | undefined>
-): ToolPolicy | undefined {
-  const allow = [...new Set(
-    policies.flatMap((policy) => policy?.allow ?? [])
-      .map((item) => String(item ?? "").trim())
-      .filter(Boolean),
-  )];
-  const deny = [...new Set(
-    policies.flatMap((policy) => policy?.deny ?? [])
-      .map((item) => String(item ?? "").trim())
-      .filter(Boolean),
-  )];
-  if (allow.length === 0 && deny.length === 0) return undefined;
-  return {
-    ...(allow.length > 0 ? { allow } : {}),
-    ...(deny.length > 0 ? { deny } : {}),
-  };
-}
-
-function taskLooksLikeCourseContentDelivery(task: string): boolean {
-  const normalizedTask = String(task ?? "").trim();
-  if (!normalizedTask) return false;
-  return COURSE_CONTENT_TASK_PATTERNS.some((pattern) => pattern.test(normalizedTask));
-}
-
-function taskExplicitlyRequestsReview(task: string): boolean {
-  const normalizedTask = String(task ?? "").trim();
-  return REVIEW_LIKE_TASK_PATTERNS.some((pattern) => pattern.test(normalizedTask));
-}
-
-function taskExplicitlyRequestsValidation(task: string): boolean {
-  const normalizedTask = String(task ?? "").trim();
-  return VALIDATION_LIKE_TASK_PATTERNS.some((pattern) => pattern.test(normalizedTask));
-}
-
-function overrideToolPolicyEnablesCoding(policy?: ToolPolicy): boolean {
-  const allow = policy?.allow ?? [];
-  return allow.some((toolName) => CODING_INTENT_TOOL_NAMES.has(String(toolName ?? "").trim()));
-}
-
-function isInlineOnlyNonCodingExecutorTask(params: {
-  roleBoundary?: SpawnedTaskRoleBoundary;
-  task: string;
-}): boolean {
-  if (params.roleBoundary !== "executor") return false;
-  const normalizedTask = String(params.task ?? "").trim();
-  const contentLike = INLINE_ONLY_CONTENT_TASK_PATTERNS.some((pattern) => pattern.test(normalizedTask));
-  const strongCodeLike = STRONG_CODE_TASK_PATTERNS.some((pattern) => pattern.test(normalizedTask));
-  if (taskLooksLikeCourseContentDelivery(normalizedTask)) return true;
-  if (contentLike && !strongCodeLike) return true;
-  const inferred = inferCodingExecutionProfile({ query: params.task });
-  return !inferred.profile.codingMode;
-}
-
-function shouldPromoteGeneralTaskToExecutor(task: string): boolean {
-  const normalizedTask = String(task ?? "").trim();
-  if (!normalizedTask) return false;
-  if (taskLooksLikeCourseContentDelivery(normalizedTask)) return true;
-  const contentLike = GENERAL_TO_EXECUTOR_PROMOTION_PATTERNS.some((pattern) => pattern.test(normalizedTask));
-  const strongCodeLike = STRONG_CODE_TASK_PATTERNS.some((pattern) => pattern.test(normalizedTask));
-  return contentLike && !strongCodeLike;
-}
-
-function buildStrictContentExecutorToolPolicy(overrideToolPolicy?: ToolPolicy): ToolPolicy {
-  const deny = uniqueNonEmptyStrings([
-    ...CONTENT_EXECUTOR_DENY_TOOL_NAMES,
-    ...(overrideToolPolicy?.deny ?? []),
-  ]);
-  return {
-    allow: [...CONTENT_EXECUTOR_ALLOW_TOOL_NAMES],
-    ...(deny.length > 0 ? { deny } : {}),
-  };
-}
-
-function buildInlineStructuredResultToolPolicy(overrideToolPolicy?: ToolPolicy): ToolPolicy {
-  const deny = uniqueNonEmptyStrings([
-    ...INLINE_STRUCTURED_RESULT_DENY_TOOL_NAMES,
-    ...(overrideToolPolicy?.deny ?? []),
-  ]);
-  return {
-    allow: [...INLINE_STRUCTURED_RESULT_ALLOW_TOOL_NAMES],
-    ...(deny.length > 0 ? { deny } : {}),
-  };
-}
-
-function resolveDialogSubtaskExecutionIntent(params: {
-  roleBoundary?: SpawnedTaskRoleBoundary;
-  task: string;
-  overrideToolPolicy?: ToolPolicy;
-  explicitExecutionIntent?: DialogSubtaskExecutionIntent;
-}): DialogSubtaskExecutionIntent {
-  if (params.explicitExecutionIntent) return params.explicitExecutionIntent;
-  const normalizedTask = String(params.task ?? "").trim();
-  if (params.roleBoundary === "reviewer" && taskExplicitlyRequestsReview(normalizedTask)) return "reviewer";
-  if (params.roleBoundary === "validator" && taskExplicitlyRequestsValidation(normalizedTask)) return "validator";
-  if (taskLooksLikeCourseContentDelivery(normalizedTask)) {
-    return overrideToolPolicyEnablesCoding(params.overrideToolPolicy) ? "coding_executor" : "content_executor";
-  }
-  if (params.roleBoundary === "reviewer") return "reviewer";
-  if (params.roleBoundary === "validator") return "validator";
-  if (params.roleBoundary === "executor") {
-    if (overrideToolPolicyEnablesCoding(params.overrideToolPolicy)) return "coding_executor";
-    return isInlineOnlyNonCodingExecutorTask({ roleBoundary: params.roleBoundary, task: normalizedTask })
-      ? "content_executor"
-      : "coding_executor";
-  }
-  return "general";
-}
-
-function buildExecutionIntentToolPolicy(params: {
-  executionIntent: DialogSubtaskExecutionIntent;
-  resultContract?: "default" | "inline_structured_result";
-  overrideToolPolicy?: ToolPolicy;
+function applyScopedSourceInlineToolPolicy(params: {
+  policy?: ToolPolicy;
+  overrides?: SpawnTaskOverrides;
 }): ToolPolicy | undefined {
-  switch (params.executionIntent) {
-    case "content_executor":
-      return params.resultContract === "inline_structured_result"
-        ? buildInlineStructuredResultToolPolicy(params.overrideToolPolicy)
-        : buildStrictContentExecutorToolPolicy(params.overrideToolPolicy);
-    case "coding_executor":
-      return mergeToolPolicies(getRoleBoundaryPolicyProfile("executor").toolPolicy, params.overrideToolPolicy);
-    case "reviewer":
-      return mergeToolPolicies(getRoleBoundaryPolicyProfile("reviewer").toolPolicy, params.overrideToolPolicy);
-    case "validator":
-      return mergeToolPolicies(getRoleBoundaryPolicyProfile("validator").toolPolicy, params.overrideToolPolicy);
-    default:
-      return params.overrideToolPolicy;
+  if (
+    params.overrides?.resultContract !== "inline_structured_result"
+    || (params.overrides?.scopedSourceItems?.length ?? 0) === 0
+  ) {
+    return params.policy;
   }
-}
 
-function buildExecutorTaskSpecificToolPolicy(params: {
-  roleBoundary?: SpawnedTaskRoleBoundary;
-  task: string;
-}): ToolPolicy | undefined {
-  if (!isInlineOnlyNonCodingExecutorTask(params)) return undefined;
+  const deny = uniqueToolPolicyNames([
+    ...(params.policy?.deny ?? []),
+    ...SCOPED_SOURCE_INLINE_TOOL_DENY,
+  ]);
+
   return {
-    allow: [...INLINE_ONLY_EXECUTOR_ALLOW_TOOL_NAMES],
-    deny: [...STRICT_NON_CODING_EXECUTOR_DENY_TOOL_NAMES],
+    ...(params.policy?.allow?.length ? { allow: [...params.policy.allow] } : {}),
+    ...(deny.length ? { deny } : {}),
   };
 }
 
@@ -367,11 +158,11 @@ function sanitizeInlineOnlyExecutorTask(task: string): string {
 
   return normalized
     .replace(
-      /生成一批课程候选\s*json/giu,
-      "直接在 terminal result 返回完整课程候选列表（每条至少包含课程名称和课程介绍）",
+      /(?:输出|结果|内容|最终结果|最终内容|产物|清单|列表)[^。；;\n]{0,80}?(?:保存到|写入到|写到|落到|输出到|导出到)\s*`?(\/[^\s`，。,；;]+)`?/giu,
+      "直接在 terminal result 中返回结果，不要写入中间文件",
     )
     .replace(
-      /(?:输出|结果|内容|课程候选|最终结果|最终内容|产物)[^。；;\n]{0,80}?(?:保存到|写入到|写到|落到|输出到|导出到)\s*`?(\/[^\s`，。,；;]+)`?/giu,
+      /(?:保存到|写入到|写到|落到|输出到|导出到)\s*`?(\/[^\s`，。,；;]+\.(?:json|txt|md|csv|xlsx?|docx?))`?/giu,
       "直接在 terminal result 中返回结果，不要写入中间文件",
     )
     .replace(
@@ -472,7 +263,7 @@ function buildEphemeralChildBoundary(role: SpawnedTaskRoleBoundary): EphemeralCh
         systemPromptAppend: [
           "你当前是独立审查子 Agent。",
           "默认不要修改文件、不要运行写操作、不要直接接管实现任务。",
-          "不要使用 send_message / ask_user / ask_clarification / delegate_subtask / enter_plan_mode / exit_plan_mode；最终结论直接写进 terminal result。",
+          "不要使用 send_message / ask_user / ask_clarification / delegate_task / enter_plan_mode / exit_plan_mode；最终结论直接写进 terminal result。",
           "重点输出发现、风险、证据和建议修复方向；如果认为必须改代码，应回传上游协调者，由其决定是否另派实现任务。",
         ].join("\n"),
       };
@@ -484,7 +275,7 @@ function buildEphemeralChildBoundary(role: SpawnedTaskRoleBoundary): EphemeralCh
         systemPromptAppend: [
           "你当前是验证子 Agent。",
           "默认不要修改代码；重点做复现、测试、验收和回归检查。",
-          "不要使用 send_message / ask_user / ask_clarification / delegate_subtask / enter_plan_mode / exit_plan_mode；最终结论直接写进 terminal result。",
+          "不要使用 send_message / ask_user / ask_clarification / delegate_task / enter_plan_mode / exit_plan_mode；最终结论直接写进 terminal result。",
           "可以运行测试、构建或检查命令，但若被实现缺口阻塞，应明确说明阻塞点和建议的上游动作。",
         ].join("\n"),
       };
@@ -496,7 +287,7 @@ function buildEphemeralChildBoundary(role: SpawnedTaskRoleBoundary): EphemeralCh
         systemPromptAppend: [
           "你当前是执行子 Agent。",
           "聚焦实现、修复或探索，不要抢协调权。",
-          "不要使用 send_message / ask_user / ask_clarification / delegate_subtask / enter_plan_mode / exit_plan_mode；最终结果、验证结论和 blocker 直接写进 terminal result。",
+          "不要使用 send_message / ask_user / ask_clarification / delegate_task / enter_plan_mode / exit_plan_mode；最终结果、验证结论和 blocker 直接写进 terminal result。",
           "如果任务属于课程生成、内容整理、方案撰写、资料汇总这类非 coding 工作，默认直接在 terminal result 返回完整结果，不要写中间 JSON / TSV / Markdown 文件。",
           "如需额外审查或验证，优先把结果和缺口写进终态结果回传给上游协调者，再由其继续分派。",
         ].join("\n"),
@@ -509,7 +300,7 @@ function buildEphemeralChildBoundary(role: SpawnedTaskRoleBoundary): EphemeralCh
         systemPromptAppend: [
           "你当前是通用支援子 Agent。",
           "聚焦补充分析、资料整理和局部线索确认，默认不要修改文件或继续派发新的子任务。",
-          "不要使用 send_message / ask_user / ask_clarification / delegate_subtask / enter_plan_mode / exit_plan_mode；最终结论直接写进 terminal result。",
+          "不要使用 send_message / ask_user / ask_clarification / delegate_task / enter_plan_mode / exit_plan_mode；最终结论直接写进 terminal result。",
           "如果发现需要新增实现、审查或验证线程，请把建议与原因回传给上游协调者，由其继续派工。",
         ].join("\n"),
       };
@@ -576,6 +367,21 @@ function buildSpawnTaskRoleBoundaryInstruction(role: SpawnedTaskRoleBoundary): s
   }
 }
 
+function formatScopedSourceItem(item: ScopedSourceItem, index: number): string {
+  const lines = [
+    `- #${index + 1} sourceItemId: ${item.id}`,
+    `  - topicIndex: ${item.topicIndex ?? item.order ?? index + 1}`,
+    `  - topicTitle: ${item.topicTitle ?? item.label}`,
+  ];
+  if (item.sectionLabel) lines.push(`  - sectionLabel: ${item.sectionLabel}`);
+  if (item.themeGroup) lines.push(`  - themeGroup: ${item.themeGroup}`);
+  if (item.trainingTarget) lines.push(`  - trainingTarget: ${item.trainingTarget}`);
+  if (item.trainingAudience) lines.push(`  - trainingAudience: ${item.trainingAudience}`);
+  if (item.outline) lines.push(`  - outline: ${item.outline}`);
+  if (item.sourcePath) lines.push(`  - sourcePath: ${item.sourcePath}`);
+  return lines.join("\n");
+}
+
 function buildDelegatedTaskPrompt(params: {
   spawnerName: string;
   task: string;
@@ -585,6 +391,7 @@ function buildDelegatedTaskPrompt(params: {
   attachments?: readonly string[];
   executionHint?: string;
   inlineOnly?: boolean;
+  scopedSourceItems?: readonly ScopedSourceItem[];
 }): string {
   const task = (params.inlineOnly ? sanitizeInlineOnlyExecutorTask(params.task) : params.task).trim() || "未命名任务";
   const label = params.label?.trim();
@@ -593,12 +400,12 @@ function buildDelegatedTaskPrompt(params: {
     .map((item) => String(item ?? "").trim())
     .filter(Boolean);
   const executionHint = params.executionHint?.trim();
+  const scopedSourceItems = (params.scopedSourceItems ?? []).filter(Boolean);
 
   const lines: string[] = [
     `[由 ${params.spawnerName} 委派的任务]`,
     "",
-    "## 任务目标",
-    task,
+    ...(/^##\s*任务目标/m.test(task) ? [task] : ["## 任务目标", task]),
   ];
 
   if (label && label !== task) {
@@ -631,6 +438,16 @@ function buildDelegatedTaskPrompt(params: {
 
   if (context) {
     lines.push("", "## 已知上下文", context);
+  }
+
+  if (scopedSourceItems.length > 0) {
+    lines.push(
+      "",
+      "## 当前分片真相（系统下传）",
+      "- 当前子任务已直接拿到 scoped source shard；请以这些条目作为唯一真相，不要重新读取整份源文档或扫描历史目录。",
+      `- 本分片共 ${scopedSourceItems.length} 个 source items：`,
+      ...scopedSourceItems.map((item, index) => formatScopedSourceItem(item, index)),
+    );
   }
 
   if (attachments.length > 0) {
@@ -997,6 +814,8 @@ export class ActorSystem {
   private actors = new Map<string, AgentActor>();
   private dialogHistory: DialogMessage[] = [];
   private eventHandlers: SystemEventHandler[] = [];
+  private dialogFlowEvents: DialogFlowTraceEvent[] = [];
+  private dialogFlowEventHandlers: Array<(event: DialogFlowTraceEvent) => void> = [];
   private pendingReplies = new Map<string, PendingReply>();
   private pendingInteractions = new Map<string, PendingInteraction>();
   private artifactRecords = new Map<string, DialogArtifactRecord>();
@@ -1009,6 +828,7 @@ export class ActorSystem {
   private legacyDialogExecutionPlanRuntimeState: LegacyDialogExecutionPlanRuntimeState | null = null;
   private dialogRoomCompaction: DialogRoomCompactionState | null = null;
   private dialogExecutionMode: DialogExecutionMode = "execute";
+  private dialogSubagentEnabled = false;
   private options: ActorSystemOptions;
   readonly sessionId: string;
   private hooks = new Map<HookType, Array<HookHandler<any>>>();
@@ -1022,6 +842,11 @@ export class ActorSystem {
     detail?: Record<string, unknown>,
     actorId?: string | null,
   ): void {
+    this.recordDialogFlowEvent({
+      event,
+      actorId: actorId ?? this.coordinatorActorId ?? undefined,
+      detail,
+    });
     traceDialogFlowEvent({
       sessionId: this.sessionId,
       actorId: actorId ?? this.coordinatorActorId ?? undefined,
@@ -1148,6 +973,30 @@ export class ActorSystem {
     return this.dialogExecutionMode;
   }
 
+  getDialogSubagentEnabled(): boolean {
+    return this.dialogSubagentEnabled === true;
+  }
+
+  hasLiveDialogSubagentContext(): boolean {
+    const activeContract = this.activeExecutionContract;
+    if (
+      activeContract
+      && activeContract.state !== "completed"
+      && activeContract.state !== "failed"
+      && activeContract.state !== "superseded"
+    ) {
+      return true;
+    }
+    return this.dialogSubtaskRuntime.getSpawnedTasksSnapshot().some((record) => (
+      record.status === "running"
+      || (record.mode === "session" && record.sessionOpen)
+    ));
+  }
+
+  shouldEnableDialogSubagentCapabilities(): boolean {
+    return this.getDialogSubagentEnabled() || this.hasLiveDialogSubagentContext();
+  }
+
   setDialogExecutionMode(mode: DialogExecutionMode, opts?: { force?: boolean }): void {
     const nextMode: DialogExecutionMode = mode === "plan" ? "plan" : "execute";
     if (this.dialogExecutionMode === nextMode) return;
@@ -1164,6 +1013,16 @@ export class ActorSystem {
       actorId: this.coordinatorActorId ?? "",
       timestamp: Date.now(),
       detail: { mode: nextMode },
+    });
+  }
+
+  setDialogSubagentEnabled(enabled: boolean): void {
+    const nextEnabled = enabled === true;
+    if (this.dialogSubagentEnabled === nextEnabled) return;
+    this.dialogSubagentEnabled = nextEnabled;
+    this.traceFlow("dialog_subagent_mode_changed", {
+      enabled: nextEnabled,
+      live_context: this.hasLiveDialogSubagentContext(),
     });
   }
 
@@ -1293,6 +1152,7 @@ export class ActorSystem {
     this.activeExecutionContract = null;
     this.legacyDialogExecutionPlanRuntimeState = null;
     this.dialogHistory = [];
+    this.dialogFlowEvents = [];
     this.pendingReplies.clear();
   }
 
@@ -1543,34 +1403,41 @@ export class ActorSystem {
           description: opts.description,
           capabilities: opts.capabilities,
         });
-    const resolvedExecutionIntent = opts.executionIntent
-      ?? (inferredBoundary.role === "reviewer"
-        ? "reviewer"
-        : inferredBoundary.role === "validator"
-          ? "validator"
-          : inferredBoundary.role === "executor"
-            ? "coding_executor"
-            : "general");
     const explicitToolPolicy = opts.toolPolicy ?? opts.overrides?.toolPolicy;
-    const resolvedChildSettings = resolveChildExecutionSettings({
+    const resolvedWorkerProfile = resolveWorkerProfile({
       roleBoundary: inferredBoundary.role,
+      task: opts.description?.trim() || requestedName,
+      overrideToolPolicy: explicitToolPolicy,
+      explicitWorkerProfileId: opts.overrides?.workerProfileId,
+      explicitExecutionIntent: opts.executionIntent ?? opts.overrides?.executionIntent,
+      resultContract: opts.overrides?.resultContract,
+      allowGeneralPromotion: !opts.roleBoundary,
+    });
+    const resolvedBoundary = buildEphemeralChildBoundary(resolvedWorkerProfile.roleBoundary);
+    const resolvedExecutionIntent = resolvedWorkerProfile.executionIntent ?? "general";
+    const resolvedChildSettings = resolveChildExecutionSettings({
+      roleBoundary: resolvedBoundary.role,
       parentToolPolicy: spawner.toolPolicyConfig,
       parentExecutionPolicy: spawner.executionPolicy,
       parentWorkspace: spawner.workspace,
       parentThinkingLevel: spawner.thinkingLevel,
       parentMiddlewareOverrides: spawner.middlewareOverrides,
-      boundaryToolPolicy: inferredBoundary.toolPolicy,
-      boundaryExecutionPolicy: inferredBoundary.executionPolicy,
+      boundaryToolPolicy: resolvedBoundary.toolPolicy,
+      boundaryExecutionPolicy: resolvedBoundary.executionPolicy,
       overrideToolPolicy: explicitToolPolicy,
       overrideExecutionPolicy: opts.overrides?.executionPolicy,
       overrideWorkspace: opts.workspace,
       overrideThinkingLevel: opts.overrides?.thinkingLevel,
       overrideMiddlewareOverrides: opts.overrides?.middlewareOverrides,
     });
-    resolvedChildSettings.toolPolicy = buildExecutionIntentToolPolicy({
-      executionIntent: resolvedExecutionIntent,
+    resolvedChildSettings.toolPolicy = buildWorkerProfileToolPolicy({
+      profileId: resolvedWorkerProfile.id,
       resultContract: opts.overrides?.resultContract,
       overrideToolPolicy: explicitToolPolicy,
+    }) ?? resolvedChildSettings.toolPolicy;
+    resolvedChildSettings.toolPolicy = applyScopedSourceInlineToolPolicy({
+      policy: resolvedChildSettings.toolPolicy,
+      overrides: opts.overrides,
     }) ?? resolvedChildSettings.toolPolicy;
     const spawnerBasePrompt = spawner.getSystemPromptOverride() ?? spawner.role.systemPrompt;
     const systemPromptBlocks = [
@@ -1578,7 +1445,7 @@ export class ActorSystem {
       `你是由 ${spawner.role.name} 临时创建的专用子 Agent。`,
       opts.description ? `你的职责定位：${opts.description}` : "",
       opts.capabilities?.length ? `优先能力聚焦：${opts.capabilities.join("、")}` : "",
-      inferredBoundary.systemPromptAppend ? `默认职责边界：${inferredBoundary.systemPromptAppend}` : "",
+      resolvedBoundary.systemPromptAppend ? `默认职责边界：${resolvedBoundary.systemPromptAppend}` : "",
       resolvedExecutionIntent === "content_executor"
         ? opts.overrides?.resultContract === "inline_structured_result"
           ? "执行意图：content_executor。当前启用 inline_structured_result 合同：你必须直接在 terminal result 返回完整结构化结果，禁止写文件、导出文件、搜索外网、再次派工。"
@@ -1586,6 +1453,9 @@ export class ActorSystem {
         : resolvedExecutionIntent === "coding_executor"
           ? "执行意图：coding_executor。你负责实现或修复，但仍禁止消息回流型工具和再次派工。"
           : "",
+      opts.overrides?.scopedSourceItems?.length
+        ? `当前已随派工下传 ${opts.overrides.scopedSourceItems.length} 个 scoped source items。请直接以任务正文里的「当前分片真相」为唯一真相，不要重新读取整份源文件。`
+        : "",
       opts.overrides?.systemPromptAppend ? `额外约束：${opts.overrides.systemPromptAppend}` : "",
       [
         "## 子任务执行规范（必读）",
@@ -1593,8 +1463,12 @@ export class ActorSystem {
           ? "- 当前子任务已锁定 inline_structured_result 合同：直接在 terminal result 返回完整结果，不要写任何中间 JSON / TSV / Markdown / Excel 文件。"
           : "- 如果任务属于内容整理、方案撰写、清单汇总这类非 coding 子任务，默认直接在 terminal result 返回完整结果，不要写任何中间 JSON / TSV / Markdown / Excel 文件。",
         "- 只有明确的 coding / 实现类任务，且当前工具策略允许时，才可以写文件或导出最终产物。",
-        "- 默认只读取当前用户提供的文档和本轮 artifacts；不要扫描目录、历史 Downloads 或旧文件。",
-        "- 读取同一文件只需调用一次 `read_document` / `read_file`，不要反复读取同一文件。",
+        opts.overrides?.scopedSourceItems?.length
+          ? "- 当前任务已经下传 scoped source shard；直接用这些条目完成任务，不要再读取整份源文档。"
+          : "- 默认只读取当前用户提供的文档和本轮 artifacts；不要扫描目录、历史 Downloads 或旧文件。",
+        opts.overrides?.scopedSourceItems?.length
+          ? "- 如果任务正文已列出「当前分片真相」，不要再重复调用 `read_document` / `read_file` 回读同一份源输入。"
+          : "- 读取同一文件只需调用一次 `read_document` / `read_file`，不要反复读取同一文件。",
         "- 尽量一次性完成目标，避免在执行过程中输出冗长的「步骤计划」或「执行方案」文本。",
         "- 最终 answer 只需要一两句话说明完成情况和产出文件路径。",
       ].join("\n"),
@@ -1664,6 +1538,17 @@ export class ActorSystem {
     }
     this.activeExecutionContract = null;
     this.legacyDialogExecutionPlanRuntimeState = null;
+  }
+
+  updateStructuredDeliveryManifest(
+    manifest: import("./structured-delivery-strategy").StructuredDeliveryManifest,
+  ): void {
+    if (!this.activeExecutionContract) return;
+    this.activeExecutionContract = {
+      ...cloneExecutionContract(this.activeExecutionContract),
+      structuredDeliveryManifest: { ...manifest },
+    };
+    log(`updateStructuredDeliveryManifest: ${manifest.deliveryContract}/${manifest.parentContract}`);
   }
 
   /**
@@ -1736,6 +1621,10 @@ export class ActorSystem {
       ...cloneExecutionContract(contract),
       state: newState,
     };
+    if (this._sessionStallTimer) {
+      clearTimeout(this._sessionStallTimer);
+      this._sessionStallTimer = null;
+    }
     log(`tryFinalizeExecutionContract: contract → ${newState}`);
     this.emitEvent({
       // Keep the legacy event name for compatibility with existing listeners.
@@ -1764,6 +1653,7 @@ export class ActorSystem {
       const busyActors = [...this.actors.values()].filter((a) => a.status !== "idle");
       if (busyActors.length > 0) return;
 
+      this.tryFinalizeExecutionContract();
       if (this.ensureRuntimeExecutionContract()?.state === "active") {
         log("scheduleExecutionContractProgressCheck: session stall detected");
         this.emitEvent({
@@ -1907,23 +1797,21 @@ export class ActorSystem {
       plannedDelegationId?: string;
     },
   ): DeferredSpawnRequest {
-    let resolvedRoleBoundary: SpawnedTaskRoleBoundary = opts?.roleBoundary ?? "general";
-    if (!opts?.roleBoundary && resolvedRoleBoundary === "general" && shouldPromoteGeneralTaskToExecutor(task)) {
-      resolvedRoleBoundary = "executor";
-    }
-    const resolvedExecutionIntent = resolveDialogSubtaskExecutionIntent({
-      roleBoundary: resolvedRoleBoundary,
+    const resolvedWorkerProfile = resolveWorkerProfile({
+      roleBoundary: opts?.roleBoundary ?? "general",
       task,
       overrideToolPolicy: opts?.overrides?.toolPolicy,
+      explicitWorkerProfileId: opts?.overrides?.workerProfileId,
       explicitExecutionIntent: opts?.overrides?.executionIntent,
+      resultContract: opts?.overrides?.resultContract,
+      allowGeneralPromotion: !opts?.roleBoundary,
     });
-    if (resolvedExecutionIntent === "content_executor" || resolvedExecutionIntent === "coding_executor") {
-      resolvedRoleBoundary = "executor";
-    } else if (resolvedExecutionIntent === "reviewer") {
-      resolvedRoleBoundary = "reviewer";
-    } else if (resolvedExecutionIntent === "validator") {
-      resolvedRoleBoundary = "validator";
-    }
+    const resolvedRoleBoundary = resolvedWorkerProfile.roleBoundary;
+    const resolvedOverrides = applyWorkerProfileDefaults({
+      profileId: resolvedWorkerProfile.id,
+      overrides: opts?.overrides,
+    });
+    const resolvedExecutionIntent = resolvedOverrides.executionIntent ?? resolvedWorkerProfile.executionIntent ?? "general";
     const request: DeferredSpawnRequest = {
       id: generateId(),
       spawnerActorId,
@@ -1943,7 +1831,7 @@ export class ActorSystem {
       executionIntent: resolvedExecutionIntent,
       createIfMissing: opts?.createIfMissing,
       createChildSpec: opts?.createChildSpec,
-      overrides: opts?.overrides,
+      overrides: resolvedOverrides,
       plannedDelegationId: opts?.plannedDelegationId,
     };
     const queue = this.deferredSpawnRequests.get(spawnerActorId) ?? [];
@@ -2558,9 +2446,7 @@ export class ActorSystem {
     if (!explicitRoleBoundary && resolvedRoleBoundary === "general" && plannedSpawn?.roleBoundary) {
       resolvedRoleBoundary = plannedSpawn.roleBoundary;
     }
-    if (!explicitRoleBoundary && resolvedRoleBoundary === "general" && shouldPromoteGeneralTaskToExecutor(resolvedTask)) {
-      resolvedRoleBoundary = "executor";
-    }
+    const explicitWorkerProfileId = opts?.overrides?.workerProfileId ?? plannedSpawn?.overrides?.workerProfileId;
     const explicitExecutionIntent = opts?.overrides?.executionIntent ?? plannedSpawn?.overrides?.executionIntent;
     const resolvedCreateChildSpec = {
       description: opts?.createChildSpec?.description ?? plannedSpawn?.childDescription,
@@ -2574,30 +2460,35 @@ export class ActorSystem {
       ...(plannedSpawn?.overrides ?? {}),
       ...(opts?.overrides ?? {}),
     };
-    let resolvedExecutionIntent = resolveDialogSubtaskExecutionIntent({
+    let resolvedWorkerProfile = resolveWorkerProfile({
       roleBoundary: resolvedRoleBoundary,
       task: resolvedTask,
       overrideToolPolicy: resolvedOverrides.toolPolicy,
+      explicitWorkerProfileId,
       explicitExecutionIntent,
+      resultContract: resolvedOverrides.resultContract,
+      allowGeneralPromotion: !explicitRoleBoundary,
     });
-    if (resolvedExecutionIntent === "content_executor" || resolvedExecutionIntent === "coding_executor") {
-      resolvedRoleBoundary = "executor";
-    } else if (resolvedExecutionIntent === "reviewer") {
-      resolvedRoleBoundary = "reviewer";
-    } else if (resolvedExecutionIntent === "validator") {
-      resolvedRoleBoundary = "validator";
-    }
+    resolvedRoleBoundary = resolvedWorkerProfile.roleBoundary;
+    Object.assign(resolvedOverrides, applyWorkerProfileDefaults({
+      profileId: resolvedWorkerProfile.id,
+      overrides: resolvedOverrides,
+    }));
+    resolvedOverrides.toolPolicy = applyScopedSourceInlineToolPolicy({
+      policy: resolvedOverrides.toolPolicy,
+      overrides: resolvedOverrides,
+    });
+    let resolvedExecutionIntent = resolvedOverrides.executionIntent ?? resolvedWorkerProfile.executionIntent ?? "general";
     this.traceFlow("profile_inferred", {
       phase: "spawn",
+      profile: resolvedWorkerProfile.id,
       status: resolvedRoleBoundary,
       execution_intent: resolvedExecutionIntent,
-      tool_policy_source: resolvedExecutionIntent === "content_executor"
-        ? "content_executor_intent"
-        : resolvedExecutionIntent === "coding_executor"
-          ? "coding_executor_intent"
-          : explicitRoleBoundary
-            ? "explicit_role_boundary"
-            : "heuristic_role_boundary",
+      tool_policy_source: explicitWorkerProfileId
+        ? "explicit_worker_profile"
+        : explicitExecutionIntent
+          ? "explicit_execution_intent"
+          : `${resolvedWorkerProfile.id}_profile`,
       preview: previewActorSystemText(resolvedTask),
     }, spawnerActorId);
     if (!target && (opts?.createIfMissing || plannedSpawn?.createIfMissing)) {
@@ -2614,22 +2505,20 @@ export class ActorSystem {
           description: resolvedCreateChildSpec.description,
           capabilities: resolvedCreateChildSpec.capabilities,
         }).role;
-        resolvedExecutionIntent = resolveDialogSubtaskExecutionIntent({
+        resolvedWorkerProfile = resolveWorkerProfile({
           roleBoundary: resolvedRoleBoundary,
           task: resolvedTask,
           overrideToolPolicy: resolvedOverrides.toolPolicy,
+          explicitWorkerProfileId,
           explicitExecutionIntent,
+          resultContract: resolvedOverrides.resultContract,
         });
-      }
-      const executorTaskSpecificToolPolicy = buildExecutorTaskSpecificToolPolicy({
-        roleBoundary: resolvedRoleBoundary,
-        task: resolvedTask,
-      });
-      if (executorTaskSpecificToolPolicy) {
-        resolvedOverrides.toolPolicy = mergeToolPolicies(
-          resolvedOverrides.toolPolicy,
-          executorTaskSpecificToolPolicy,
-        );
+        Object.assign(resolvedOverrides, applyWorkerProfileDefaults({
+          profileId: resolvedWorkerProfile.id,
+          overrides: resolvedOverrides,
+        }));
+        resolvedRoleBoundary = resolvedWorkerProfile.roleBoundary;
+        resolvedExecutionIntent = resolvedOverrides.executionIntent ?? resolvedWorkerProfile.executionIntent ?? "general";
       }
       const created = this.createEphemeralAgent(spawnerActorId, {
         name: childActorName,
@@ -2657,25 +2546,23 @@ export class ActorSystem {
         capabilities: target.capabilities?.tags,
         description: target.capabilities?.description,
       }).role;
-      resolvedExecutionIntent = resolveDialogSubtaskExecutionIntent({
+      resolvedWorkerProfile = resolveWorkerProfile({
         roleBoundary: resolvedRoleBoundary,
         task: resolvedTask,
         overrideToolPolicy: resolvedOverrides.toolPolicy,
+        explicitWorkerProfileId,
         explicitExecutionIntent,
+        resultContract: resolvedOverrides.resultContract,
       });
+      Object.assign(resolvedOverrides, applyWorkerProfileDefaults({
+        profileId: resolvedWorkerProfile.id,
+        overrides: resolvedOverrides,
+      }));
+      resolvedRoleBoundary = resolvedWorkerProfile.roleBoundary;
+      resolvedExecutionIntent = resolvedOverrides.executionIntent ?? resolvedWorkerProfile.executionIntent ?? "general";
     }
-    const executorTaskSpecificToolPolicy = buildExecutorTaskSpecificToolPolicy({
-      roleBoundary: resolvedRoleBoundary,
-      task: resolvedTask,
-    });
-    if (executorTaskSpecificToolPolicy) {
-      resolvedOverrides.toolPolicy = mergeToolPolicies(
-        resolvedOverrides.toolPolicy,
-        executorTaskSpecificToolPolicy,
-      );
-    }
-    resolvedOverrides.toolPolicy = buildExecutionIntentToolPolicy({
-      executionIntent: resolvedExecutionIntent,
+    resolvedOverrides.toolPolicy = buildWorkerProfileToolPolicy({
+      profileId: resolvedWorkerProfile.id,
       resultContract: resolvedOverrides.resultContract,
       overrideToolPolicy: resolvedOverrides.toolPolicy,
     }) ?? resolvedOverrides.toolPolicy;
@@ -2757,7 +2644,9 @@ export class ActorSystem {
     const effectiveContext = opts?.context ?? plannedSpawn?.context;
     const roleBoundaryInstruction = buildSpawnTaskRoleBoundaryInstruction(resolvedRoleBoundary);
     const executionHint = buildSpawnTaskExecutionHint(resolvedTask);
-    const inlineOnlyExecutorTask = Boolean(executorTaskSpecificToolPolicy);
+    const inlineOnlyExecutorTask =
+      resolvedWorkerProfile.id === "content_worker"
+      || resolvedWorkerProfile.id === "spreadsheet_worker";
     const fullTask = buildDelegatedTaskPrompt({
       spawnerName,
       task: resolvedTask,
@@ -2767,6 +2656,7 @@ export class ActorSystem {
       attachments: opts?.attachments,
       executionHint,
       inlineOnly: inlineOnlyExecutorTask,
+      scopedSourceItems: resolvedOverrides.scopedSourceItems,
     });
     const effectiveRunOverrides: import("./types").SpawnTaskOverrides = {
       ...resolvedOverrides,
@@ -2784,11 +2674,15 @@ export class ActorSystem {
       parentRunId: undefined,
       rootRunId: runId,
       roleBoundary: resolvedRoleBoundary,
+      workerProfileId: resolvedWorkerProfile.id,
       executionIntent: resolvedExecutionIntent,
       resultContract: resolvedOverrides.resultContract,
       deliveryTargetId: resolvedOverrides.deliveryTargetId,
       deliveryTargetLabel: resolvedOverrides.deliveryTargetLabel,
       sheetName: resolvedOverrides.sheetName,
+      sourceItemIds: resolvedOverrides.sourceItemIds ? [...resolvedOverrides.sourceItemIds] : undefined,
+      sourceItemCount: resolvedOverrides.sourceItemCount,
+      scopedSourceItems: cloneScopedSourceItems(resolvedOverrides.scopedSourceItems),
       task: resolvedTask,
       label,
       images: opts?.images?.length ? [...new Set(opts.images)] : undefined,
@@ -3787,6 +3681,15 @@ export class ActorSystem {
     return this.dialogHistory;
   }
 
+  getDialogFlowEventsSnapshot(): DialogFlowTraceEvent[] {
+    return this.dialogFlowEvents.map((event) => ({
+      event: event.event,
+      actorId: event.actorId,
+      timestamp: event.timestamp,
+      detail: event.detail ? { ...event.detail } : undefined,
+    }));
+  }
+
   getDialogMessagesSnapshot(): DialogMessage[] {
     return this.dialogHistory.map((message) => ({
       ...message,
@@ -3830,6 +3733,18 @@ export class ActorSystem {
     log(`Restored ${history.length} dialog messages from persisted session`);
   }
 
+  restoreDialogFlowEvents(events: readonly DialogFlowTraceEvent[]): void {
+    this.dialogFlowEvents = events
+      .map((event) => ({
+        event: event.event,
+        actorId: event.actorId,
+        timestamp: event.timestamp,
+        detail: event.detail ? { ...event.detail } : undefined,
+      }))
+      .slice(-MAX_DIALOG_FLOW_TRACE_EVENTS);
+    log(`Restored ${this.dialogFlowEvents.length} dialog flow trace events`);
+  }
+
   /** 恢复子任务记录（用于 session 恢复后 UI 显示） */
   restoreSpawnedTasks(records: Array<Omit<SpawnedTaskRecord, "timeoutId">>): void {
     for (const record of records) {
@@ -3854,6 +3769,7 @@ export class ActorSystem {
 
   clearHistory(): void {
     this.dialogHistory = [];
+    this.dialogFlowEvents = [];
     this.dialogRoomCompaction = null;
   }
 
@@ -3865,6 +3781,7 @@ export class ActorSystem {
     const oldSessionId = this.sessionId;
     archiveSession(oldSessionId, summary);
     this.dialogHistory = [];
+    this.dialogFlowEvents = [];
     (this as any).sessionId = generateId();
     this.traceFlow("session_reset", {
       previous_session: oldSessionId.slice(0, 8),
@@ -4103,6 +4020,31 @@ export class ActorSystem {
     };
   }
 
+  onDialogFlowEvent(handler: (event: DialogFlowTraceEvent) => void): () => void {
+    this.dialogFlowEventHandlers.push(handler);
+    return () => {
+      this.dialogFlowEventHandlers = this.dialogFlowEventHandlers.filter((item) => item !== handler);
+    };
+  }
+
+  recordDialogFlowEvent(params: {
+    event: string;
+    actorId?: string | null;
+    detail?: Record<string, unknown>;
+    timestamp?: number;
+  }): void {
+    const event: DialogFlowTraceEvent = {
+      event: params.event,
+      actorId: params.actorId?.trim() || undefined,
+      timestamp: params.timestamp ?? Date.now(),
+      detail: params.detail ? { ...params.detail } : undefined,
+    };
+    this.dialogFlowEvents = [...this.dialogFlowEvents, event].slice(-MAX_DIALOG_FLOW_TRACE_EVENTS);
+    for (const handler of this.dialogFlowEventHandlers) {
+      try { handler(event); } catch { /* non-critical */ }
+    }
+  }
+
   emitEvent(event: ActorEvent | DialogMessage): void {
     traceDialogActorSystemEvent(this.sessionId, event);
     for (const handler of this.eventHandlers) {
@@ -4125,6 +4067,7 @@ export class ActorSystem {
       coordinatorActorId: this.getCoordinatorId(),
       executionContract: this.getActiveExecutionContract(),
       dialogHistory: [...this.dialogHistory],
+      dialogFlowEvents: this.getDialogFlowEventsSnapshot(),
       pendingReplies: this.pendingReplies.size + this.pendingInteractions.size,
       spawnedTasks: this.dialogSubtaskRuntime.getSpawnedTasksSnapshot().map((r) => ({
         runId: r.runId,

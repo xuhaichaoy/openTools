@@ -1,6 +1,6 @@
 import type { AgentTool } from "@/plugins/builtin/SmartAgent/core/react-agent";
 import type { ActorSystem } from "./actor-system";
-import type { AgentCapability, SpawnedTaskRoleBoundary } from "./types";
+import type { AgentCapability, SpawnedTaskRoleBoundary, WorkerProfileId } from "./types";
 import type { AgentScheduledTask, AgentTaskOriginMode } from "@/core/ai/types";
 import { isLikelyVisualAttachmentPath } from "@/core/ai/ai-center-handoff";
 import {
@@ -14,6 +14,14 @@ import {
   getSessionSummary,
   listTranscriptSessionIds,
 } from "./actor-transcript";
+import {
+  enableStructuredDeliveryAdapter,
+  getStructuredDeliveryStrategyReferenceId,
+  resolveStructuredDeliveryManifest,
+} from "./structured-delivery-strategy";
+import type { SourceGroundingItem } from "./source-grounding";
+import { resolveWorkerProfile } from "./worker-profiles";
+import type { ScopedSourceItem } from "./types";
 
 const KNOWN_AGENT_CAPABILITIES = new Set<AgentCapability>([
   "coordinator",
@@ -42,6 +50,14 @@ const KNOWN_ROLE_BOUNDARIES = new Set<SpawnedTaskRoleBoundary>([
   "executor",
   "reviewer",
   "validator",
+]);
+const KNOWN_WORKER_PROFILES = new Set<WorkerProfileId>([
+  "general_worker",
+  "content_worker",
+  "coding_worker",
+  "validator_worker",
+  "review_worker",
+  "spreadsheet_worker",
 ]);
 
 function previewSpawnTargetText(value?: string, maxLength = 32): string | undefined {
@@ -216,6 +232,164 @@ function getMediaFileName(path: string): string {
   return parts[parts.length - 1] || cleanPath;
 }
 
+function parseChecklist(value: unknown): string[] {
+  if (typeof value !== "string") return [];
+  return value
+    .split(/\r?\n|[；;]+/u)
+    .map((item) => item.replace(/^\s*(?:[-*•]|\d+[.)、．])\s*/u, "").trim())
+    .filter(Boolean);
+}
+
+function buildDelegationTaskText(params: {
+  goal: string;
+  acceptance?: string;
+  defaultAcceptance?: string[];
+}): string {
+  const goal = params.goal.trim();
+  const acceptanceItems = parseChecklist(params.acceptance);
+  const mergedAcceptanceItems = acceptanceItems.length > 0
+    ? acceptanceItems
+    : (params.defaultAcceptance ?? []).filter(Boolean);
+  const lines = ["## 任务目标", goal];
+  if (mergedAcceptanceItems.length > 0) {
+    lines.push("", "## 验收标准", ...mergedAcceptanceItems.map((item) => `- ${item}`));
+  }
+  return lines.join("\n");
+}
+
+function isSpreadsheetDeliveryManifest(
+  manifest: ReturnType<typeof resolveStructuredDeliveryManifest> | null | undefined,
+): boolean {
+  return Boolean(
+    manifest
+    && (manifest.deliveryContract === "spreadsheet" || manifest.parentContract === "single_workbook"),
+  );
+}
+
+function buildScopedSourceItemsFromGroundingItems(
+  items: readonly SourceGroundingItem[] | undefined,
+): ScopedSourceItem[] | undefined {
+  if (!items?.length) return undefined;
+  return items.map((item) => ({
+    id: item.id,
+    label: item.label,
+    raw: item.raw,
+    order: item.order,
+    sourcePath: item.sourcePath,
+    sectionLabel: item.sectionLabel,
+    topicIndex: item.topicIndex,
+    topicTitle: item.topicTitle,
+    themeGroup: item.themeGroup,
+    trainingTarget: item.trainingTarget,
+    trainingAudience: item.trainingAudience,
+    outline: item.outline,
+  }));
+}
+
+function parseStringArrayParam(raw: unknown): string[] | undefined {
+  if (Array.isArray(raw)) {
+    const values = raw
+      .map((item) => String(item ?? "").trim())
+      .filter(Boolean);
+    return values.length > 0 ? values : undefined;
+  }
+  if (typeof raw === "string") {
+    const values = raw
+      .split(/[\r\n,]+/u)
+      .map((item) => item.trim())
+      .filter(Boolean);
+    return values.length > 0 ? values : undefined;
+  }
+  return undefined;
+}
+
+function parseScopedSourceItemsParam(raw: unknown): ScopedSourceItem[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const items = raw
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+    .map((item) => ({
+      id: String(item.id ?? "").trim(),
+      label: String(item.label ?? "").trim(),
+      raw: String(item.raw ?? "").trim(),
+      order: Number(item.order ?? 0),
+      sourcePath: item.sourcePath ? String(item.sourcePath).trim() : undefined,
+      sectionLabel: item.sectionLabel ? String(item.sectionLabel).trim() : undefined,
+      topicIndex: Number.isFinite(Number(item.topicIndex)) ? Number(item.topicIndex) : undefined,
+      topicTitle: item.topicTitle ? String(item.topicTitle).trim() : undefined,
+      themeGroup: item.themeGroup ? String(item.themeGroup).trim() : undefined,
+      trainingTarget: item.trainingTarget ? String(item.trainingTarget).trim() : undefined,
+      trainingAudience: item.trainingAudience ? String(item.trainingAudience).trim() : undefined,
+      outline: item.outline ? String(item.outline).trim() : undefined,
+    }))
+    .filter((item) => item.id && item.label);
+  return items.length > 0 ? items : undefined;
+}
+
+function resolveParentStructuredDeliveryManifest(
+  actorId: string,
+  system: ActorSystem,
+): ReturnType<typeof resolveStructuredDeliveryManifest> | null {
+  const contractManifest = system.getActiveExecutionContract?.()?.structuredDeliveryManifest ?? null;
+  const actor = system.get(actorId) as
+    | {
+        currentTask?: { query?: string };
+        getEngagedStructuredDeliveryManifest?: () => ReturnType<typeof resolveStructuredDeliveryManifest> | null;
+      }
+    | undefined;
+  const engagedManifest = actor?.getEngagedStructuredDeliveryManifest?.() ?? null;
+  const currentTaskQuery = actor?.currentTask?.query?.trim();
+  const queryManifest = currentTaskQuery ? resolveStructuredDeliveryManifest(currentTaskQuery) : null;
+  if ((contractManifest?.sourceSnapshot?.items.length ?? 0) > 0) return contractManifest;
+  if ((engagedManifest?.sourceSnapshot?.items.length ?? 0) > 0) return engagedManifest;
+  if ((queryManifest?.sourceSnapshot?.items.length ?? 0) > 0) return queryManifest;
+  return contractManifest ?? engagedManifest ?? queryManifest;
+}
+
+function buildDefaultDelegationAcceptance(params: {
+  roleBoundary?: SpawnedTaskRoleBoundary;
+  workerProfileId?: WorkerProfileId;
+}): string[] {
+  if (params.workerProfileId === "spreadsheet_worker") {
+    return [
+      "完整返回结构化 rows，不写文件、不导出表格。",
+      "每行只绑定 1 个 `sourceItemId`，并显式包含 `topicIndex`、`topicTitle`、`coverageType`。",
+      "说明已覆盖条目数、产出行数，以及是否存在 blocker。",
+    ];
+  }
+  if (params.workerProfileId === "content_worker") {
+    return [
+      "直接返回完整内容结果，不写中间文件。",
+      "给出关键结论、证据和未完成部分。",
+      "如果存在 blocker，明确写出原因和建议后续动作。",
+    ];
+  }
+  switch (params.roleBoundary) {
+    case "reviewer":
+      return [
+        "给出主要风险、边界条件和回归点。",
+        "每个风险都附带证据或触发条件。",
+        "默认不接管实现，只提出修复建议。",
+      ];
+    case "validator":
+      return [
+        "给出复现/验证步骤、命令或输入条件。",
+        "明确写出验证结论：通过、失败或受阻。",
+        "列出剩余风险和建议补充验证项。",
+      ];
+    case "executor":
+      return [
+        "给出最终结论和关键产出。",
+        "若涉及代码/文件/页面，提供可核查路径或修改点。",
+        "若未完成，明确 blocker 与建议下一步。",
+      ];
+    default:
+      return [
+        "给出结论、关键证据和下一步建议。",
+        "不要只回复已完成或已处理。",
+      ];
+  }
+}
+
 async function doesMediaPathExist(path: string): Promise<boolean> {
   if (/^https?:\/\//i.test(path)) return true;
   try {
@@ -266,6 +440,80 @@ export function createActorCommunicationTools(
     const value = String(raw).trim() as SpawnedTaskRoleBoundary;
     return KNOWN_ROLE_BOUNDARIES.has(value) ? value : undefined;
   };
+
+  const parseWorkerProfileId = (raw: unknown): WorkerProfileId | undefined => {
+    if (!raw) return undefined;
+    const value = String(raw).trim() as WorkerProfileId;
+    return KNOWN_WORKER_PROFILES.has(value) ? value : undefined;
+  };
+
+  tools.push({
+    name: "engage_delivery_adapter",
+    description: [
+      "显式启用一个高可靠 delivery adapter，让主 Agent 决定当前任务进入更强约束的交付模式。",
+      "适用于你已经判断：当前任务需要 structured child result、host-managed export、quality gate 这类更强交付保障时。",
+      "这不会自动派工；它只是把 adapter 从“建议态”切换为“已启用”。",
+    ].join("\n"),
+    parameters: {
+      strategy_id: {
+        type: "string",
+        description: "要启用的 adapter/strategy id。通常可留空，系统会优先使用当前任务的推荐 adapter。",
+        required: false,
+      },
+    },
+    readonly: false,
+    execute: async (params) => {
+      const actor = system.get(actorId) as
+        | {
+            currentTask?: { query?: string };
+            getEngagedStructuredDeliveryManifest?: () => ReturnType<typeof resolveStructuredDeliveryManifest> | null;
+            engageStructuredDeliveryAdapter?: (manifest: ReturnType<typeof resolveStructuredDeliveryManifest>) => void;
+          }
+        | undefined;
+      if (!actor?.currentTask?.query?.trim()) {
+        return { error: "当前没有可用的运行中任务，无法启用 delivery adapter。" };
+      }
+
+      const ownerRecord = typeof system.getSpawnedTasksSnapshot === "function"
+        ? system.getSpawnedTasksSnapshot().find((record) =>
+            record.targetActorId === actorId
+            && (record.status === "running" || (record.mode === "session" && record.sessionOpen)))
+        : undefined;
+      if (ownerRecord) {
+        return { error: "当前子任务不能自行启用 delivery adapter，请回传协调者决定。" };
+      }
+
+      const existingManifest = system.getActiveExecutionContract?.()?.structuredDeliveryManifest
+        ?? actor.getEngagedStructuredDeliveryManifest?.()
+        ?? resolveStructuredDeliveryManifest(actor.currentTask.query);
+      const preferredStrategyId = params.strategy_id
+        ? String(params.strategy_id).trim()
+        : getStructuredDeliveryStrategyReferenceId(existingManifest);
+      if (!preferredStrategyId) {
+        return { error: "当前任务没有可启用的推荐 delivery adapter。" };
+      }
+
+      const nextManifest = enableStructuredDeliveryAdapter({
+        ...existingManifest,
+        recommendedStrategyId: existingManifest.recommendedStrategyId ?? preferredStrategyId,
+        strategyId: preferredStrategyId,
+      }, "runtime");
+
+      if (typeof system.updateStructuredDeliveryManifest === "function" && system.getActiveExecutionContract?.()) {
+        system.updateStructuredDeliveryManifest(nextManifest);
+      } else {
+        actor.engageStructuredDeliveryAdapter?.(nextManifest);
+      }
+
+      return {
+        ok: true,
+        adapter_enabled: true,
+        strategy_id: nextManifest.strategyId,
+        delivery_contract: `${nextManifest.deliveryContract}/${nextManifest.parentContract}`,
+        hint: "delivery adapter 已启用。接下来如有必要，可继续派工、等待结构化结果，或进入 host-managed export 路径。",
+      };
+    },
+  });
 
   // ── spawn_task (对标 OpenClaw sessions_spawn) ──
   tools.push({
@@ -353,6 +601,16 @@ export function createActorCommunicationTools(
         description: "显式声明本轮子任务职责边界：'executor'、'reviewer'、'validator' 或 'general'。用于把计划层的职责边界稳定传到执行层。",
         required: false,
       },
+      worker_profile: {
+        type: "string",
+        description: "显式指定 worker profile：'general_worker'、'content_worker'、'coding_worker'、'review_worker'、'validator_worker' 或 'spreadsheet_worker'。优先于系统 heuristics。",
+        required: false,
+      },
+      result_contract: {
+        type: "string",
+        description: "显式指定结果合同：'default' 或 'inline_structured_result'。用于强制 child 直接返回结构化 terminal result。",
+        required: false,
+      },
       override_model: {
         type: "string",
         description: "覆盖目标 Agent 的 LLM 模型（如 'gpt-4o'、'claude-3-sonnet' 等）。不提供则使用目标 Agent 的默认模型。",
@@ -404,6 +662,24 @@ export function createActorCommunicationTools(
       const expectsCompletionMessage = params.expects_completion !== false;
       const childCapabilities = parseCapabilities(params.agent_capabilities);
       const roleBoundary = parseRoleBoundary(params.role_boundary);
+      const workerProfileId = parseWorkerProfileId(params.worker_profile);
+      const resultContract = params.result_contract === "inline_structured_result"
+        ? "inline_structured_result"
+        : undefined;
+      const deliveryTargetId = typeof params.deliveryTargetId === "string"
+        ? String(params.deliveryTargetId).trim()
+        : undefined;
+      const deliveryTargetLabel = typeof params.deliveryTargetLabel === "string"
+        ? String(params.deliveryTargetLabel).trim()
+        : undefined;
+      const sheetName = typeof params.sheetName === "string"
+        ? String(params.sheetName).trim()
+        : undefined;
+      const sourceItemIds = parseStringArrayParam(params.sourceItemIds);
+      const sourceItemCount = Number.isFinite(Number(params.sourceItemCount))
+        ? Number(params.sourceItemCount)
+        : undefined;
+      const scopedSourceItems = parseScopedSourceItemsParam(params.scopedSourceItems);
       const derivedTarget = createIfMissing
         ? deriveEphemeralSpawnTarget({
             target,
@@ -417,6 +693,14 @@ export function createActorCommunicationTools(
 
       // Subagent 独立配置
       const overrides: import("./types").SpawnTaskOverrides = {};
+      if (workerProfileId) overrides.workerProfileId = workerProfileId;
+      if (resultContract) overrides.resultContract = resultContract;
+      if (deliveryTargetId) overrides.deliveryTargetId = deliveryTargetId;
+      if (deliveryTargetLabel) overrides.deliveryTargetLabel = deliveryTargetLabel;
+      if (sheetName) overrides.sheetName = sheetName;
+      if (sourceItemIds?.length) overrides.sourceItemIds = sourceItemIds;
+      if (typeof sourceItemCount === "number" && sourceItemCount > 0) overrides.sourceItemCount = sourceItemCount;
+      if (scopedSourceItems?.length) overrides.scopedSourceItems = scopedSourceItems;
       if (params.override_model) overrides.model = String(params.override_model);
       if (params.override_max_iterations) overrides.maxIterations = Number(params.override_max_iterations);
       if (params.override_tools_allow || params.override_tools_deny) {
@@ -477,6 +761,7 @@ export function createActorCommunicationTools(
           queue_id: queued.id,
           pending_dispatch_count: pendingDispatchCount,
           profile: queued.profile,
+          worker_profile: queued.overrides?.workerProfileId,
           execution_intent: queued.executionIntent ?? queued.overrides?.executionIntent,
           role_boundary: queued.roleBoundary ?? "general",
           roleBoundary: queued.roleBoundary,
@@ -519,10 +804,217 @@ export function createActorCommunicationTools(
         to: getActorName(result.targetActorId),
         label: result.label,
         profile: result.runtime?.profile ?? result.roleBoundary ?? "general",
+        worker_profile: result.workerProfileId,
         execution_intent: result.executionIntent,
         role_boundary: result.roleBoundary ?? "general",
         roleBoundary: result.roleBoundary,
         hint: `任务已派发（mode=${result.mode}）。当你的下一步明确依赖这些子任务结果时，再调用 wait_for_spawned_tasks 挂起等待。`,
+      };
+    },
+  });
+
+  tools.push({
+    name: "delegate_task",
+    description: [
+      "更高层的 agent-first 委派接口：你只需说明目标、验收标准和职责边界，系统会整理成稳定的子任务 prompt 并派发。",
+      "适用于主 Agent 已判断“需要协作”，但不想手写完整 spawn_task 任务正文的场景。",
+      "如果你需要完全控制任务正文、附件或底层 override，请继续使用 spawn_task。",
+    ].join("\n"),
+    parameters: {
+      goal: {
+        type: "string",
+        description: "子任务目标。用一句或几句清楚说明要让子 agent 完成什么。",
+        required: true,
+      },
+      acceptance: {
+        type: "string",
+        description: "验收标准。支持换行、分号或项目符号；系统会整理成结构化验收清单。",
+        required: false,
+      },
+      target_agent: {
+        type: "string",
+        description: "目标 Agent 名称；若留空且 create_if_missing=true，系统会根据 label/goal 自动生成临时子 Agent 名称。",
+        required: false,
+      },
+      label: {
+        type: "string",
+        description: "短标签，用于标识本次委派。",
+        required: false,
+      },
+      context: {
+        type: "string",
+        description: "补充上下文，例如限制范围、已知结论、建议关注的模块等。",
+        required: false,
+      },
+      timeout_seconds: {
+        type: "number",
+        description: "子任务总预算（秒）。",
+        required: false,
+      },
+      attachments: {
+        type: "string",
+        description: "附件文件路径列表，逗号分隔。",
+        required: false,
+      },
+      planned_delegation_id: {
+        type: "string",
+        description: "若要复用系统已批准的委派建议，可传入对应 ID。",
+        required: false,
+      },
+      create_if_missing: {
+        type: "boolean",
+        description: "当目标 Agent 不存在时，是否自动创建临时子 Agent。",
+        required: false,
+      },
+      agent_description: {
+        type: "string",
+        description: "创建临时子 Agent 时的职责描述。",
+        required: false,
+      },
+      agent_capabilities: {
+        type: "string",
+        description: "创建临时子 Agent 时的能力标签，逗号分隔。",
+        required: false,
+      },
+      agent_workspace: {
+        type: "string",
+        description: "创建临时子 Agent 时的工作目录。",
+        required: false,
+      },
+      role_boundary: {
+        type: "string",
+        description: "职责边界：'executor'、'reviewer'、'validator' 或 'general'。",
+        required: false,
+      },
+      worker_profile: {
+        type: "string",
+        description: "显式指定 worker profile。",
+        required: false,
+      },
+    },
+    readonly: false,
+    execute: async (params) => {
+      const goal = String(params.goal ?? "").trim();
+      if (!goal) {
+        return { delegated: false, error: "delegate_task 需要提供 goal。" };
+      }
+      const explicitTargetAgent = typeof params.target_agent === "string"
+        ? String(params.target_agent).trim()
+        : "";
+      const explicitCreateIfMissing = params.create_if_missing;
+      const requestedLabel = typeof params.label === "string"
+        ? String(params.label).trim()
+        : "";
+      const effectiveLabel = requestedLabel || previewSpawnTargetText(goal, 24);
+      const requestedRoleBoundary = parseRoleBoundary(params.role_boundary);
+      const requestedWorkerProfileId = parseWorkerProfileId(params.worker_profile);
+      const goalManifest = resolveStructuredDeliveryManifest(goal);
+      const parentManifest = resolveParentStructuredDeliveryManifest(actorId, system);
+      const spreadsheetInheritanceAllowed = !requestedWorkerProfileId
+        && (!requestedRoleBoundary || requestedRoleBoundary === "general" || requestedRoleBoundary === "executor");
+      const effectiveStructuredManifest = (
+        spreadsheetInheritanceAllowed
+        && !isSpreadsheetDeliveryManifest(goalManifest)
+        && isSpreadsheetDeliveryManifest(parentManifest)
+      )
+        ? parentManifest
+        : goalManifest;
+      const manifestSuggestedWorkerProfileId = (
+        isSpreadsheetDeliveryManifest(effectiveStructuredManifest)
+      )
+        ? "spreadsheet_worker"
+        : undefined;
+      const inheritedScopedSourceItems = manifestSuggestedWorkerProfileId === "spreadsheet_worker"
+        ? buildScopedSourceItemsFromGroundingItems(effectiveStructuredManifest?.sourceSnapshot?.items)
+        : undefined;
+      const manifestStructuredOverrides = manifestSuggestedWorkerProfileId === "spreadsheet_worker"
+        ? {
+            resultContract: "inline_structured_result" as const,
+            ...(inheritedScopedSourceItems?.length
+              ? {
+                  scopedSourceItems: inheritedScopedSourceItems,
+                  sourceItemIds: inheritedScopedSourceItems.map((item) => item.id),
+                  sourceItemCount: inheritedScopedSourceItems.length,
+                }
+              : {}),
+          }
+        : undefined;
+      const resolvedWorkerProfile = resolveWorkerProfile({
+        roleBoundary: requestedRoleBoundary ?? "general",
+        task: goal,
+        explicitWorkerProfileId: requestedWorkerProfileId ?? manifestSuggestedWorkerProfileId,
+        resultContract: manifestStructuredOverrides?.resultContract,
+        allowGeneralPromotion: true,
+      });
+      const effectiveWorkerProfileId = requestedWorkerProfileId
+        ?? manifestSuggestedWorkerProfileId
+        ?? resolvedWorkerProfile.id;
+      const effectiveRoleBoundary = requestedRoleBoundary ?? resolvedWorkerProfile.roleBoundary;
+      const spawnTool = tools.find((tool) => tool.name === "spawn_task");
+      if (!spawnTool) {
+        return { delegated: false, error: "spawn_task 工具不可用，无法完成委派。" };
+      }
+      const delegationTask = buildDelegationTaskText({
+        goal,
+        acceptance: typeof params.acceptance === "string" ? params.acceptance : undefined,
+        defaultAcceptance: buildDefaultDelegationAcceptance({
+          roleBoundary: effectiveRoleBoundary,
+          workerProfileId: effectiveWorkerProfileId,
+        }),
+      });
+      const shouldAutoCreateIfMissing = explicitCreateIfMissing === true
+        || (
+          explicitCreateIfMissing !== false
+          && !explicitTargetAgent
+          && !params.planned_delegation_id
+        );
+      const shouldQueueIfBusy = manifestSuggestedWorkerProfileId === "spreadsheet_worker";
+      const spawnLimit = typeof system.getDialogSpawnConcurrencyLimit === "function"
+        ? system.getDialogSpawnConcurrencyLimit()
+        : undefined;
+      const executeDelegatedSpawn = async (createIfMissing: boolean) => spawnTool.execute({
+        target_agent: params.target_agent,
+        planned_delegation_id: params.planned_delegation_id,
+        task: delegationTask,
+        label: effectiveLabel,
+        context: params.context,
+        timeout_seconds: params.timeout_seconds,
+        attachments: params.attachments,
+        create_if_missing: createIfMissing,
+        agent_description: params.agent_description,
+        agent_capabilities: params.agent_capabilities,
+        agent_workspace: params.agent_workspace,
+        role_boundary: effectiveRoleBoundary,
+        worker_profile: effectiveWorkerProfileId,
+        result_contract: manifestStructuredOverrides?.resultContract,
+        __queue_if_busy: shouldQueueIfBusy,
+        ...(typeof spawnLimit === "number" ? { __spawn_limit: spawnLimit } : {}),
+        ...(manifestStructuredOverrides ?? {}),
+      });
+      let result = await executeDelegatedSpawn(shouldAutoCreateIfMissing);
+      const shouldRetryWithAutoCreate = Boolean(
+        result
+        && typeof result === "object"
+        && "error" in result
+        && (result as Record<string, unknown>).error === "Target not found"
+        && explicitCreateIfMissing !== false,
+      );
+      if (shouldRetryWithAutoCreate && !shouldAutoCreateIfMissing) {
+        result = await executeDelegatedSpawn(true);
+      }
+      const resultObject = result && typeof result === "object"
+        ? result as Record<string, unknown>
+        : { result };
+      return {
+        ...resultObject,
+        delegated: !("error" in resultObject),
+        interface: "delegate_task",
+        auto_create_if_missing: explicitCreateIfMissing === undefined
+          ? (shouldAutoCreateIfMissing || shouldRetryWithAutoCreate)
+          : undefined,
+        inferred_role_boundary: requestedRoleBoundary ? undefined : effectiveRoleBoundary,
+        inferred_worker_profile: requestedWorkerProfileId ? undefined : effectiveWorkerProfileId,
+        result_contract: manifestStructuredOverrides?.resultContract,
       };
     },
   });

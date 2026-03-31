@@ -41,11 +41,11 @@ export class SpawnLimitMiddleware implements ActorMiddleware {
 
     const wrappedTool: AgentTool = {
       ...originalTool,
-      execute: async (params) => originalTool.execute({
+      execute: async (params, signal) => originalTool.execute({
         ...params,
         __queue_if_busy: true,
         __spawn_limit: limit,
-      }),
+      }, signal),
     };
 
     ctx.tools = [

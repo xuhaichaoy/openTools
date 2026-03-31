@@ -8,6 +8,7 @@ import type {
   AgentCapabilities,
   ActorConfig,
   ActorStatus,
+  DialogFlowTraceEvent,
   DialogExecutionMode,
   DialogSubtaskRuntimeState,
   DialogArtifactRecord,
@@ -103,7 +104,7 @@ const log = createLogger("ActorStore");
 
 const LEGACY_STORAGE_KEY = "dialog_session";
 const ACTIVE_SESSION_POINTER_KEY = "dialog_session_pointer";
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 12;
 
 interface PersistedSpawnedTask {
   runId: string;
@@ -139,6 +140,7 @@ interface PersistedSpawnedTask {
 interface PersistedSession {
   version?: number;
   dialogHistory: DialogMessage[];
+  dialogFlowEvents?: DialogFlowTraceEvent[];
   actorConfigs: Array<{
     id: string;
     roleName: string;
@@ -172,6 +174,7 @@ interface PersistedSession {
   dialogRoomCompaction?: DialogRoomCompactionState | null;
   collaborationSnapshot?: CollaborationSessionSnapshot | null;
   dialogExecutionMode?: DialogExecutionMode;
+  dialogSubagentEnabled?: boolean;
   sessionId?: string;
   savedAt: number;
 }
@@ -265,6 +268,7 @@ function buildRecoveredPendingUserInteractions(
 
 function buildSessionSnapshot(
   dialogHistory: DialogMessage[],
+  dialogFlowEvents: readonly DialogFlowTraceEvent[],
   actors: AgentActor[],
   spawnedTasks?: Map<string, SpawnedTaskRecord>,
   artifacts?: readonly DialogArtifactRecord[],
@@ -279,6 +283,7 @@ function buildSessionSnapshot(
   dialogRoomCompaction?: DialogRoomCompactionState | null,
   collaborationSnapshot?: CollaborationSessionSnapshot | null,
   dialogExecutionMode?: DialogExecutionMode,
+  dialogSubagentEnabled?: boolean,
   sessionId?: string,
 ): PersistedSession {
   const persistedTasks: PersistedSpawnedTask[] = [];
@@ -327,6 +332,12 @@ function buildSessionSnapshot(
   return {
     version: SCHEMA_VERSION,
     dialogHistory: dialogHistory.slice(-200),
+    dialogFlowEvents: dialogFlowEvents.slice(-400).map((event) => ({
+      event: event.event,
+      actorId: event.actorId,
+      timestamp: event.timestamp,
+      detail: event.detail ? { ...event.detail } : undefined,
+    })),
     actorConfigs: actors.map((a) => ({
       id: a.id,
       roleName: a.role.name,
@@ -376,6 +387,7 @@ function buildSessionSnapshot(
       ? cloneCollaborationSnapshotForPersistence(collaborationSnapshot)
       : null,
     dialogExecutionMode,
+    dialogSubagentEnabled,
     sessionId,
     savedAt: Date.now(),
   };
@@ -1290,6 +1302,7 @@ async function saveSessionSnapshot(system: ActorSystem): Promise<void> {
     ?? system.getFocusedSpawnedSessionRunId();
   const snapshot = buildSessionSnapshot(
     [...system.getDialogHistory()],
+    system.getDialogFlowEventsSnapshot(),
     system.getAll(),
     system.getSpawnedTasksMap(),
     system.getArtifactRecordsSnapshot(),
@@ -1304,6 +1317,7 @@ async function saveSessionSnapshot(system: ActorSystem): Promise<void> {
     resolveLiveDialogRoomCompaction(system, useActorSystemStore.getState().dialogRoomCompaction),
     collaborationSnapshot,
     system.getDialogExecutionMode(),
+    system.getDialogSubagentEnabled(),
     system.sessionId,
   );
 
@@ -1342,6 +1356,9 @@ interface RestoreSnapshotResult {
 function restoreSnapshot(system: ActorSystem, persisted: PersistedSession): RestoreSnapshotResult {
   if (persisted.dialogHistory.length) {
     system.restoreDialogHistory(persisted.dialogHistory);
+  }
+  if (persisted.dialogFlowEvents?.length) {
+    system.restoreDialogFlowEvents(persisted.dialogFlowEvents);
   }
   const actorCount = persisted.actorConfigs.length;
   for (const config of persisted.actorConfigs) {
@@ -1444,6 +1461,7 @@ function restoreSnapshot(system: ActorSystem, persisted: PersistedSession): Rest
     }
   }
   system.setDialogExecutionMode(persisted.dialogExecutionMode ?? "execute", { force: true });
+  system.setDialogSubagentEnabled(persisted.dialogSubagentEnabled === true);
 
   return {
     dialogRoomCompaction: recoveredCompaction,
@@ -1507,6 +1525,8 @@ interface ActorSystemState {
   actors: ActorSnapshot[];
   /** 对话历史 */
   dialogHistory: DialogMessage[];
+  /** 主 Agent / host 级 flow trace 事件 */
+  dialogFlowEvents: DialogFlowTraceEvent[];
   /** 当前子任务快照 */
   spawnedTasks: SpawnedTaskRecord[];
   /** 结构化产物工作区 */
@@ -1537,6 +1557,8 @@ interface ActorSystemState {
   presentationState: CollaborationPresentationState | null;
   /** 当前 Dialog 执行模式 */
   dialogExecutionMode: DialogExecutionMode;
+  /** 是否显式开启 DeerFlow 式子代理协作 */
+  dialogSubagentEnabled: boolean;
   /** 当前 ActorSystem 实例引用（不序列化） */
   _system: ActorSystem | null;
 
@@ -1615,6 +1637,7 @@ interface ActorSystemState {
     capabilities?: AgentCapabilities;
   }) => void;
   setDialogExecutionMode: (mode: DialogExecutionMode) => void;
+  setDialogSubagentEnabled: (enabled: boolean) => void;
 }
 
 function snapshotActor(actor: AgentActor): ActorSnapshot {
@@ -1671,6 +1694,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
   active: false,
   actors: [],
   dialogHistory: [],
+  dialogFlowEvents: [],
   spawnedTasks: [],
   artifacts: [],
   sessionUploads: [],
@@ -1686,6 +1710,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
   collaborationSnapshot: null,
   presentationState: null,
   dialogExecutionMode: "execute",
+  dialogSubagentEnabled: false,
   pendingUserInteractions: [],
   _system: null,
 
@@ -1702,6 +1727,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
       "spawned_task_completed", "spawned_task_failed", "spawned_task_timeout",
     ]);
     const MAX_TASK_EVENTS = 240;
+    const MAX_DIALOG_FLOW_EVENTS = 400;
 
     // RAF-based debounce: coalesce rapid events into a single sync per frame
     let syncRAF = 0;
@@ -1743,6 +1769,16 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
           get().sync();
         });
       }
+    });
+    system.onDialogFlowEvent((event) => {
+      set((state) => ({
+        dialogFlowEvents: [...state.dialogFlowEvents, {
+          event: event.event,
+          actorId: event.actorId,
+          timestamp: event.timestamp,
+          detail: event.detail ? { ...event.detail } : undefined,
+        }].slice(-MAX_DIALOG_FLOW_EVENTS),
+      }));
     });
 
     // 连接 IM 通道管理器，实现 IM ↔ Agent 双向通信
@@ -1875,6 +1911,13 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
     get().sync();
   },
 
+  setDialogSubagentEnabled: (enabled) => {
+    const system = get()._system;
+    if (!system) return;
+    system.setDialogSubagentEnabled(enabled);
+    get().sync();
+  },
+
   destroyAll: () => {
     const system = get()._system;
     if (system) {
@@ -1907,6 +1950,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
       collaborationSnapshot: null,
       presentationState: null,
       dialogExecutionMode: "execute",
+      dialogSubagentEnabled: false,
       pendingUserInteractions: [],
     });
   },
@@ -2192,6 +2236,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
       set({
         actors: [],
         dialogHistory: [],
+        dialogFlowEvents: [],
         spawnedTasks: [],
         artifacts: [],
         sessionUploads: [],
@@ -2206,6 +2251,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
         collaborationSnapshot: null,
         presentationState: null,
         dialogExecutionMode: "execute",
+        dialogSubagentEnabled: false,
         pendingUserInteractions: [],
       });
       return;
@@ -2213,6 +2259,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
     const liveActors = system.getAll();
     const actors = liveActors.map(snapshotActor);
     const dialogHistory = [...system.getDialogHistory()];
+    const dialogFlowEvents = system.getDialogFlowEventsSnapshot();
     const spawnedTasks = system.getSpawnedTasksSnapshot().map((task) => ({ ...task }));
     const artifacts = system.getArtifactRecordsSnapshot().map((artifact) => ({ ...artifact }));
     const sessionUploads = system.getSessionUploadsSnapshot().map((upload) => ({ ...upload }));
@@ -2252,6 +2299,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
     set({
       actors,
       dialogHistory,
+      dialogFlowEvents,
       spawnedTasks,
       artifacts,
       sessionUploads,
@@ -2264,6 +2312,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
       collaborationSnapshot: collaborationSnapshot ? cloneCollaborationSnapshot(collaborationSnapshot) : null,
       presentationState: collaborationSnapshot ? { ...collaborationSnapshot.presentationState } : null,
       dialogExecutionMode: system.getDialogExecutionMode(),
+      dialogSubagentEnabled: system.getDialogSubagentEnabled(),
       pendingUserInteractions,
     });
     syncDialogRuntimeSession(system.sessionId, {

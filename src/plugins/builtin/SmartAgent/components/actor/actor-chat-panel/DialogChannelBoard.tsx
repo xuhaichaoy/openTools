@@ -16,6 +16,7 @@ import type {
   IMConversationSnapshot,
 } from "@/store/im-conversation-runtime-store";
 import type { CollaborationChildSessionPreview } from "@/core/collaboration/types";
+import { getRuntimeAgentCount } from "./runtime-agent-count";
 
 export type DialogSessionViewKey = "local" | "dingtalk" | "feishu";
 
@@ -555,7 +556,7 @@ function RuntimeSessionPreview({
               </div>
               <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-[var(--color-text-tertiary)]">
                 <span className="rounded-full border border-[var(--color-border)] px-2 py-0.5">
-                  {preview.actors.length} 个 Agent
+                  {getRuntimeAgentCount(preview.actors)} 个 Agent
                 </span>
                 <span className="rounded-full border border-[var(--color-border)] px-2 py-0.5">
                   {preview.dialogHistory.length} 条消息

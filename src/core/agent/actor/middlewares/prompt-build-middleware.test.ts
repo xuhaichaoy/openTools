@@ -117,6 +117,7 @@ describe("PromptBuildMiddleware", () => {
     const ctx = createContext();
     ctx.actorSystem = {
       size: 2,
+      shouldEnableDialogSubagentCapabilities: () => true,
       getAll: () => [
         { id: "actor-1", role: { name: "Builder" } },
         { id: "actor-2", role: { name: "Reviewer" } },
@@ -153,8 +154,67 @@ describe("PromptBuildMiddleware", () => {
     expect(ctx.rolePrompt).toContain("已批准建议委派 1 条，可按需参考和复用。");
     expect(ctx.rolePrompt).toContain("已批准建议委派只是许可与建议");
     expect(ctx.rolePrompt).toContain("当你的下一步明确依赖子任务结果时");
+    expect(ctx.rolePrompt).toContain("先判断自己是否已经能直接完成");
+    expect(ctx.rolePrompt).not.toContain("不要独自完成所有工作");
+    expect(ctx.rolePrompt).not.toContain("应先拆解任务");
     expect(ctx.rolePrompt).not.toContain("务必立刻调用 `wait_for_spawned_tasks`");
     expect(ctx.rolePrompt).not.toContain("请**必须调用 `wait_for_spawned_tasks`");
     expect(ctx.rolePrompt).not.toContain("独立审查 -> Reviewer");
+  });
+
+  it("keeps collaboration prompt hidden when subagent mode is off and there is no live orchestration context", async () => {
+    const ctx = createContext();
+    ctx.actorSystem = {
+      size: 2,
+      shouldEnableDialogSubagentCapabilities: () => false,
+      getAll: () => [
+        { id: "actor-1", role: { name: "Builder" } },
+        { id: "actor-2", role: { name: "Reviewer" } },
+      ],
+      getCoordinator: () => ({ id: "actor-1" }),
+      getActiveExecutionContract: () => null,
+    } as ActorRunContext["actorSystem"];
+
+    await new PromptBuildMiddleware().apply(ctx);
+
+    expect(ctx.rolePrompt).not.toContain("## 多 Agent 协作");
+    expect(ctx.rolePrompt).not.toContain("spawn_task");
+  });
+
+  it("shows collaboration prompt when subagent mode is explicitly enabled", async () => {
+    const ctx = createContext();
+    ctx.actorSystem = {
+      size: 2,
+      shouldEnableDialogSubagentCapabilities: () => true,
+      getAll: () => [
+        { id: "actor-1", role: { name: "Builder" } },
+        { id: "actor-2", role: { name: "Reviewer" } },
+      ],
+      getCoordinator: () => ({ id: "actor-1" }),
+      getActiveExecutionContract: () => null,
+    } as ActorRunContext["actorSystem"];
+
+    await new PromptBuildMiddleware().apply(ctx);
+
+    expect(ctx.rolePrompt).toContain("## 多 Agent 协作");
+    expect(ctx.rolePrompt).toContain("先判断自己是否已经能直接完成");
+  });
+
+  it("surfaces session thread-data paths in the final prompt", async () => {
+    const ctx = createContext();
+    ctx.threadData = {
+      sessionId: "session-thread-1",
+      rootPath: "/tmp/51toolbox/threads/session-thread-1/user-data",
+      workspacePath: "/tmp/51toolbox/threads/session-thread-1/user-data/workspace",
+      uploadsPath: "/tmp/51toolbox/threads/session-thread-1/user-data/uploads",
+      outputsPath: "/tmp/51toolbox/threads/session-thread-1/user-data/outputs",
+    };
+
+    await new PromptBuildMiddleware().apply(ctx);
+
+    expect(ctx.rolePrompt).toContain("## 会话 Thread Data");
+    expect(ctx.rolePrompt).toContain("session-thread-1");
+    expect(ctx.rolePrompt).toContain("/tmp/51toolbox/threads/session-thread-1/user-data/workspace");
+    expect(ctx.rolePrompt).toContain("/tmp/51toolbox/threads/session-thread-1/user-data/outputs");
   });
 });

@@ -32,6 +32,7 @@ describe("execution-policy", () => {
     ]));
     expect(reviewer.toolPolicy?.deny).toEqual(expect.arrayContaining([
       "spawn_task",
+      "delegate_task",
       "delegate_subtask",
       "enter_plan_mode",
       "exit_plan_mode",
@@ -63,6 +64,7 @@ describe("execution-policy", () => {
     ]));
     expect(executor.toolPolicy?.deny).toEqual(expect.arrayContaining([
       "spawn_task",
+      "delegate_task",
       "delegate_subtask",
       "wait_for_spawned_tasks",
       "send_message",

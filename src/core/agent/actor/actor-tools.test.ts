@@ -92,6 +92,7 @@ describe("createActorCommunicationTools", () => {
       agent_description: "只负责独立审查 patch",
       agent_capabilities: "code_review,testing,unknown_capability",
       role_boundary: "reviewer",
+      worker_profile: "review_worker",
       override_tools_allow: "read_file,search",
     });
 
@@ -108,6 +109,7 @@ describe("createActorCommunicationTools", () => {
         },
         roleBoundary: "reviewer",
         overrides: expect.objectContaining({
+          workerProfileId: "review_worker",
           toolPolicy: {
             allow: ["read_file", "search"],
           },
@@ -167,6 +169,7 @@ describe("createActorCommunicationTools", () => {
       label: "并行验证",
       targetActorId: "validator",
       roleBoundary: "validator" as const,
+      workerProfileId: "validator_worker" as const,
       runtime: {
         subtaskId: "run-structured-1",
         profile: "validator" as const,
@@ -199,8 +202,413 @@ describe("createActorCommunicationTools", () => {
       task_id: "run-structured-1",
       subtask_id: "run-structured-1",
       profile: "validator",
+      worker_profile: "validator_worker",
       role_boundary: "validator",
       runId: "run-structured-1",
+    }));
+  });
+
+  it("builds a higher-level delegation prompt for delegate_task", async () => {
+    const spawnTask = vi.fn(() => ({
+      runId: "run-delegate-1",
+      mode: "run" as const,
+      label: "技术方向课程生成",
+      targetActorId: "spawned-tech-worker",
+      roleBoundary: "executor" as const,
+    }));
+
+    const system = {
+      get: (id: string) => {
+        if (id === "coordinator") return { id, role: { name: "Coordinator" } };
+        if (id === "spawned-tech-worker") return { id, role: { name: "技术方向课程生成" } };
+        return undefined;
+      },
+      getAll: () => [],
+      spawnTask,
+    } as any;
+
+    const tools = createActorCommunicationTools("coordinator", system);
+    const delegateTool = tools.find((tool) => tool.name === "delegate_task");
+
+    expect(delegateTool).toBeTruthy();
+    if (!delegateTool) return;
+
+    const result = await delegateTool.execute({
+      goal: "围绕技术方向主题生成课程名称和课程介绍",
+      acceptance: "- 每个主题至少给出一门课程\n- 返回结构化结果，不写文件",
+      label: "技术方向课程生成",
+      create_if_missing: true,
+      role_boundary: "executor",
+      worker_profile: "spreadsheet_worker",
+    });
+
+    expect(spawnTask).toHaveBeenCalledWith(
+      "coordinator",
+      "技术方向课程生成",
+      expect.stringContaining("## 任务目标"),
+      expect.objectContaining({
+        label: "技术方向课程生成",
+        createIfMissing: true,
+        roleBoundary: "executor",
+        overrides: expect.objectContaining({
+          workerProfileId: "spreadsheet_worker",
+        }),
+      }),
+    );
+    expect(spawnTask).toHaveBeenCalledWith(
+      "coordinator",
+      "技术方向课程生成",
+      expect.stringContaining("## 验收标准"),
+      expect.any(Object),
+    );
+    expect(result).toEqual(expect.objectContaining({
+      delegated: true,
+      interface: "delegate_task",
+      task_id: "run-delegate-1",
+    }));
+  });
+
+  it("infers spreadsheet-style delegation defaults when delegate_task omits worker settings", async () => {
+    const spawnTask = vi.fn(() => ({
+      runId: "run-delegate-2",
+      mode: "run" as const,
+      label: "结果清单生成",
+      targetActorId: "spawned-sheet-worker",
+      roleBoundary: "executor" as const,
+    }));
+
+    const system = {
+      get: (id: string) => {
+        if (id === "coordinator") return { id, role: { name: "Coordinator" } };
+        if (id === "spawned-sheet-worker") return { id, role: { name: "结果清单生成" } };
+        return undefined;
+      },
+      getAll: () => [],
+      spawnTask,
+    } as any;
+
+    const tools = createActorCommunicationTools("coordinator", system);
+    const delegateTool = tools.find((tool) => tool.name === "delegate_task");
+
+    expect(delegateTool).toBeTruthy();
+    if (!delegateTool) return;
+
+    const result = await delegateTool.execute({
+      goal: "根据附件里的主题整理课程清单，最终用于 Excel 汇总",
+      label: "结果清单生成",
+      create_if_missing: true,
+    });
+
+    expect(spawnTask).toHaveBeenCalledWith(
+      "coordinator",
+      "结果清单生成",
+      expect.stringContaining("每行只绑定 1 个 `sourceItemId`"),
+      expect.objectContaining({
+        roleBoundary: "executor",
+        overrides: expect.objectContaining({
+          workerProfileId: "spreadsheet_worker",
+          resultContract: "inline_structured_result",
+        }),
+      }),
+    );
+    expect(result).toEqual(expect.objectContaining({
+      delegated: true,
+      inferred_role_boundary: "executor",
+      inferred_worker_profile: "spreadsheet_worker",
+      result_contract: "inline_structured_result",
+    }));
+  });
+
+  it("inherits spreadsheet delivery context from the parent task even when the child goal omits excel wording", async () => {
+    const spawnTask = vi.fn(() => ({
+      runId: "run-delegate-parent-sheet",
+      mode: "run" as const,
+      label: "技术研发方向课程生成",
+      targetActorId: "spawned-tech-sheet-worker",
+      roleBoundary: "executor" as const,
+    }));
+
+    const parentQuery = [
+      "## 🗂️ 工作上下文 - 项目路径: `/Users/demo/Downloads/source.xlsx`",
+      "以下是用户提供的文件内容（路径均为绝对路径），请根据用户指令进行处理。",
+      "### 文件 /Users/demo/Downloads/source.xlsx",
+      "1. AI应用开发工程化实战",
+      "2. 智能体开发与知识库落地",
+      "3. 大模型安全治理与测试",
+      "4. AI产品需求转化与方案设计",
+      "5. AI产品运营增长与商业闭环",
+      "6. 银行AI解决方案咨询方法论",
+      "7. 数据分析与经营洞察实战",
+      "8. 全员AI办公赋能与协同提效",
+      "9. AI通识与智能素养提升",
+      "用户要求：根据这 9 个主题生成课程清单，需要提供的字段只有课程名称和课程介绍，最终给我一个 Excel 文件。",
+    ].join("\n");
+
+    const system = {
+      get: (id: string) => {
+        if (id === "coordinator") {
+          return {
+            id,
+            role: { name: "Coordinator" },
+            currentTask: { query: parentQuery },
+          };
+        }
+        if (id === "spawned-tech-sheet-worker") {
+          return { id, role: { name: "技术研发方向课程生成" } };
+        }
+        return undefined;
+      },
+      getAll: () => [],
+      getActiveExecutionContract: () => null,
+      spawnTask,
+    } as any;
+
+    const tools = createActorCommunicationTools("coordinator", system);
+    const delegateTool = tools.find((tool) => tool.name === "delegate_task");
+
+    expect(delegateTool).toBeTruthy();
+    if (!delegateTool) return;
+
+    const result = await delegateTool.execute({
+      goal: "基于这批主题，从技术研发维度生成 10 门课程。",
+      label: "技术研发方向课程生成",
+      create_if_missing: true,
+    });
+
+    expect(spawnTask).toHaveBeenCalledWith(
+      "coordinator",
+      "技术研发方向课程生成",
+      expect.any(String),
+      expect.objectContaining({
+        roleBoundary: "executor",
+        overrides: expect.objectContaining({
+          workerProfileId: "spreadsheet_worker",
+          resultContract: "inline_structured_result",
+          sourceItemCount: 9,
+          sourceItemIds: [
+            "source-item-1",
+            "source-item-2",
+            "source-item-3",
+            "source-item-4",
+            "source-item-5",
+            "source-item-6",
+            "source-item-7",
+            "source-item-8",
+            "source-item-9",
+          ],
+          scopedSourceItems: expect.arrayContaining([
+            expect.objectContaining({ id: "source-item-1", topicTitle: "AI应用开发工程化实战" }),
+            expect.objectContaining({ id: "source-item-9", topicTitle: "AI通识与智能素养提升" }),
+          ]),
+        }),
+      }),
+    );
+    expect(result).toEqual(expect.objectContaining({
+      delegated: true,
+      inferred_worker_profile: "spreadsheet_worker",
+      result_contract: "inline_structured_result",
+    }));
+  });
+
+  it("queues spreadsheet-style delegate_task requests when child concurrency is full", async () => {
+    const spawnTool = vi.fn(async (params: Record<string, unknown>) => {
+      if (params.__queue_if_busy === true) {
+        return {
+          spawned: false,
+          queued: true,
+          dispatch_status: "queued",
+          queue_id: "queued-delegate-1",
+          pending_dispatch_count: 2,
+          profile: "executor",
+          worker_profile: "spreadsheet_worker",
+          role_boundary: "executor",
+        };
+      }
+      return { error: "unexpected" };
+    });
+
+    const system = {
+      get: (id: string) => ({ id, role: { name: id === "coordinator" ? "Coordinator" : id } }),
+      getAll: () => [],
+      getDialogSpawnConcurrencyLimit: () => 3,
+    } as any;
+
+    const tools = createActorCommunicationTools("coordinator", system);
+    const delegateTool = tools.find((tool) => tool.name === "delegate_task");
+    const actualSpawnTool = tools.find((tool) => tool.name === "spawn_task");
+
+    expect(delegateTool).toBeTruthy();
+    expect(actualSpawnTool).toBeTruthy();
+    if (!delegateTool || !actualSpawnTool) return;
+
+    actualSpawnTool.execute = spawnTool as any;
+
+    const result = await delegateTool.execute({
+      goal: "根据附件里的主题整理课程清单，最终给我一个 Excel 文件",
+      label: "结果清单生成",
+      create_if_missing: true,
+    });
+
+    expect(spawnTool).toHaveBeenCalledWith(expect.objectContaining({
+      worker_profile: "spreadsheet_worker",
+      __queue_if_busy: true,
+      __spawn_limit: 3,
+      resultContract: "inline_structured_result",
+    }));
+    expect(result).toEqual(expect.objectContaining({
+      delegated: true,
+      queued: true,
+      dispatch_status: "queued",
+      worker_profile: "spreadsheet_worker",
+      result_contract: "inline_structured_result",
+    }));
+  });
+
+  it("auto-enables create_if_missing for delegate_task when no target is provided", async () => {
+    const spawnTask = vi.fn(() => ({
+      runId: "run-delegate-auto-create",
+      mode: "run" as const,
+      label: "课程主题拆分",
+      targetActorId: "spawned-course-worker",
+      roleBoundary: "executor" as const,
+    }));
+
+    const system = {
+      get: (id: string) => {
+        if (id === "coordinator") return { id, role: { name: "Coordinator" } };
+        if (id === "spawned-course-worker") return { id, role: { name: "课程主题拆分" } };
+        return undefined;
+      },
+      getAll: () => [],
+      spawnTask,
+    } as any;
+
+    const tools = createActorCommunicationTools("coordinator", system);
+    const delegateTool = tools.find((tool) => tool.name === "delegate_task");
+
+    expect(delegateTool).toBeTruthy();
+    if (!delegateTool) return;
+
+    const result = await delegateTool.execute({
+      goal: "按课程主题拆分并生成多组课程候选结果",
+      label: "课程主题拆分",
+    });
+
+    expect(spawnTask).toHaveBeenCalledWith(
+      "coordinator",
+      "课程主题拆分",
+      expect.stringContaining("## 任务目标"),
+      expect.objectContaining({
+        label: "课程主题拆分",
+        createIfMissing: true,
+      }),
+    );
+    expect(result).toEqual(expect.objectContaining({
+      delegated: true,
+      auto_create_if_missing: true,
+      interface: "delegate_task",
+    }));
+  });
+
+  it("retries delegate_task with create_if_missing when target is missing", async () => {
+    const spawnTask = vi
+      .fn()
+      .mockReturnValueOnce({ error: "Target not found" })
+      .mockReturnValueOnce({
+        runId: "run-delegate-retry",
+        mode: "run" as const,
+        label: "AI 应用开发课程组",
+        targetActorId: "ai-app-course-worker",
+        roleBoundary: "executor" as const,
+      });
+
+    const system = {
+      get: (id: string) => {
+        if (id === "coordinator") return { id, role: { name: "Coordinator" } };
+        if (id === "ai-app-course-worker") return { id, role: { name: "AI 应用开发课程组" } };
+        return undefined;
+      },
+      getAll: () => [],
+      spawnTask,
+    } as any;
+
+    const tools = createActorCommunicationTools("coordinator", system);
+    const delegateTool = tools.find((tool) => tool.name === "delegate_task");
+
+    expect(delegateTool).toBeTruthy();
+    if (!delegateTool) return;
+
+    const result = await delegateTool.execute({
+      goal: "围绕 AI 应用开发主题生成课程名称与课程介绍",
+      target_agent: "AI 应用开发课程组",
+    });
+
+    expect(spawnTask).toHaveBeenNthCalledWith(
+      1,
+      "coordinator",
+      "AI 应用开发课程组",
+      expect.stringContaining("## 任务目标"),
+      expect.objectContaining({
+        createIfMissing: false,
+      }),
+    );
+    expect(spawnTask).toHaveBeenNthCalledWith(
+      2,
+      "coordinator",
+      "AI 应用开发课程组",
+      expect.stringContaining("## 任务目标"),
+      expect.objectContaining({
+        createIfMissing: true,
+      }),
+    );
+    expect(result).toEqual(expect.objectContaining({
+      delegated: true,
+      auto_create_if_missing: true,
+      interface: "delegate_task",
+      task_id: "run-delegate-retry",
+    }));
+  });
+
+  it("lets the lead explicitly engage a recommended delivery adapter", async () => {
+    const engageStructuredDeliveryAdapter = vi.fn();
+    const system = {
+      get: (id: string) => {
+        if (id === "coordinator") {
+          return {
+            id,
+            role: { name: "Coordinator" },
+            currentTask: {
+              query: "根据附件生成课程清单，最终给我一个 Excel 文件",
+            },
+            getEngagedStructuredDeliveryManifest: () => null,
+            engageStructuredDeliveryAdapter,
+          };
+        }
+        return undefined;
+      },
+      getAll: () => [],
+      getActiveExecutionContract: () => null,
+      getSpawnedTasksSnapshot: () => [],
+    } as any;
+
+    const tools = createActorCommunicationTools("coordinator", system);
+    const engageTool = tools.find((tool) => tool.name === "engage_delivery_adapter");
+
+    expect(engageTool).toBeTruthy();
+    if (!engageTool) return;
+
+    const result = await engageTool.execute({});
+
+    expect(result).toEqual(expect.objectContaining({
+      ok: true,
+      adapter_enabled: true,
+      strategy_id: "dynamic_spreadsheet",
+    }));
+    expect(engageStructuredDeliveryAdapter).toHaveBeenCalledWith(expect.objectContaining({
+      source: "runtime",
+      adapterEnabled: true,
+      strategyId: "dynamic_spreadsheet",
+      recommendedStrategyId: "dynamic_spreadsheet",
     }));
   });
 

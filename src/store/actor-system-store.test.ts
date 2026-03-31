@@ -188,4 +188,101 @@ describe("actor-system-store restore", () => {
       approvalMode: "strict",
     });
   });
+
+  it("restores persisted dialog subagent mode flag", async () => {
+    const runtimeSessionId = "dialog-session-subagent-mode";
+    localStorage.setItem("dialog_session_pointer", runtimeSessionId);
+    mockLoadSessionFromDisk.mockResolvedValue({
+      sessionId: runtimeSessionId,
+      createdAt: 100,
+      updatedAt: 200,
+      entries: [],
+      actorConfigs: [],
+      snapshot: {
+        version: 11,
+        sessionId: runtimeSessionId,
+        dialogHistory: [],
+        actorConfigs: [
+          {
+            id: "agent-lead-subagent",
+            roleName: "Lead",
+            maxIterations: 40,
+          },
+        ],
+        dialogSubagentEnabled: true,
+        savedAt: 1710000000000,
+      },
+    });
+
+    useActorSystemStore.getState().init();
+    await flushMicrotasks();
+    await flushMicrotasks();
+    await vi.runAllTimersAsync();
+    await flushMicrotasks();
+
+    const state = useActorSystemStore.getState();
+
+    expect(state.dialogSubagentEnabled).toBe(true);
+    expect(state._system?.getDialogSubagentEnabled()).toBe(true);
+  });
+
+  it("restores persisted dialog flow trace events", async () => {
+    const runtimeSessionId = "dialog-session-flow-trace";
+    localStorage.setItem("dialog_session_pointer", runtimeSessionId);
+    mockLoadSessionFromDisk.mockResolvedValue({
+      sessionId: runtimeSessionId,
+      createdAt: 100,
+      updatedAt: 200,
+      entries: [],
+      actorConfigs: [],
+      snapshot: {
+        version: 12,
+        sessionId: runtimeSessionId,
+        dialogHistory: [],
+        dialogFlowEvents: [
+          {
+            event: "repair_round_started",
+            actorId: "agent-lead-flow",
+            timestamp: 1200,
+            detail: {
+              accepted_count: 1,
+              preview: "结果清单补派（第2组修复）",
+            },
+          },
+          {
+            event: "host_export_completed",
+            actorId: "agent-lead-flow",
+            timestamp: 1500,
+            detail: {
+              phase: "host_export",
+              preview: "/Users/demo/Downloads/final-courses.xlsx",
+            },
+          },
+        ],
+        actorConfigs: [
+          {
+            id: "agent-lead-flow",
+            roleName: "Lead",
+            maxIterations: 40,
+          },
+        ],
+        savedAt: 1710000000000,
+      },
+    });
+
+    useActorSystemStore.getState().init();
+    await flushMicrotasks();
+    await flushMicrotasks();
+    await vi.runAllTimersAsync();
+    await flushMicrotasks();
+
+    const state = useActorSystemStore.getState();
+
+    expect(state.dialogFlowEvents).toHaveLength(2);
+    expect(state.dialogFlowEvents[0]).toMatchObject({
+      event: "repair_round_started",
+      actorId: "agent-lead-flow",
+    });
+    expect(state._system?.getDialogFlowEventsSnapshot()).toHaveLength(2);
+  });
 });

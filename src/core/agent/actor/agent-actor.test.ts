@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { WAIT_FOR_SPAWNED_TASKS_DEFERRED_RESULT } from "@/plugins/builtin/SmartAgent/core/react-agent";
 import { AgentActor, DIALOG_FULL_ROLE } from "./agent-actor";
 import type { DialogStructuredSubtaskResult } from "./dialog-subtask-runtime";
+import { enableStructuredDeliveryAdapter, resolveStructuredDeliveryManifest } from "./structured-delivery-strategy";
 
 vi.mock("./actor-memory", () => ({
   autoExtractMemories: vi.fn(async () => undefined),
@@ -122,6 +123,14 @@ describe("AgentActor updateConfig", () => {
 });
 
 describe("AgentActor dialog execution mode", () => {
+  it("keeps the base lead prompt agent-first instead of orchestration-first", () => {
+    expect(DIALOG_FULL_ROLE.systemPrompt).toContain("默认先自己完成");
+    expect(DIALOG_FULL_ROLE.systemPrompt).toContain("必要时才协作");
+    expect(DIALOG_FULL_ROLE.systemPrompt).not.toContain("spawn_task");
+    expect(DIALOG_FULL_ROLE.systemPrompt).not.toContain("wait_for_spawned_tasks");
+    expect(DIALOG_FULL_ROLE.systemPrompt).not.toContain("send_message");
+  });
+
   it("applies plan-mode runtime restrictions without mutating persisted config", () => {
     const actor = new AgentActor({
       id: "lead-plan",
@@ -161,6 +170,39 @@ describe("AgentActor dialog execution mode", () => {
     actorInternals._status = "running";
 
     expect(() => actor.setDialogExecutionMode("plan")).toThrow("Cannot change dialog execution mode while running");
+  });
+
+  it("hides orchestration tools by default when dialog subagent mode is off", () => {
+    const actor = new AgentActor({
+      id: "lead-subagent-off",
+      role: { ...DIALOG_FULL_ROLE, name: "Lead" },
+    }, {
+      actorSystem: {
+        getDialogSubagentEnabled: () => false,
+        hasLiveDialogSubagentContext: () => false,
+      } as never,
+    });
+
+    expect(actor.toolPolicyConfig?.deny).toEqual(expect.arrayContaining([
+      "spawn_task",
+      "wait_for_spawned_tasks",
+      "send_message",
+      "agents",
+    ]));
+  });
+
+  it("keeps orchestration tools available when dialog subagent mode is on", () => {
+    const actor = new AgentActor({
+      id: "lead-subagent-on",
+      role: { ...DIALOG_FULL_ROLE, name: "Lead" },
+    }, {
+      actorSystem: {
+        getDialogSubagentEnabled: () => true,
+        hasLiveDialogSubagentContext: () => false,
+      } as never,
+    });
+
+    expect(actor.toolPolicyConfig).toBeUndefined();
   });
 });
 
@@ -1476,6 +1518,10 @@ describe("AgentActor timeout guards", () => {
     let active = true;
     let deliveredStructuredResult = false;
     const artifacts: Array<Record<string, unknown>> = [];
+    const engagedManifest = enableStructuredDeliveryAdapter(
+      resolveStructuredDeliveryManifest("根据附件生成课程并给我一个 excel文件"),
+      "planner",
+    );
 
     const actor = new AgentActor({
       id: "lead-repair-rewrite",
@@ -1492,6 +1538,9 @@ describe("AgentActor timeout guards", () => {
         getArtifactRecordsSnapshot: () => artifacts as never,
         cancelPendingInteractionsForActor: () => undefined,
         getActiveSpawnedTasks: () => (active ? [{ runId: "run-child-spreadsheet", spawnedAt: 1, lastActiveAt: Date.now() }] : []),
+        getActiveExecutionContract: () => ({
+          structuredDeliveryManifest: engagedManifest,
+        }),
         collectStructuredSpawnedTaskResults: () => {
           if (active || deliveredStructuredResult) return [];
           deliveredStructuredResult = true;
@@ -1584,10 +1633,7 @@ describe("AgentActor timeout guards", () => {
         };
       }
       if (query.includes("结构化子任务摘要")) {
-        expect(runOverrides?.toolPolicy?.allow).toEqual(expect.arrayContaining([
-          "task_done",
-          "export_spreadsheet",
-        ]));
+        expect(runOverrides?.toolPolicy?.allow).toEqual(["task_done"]);
         expect(runOverrides?.toolPolicy?.allow).not.toContain("export_document");
         return {
           result: "目前已收到各子任务反馈。",

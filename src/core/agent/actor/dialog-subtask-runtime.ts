@@ -1,17 +1,20 @@
 import type { AgentActor } from "./agent-actor";
 import type { TimeoutReason } from "./timeout-policy";
+import { cloneScopedSourceItems } from "./types";
 import type {
   DialogArtifactRecord,
   DialogArtifactSource,
   DialogSubtaskExecutionIntent,
   DialogSubtaskProfile,
   DialogSubtaskRuntimeState,
+  ScopedSourceItem,
   SpawnTaskOverrides,
   SpawnedTaskEventDetail,
   SpawnMode,
   SpawnedTaskRecord,
   SpawnedTaskRoleBoundary,
   SpawnedTaskStatus,
+  WorkerProfileId,
 } from "./types";
 import { validateSpawnedTaskResult } from "./spawned-task-result-validator";
 import {
@@ -26,6 +29,11 @@ import {
   type TaskExecutorTimeoutTrigger,
   type TaskExecutorUpdateReason,
 } from "./task-executor-runtime-core";
+import {
+  extractNormalizedStructuredRows,
+  inferColumnsFromRows,
+  type StructuredRowRecord,
+} from "./dynamic-workbook-builder";
 import { createLogger } from "@/core/logger";
 
 const runtimeLogger = createLogger("DialogSubtaskRuntime");
@@ -84,14 +92,15 @@ function summarizeNarrativeProgress(
 ): string | undefined {
   const normalized = String(content ?? "").replace(/\s+/g, " ").trim();
   if (!normalized) return undefined;
+  const structuredItemCount = inferStructuredRowCount(normalized);
+  if (typeof structuredItemCount === "number" && structuredItemCount > 0) {
+    return `已产出 ${structuredItemCount} 条结构化结果`;
+  }
   if (/(?:excel|xlsx|xls|csv|表格|工作簿)/iu.test(normalized)) {
     if (/(?:导出|写入|保存|落盘)/iu.test(normalized)) {
       return "正在导出表格";
     }
     return "正在整理表格结果";
-  }
-  if (/(?:课程|培训|课纲|课程候选|清单)/u.test(normalized)) {
-    return "正在整理课程结果";
   }
   if (/(?:验证|测试|回归|验收|check|assert)/iu.test(normalized)) {
     return "正在验证结果";
@@ -149,6 +158,8 @@ function inferStructuredResultKind(params: {
   terminalError?: string;
   artifacts?: readonly DialogSubtaskArtifactSummary[];
   executionIntent?: DialogSubtaskExecutionIntent;
+  resultContract?: "default" | "inline_structured_result";
+  structuredRowCount?: number;
 }): "structured_rows" | "file_artifact" | "blocker" | "unknown" {
   if (params.status === "error" || params.status === "aborted" || params.terminalError) {
     return "blocker";
@@ -156,7 +167,10 @@ function inferStructuredResultKind(params: {
   if ((params.artifacts?.length ?? 0) > 0) {
     return "file_artifact";
   }
-  if (params.executionIntent === "content_executor" && typeof inferStructuredRowCount(params.terminalResult) === "number") {
+  if (params.resultContract === "inline_structured_result") {
+    return (params.structuredRowCount ?? 0) > 0 ? "structured_rows" : "blocker";
+  }
+  if (params.executionIntent === "content_executor" && (params.structuredRowCount ?? 0) > 0) {
     return "structured_rows";
   }
   return "unknown";
@@ -199,6 +213,7 @@ export interface DialogStructuredSubtaskResult {
   subtaskId: string;
   targetActorId: string;
   targetActorName: string;
+  workerProfileId?: WorkerProfileId;
   resultContract?: "default" | "inline_structured_result";
   deliveryTargetId?: string;
   deliveryTargetLabel?: string;
@@ -224,6 +239,11 @@ export interface DialogStructuredSubtaskResult {
   artifacts?: DialogSubtaskArtifactSummary[];
   resultKind?: "structured_rows" | "file_artifact" | "blocker" | "unknown";
   rowCount?: number;
+  schemaFields?: string[];
+  structuredRows?: StructuredRowRecord[];
+  sourceItemIds?: string[];
+  sourceItemCount?: number;
+  scopedSourceItems?: ScopedSourceItem[];
   blocker?: string;
 }
 
@@ -372,6 +392,9 @@ export function buildDialogSubtaskWaitResult(
     artifacts?: DialogSubtaskArtifactSummary[];
     result_kind?: "structured_rows" | "file_artifact" | "blocker" | "unknown";
     row_count?: number;
+    schema_fields?: string[];
+    source_item_ids?: string[];
+    source_item_count?: number;
     blocker?: string;
   }>;
 } {
@@ -404,6 +427,10 @@ export function buildDialogSubtaskWaitResult(
       artifacts: task.artifacts,
       result_kind: task.resultKind,
       row_count: task.rowCount,
+      schema_fields: task.schemaFields,
+      source_item_ids: task.sourceItemIds,
+      source_item_count: task.sourceItemCount,
+      scoped_source_items: task.scopedSourceItems,
       blocker: task.blocker,
     }));
   const pendingCount = structuredTasks.filter((task) => task.status === "running").length;
@@ -477,14 +504,54 @@ export function buildDialogStructuredSubtaskResults(
       const terminalResult = runtime.terminalResult ?? task.result;
       const terminalError = runtime.terminalError ?? task.error;
       const artifacts = collectSubtaskArtifacts(task, artifactRecords);
-      const rowCount = inferStructuredRowCount(terminalResult);
+      const structuredRows = extractNormalizedStructuredRows({ result: {
+        runId: task.runId,
+        subtaskId: runtime.subtaskId,
+        targetActorId: task.targetActorId,
+        targetActorName: actorNameById.get(task.targetActorId) ?? task.targetActorId,
+        workerProfileId: task.workerProfileId,
+        resultContract: task.resultContract,
+        deliveryTargetId: task.deliveryTargetId,
+        deliveryTargetLabel: task.deliveryTargetLabel,
+        sheetName: task.sheetName,
+        label: task.label,
+        task: task.task,
+        mode: task.mode,
+        roleBoundary: task.roleBoundary,
+        profile: runtime.profile,
+        executionIntent: task.executionIntent,
+        status: task.status,
+        progressSummary: runtime.progressSummary,
+        terminalResult,
+        terminalError,
+        startedAt: runtime.startedAt ?? task.spawnedAt,
+        completedAt: runtime.completedAt ?? task.completedAt,
+        timeoutSeconds: runtime.timeoutSeconds ?? task.budgetSeconds,
+        eventCount: runtime.eventCount,
+      } });
+      const rowCount = structuredRows.length > 0
+        ? structuredRows.length
+        : inferStructuredRowCount(terminalResult);
+      const schemaFields = structuredRows.length > 0
+        ? inferColumnsFromRows(structuredRows)
+        : undefined;
+      const inlineStructuredContractViolated = (
+        task.resultContract === "inline_structured_result"
+        && task.status === "completed"
+        && structuredRows.length === 0
+        && artifacts.length === 0
+      );
       const blocker = terminalError
+        ?? (inlineStructuredContractViolated
+          ? "当前子任务声明为 inline_structured_result，但没有返回任何结构化 rows。"
+          : undefined)
         ?? (/阻塞(?:原因|点)?[:：]?/u.test(String(terminalResult ?? "")) ? terminalResult : undefined);
       return {
         runId: task.runId,
         subtaskId: runtime.subtaskId,
         targetActorId: task.targetActorId,
         targetActorName: actorNameById.get(task.targetActorId) ?? task.targetActorId,
+        workerProfileId: task.workerProfileId,
         resultContract: task.resultContract,
         deliveryTargetId: task.deliveryTargetId,
         deliveryTargetLabel: task.deliveryTargetLabel,
@@ -514,8 +581,15 @@ export function buildDialogStructuredSubtaskResults(
           terminalError,
           artifacts,
           executionIntent: task.executionIntent,
+          resultContract: task.resultContract,
+          structuredRowCount: structuredRows.length,
         }),
         rowCount,
+        schemaFields,
+        structuredRows,
+        sourceItemIds: task.sourceItemIds ? [...task.sourceItemIds] : undefined,
+        sourceItemCount: task.sourceItemCount,
+        scopedSourceItems: cloneScopedSourceItems(task.scopedSourceItems),
         blocker,
       };
     });

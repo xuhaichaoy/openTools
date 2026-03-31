@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   getLocalDialogLiveContinuationState,
+  mergeLocalDialogLiveContinuationStateWithTraceEvents,
   shouldHideLocalDialogLiveActor,
   shouldHideLocalDialogMessage,
   shouldRenderLocalDialogStreamingAnswer,
@@ -246,6 +247,205 @@ describe("local-dialog-projection", () => {
     ]);
 
     expect(state.phase).toBe("repairing");
+  });
+
+  it("treats quality-gate repair-round progress as a repairing phase", () => {
+    const state = getLocalDialogLiveContinuationState([
+      {
+        type: "action",
+        toolName: "wait_for_spawned_tasks",
+        toolInput: {},
+        content: "",
+        timestamp: 1,
+      },
+      {
+        type: "observation",
+        content: "host export 被 quality gate 拦截，系统正在按 repair plan 补派 1 个 repair shards。",
+        timestamp: 2,
+      },
+    ]);
+
+    expect(state.phase).toBe("repairing");
+    expect(state.latestContinuationPreview).toContain("quality gate");
+  });
+
+  it("projects structured host milestones from repair and export steps", () => {
+    const state = getLocalDialogLiveContinuationState([
+      {
+        type: "action",
+        toolName: "wait_for_spawned_tasks",
+        toolInput: {},
+        content: "",
+        timestamp: 1,
+      },
+      {
+        type: "observation",
+        content: "host export 被 quality gate 拦截，系统正在按 repair plan 补派 1 个 repair shards。",
+        timestamp: 2,
+      },
+      {
+        type: "action",
+        toolName: "export_spreadsheet",
+        toolInput: {
+          file_name: "final-courses.xlsx",
+        },
+        content: "调用 export_spreadsheet",
+        timestamp: 3,
+      },
+      {
+        type: "observation",
+        toolName: "export_spreadsheet",
+        toolOutput: "已导出 Excel 文件: /Users/demo/Downloads/final-courses.xlsx",
+        content: "已导出 Excel 文件: /Users/demo/Downloads/final-courses.xlsx",
+        timestamp: 4,
+      },
+    ]);
+
+    expect(state.phase).toBe("published");
+    expect(state.latestContinuationPreview).toContain("重试导出成功");
+    expect(state.hostMilestones.map((milestone) => milestone.summary)).toEqual([
+      "进入修复轮：host export 被 quality gate 拦截，系统正在按 repair plan 补派 1 个 repair shards。",
+      "开始重试导出工作簿：final-courses.xlsx",
+      "重试导出成功：/Users/demo/Downloads/final-courses.xlsx",
+    ]);
+  });
+
+  it("uses export actions as structured live previews instead of raw tool labels", () => {
+    const state = getLocalDialogLiveContinuationState([
+      {
+        type: "action",
+        toolName: "wait_for_spawned_tasks",
+        toolInput: {},
+        content: "",
+        timestamp: 1,
+      },
+      {
+        type: "action",
+        toolName: "export_spreadsheet",
+        toolInput: {
+          file_name: "result.xlsx",
+        },
+        content: "调用 export_spreadsheet",
+        timestamp: 2,
+      },
+    ]);
+
+    expect(state.phase).toBe("aggregating");
+    expect(state.latestContinuationPreview).toContain("开始导出工作簿");
+    expect(state.latestContinuationPreview).toContain("result.xlsx");
+  });
+
+  it("merges direct dialog flow trace events into an idle actor continuation state", () => {
+    const merged = mergeLocalDialogLiveContinuationStateWithTraceEvents(
+      getLocalDialogLiveContinuationState([]),
+      [
+        {
+          event: "repair_round_started",
+          actorId: "coordinator",
+          timestamp: 2000,
+          detail: {
+            accepted_count: 1,
+            preview: "结果清单补派（第2组修复）",
+          },
+        },
+        {
+          event: "tool_call_started",
+          actorId: "coordinator",
+          timestamp: 2300,
+          detail: {
+            phase: "host_export",
+            tool: "export_spreadsheet",
+            preview: "final-courses.xlsx (28 rows)",
+          },
+        },
+        {
+          event: "host_export_completed",
+          actorId: "coordinator",
+          timestamp: 2600,
+          detail: {
+            phase: "host_export",
+            preview: "/Users/demo/Downloads/final-courses.xlsx",
+          },
+        },
+      ],
+    );
+
+    expect(merged.phase).toBe("published");
+    expect(merged.latestContinuationPreview).toContain("重试导出成功");
+    expect(merged.hostMilestones?.map((milestone) => milestone.summary)).toEqual([
+      "进入修复轮：结果清单补派（第2组修复）",
+      "开始重试导出工作簿：final-courses.xlsx (28 rows)",
+      "重试导出成功：/Users/demo/Downloads/final-courses.xlsx",
+    ]);
+  });
+
+  it("prefers newer trace-backed host milestones over older step previews", () => {
+    const merged = mergeLocalDialogLiveContinuationStateWithTraceEvents(
+      getLocalDialogLiveContinuationState([
+        {
+          type: "action",
+          toolName: "wait_for_spawned_tasks",
+          toolInput: {},
+          content: "",
+          timestamp: 1,
+        },
+        {
+          type: "answer",
+          content: "正在综合最终结果",
+          timestamp: 2,
+          streaming: true,
+        },
+      ]),
+      [
+        {
+          event: "host_export_completed",
+          actorId: "coordinator",
+          timestamp: 5,
+          detail: {
+            phase: "host_export",
+            preview: "/Users/demo/Downloads/final-courses.xlsx",
+          },
+        },
+      ],
+    );
+
+    expect(merged.phase).toBe("published");
+    expect(merged.latestContinuationTimestamp).toBe(5);
+    expect(merged.latestContinuationPreview).toContain("导出成功");
+  });
+
+  it("treats aggregation and export-blocked trace events as an aggregating continuation", () => {
+    const merged = mergeLocalDialogLiveContinuationStateWithTraceEvents(
+      getLocalDialogLiveContinuationState([]),
+      [
+        {
+          event: "aggregation_started",
+          actorId: "coordinator",
+          timestamp: 10,
+          detail: {
+            count: 28,
+          },
+        },
+        {
+          event: "host_export_blocked",
+          actorId: "coordinator",
+          timestamp: 20,
+          detail: {
+            phase: "host_export",
+            status: "blocked",
+            preview: "仍缺少 4 个主题的覆盖行。",
+          },
+        },
+      ],
+    );
+
+    expect(merged.phase).toBe("aggregating");
+    expect(merged.latestContinuationTimestamp).toBe(20);
+    expect(merged.latestContinuationPreview).toContain("导出被质量门禁拦截");
+    expect(merged.hostMilestones?.map((milestone) => milestone.summary)).toEqual([
+      "开始汇总子任务结果：当前聚合 28 个结构化结果。",
+      "导出被质量门禁拦截：仍缺少 4 个主题的覆盖行。",
+    ]);
   });
 
   it("hides internal planning outlines from the local streaming bubble", () => {

@@ -19,6 +19,7 @@ import type {
   ExecutionContractDraft,
 } from "./types";
 import type { StructuredDeliveryManifest } from "@/core/agent/actor/structured-delivery-strategy";
+import { cloneSourceGroundingSnapshot } from "@/core/agent/actor/source-grounding";
 
 function cloneDialogMessage(message: DialogMessage): DialogMessage {
   return {
@@ -137,6 +138,11 @@ function cloneStructuredDeliveryManifest(
               : {}),
             ...(target.metadata ? { metadata: { ...target.metadata } } : {}),
           })),
+        }
+      : {}),
+    ...(manifest.sourceSnapshot
+      ? {
+          sourceSnapshot: cloneSourceGroundingSnapshot(manifest.sourceSnapshot),
         }
       : {}),
     ...(manifest.resultSchema

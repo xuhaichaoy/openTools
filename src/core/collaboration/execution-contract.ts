@@ -15,6 +15,7 @@ import {
   resolveStructuredDeliveryManifest,
   type StructuredDeliveryManifest,
 } from "@/core/agent/actor/structured-delivery-strategy";
+import { cloneSourceGroundingSnapshot } from "@/core/agent/actor/source-grounding";
 import type {
   CollaborationActorPair,
   CollaborationActorRosterEntry,
@@ -196,11 +197,17 @@ function normalizePlannedDelegation(
     childMaxIterations: spawn.childMaxIterations,
     overrides: spawn.overrides
       ? {
+          ...(spawn.overrides.workerProfileId ? { workerProfileId: spawn.overrides.workerProfileId } : {}),
           ...(spawn.overrides.executionIntent ? { executionIntent: spawn.overrides.executionIntent } : {}),
           ...(spawn.overrides.resultContract ? { resultContract: spawn.overrides.resultContract } : {}),
           ...(spawn.overrides.deliveryTargetId ? { deliveryTargetId: spawn.overrides.deliveryTargetId.trim() } : {}),
           ...(spawn.overrides.deliveryTargetLabel ? { deliveryTargetLabel: spawn.overrides.deliveryTargetLabel.trim() } : {}),
           ...(spawn.overrides.sheetName ? { sheetName: spawn.overrides.sheetName.trim() } : {}),
+          ...(spawn.overrides.sourceItemIds ? { sourceItemIds: [...spawn.overrides.sourceItemIds] } : {}),
+          ...(typeof spawn.overrides.sourceItemCount === "number" ? { sourceItemCount: spawn.overrides.sourceItemCount } : {}),
+          ...(spawn.overrides.scopedSourceItems
+            ? { scopedSourceItems: spawn.overrides.scopedSourceItems.map((item) => ({ ...item })) }
+            : {}),
         }
       : undefined,
   };
@@ -243,6 +250,9 @@ function cloneStructuredDeliveryManifest(
         : {}),
       ...(target.metadata ? { metadata: { ...target.metadata } } : {}),
     })),
+    sourceSnapshot: manifest.sourceSnapshot
+      ? cloneSourceGroundingSnapshot(manifest.sourceSnapshot)
+      : undefined,
     resultSchema: manifest.resultSchema
       ? {
           ...manifest.resultSchema,
