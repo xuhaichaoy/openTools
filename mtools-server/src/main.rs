@@ -1,6 +1,7 @@
 use mtools_server::{config::Config, routes::create_router};
-use sqlx::PgPool;
+use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::net::SocketAddr;
+use std::time::Duration;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -18,7 +19,12 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::from_env()?;
 
     // 初始化数据库连接
-    let pool = sqlx::PgPool::connect(&config.database_url).await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(20)
+        .min_connections(3)
+        .acquire_timeout(Duration::from_secs(10))
+        .connect(&config.database_url)
+        .await?;
     tracing::info!("Connected to database");
 
     // 运行数据库迁移
@@ -33,8 +39,13 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Connected to Redis");
 
     // 初始化服务
-    let auth_service =
-        mtools_server::services::AuthService::new(config.jwt_secret.clone(), redis_client.clone());
+    let auth_service = mtools_server::services::AuthService::new(
+        config.jwt_secret.clone(),
+        redis_client.clone(),
+        config.jwt_access_token_ttl_secs,
+        config.jwt_refresh_token_ttl_secs,
+        config.jwt_leeway_secs,
+    );
 
     // 创建上传目录
     let avatar_dir = std::path::Path::new(&config.upload_dir).join("avatars");
@@ -47,8 +58,8 @@ async fn main() -> anyhow::Result<()> {
 
     // 创建应用状态
     let http_client = reqwest::Client::builder()
-        .pool_max_idle_per_host(20)
-        .timeout(std::time::Duration::from_secs(120))
+        .pool_max_idle_per_host(50)
+        .connect_timeout(Duration::from_secs(config.upstream_connect_timeout_secs))
         .build()
         .expect("Failed to build HTTP client");
 

@@ -23,6 +23,7 @@ use std::sync::Arc;
 use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::services::ServeDir;
+use tower_http::trace::TraceLayer;
 
 pub fn create_router(state: Arc<AppState>) -> Router {
     let allowed_origins = std::env::var("ALLOWED_ORIGINS").unwrap_or_default();
@@ -112,6 +113,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // 旧路由（向后兼容，后续版本移除）
         .nest("/auth", auth::routes())
         .merge(auth_routes)
+        .layer(TraceLayer::new_for_http())
         .layer(rate_limit)
         .layer(cors)
         .with_state(state)

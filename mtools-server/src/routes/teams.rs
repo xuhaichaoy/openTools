@@ -896,9 +896,14 @@ async fn get_skill_marketplace_status(
         .map(|item| resolve_server_http_context(&item.site_url, &item.registry_url));
     let token_available = config
         .as_ref()
-        .map(|item| !crate::crypto::maybe_decrypt(&item.api_token).trim().is_empty())
+        .map(|item| {
+            !crate::crypto::maybe_decrypt(&item.api_token)
+                .trim()
+                .is_empty()
+        })
         .unwrap_or(false);
-    let service_ready = config.as_ref().map(|item| item.is_active).unwrap_or(false) && token_available;
+    let service_ready =
+        config.as_ref().map(|item| item.is_active).unwrap_or(false) && token_available;
     Ok(Json(serde_json::json!({
         "provider": provider,
         "configured": config.is_some(),
@@ -1418,7 +1423,9 @@ fn server_extract_url_from_json(value: &Value, keys: &[&str], bases: &[&str]) ->
             for key in keys {
                 if let Some(candidate) = server_json_string(map.get(*key)) {
                     for base in bases {
-                        if let Some(url) = resolve_marketplace_relative_url(base, candidate.as_str()) {
+                        if let Some(url) =
+                            resolve_marketplace_relative_url(base, candidate.as_str())
+                        {
                             return Some(url);
                         }
                     }
@@ -1520,12 +1527,28 @@ fn server_parse_http_search_entries(
                     }
                 }
                 for child in map.values() {
-                    visit(child, entries, seen, limit, site_url, registry_url, source_kind);
+                    visit(
+                        child,
+                        entries,
+                        seen,
+                        limit,
+                        site_url,
+                        registry_url,
+                        source_kind,
+                    );
                 }
             }
             Value::Array(items) => {
                 for child in items {
-                    visit(child, entries, seen, limit, site_url, registry_url, source_kind);
+                    visit(
+                        child,
+                        entries,
+                        seen,
+                        limit,
+                        site_url,
+                        registry_url,
+                        source_kind,
+                    );
                 }
             }
             _ => {}
@@ -1588,7 +1611,10 @@ async fn run_server_clawhub_verify_http(
             .await
             .map_err(|error| Error::Internal(error.into()))?;
         if !response.status().is_success() {
-            last_error = Some(format!("ClawHub 验证接口返回 {} ({url})", response.status()));
+            last_error = Some(format!(
+                "ClawHub 验证接口返回 {} ({url})",
+                response.status()
+            ));
             continue;
         }
         let body = response
@@ -1723,13 +1749,17 @@ async fn resolve_server_bundle_http(
         .map_err(|error| Error::Internal(error.into()))?;
     download_url.query_pairs_mut().append_pair("slug", slug);
     if let Some(version) = version {
-        download_url.query_pairs_mut().append_pair("version", version);
+        download_url
+            .query_pairs_mut()
+            .append_pair("version", version);
     }
     candidates.push(download_url);
 
-    let mut download_slug_url =
-        Url::parse(&format!("{}/api/v1/download/{}", context.registry_url, slug))
-            .map_err(|error| Error::Internal(error.into()))?;
+    let mut download_slug_url = Url::parse(&format!(
+        "{}/api/v1/download/{}",
+        context.registry_url, slug
+    ))
+    .map_err(|error| Error::Internal(error.into()))?;
     if let Some(version) = version {
         download_slug_url
             .query_pairs_mut()
@@ -1737,9 +1767,11 @@ async fn resolve_server_bundle_http(
     }
     candidates.push(download_slug_url);
 
-    let mut download_skill_url =
-        Url::parse(&format!("{}/api/v1/skills/{}/download", context.registry_url, slug))
-            .map_err(|error| Error::Internal(error.into()))?;
+    let mut download_skill_url = Url::parse(&format!(
+        "{}/api/v1/skills/{}/download",
+        context.registry_url, slug
+    ))
+    .map_err(|error| Error::Internal(error.into()))?;
     if let Some(version) = version {
         download_skill_url
             .query_pairs_mut()
@@ -1754,7 +1786,10 @@ async fn resolve_server_bundle_http(
             .await
             .map_err(|error| Error::Internal(error.into()))?;
         if !response.status().is_success() {
-            last_error = Some(format!("ClawHub 下载接口返回 {} ({url})", response.status()));
+            last_error = Some(format!(
+                "ClawHub 下载接口返回 {} ({url})",
+                response.status()
+            ));
             continue;
         }
         let content_type = response
@@ -1816,7 +1851,9 @@ async fn resolve_server_bundle_http(
                     .or(Some(download_url)),
                 });
             }
-            if let Some(skill_md) = server_extract_string_from_json(&payload, &["skill_md", "skillMd"]) {
+            if let Some(skill_md) =
+                server_extract_string_from_json(&payload, &["skill_md", "skillMd"])
+            {
                 return Ok(ServerHttpClawHubBundle {
                     bytes: skill_md.into_bytes(),
                     version: server_extract_version_from_json(&payload)
@@ -1829,7 +1866,9 @@ async fn resolve_server_bundle_http(
                     .or(Some(url.to_string())),
                 });
             }
-            last_error = Some(format!("ClawHub 下载接口返回 JSON，但未找到 bundle URL ({url})"));
+            last_error = Some(format!(
+                "ClawHub 下载接口返回 JSON，但未找到 bundle URL ({url})"
+            ));
             continue;
         }
 
@@ -1846,7 +1885,6 @@ async fn resolve_server_bundle_http(
         None,
     ))
 }
-
 
 // ── 类型 ──
 

@@ -11,11 +11,14 @@ use axum::{
     Json, Router,
 };
 use futures_util::StreamExt;
-use http::StatusCode;
+use http::{header::CONTENT_TYPE, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
+
+const UPSTREAM_ERROR_BODY_LIMIT: usize = 1024;
 
 #[derive(Debug, Serialize)]
 pub struct EnergyResponse {
@@ -183,24 +186,63 @@ async fn ai_proxy_chat(
 
     let api_key = std::env::var("PLATFORM_AI_API_KEY")
         .unwrap_or_else(|_| std::env::var("OPENAI_API_KEY").unwrap_or_default());
+    if api_key.trim().is_empty() {
+        return Err(Error::api(
+            StatusCode::BAD_GATEWAY,
+            "PLATFORM_AI_KEY_MISSING",
+            "平台 AI Key 未配置，请检查服务端环境变量",
+            None,
+        ));
+    }
+
     let api_base =
         std::env::var("PLATFORM_AI_BASE_URL").unwrap_or_else(|_| "https://api.deepseek.com".into());
+    let forward_url = build_upstream_url(&api_base, "openai").map_err(|error| {
+        Error::api(
+            StatusCode::BAD_GATEWAY,
+            "PLATFORM_AI_BASE_URL_INVALID",
+            "平台 AI Base URL 配置无效",
+            Some(serde_json::json!({
+                "base_url": api_base,
+                "reason": error.to_string(),
+            })),
+        )
+    })?;
 
     let is_stream = payload
         .get("stream")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let res = state
+    let mut req = state
         .http_client
-        .post(format!("{}/chat/completions", api_base))
+        .post(&forward_url)
         .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json");
+    if is_stream {
+        req = req.header("Accept", "text/event-stream");
+    } else {
+        req = req.timeout(Duration::from_secs(
+            state.config.upstream_request_timeout_secs,
+        ));
+    }
+    let res = req
         .json(&payload)
         .send()
         .await
         .map_err(|e| Error::Internal(anyhow::anyhow!("Proxy error: {}", e)))?;
 
     let status = res.status();
+    if !status.is_success() {
+        return Err(build_upstream_error(
+            res,
+            "PLATFORM_AI",
+            serde_json::json!({
+                "upstream_url": sanitize_url(&forward_url),
+            }),
+        )
+        .await);
+    }
 
     if !is_stream {
         // 非流式：读完整响应，计算 token 并扣费
@@ -448,14 +490,45 @@ async fn ai_team_proxy_chat(
         );
     }
 
-    let decrypted_key = crate::crypto::maybe_decrypt(&team_config.api_key);
+    let decrypted_key = crate::crypto::try_decrypt(&team_config.api_key).map_err(|error| {
+        Error::api(
+            StatusCode::BAD_GATEWAY,
+            "TEAM_AI_KEY_DECRYPT_FAILED",
+            "团队 AI Key 解密失败，请重新保存该团队模型配置",
+            Some(serde_json::json!({
+                "config_id": team_config.id,
+                "model": team_config.model_name,
+                "reason": error.to_string(),
+            })),
+        )
+    })?;
+    if decrypted_key.trim().is_empty() {
+        return Err(Error::api(
+            StatusCode::BAD_GATEWAY,
+            "TEAM_AI_KEY_MISSING",
+            "团队 AI Key 为空，请补全该团队模型配置",
+            Some(serde_json::json!({
+                "config_id": team_config.id,
+                "model": team_config.model_name,
+            })),
+        ));
+    }
 
     let is_anthropic = team_config.protocol == "anthropic";
-    let forward_url = if is_anthropic {
-        format!("{}/v1/messages", team_config.base_url)
-    } else {
-        format!("{}/chat/completions", team_config.base_url)
-    };
+    let forward_url =
+        build_upstream_url(&team_config.base_url, &team_config.protocol).map_err(|error| {
+            Error::api(
+                StatusCode::BAD_GATEWAY,
+                "TEAM_AI_BASE_URL_INVALID",
+                "团队 AI Base URL 配置无效",
+                Some(serde_json::json!({
+                    "config_id": team_config.id,
+                    "protocol": team_config.protocol,
+                    "base_url": team_config.base_url,
+                    "reason": error.to_string(),
+                })),
+            )
+        })?;
     let is_stream = payload
         .get("stream")
         .and_then(|v| v.as_bool())
@@ -480,14 +553,34 @@ async fn ai_team_proxy_chat(
     if forward_url.contains("coding.dashscope") || forward_url.contains("coding-intl.dashscope") {
         req = req.header("User-Agent", "openclaw/1.0.0");
     }
+    req = req.header("Content-Type", "application/json");
+    if is_stream {
+        req = req.header("Accept", "text/event-stream");
+    } else {
+        req = req.timeout(Duration::from_secs(
+            state.config.upstream_request_timeout_secs,
+        ));
+    }
     let res = req
-        .header("Content-Type", "application/json")
         .json(&forward_payload)
         .send()
         .await
         .map_err(|e| Error::Internal(anyhow::anyhow!("Team proxy error: {}", e)))?;
 
     let status = res.status();
+    if !status.is_success() {
+        return Err(build_upstream_error(
+            res,
+            "TEAM_AI",
+            serde_json::json!({
+                "config_id": team_config.id,
+                "protocol": team_config.protocol,
+                "model": team_config.model_name,
+                "upstream_url": sanitize_url(&forward_url),
+            }),
+        )
+        .await);
+    }
 
     if !is_stream {
         let body_bytes = res
@@ -730,6 +823,159 @@ async fn deduct_and_log_energy(
     Ok(())
 }
 
+fn build_upstream_url(base_url: &str, protocol: &str) -> anyhow::Result<String> {
+    let normalized = base_url.trim().trim_end_matches('/').to_string();
+    if normalized.is_empty() {
+        anyhow::bail!("base_url is empty");
+    }
+
+    let parsed = reqwest::Url::parse(&normalized)?;
+    let path = parsed.path().trim_end_matches('/');
+    let lower_path = path.to_ascii_lowercase();
+    let lower_protocol = protocol.trim().to_ascii_lowercase();
+
+    if lower_protocol == "anthropic" {
+        if lower_path.ends_with("/v1/messages") || lower_path.ends_with("/messages") {
+            return Ok(normalized);
+        }
+        if lower_path.ends_with("/v1") {
+            return Ok(format!("{normalized}/messages"));
+        }
+        if lower_path.is_empty() || lower_path == "/" {
+            return Ok(format!("{normalized}/v1/messages"));
+        }
+        return Ok(format!("{normalized}/messages"));
+    }
+
+    if lower_path.ends_with("/chat/completions") {
+        return Ok(normalized);
+    }
+    if lower_path.ends_with("/v1") {
+        return Ok(format!("{normalized}/chat/completions"));
+    }
+    if lower_path.is_empty() || lower_path == "/" {
+        return Ok(format!("{normalized}/v1/chat/completions"));
+    }
+    Ok(format!("{normalized}/chat/completions"))
+}
+
+fn sanitize_url(url: &str) -> String {
+    reqwest::Url::parse(url)
+        .map(|mut parsed| {
+            parsed.set_query(None);
+            parsed.set_fragment(None);
+            parsed.to_string()
+        })
+        .unwrap_or_else(|_| url.to_string())
+}
+
+async fn build_upstream_error(
+    response: reqwest::Response,
+    code_prefix: &str,
+    context: serde_json::Value,
+) -> Error {
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+
+    let body_bytes = response.bytes().await.unwrap_or_default();
+    let upstream_body = summarize_upstream_body(&body_bytes, content_type.as_deref());
+
+    let (mapped_status, code, message) = map_upstream_status(status, code_prefix);
+    let details = serde_json::json!({
+        "upstream_status": status.as_u16(),
+        "upstream_body": upstream_body,
+        "content_type": content_type,
+        "context": context,
+    });
+
+    tracing::warn!(
+        "AI upstream request failed: code={} upstream_status={} details={}",
+        code,
+        status,
+        details
+    );
+
+    Error::api(mapped_status, code, message, Some(details))
+}
+
+fn map_upstream_status(
+    status: StatusCode,
+    code_prefix: &str,
+) -> (StatusCode, String, &'static str) {
+    match status {
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => (
+            StatusCode::BAD_GATEWAY,
+            format!("{code_prefix}_UPSTREAM_AUTH_FAILED"),
+            "上游 AI 服务认证失败，请检查服务端模型配置",
+        ),
+        StatusCode::NOT_FOUND => (
+            StatusCode::BAD_GATEWAY,
+            format!("{code_prefix}_UPSTREAM_ENDPOINT_NOT_FOUND"),
+            "上游 AI 服务地址不可用，请检查 Base URL 配置",
+        ),
+        StatusCode::TOO_MANY_REQUESTS => (
+            StatusCode::TOO_MANY_REQUESTS,
+            format!("{code_prefix}_UPSTREAM_RATE_LIMITED"),
+            "上游 AI 服务触发限流，请稍后重试",
+        ),
+        status if status.is_server_error() => (
+            StatusCode::BAD_GATEWAY,
+            format!("{code_prefix}_UPSTREAM_BAD_GATEWAY"),
+            "上游 AI 服务暂时不可用，请稍后重试",
+        ),
+        status if status.is_client_error() => (
+            StatusCode::BAD_REQUEST,
+            format!("{code_prefix}_UPSTREAM_REQUEST_REJECTED"),
+            "上游 AI 服务拒绝了本次请求，请检查模型和请求参数",
+        ),
+        _ => (
+            StatusCode::BAD_GATEWAY,
+            format!("{code_prefix}_UPSTREAM_ERROR"),
+            "上游 AI 服务请求失败",
+        ),
+    }
+}
+
+fn summarize_upstream_body(body: &[u8], content_type: Option<&str>) -> String {
+    if body.is_empty() {
+        return String::new();
+    }
+
+    if matches!(content_type, Some(value) if value.contains("application/json")) {
+        if let Ok(json) = serde_json::from_slice::<serde_json::Value>(body) {
+            if let Some(message) = json
+                .get("error")
+                .and_then(|value| value.as_str())
+                .or_else(|| json.get("message").and_then(|value| value.as_str()))
+            {
+                return truncate_for_log(message);
+            }
+            if let Some(message) = json
+                .get("error")
+                .and_then(|value| value.get("message"))
+                .and_then(|value| value.as_str())
+            {
+                return truncate_for_log(message);
+            }
+            return truncate_for_log(&json.to_string());
+        }
+    }
+
+    truncate_for_log(&String::from_utf8_lossy(body))
+}
+
+fn truncate_for_log(text: &str) -> String {
+    let normalized = text.trim().replace('\n', " ");
+    if normalized.chars().count() <= UPSTREAM_ERROR_BODY_LIMIT {
+        return normalized;
+    }
+    normalized.chars().take(UPSTREAM_ERROR_BODY_LIMIT).collect()
+}
+
 // ── 类型 ──
 
 #[derive(Debug, Deserialize)]
@@ -776,4 +1022,36 @@ struct TeamAiConfig {
     priority: i32,
     #[allow(dead_code)]
     created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_upstream_url_preserves_full_openai_endpoint() {
+        let url = build_upstream_url("https://api.openai.com/v1/chat/completions", "openai")
+            .expect("url");
+        assert_eq!(url, "https://api.openai.com/v1/chat/completions");
+    }
+
+    #[test]
+    fn build_upstream_url_adds_common_openai_suffix() {
+        let url = build_upstream_url("https://api.openai.com", "openai").expect("url");
+        assert_eq!(url, "https://api.openai.com/v1/chat/completions");
+    }
+
+    #[test]
+    fn build_upstream_url_handles_anthropic_base() {
+        let url = build_upstream_url("https://api.anthropic.com", "anthropic").expect("url");
+        assert_eq!(url, "https://api.anthropic.com/v1/messages");
+    }
+
+    #[test]
+    fn map_upstream_status_rewrites_provider_auth_failures() {
+        let (status, code, message) = map_upstream_status(StatusCode::UNAUTHORIZED, "TEAM_AI");
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(code, "TEAM_AI_UPSTREAM_AUTH_FAILED");
+        assert!(message.contains("认证失败"));
+    }
 }

@@ -80,16 +80,20 @@ pub fn decrypt(value: &str) -> anyhow::Result<String> {
     Ok(String::from_utf8(plaintext)?)
 }
 
+pub fn try_decrypt(value: &str) -> anyhow::Result<String> {
+    if value.starts_with(ENC_PREFIX) {
+        decrypt(value)
+    } else {
+        Ok(value.to_string())
+    }
+}
+
 /// Transparently decrypt: if prefixed with `enc:`, decrypt; otherwise return as-is.
 pub fn maybe_decrypt(value: &str) -> String {
-    if value.starts_with(ENC_PREFIX) {
-        decrypt(value).unwrap_or_else(|e| {
-            tracing::warn!("Failed to decrypt key: {e}");
-            String::new()
-        })
-    } else {
-        value.to_string()
-    }
+    try_decrypt(value).unwrap_or_else(|e| {
+        tracing::warn!("Failed to decrypt key: {e}");
+        String::new()
+    })
 }
 
 /// Mask an API key for display: `sk-abc1****9xyz`

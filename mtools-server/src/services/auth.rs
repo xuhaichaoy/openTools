@@ -1,5 +1,5 @@
 use crate::{Error, Result};
-use jsonwebtoken::{decode, encode, EncodingKey, Header};
+use jsonwebtoken::{decode, encode, errors::ErrorKind, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -25,11 +25,26 @@ pub struct TokenPair {
 pub struct AuthService {
     jwt_secret: String,
     redis: redis::Client,
+    access_token_ttl_secs: usize,
+    refresh_token_ttl_secs: usize,
+    jwt_leeway_secs: u64,
 }
 
 impl AuthService {
-    pub fn new(jwt_secret: String, redis: redis::Client) -> Self {
-        Self { jwt_secret, redis }
+    pub fn new(
+        jwt_secret: String,
+        redis: redis::Client,
+        access_token_ttl_secs: u64,
+        refresh_token_ttl_secs: u64,
+        jwt_leeway_secs: u64,
+    ) -> Self {
+        Self {
+            jwt_secret,
+            redis,
+            access_token_ttl_secs: access_token_ttl_secs as usize,
+            refresh_token_ttl_secs: refresh_token_ttl_secs as usize,
+            jwt_leeway_secs,
+        }
     }
 
     fn now_secs() -> Result<usize> {
@@ -46,14 +61,14 @@ impl AuthService {
         let access_claims = Claims {
             sub: user_id.to_string(),
             iat: now,
-            exp: now + 15 * 60, // 15 分钟
+            exp: now + self.access_token_ttl_secs,
             token_type: "access".to_string(),
         };
 
         let refresh_claims = Claims {
             sub: user_id.to_string(),
             iat: now,
-            exp: now + 30 * 24 * 60 * 60, // 30 天
+            exp: now + self.refresh_token_ttl_secs,
             token_type: "refresh".to_string(),
         };
 
@@ -76,13 +91,26 @@ impl AuthService {
     }
 
     pub fn validate_token(&self, token: &str) -> Result<Claims> {
+        let mut validation = Validation::default();
+        validation.leeway = self.jwt_leeway_secs;
+
         decode::<Claims>(
             token,
             &jsonwebtoken::DecodingKey::from_secret(self.jwt_secret.as_bytes()),
-            &jsonwebtoken::Validation::default(),
+            &validation,
         )
         .map(|data| data.claims)
-        .map_err(|_| Error::Unauthorized("Invalid token".into()))
+        .map_err(|error| {
+            let message = match error.kind() {
+                ErrorKind::ExpiredSignature => "Token expired",
+                ErrorKind::InvalidSignature => "Token signature mismatch",
+                ErrorKind::InvalidToken => "Invalid token",
+                ErrorKind::InvalidAlgorithm => "Unsupported token algorithm",
+                _ => "Invalid token",
+            };
+            tracing::warn!("JWT validation failed: {message}");
+            Error::Unauthorized(message.into())
+        })
     }
 
     /// 验证 refresh token 并生成新的 token 对
@@ -148,5 +176,52 @@ impl AuthService {
             }
             _ => Ok(false),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn service_with_ttl(access_ttl_secs: u64, leeway_secs: u64) -> AuthService {
+        AuthService::new(
+            "unit-test-secret".to_string(),
+            redis::Client::open("redis://127.0.0.1/").expect("redis client"),
+            access_ttl_secs,
+            7 * 24 * 60 * 60,
+            leeway_secs,
+        )
+    }
+
+    #[test]
+    fn generate_token_pair_uses_configured_ttl() {
+        let service = service_with_ttl(3600, 0);
+        let pair = service.generate_token_pair("user-1").expect("token pair");
+        let claims = service.validate_token(&pair.access_token).expect("claims");
+        assert_eq!(claims.exp.saturating_sub(claims.iat), 3600);
+        assert_eq!(claims.token_type, "access");
+    }
+
+    #[test]
+    fn validate_token_reports_expired_token() {
+        let service = service_with_ttl(1, 0);
+        let pair = service.generate_token_pair("user-2").expect("token pair");
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let error = service
+            .validate_token(&pair.access_token)
+            .expect_err("expired");
+        match error {
+            Error::Unauthorized(message) => assert_eq!(message, "Token expired"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_token_allows_small_clock_skew() {
+        let service = service_with_ttl(1, 2);
+        let pair = service.generate_token_pair("user-3").expect("token pair");
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let claims = service.validate_token(&pair.access_token).expect("leeway");
+        assert_eq!(claims.sub, "user-3");
     }
 }
