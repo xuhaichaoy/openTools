@@ -3,6 +3,7 @@ import type { AIConfig, AIRequestMessage } from "./types";
 import { api } from "@/core/api/client";
 import { getServerUrl } from "@/store/server-store";
 import { useAuthStore } from "@/store/auth-store";
+import { ensureFreshAuthToken, refreshAuthSession } from "@/core/auth/session";
 
 export type AISource = "own_key" | "team" | "platform";
 
@@ -26,7 +27,6 @@ const teamModelCache = new Map<
   { expiresAt: number; models: TeamModelInfo[] }
 >();
 const teamModelRequests = new Map<string, Promise<TeamModelInfo[]>>();
-let authRefreshPromise: Promise<string | null> | null = null;
 const AI_AUTH_ERROR_PATTERNS = [
   /\b401\b/,
   /unauthorized/i,
@@ -192,43 +192,16 @@ function promptReLogin(): void {
 }
 
 export async function refreshAIAuthToken(): Promise<string | null> {
-  if (authRefreshPromise) {
-    return authRefreshPromise;
+  const result = await refreshAuthSession({
+    reason: "ai_router_401",
+    promptOnFailure: false,
+    logoutOnFatal: false,
+  });
+  if (!result.ok && result.fatal) {
+    useAuthStore.getState().logout?.();
+    promptReLogin();
   }
-
-  authRefreshPromise = (async () => {
-    const auth = useAuthStore.getState();
-    if (!auth.refreshToken) return null;
-
-    try {
-      const res = await fetch(`${getServerUrl()}/v1/auth/refresh`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ refresh_token: auth.refreshToken }),
-      });
-
-      if (!res.ok) {
-        auth.logout?.();
-        promptReLogin();
-        return null;
-      }
-
-      const data = await res.json();
-      if (!data?.access_token || !data?.user) {
-        return null;
-      }
-
-      auth.login?.(data.user, data.access_token, data.refresh_token);
-      return data.access_token;
-    } catch (error) {
-      console.warn("[AI Router] failed to refresh auth token:", error);
-      return null;
-    } finally {
-      authRefreshPromise = null;
-    }
-  })();
-
-  return authRefreshPromise;
+  return result.accessToken;
 }
 
 export async function withRoutedAIConfig<T>(
@@ -242,14 +215,33 @@ export async function withRoutedAIConfig<T>(
   const allowRetry = options?.retryOnAuth !== false;
   const source = (config.source || "own_key") as AISource;
   const preferredToken = options?.token;
-  const initialRouted = await resolveRoutedConfig(config, preferredToken);
+  const managedToken = shouldUseManagedAuth(source)
+    ? await ensureFreshAuthToken({
+        reason: `managed_ai:${source}:${config.model || "unknown_model"}`,
+        promptOnFailure: false,
+        logoutOnFatal: false,
+      })
+    : null;
+  const initialRouted = await resolveRoutedConfig(
+    config,
+    managedToken ?? preferredToken ?? undefined,
+  );
   const initialManagedToken = shouldUseManagedAuth(source)
     ? String(initialRouted.api_key || "").trim()
     : String(preferredToken ?? "").trim();
 
+  console.log("[withRoutedAIConfig] routed config:", {
+    source: initialRouted.source,
+    base_url: initialRouted.base_url,
+    team_id: initialRouted.team_id,
+    model: initialRouted.model,
+    hasApiKey: !!initialRouted.api_key,
+  });
+
   try {
     return await runner(initialRouted);
   } catch (error) {
+    console.error("[withRoutedAIConfig] runner failed:", error);
     if (
       !allowRetry ||
       !shouldUseManagedAuth(source) ||

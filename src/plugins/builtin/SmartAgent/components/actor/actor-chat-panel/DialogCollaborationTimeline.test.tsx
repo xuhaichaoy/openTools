@@ -8,6 +8,7 @@ import {
   DialogCollaborationTimelineCard,
   mergeLocalDialogTranscriptItems,
 } from "./DialogCollaborationTimeline";
+import { partitionLocalCollaborationTimelineGroups } from "./dialog-collaboration-visibility";
 import type {
   DialogFlowTraceEvent,
   DialogMessage,
@@ -514,6 +515,38 @@ describe("DialogCollaborationTimeline", () => {
     ]));
   });
 
+  it("summarizes structured worker payloads instead of rendering raw JSON blobs", () => {
+    const [group] = buildLocalCollaborationTimelineGroups({
+      events: [],
+      spawnedTasks: [
+        createTask({
+          runId: "run-structured-result",
+          spawnerActorId: "coordinator",
+          targetActorId: "worker-a",
+          task: "生成课程结果",
+          label: "课程结果",
+          status: "completed",
+          spawnedAt: 1000,
+          completedAt: 3000,
+          result: JSON.stringify([
+            { courseName: "智能办公", courseIntroduction: "..." },
+            { courseName: "AI 协作", courseIntroduction: "..." },
+          ]),
+          mode: "run",
+          expectsCompletionMessage: true,
+          cleanup: "keep",
+        }),
+      ],
+      dialogHistory: [],
+      actorNameById: new Map([
+        ["coordinator", "Coordinator"],
+        ["worker-a", "Worker A"],
+      ]),
+    });
+
+    expect(group.workers[0]?.resultPreview).toBe("已返回 2 条结构化结果");
+  });
+
   it("treats published parent activity as aggregated and shows a host export success milestone", () => {
     const [group] = buildLocalCollaborationTimelineGroups({
       events: [],
@@ -814,6 +847,40 @@ describe("DialogCollaborationTimeline", () => {
       "collaboration_group",
       "message",
     ]);
+  });
+
+  it("hides completed collaboration groups after a later visible final reply", () => {
+    const group = {
+      id: "group-1",
+      spawnerActorId: "coordinator",
+      spawnerName: "Coordinator",
+      startedAt: 2000,
+      updatedAt: 6000,
+      completedAt: 6000,
+      phase: "aggregated" as const,
+      title: "并行协作 · 2 个子任务",
+      summary: "已回流汇总",
+      totalWorkers: 2,
+      runningCount: 0,
+      completedCount: 2,
+      failedCount: 0,
+      activeWorkerNames: [],
+      workers: [],
+      milestones: [],
+    };
+
+    const result = partitionLocalCollaborationTimelineGroups({
+      groups: [group],
+      messages: [
+        createMessage({ id: "m1", from: "user", content: "开始", timestamp: 1000, kind: "user_input" }),
+        createMessage({ id: "m2", from: "coordinator", content: "最终答复", timestamp: 9000, kind: "agent_result" }),
+      ],
+      hasActiveCollaborationFlow: false,
+      hideCompletedGroups: true,
+    });
+
+    expect(result.collapsibleGroupCount).toBe(1);
+    expect(result.visibleGroups).toEqual([]);
   });
 
   it("renders the local collaboration card with worker rows", () => {

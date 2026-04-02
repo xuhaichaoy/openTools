@@ -104,7 +104,7 @@ const log = createLogger("ActorStore");
 
 const LEGACY_STORAGE_KEY = "dialog_session";
 const ACTIVE_SESSION_POINTER_KEY = "dialog_session_pointer";
-const SCHEMA_VERSION = 12;
+const SCHEMA_VERSION = 13;
 
 interface PersistedSpawnedTask {
   runId: string;
@@ -175,6 +175,7 @@ interface PersistedSession {
   collaborationSnapshot?: CollaborationSessionSnapshot | null;
   dialogExecutionMode?: DialogExecutionMode;
   dialogSubagentEnabled?: boolean;
+  coordinatorMode?: "coordinator" | "normal";
   sessionId?: string;
   savedAt: number;
 }
@@ -284,6 +285,7 @@ function buildSessionSnapshot(
   collaborationSnapshot?: CollaborationSessionSnapshot | null,
   dialogExecutionMode?: DialogExecutionMode,
   dialogSubagentEnabled?: boolean,
+  coordinatorMode?: "coordinator" | "normal",
   sessionId?: string,
 ): PersistedSession {
   const persistedTasks: PersistedSpawnedTask[] = [];
@@ -388,6 +390,7 @@ function buildSessionSnapshot(
       : null,
     dialogExecutionMode,
     dialogSubagentEnabled,
+    coordinatorMode,
     sessionId,
     savedAt: Date.now(),
   };
@@ -1318,6 +1321,7 @@ async function saveSessionSnapshot(system: ActorSystem): Promise<void> {
     collaborationSnapshot,
     system.getDialogExecutionMode(),
     system.getDialogSubagentEnabled(),
+    system.isCoordinatorModeEnabled() ? "coordinator" : "normal",
     system.sessionId,
   );
 
@@ -1394,6 +1398,7 @@ function restoreSnapshot(system: ActorSystem, persisted: PersistedSession): Rest
   if (persisted.coordinatorActorId && system.get(persisted.coordinatorActorId)) {
     system.setCoordinator(persisted.coordinatorActorId);
   }
+  system.setCoordinatorModeEnabled(persisted.coordinatorMode === "coordinator");
   const restoredContract = !persisted.collaborationSnapshot
     ? buildPersistedExecutionContract({
         persisted,
@@ -1559,6 +1564,8 @@ interface ActorSystemState {
   dialogExecutionMode: DialogExecutionMode;
   /** 是否显式开启 DeerFlow 式子代理协作 */
   dialogSubagentEnabled: boolean;
+  /** 是否显式开启 Coordinator Mode */
+  coordinatorModeEnabled: boolean;
   /** 当前 ActorSystem 实例引用（不序列化） */
   _system: ActorSystem | null;
 
@@ -1638,6 +1645,7 @@ interface ActorSystemState {
   }) => void;
   setDialogExecutionMode: (mode: DialogExecutionMode) => void;
   setDialogSubagentEnabled: (enabled: boolean) => void;
+  setCoordinatorModeEnabled: (enabled: boolean) => void;
 }
 
 function snapshotActor(actor: AgentActor): ActorSnapshot {
@@ -1711,6 +1719,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
   presentationState: null,
   dialogExecutionMode: "execute",
   dialogSubagentEnabled: false,
+  coordinatorModeEnabled: false,
   pendingUserInteractions: [],
   _system: null,
 
@@ -1718,7 +1727,12 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
     const existing = get()._system;
     if (existing) return existing;
 
-    const system = new ActorSystem(options);
+    const system = new ActorSystem({
+      ...options,
+      traceSurface: options?.traceSurface ?? "local_dialog",
+      traceOwnerId: options?.traceOwnerId ?? "dialog_main",
+      traceRuntimeKey: options?.traceRuntimeKey ?? "local_dialog::dialog_main",
+    });
     clearSessionApprovals();
 
     // Capture spawned task lifecycle events for the UI
@@ -1804,7 +1818,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
     void (async () => {
       const persisted = await loadPersistedSessionSnapshot();
       if (persisted?.sessionId) {
-        (system as unknown as { sessionId: string }).sessionId = persisted.sessionId;
+        system.restoreSessionId(persisted.sessionId);
       }
       if (persisted) {
         const restored = restoreSnapshot(system, persisted);
@@ -1915,13 +1929,21 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
     const system = get()._system;
     if (!system) return;
     system.setDialogSubagentEnabled(enabled);
+    system.setCoordinatorModeEnabled(enabled);
+    get().sync();
+  },
+
+  setCoordinatorModeEnabled: (enabled) => {
+    const system = get()._system;
+    if (!system) return;
+    system.setCoordinatorModeEnabled(enabled);
     get().sync();
   },
 
   destroyAll: () => {
     const system = get()._system;
     if (system) {
-      system.killAll();
+      system.dispose("store_destroy_all");
       unregisterRuntimeAbortHandler("dialog", system.sessionId);
       useRuntimeStateStore.getState().removeSession("dialog", system.sessionId);
     }
@@ -1951,6 +1973,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
       presentationState: null,
       dialogExecutionMode: "execute",
       dialogSubagentEnabled: false,
+      coordinatorModeEnabled: false,
       pendingUserInteractions: [],
     });
   },
@@ -2252,6 +2275,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
         presentationState: null,
         dialogExecutionMode: "execute",
         dialogSubagentEnabled: false,
+        coordinatorModeEnabled: false,
         pendingUserInteractions: [],
       });
       return;
@@ -2313,6 +2337,7 @@ export const useActorSystemStore = create<ActorSystemState>((set, get) => ({
       presentationState: collaborationSnapshot ? { ...collaborationSnapshot.presentationState } : null,
       dialogExecutionMode: system.getDialogExecutionMode(),
       dialogSubagentEnabled: system.getDialogSubagentEnabled(),
+      coordinatorModeEnabled: system.isCoordinatorModeEnabled(),
       pendingUserInteractions,
     });
     syncDialogRuntimeSession(system.sessionId, {

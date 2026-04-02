@@ -27,6 +27,8 @@ import {
   loadArchivedSessions as fsLoadArchivedSessions,
   deleteTranscriptSession as fsDeleteTranscriptSession,
   listTranscriptSessionIds as fsListTranscriptSessionIds,
+  persistTranscriptActorResumeMetadata as fsPersistTranscriptActorResumeMetadata,
+  readTranscriptActorResumeMetadata as fsReadTranscriptActorResumeMetadata,
   updateTranscriptActors as fsUpdateTranscriptActors,
 } from "./actor-transcript-fs";
 
@@ -106,5 +108,7 @@ export {
   fsLoadArchivedSessions as loadArchivedSessions,
   fsDeleteTranscriptSession as deleteTranscriptSession,
   fsListTranscriptSessionIds as listTranscriptSessionIds,
+  fsPersistTranscriptActorResumeMetadata as persistTranscriptActorResumeMetadata,
+  fsReadTranscriptActorResumeMetadata as readTranscriptActorResumeMetadata,
   fsUpdateTranscriptActors as updateTranscriptActors,
 };

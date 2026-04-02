@@ -1,8 +1,5 @@
 export type AIProductMode =
   | "explore"
-  | "build"
-  | "plan"
-  | "review"
   | "dialog"
   | "im_conversation";
 
@@ -28,15 +25,14 @@ export function normalizeAIProductMode(
     case "ask":
       return "explore";
     case "agent":
-      return "build";
+    case "build":
     case "cluster":
-      return "plan";
+    case "plan":
     case "review":
+      return "dialog";
     case "dialog":
     case "im_conversation":
     case "explore":
-    case "build":
-    case "plan":
       return mode;
     default:
       return "explore";
@@ -56,8 +52,6 @@ export function getLegacyAICenterMode(
   switch (normalizeAIProductMode(mode)) {
     case "explore":
       return "ask";
-    case "build":
-      return "agent";
     case "plan":
       return "cluster";
     case "review":
@@ -75,17 +69,12 @@ export function getAIProductModeForRuntimeMode(
     case "ask":
       return "explore";
     case "agent":
-      return "build";
     case "cluster":
-      return "plan";
     case "dialog":
       return "dialog";
     case "im_conversation":
       return "im_conversation";
     case "explore":
-    case "build":
-    case "plan":
-    case "review":
       return mode;
     default:
       return "explore";
@@ -98,11 +87,6 @@ export function getRuntimeSessionModeForProductMode(
   switch (normalizeAIProductMode(mode)) {
     case "explore":
       return "ask";
-    case "build":
-      return "agent";
-    case "plan":
-      return "cluster";
-    case "review":
     case "dialog":
       return "dialog";
     case "im_conversation":

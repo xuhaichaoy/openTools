@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  getLocalDialogContinuationSummaryLabel,
   getLocalDialogLiveContinuationState,
   mergeLocalDialogLiveContinuationStateWithTraceEvents,
+  shouldPreferLocalDialogContinuationSummary,
   shouldHideLocalDialogLiveActor,
   shouldHideLocalDialogMessage,
   shouldRenderLocalDialogStreamingAnswer,
@@ -70,6 +72,54 @@ describe("local-dialog-projection", () => {
     }), {
       hasCollaborationGroups: true,
     })).toBe(false);
+  });
+
+  it("hides internal coordinator traffic and raw structured payloads when collaboration cards exist", () => {
+    expect(shouldHideLocalDialogMessage(createMessage({
+      from: "spawned-worker-1",
+      content: "任务执行失败：Aborted",
+      kind: "agent_result",
+    }), {
+      hasCollaborationGroups: true,
+    })).toBe(true);
+
+    expect(shouldHideLocalDialogMessage(createMessage({
+      from: "coordinator",
+      to: "worker-a",
+      content: "请继续补齐第 8-14 主题缺口",
+      kind: "agent_message",
+    }), {
+      hasCollaborationGroups: true,
+    })).toBe(true);
+
+    expect(shouldHideLocalDialogMessage(createMessage({
+      from: "coordinator",
+      content: `[
+  {"theme":"主题 1","status":"done","path":"/Users/demo/result-1.json"},
+  {"theme":"主题 2","status":"done","path":"/Users/demo/result-2.json"}
+]`,
+      kind: "agent_result",
+    }), {
+      hasCollaborationGroups: true,
+    })).toBe(true);
+  });
+
+  it("hides low-signal tool/status summaries from the main transcript during collaboration", () => {
+    expect(shouldHideLocalDialogMessage(createMessage({
+      from: "coordinator",
+      content: "命令执行完成，分析输出",
+      kind: "agent_message",
+    }), {
+      hasCollaborationGroups: true,
+    })).toBe(true);
+
+    expect(shouldHideLocalDialogMessage(createMessage({
+      from: "coordinator",
+      content: "已同步子任务结果，继续汇总",
+      kind: "agent_message",
+    }), {
+      hasCollaborationGroups: true,
+    })).toBe(true);
   });
 
   it("hides live blocks for worker actors and pure wait/spawn orchestration steps", () => {
@@ -446,6 +496,29 @@ describe("local-dialog-projection", () => {
       "开始汇总子任务结果：当前聚合 28 个结构化结果。",
       "导出被质量门禁拦截：仍缺少 4 个主题的覆盖行。",
     ]);
+  });
+
+  it("prefers a concise collaboration summary card once orchestration continues", () => {
+    const state = getLocalDialogLiveContinuationState([
+      {
+        type: "action",
+        toolName: "wait_for_spawned_tasks",
+        toolInput: {},
+        content: "",
+        timestamp: 1,
+      },
+      {
+        type: "observation",
+        content: "所有子任务已结束，正在触发一次最终综合。",
+        timestamp: 2,
+      },
+    ]);
+
+    expect(shouldPreferLocalDialogContinuationSummary({
+      hasCollaborationGroups: true,
+      continuationState: state,
+    })).toBe(true);
+    expect(getLocalDialogContinuationSummaryLabel(state.phase)).toBe("汇总子任务结果");
   });
 
   it("hides internal planning outlines from the local streaming bubble", () => {

@@ -39,7 +39,9 @@ describe("resolveTeamModelConfig", () => {
     globalThis.fetch = mocks.fetch as typeof fetch;
     mocks.getAuthState.mockReturnValue({
       token: "token",
+      tokenUpdatedAt: Date.now(),
       refreshToken: "refresh-token",
+      isLoggedIn: true,
       login: mocks.login,
       logout: mocks.logout,
     });
@@ -57,7 +59,9 @@ describe("resolveTeamModelConfig", () => {
     });
     mocks.getAuthState.mockReturnValueOnce({
       token: "session-token",
+      tokenUpdatedAt: Date.now(),
       refreshToken: "refresh-token",
+      isLoggedIn: true,
       login: mocks.login,
       logout: mocks.logout,
     });
@@ -209,10 +213,59 @@ describe("resolveTeamModelConfig", () => {
     );
   });
 
+  it("pre-refreshes stale managed-auth tokens before the first AI request", async () => {
+    mocks.fetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        access_token: "prewarmed-token",
+        refresh_token: "prewarmed-refresh-token",
+        user: { id: "user-1" },
+      }),
+    });
+
+    mocks.getAuthState.mockReturnValue({
+      token: "stale-token",
+      tokenUpdatedAt: Date.now() - 21 * 60 * 1000,
+      refreshToken: "refresh-token",
+      isLoggedIn: true,
+      login: mocks.login,
+      logout: mocks.logout,
+    });
+
+    const config: AIConfig = {
+      base_url: "https://api.openai.com/v1",
+      api_key: "",
+      model: "gpt-5.4",
+      temperature: 0.7,
+      max_tokens: null,
+      enable_advanced_tools: true,
+      system_prompt: "",
+      enable_rag_auto_search: true,
+      enable_native_tools: true,
+      enable_long_term_memory: true,
+      enable_memory_auto_recall: true,
+      enable_memory_auto_save: true,
+      enable_memory_sync: true,
+      source: "platform",
+      protocol: "openai",
+    };
+
+    const runner = vi.fn().mockResolvedValue("ok");
+
+    const result = await withRoutedAIConfig(config, runner);
+
+    expect(result).toBe("ok");
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+    expect(runner).toHaveBeenCalledTimes(1);
+    expect(runner.mock.calls[0]?.[0]?.api_key).toBe("prewarmed-token");
+  });
+
   it("reuses a newer auth-store token before issuing another refresh", async () => {
     const authState = {
       token: "stale-token",
+      tokenUpdatedAt: Date.now(),
       refreshToken: "refresh-token",
+      isLoggedIn: true,
       login: mocks.login,
       logout: mocks.logout,
     };

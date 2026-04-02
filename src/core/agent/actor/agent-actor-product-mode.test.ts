@@ -33,7 +33,12 @@ vi.mock("./actor-middleware", async (importOriginal) => {
 });
 
 vi.mock("@/plugins/builtin/SmartAgent/core/react-agent", () => ({
+  FunctionCallingRequiredError: class FunctionCallingRequiredError extends Error {},
   ReActAgent: class MockReActAgent {
+    listVisibleToolNames() {
+      return [];
+    }
+
     async run() {
       return "done";
     }

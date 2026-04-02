@@ -538,7 +538,7 @@ function RuntimeSessionPreview({
                   {preview.displayLabel || "IM 会话"}
                 </span>
                 <span className="rounded-full bg-sky-500/10 px-2 py-0.5 text-[10px] text-sky-700">
-                  只读预览
+                  当前会话
                 </span>
                 <span className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
                   {getIMRuntimeStatusLabel(preview.status, {

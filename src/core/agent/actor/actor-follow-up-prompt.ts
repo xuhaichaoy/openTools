@@ -46,6 +46,9 @@ function extractStructuredPathCandidates(
 ): string[] {
   const paths: string[] = [];
   for (const task of structuredTasks) {
+    if ((task.structuredRows?.length ?? 0) > 0) {
+      continue;
+    }
     for (const artifact of task.artifacts ?? []) {
       if (artifact.path?.trim()) {
         paths.push(artifact.path.trim());
@@ -63,6 +66,24 @@ function extractStructuredPathCandidates(
   return uniqueNonEmpty(paths);
 }
 
+function summarizeStructuredRowsPreview(task: DialogStructuredSubtaskResult): string | undefined {
+  const rows = task.structuredRows ?? [];
+  if (rows.length === 0) return undefined;
+  return rows
+    .slice(0, 2)
+    .map((row) => {
+      const courseName = String(row["课程名称"] ?? row["courseName"] ?? row["name"] ?? "").trim();
+      const courseIntro = compactPromptText(
+        String(row["课程介绍"] ?? row["courseIntro"] ?? row["description"] ?? "").trim(),
+        48,
+      );
+      if (courseName && courseIntro) return `${courseName}｜${courseIntro}`;
+      return courseName || courseIntro || compactPromptText(Object.values(row).join(" / "), 48);
+    })
+    .filter(Boolean)
+    .join("；");
+}
+
 export function buildStructuredTaskSummaryBlock(
   structuredTasks: readonly DialogStructuredSubtaskResult[],
 ): string {
@@ -73,6 +94,7 @@ export function buildStructuredTaskSummaryBlock(
   const timedOutCount = structuredTasks.filter((task) => task.timeoutReason).length;
   const abortedCount = structuredTasks.filter((task) => task.status === "aborted").length;
   const runningCount = structuredTasks.filter((task) => task.status === "running").length;
+  const structuredRowTaskCount = structuredTasks.filter((task) => (task.structuredRows?.length ?? 0) > 0).length;
   const pathCandidates = extractStructuredPathCandidates(structuredTasks).slice(0, 12);
 
   const headerLines = [
@@ -80,6 +102,9 @@ export function buildStructuredTaskSummaryBlock(
     `- 子任务总数：${structuredTasks.length}`,
     `- 完成：${completedCount}；失败：${failedCount}；中止：${abortedCount}；超时：${timedOutCount}；运行中：${runningCount}`,
     "- 聚合范围：仅允许引用当前 run 关联的结构化结果与 artifacts，禁止回头扫描 Downloads / 历史目录 / 记忆结果。",
+    structuredRowTaskCount > 0
+      ? `- 已有 ${structuredRowTaskCount} 个子任务回传可直接消费的 structured rows；优先使用这些 rows，禁止再次根据路径猜测文件并手动 read_file。`
+      : "",
     pathCandidates.length > 0
       ? `- 产物 / 路径摘要：${pathCandidates.join("、")}`
       : "- 产物 / 路径摘要：暂无可直接抽取的明确路径，请优先引用各子任务终态里的文件路径、验证结论和 blocker。",
@@ -97,6 +122,7 @@ export function buildStructuredTaskSummaryBlock(
       task.terminalError ? `- terminal_error: ${compactPromptText(task.terminalError)}` : "",
       task.resultKind ? `- result_kind: ${task.resultKind}` : "",
       typeof task.rowCount === "number" ? `- row_count: ${task.rowCount}` : "",
+      summarizeStructuredRowsPreview(task) ? `- structured_rows_preview: ${summarizeStructuredRowsPreview(task)}` : "",
       typeof task.sourceItemCount === "number" ? `- source_item_count: ${task.sourceItemCount}` : "",
       task.scopedSourceItems?.length ? `- scoped_source_item_count: ${task.scopedSourceItems.length}` : "",
       task.schemaFields?.length ? `- schema_fields: ${task.schemaFields.join("、")}` : "",
@@ -221,6 +247,7 @@ function renderStructuredTasks(
       task.terminalError ? `- error: ${task.terminalError.slice(0, 320)}` : "",
       task.resultKind ? `- result_kind: ${task.resultKind}` : "",
       typeof task.rowCount === "number" ? `- row_count: ${task.rowCount}` : "",
+      summarizeStructuredRowsPreview(task) ? `- structured_rows_preview: ${summarizeStructuredRowsPreview(task)}` : "",
       typeof task.sourceItemCount === "number" ? `- source_item_count: ${task.sourceItemCount}` : "",
       task.scopedSourceItems?.length ? `- scoped_source_item_count: ${task.scopedSourceItems.length}` : "",
       task.schemaFields?.length ? `- schema_fields: ${task.schemaFields.join("、")}` : "",

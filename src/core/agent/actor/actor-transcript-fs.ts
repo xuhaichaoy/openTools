@@ -12,7 +12,14 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { homeDir, join } from "@tauri-apps/api/path";
-import type { DialogMessage } from "./types";
+import type {
+  DialogMessage,
+  ExecutionPolicy,
+  ThinkingLevel,
+  ToolPolicy,
+} from "./types";
+import type { ToolResultReplacementSnapshot } from "@/core/agent/runtime/tool-result-replacement";
+import type { RuntimeTranscriptMessage } from "@/core/agent/runtime/transcript-messages";
 import {
   emitMessageAdded,
   emitToolCall,
@@ -43,17 +50,53 @@ export interface TranscriptEntry {
   data: Record<string, unknown>;
 }
 
+export interface TranscriptActorResumeMetadata {
+  taskId: string;
+  sessionId: string;
+  agentId: string;
+  agentName: string;
+  createdAt: number;
+  updatedAt?: number;
+  description?: string;
+  subagentType?: string;
+  parentActorId?: string;
+  model?: string;
+  originalPrompt?: string;
+  lastMessage?: string;
+  outputFile?: string;
+  pendingMessages?: string[];
+  sessionHistory?: Array<{
+    role: "user" | "assistant";
+    content: string;
+    timestamp: number;
+  }>;
+  transcriptMessages?: RuntimeTranscriptMessage[];
+  systemPromptOverride?: string;
+  workspace?: string;
+  contextTokens?: number;
+  thinkingLevel?: ThinkingLevel;
+  toolResultReplacementSnapshot?: ToolResultReplacementSnapshot;
+  maxIterations?: number;
+  toolPolicy?: ToolPolicy;
+  executionPolicy?: ExecutionPolicy;
+  timeoutSeconds?: number;
+  idleLeaseSeconds?: number;
+}
+
+export interface TranscriptActorConfig {
+  id: string;
+  name: string;
+  model?: string;
+  maxIterations?: number;
+  resumeMetadata?: TranscriptActorResumeMetadata;
+}
+
 export interface TranscriptSession {
   sessionId: string;
   createdAt: number;
   updatedAt: number;
   entries: TranscriptEntry[];
-  actorConfigs: Array<{
-    id: string;
-    name: string;
-    model?: string;
-    maxIterations?: number;
-  }>;
+  actorConfigs: TranscriptActorConfig[];
 }
 
 export interface ArchivedSession {
@@ -188,6 +231,365 @@ function stringifyJsonl<T>(items: T[]): string {
   return items.map((item) => JSON.stringify(item)).join("\n");
 }
 
+function normalizeResumeMetadata(
+  value: unknown,
+): TranscriptActorResumeMetadata | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  const taskId = typeof record.taskId === "string" ? record.taskId.trim() : "";
+  const sessionId = typeof record.sessionId === "string" ? record.sessionId.trim() : "";
+  const agentId = typeof record.agentId === "string" ? record.agentId.trim() : "";
+  const agentName = typeof record.agentName === "string"
+    ? record.agentName.trim()
+    : agentId;
+  if (!taskId || !sessionId || !agentId || !agentName) return undefined;
+
+  const createdAt = typeof record.createdAt === "number" && Number.isFinite(record.createdAt)
+    ? record.createdAt
+    : Date.now();
+  const updatedAt = typeof record.updatedAt === "number" && Number.isFinite(record.updatedAt)
+    ? record.updatedAt
+    : undefined;
+  const pendingMessages = Array.isArray(record.pendingMessages)
+    ? record.pendingMessages
+      .map((item) => String(item ?? "").trim())
+      .filter(Boolean)
+    : undefined;
+  const sessionHistory = Array.isArray(record.sessionHistory)
+    ? record.sessionHistory
+      .map((item) => {
+        if (!item || typeof item !== "object") return null;
+        const entry = item as Record<string, unknown>;
+        const role: "user" | "assistant" | null = entry.role === "assistant"
+          ? "assistant"
+          : entry.role === "user"
+            ? "user"
+            : null;
+        const content = typeof entry.content === "string" ? entry.content.trim() : "";
+        if (!role || !content) return null;
+        return {
+          role,
+          content,
+          timestamp: typeof entry.timestamp === "number" && Number.isFinite(entry.timestamp)
+            ? entry.timestamp
+            : Date.now(),
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => Boolean(item))
+    : undefined;
+  const transcriptMessages = Array.isArray(record.transcriptMessages)
+    ? record.transcriptMessages
+      .map((item) => {
+        if (!item || typeof item !== "object") return null;
+        const entry = item as Record<string, unknown>;
+        const role = entry.role === "assistant" || entry.role === "user" || entry.role === "tool"
+          ? entry.role
+          : null;
+        if (!role) return null;
+        const content = entry.content == null ? null : String(entry.content);
+        const images = Array.isArray(entry.images)
+          ? entry.images.map((image) => String(image ?? "").trim()).filter(Boolean)
+          : undefined;
+        const toolCalls = Array.isArray(entry.tool_calls)
+          ? entry.tool_calls
+            .map((toolCall) => {
+              if (!toolCall || typeof toolCall !== "object") return null;
+              const call = toolCall as Record<string, unknown>;
+              const id = String(call.id ?? "").trim();
+              const type = String(call.type ?? "function").trim() || "function";
+              const fn = call.function && typeof call.function === "object"
+                ? call.function as Record<string, unknown>
+                : null;
+              const name = String(fn?.name ?? "").trim();
+              const args = String(fn?.arguments ?? "").trim();
+              if (!id || !name) return null;
+              return {
+                id,
+                type,
+                function: {
+                  name,
+                  arguments: args,
+                },
+              };
+            })
+            .filter((toolCall): toolCall is NonNullable<typeof toolCall> => Boolean(toolCall))
+          : undefined;
+        const toolCallId = typeof entry.tool_call_id === "string" && entry.tool_call_id.trim()
+          ? entry.tool_call_id.trim()
+          : undefined;
+        const name = typeof entry.name === "string" && entry.name.trim()
+          ? entry.name.trim()
+          : undefined;
+        return {
+          role,
+          content,
+          ...(images?.length ? { images } : {}),
+          ...(toolCalls?.length ? { tool_calls: toolCalls } : {}),
+          ...(toolCallId ? { tool_call_id: toolCallId } : {}),
+          ...(name ? { name } : {}),
+        } satisfies RuntimeTranscriptMessage;
+      })
+      .filter((item): item is NonNullable<typeof item> => Boolean(item))
+    : undefined;
+  const toolPolicy = record.toolPolicy && typeof record.toolPolicy === "object"
+    ? {
+        ...(Array.isArray((record.toolPolicy as Record<string, unknown>).allow)
+          ? {
+              allow: ((record.toolPolicy as Record<string, unknown>).allow as unknown[])
+                .map((item) => String(item ?? "").trim())
+                .filter(Boolean),
+            }
+          : {}),
+        ...(Array.isArray((record.toolPolicy as Record<string, unknown>).deny)
+          ? {
+              deny: ((record.toolPolicy as Record<string, unknown>).deny as unknown[])
+                .map((item) => String(item ?? "").trim())
+                .filter(Boolean),
+            }
+          : {}),
+      } satisfies ToolPolicy
+    : undefined;
+  const executionPolicy = record.executionPolicy && typeof record.executionPolicy === "object"
+    ? {
+        ...((record.executionPolicy as Record<string, unknown>).accessMode
+          && typeof (record.executionPolicy as Record<string, unknown>).accessMode === "string"
+          ? {
+              accessMode: (record.executionPolicy as Record<string, unknown>).accessMode as ExecutionPolicy["accessMode"],
+            }
+          : {}),
+        ...((record.executionPolicy as Record<string, unknown>).approvalMode
+          && typeof (record.executionPolicy as Record<string, unknown>).approvalMode === "string"
+          ? {
+              approvalMode: (record.executionPolicy as Record<string, unknown>).approvalMode as ExecutionPolicy["approvalMode"],
+            }
+          : {}),
+      } satisfies ExecutionPolicy
+    : undefined;
+  const toolResultReplacementSnapshot = record.toolResultReplacementSnapshot
+    && typeof record.toolResultReplacementSnapshot === "object"
+    ? (() => {
+        const snapshot = record.toolResultReplacementSnapshot as Record<string, unknown>;
+        const seenToolUseIds = Array.isArray(snapshot.seenToolUseIds)
+          ? snapshot.seenToolUseIds
+            .map((item) => String(item ?? "").trim())
+            .filter(Boolean)
+          : [];
+        const replacements = Array.isArray(snapshot.replacements)
+          ? snapshot.replacements
+            .map((item) => {
+              if (!item || typeof item !== "object") return null;
+              const entry = item as Record<string, unknown>;
+              const toolUseId = String(entry.toolUseId ?? "").trim();
+              const replacement = String(entry.replacement ?? "");
+              if (!toolUseId || !replacement) return null;
+              return {
+                kind: "tool-result" as const,
+                toolUseId,
+                replacement,
+              };
+            })
+            .filter((item): item is NonNullable<typeof item> => Boolean(item))
+          : [];
+        if (seenToolUseIds.length === 0 && replacements.length === 0) return undefined;
+        return { seenToolUseIds, replacements };
+      })()
+    : undefined;
+
+  return {
+    taskId,
+    sessionId,
+    agentId,
+    agentName,
+    createdAt,
+    ...(updatedAt !== undefined ? { updatedAt } : {}),
+    ...(typeof record.description === "string" && record.description.trim()
+      ? { description: record.description.trim() }
+      : {}),
+    ...(typeof record.subagentType === "string" && record.subagentType.trim()
+      ? { subagentType: record.subagentType.trim() }
+      : {}),
+    ...(typeof record.parentActorId === "string" && record.parentActorId.trim()
+      ? { parentActorId: record.parentActorId.trim() }
+      : {}),
+    ...(typeof record.model === "string" && record.model.trim()
+      ? { model: record.model.trim() }
+      : {}),
+    ...(typeof record.originalPrompt === "string" && record.originalPrompt.trim()
+      ? { originalPrompt: record.originalPrompt }
+      : {}),
+    ...(typeof record.lastMessage === "string" && record.lastMessage.trim()
+      ? { lastMessage: record.lastMessage }
+      : {}),
+    ...(typeof record.outputFile === "string" && record.outputFile.trim()
+      ? { outputFile: record.outputFile.trim() }
+      : {}),
+    ...(pendingMessages?.length ? { pendingMessages } : {}),
+    ...(sessionHistory?.length ? { sessionHistory } : {}),
+    ...(transcriptMessages?.length ? { transcriptMessages } : {}),
+    ...(typeof record.systemPromptOverride === "string" && record.systemPromptOverride.trim()
+      ? { systemPromptOverride: record.systemPromptOverride }
+      : {}),
+    ...(typeof record.workspace === "string" && record.workspace.trim()
+      ? { workspace: record.workspace.trim() }
+      : {}),
+    ...(typeof record.contextTokens === "number" && Number.isFinite(record.contextTokens)
+      ? { contextTokens: record.contextTokens }
+      : {}),
+    ...(typeof record.thinkingLevel === "string" && record.thinkingLevel.trim()
+      ? { thinkingLevel: record.thinkingLevel as ThinkingLevel }
+      : {}),
+    ...(toolResultReplacementSnapshot ? { toolResultReplacementSnapshot } : {}),
+    ...(typeof record.maxIterations === "number" && Number.isFinite(record.maxIterations)
+      ? { maxIterations: record.maxIterations }
+      : {}),
+    ...(toolPolicy && (toolPolicy.allow?.length || toolPolicy.deny?.length)
+      ? { toolPolicy }
+      : {}),
+    ...(executionPolicy && (executionPolicy.accessMode || executionPolicy.approvalMode)
+      ? { executionPolicy }
+      : {}),
+    ...(typeof record.timeoutSeconds === "number" && Number.isFinite(record.timeoutSeconds)
+      ? { timeoutSeconds: record.timeoutSeconds }
+      : {}),
+    ...(typeof record.idleLeaseSeconds === "number" && Number.isFinite(record.idleLeaseSeconds)
+      ? { idleLeaseSeconds: record.idleLeaseSeconds }
+      : {}),
+  };
+}
+
+function cloneResumeMetadata(
+  metadata: TranscriptActorResumeMetadata,
+): TranscriptActorResumeMetadata {
+  return {
+    ...metadata,
+    ...(metadata.pendingMessages ? { pendingMessages: [...metadata.pendingMessages] } : {}),
+    ...(metadata.sessionHistory
+      ? {
+          sessionHistory: metadata.sessionHistory.map((entry) => ({ ...entry })),
+        }
+      : {}),
+    ...(metadata.transcriptMessages
+      ? {
+          transcriptMessages: metadata.transcriptMessages.map((message) => ({
+            role: message.role,
+            content: message.content,
+            ...(message.images?.length ? { images: [...message.images] } : {}),
+            ...(message.tool_calls?.length
+              ? {
+                  tool_calls: message.tool_calls.map((toolCall) => ({
+                    ...toolCall,
+                    function: {
+                      ...toolCall.function,
+                    },
+                  })),
+                }
+              : {}),
+            ...(message.tool_call_id ? { tool_call_id: message.tool_call_id } : {}),
+            ...(message.name ? { name: message.name } : {}),
+          })),
+        }
+      : {}),
+    ...(metadata.toolPolicy
+      ? {
+          toolPolicy: {
+            ...(metadata.toolPolicy.allow ? { allow: [...metadata.toolPolicy.allow] } : {}),
+            ...(metadata.toolPolicy.deny ? { deny: [...metadata.toolPolicy.deny] } : {}),
+          },
+        }
+      : {}),
+    ...(metadata.executionPolicy ? { executionPolicy: { ...metadata.executionPolicy } } : {}),
+    ...(metadata.toolResultReplacementSnapshot
+      ? {
+          toolResultReplacementSnapshot: {
+            seenToolUseIds: [...metadata.toolResultReplacementSnapshot.seenToolUseIds],
+            replacements: metadata.toolResultReplacementSnapshot.replacements.map((entry) => ({ ...entry })),
+          },
+        }
+      : {}),
+  };
+}
+
+function normalizeActorConfig(value: unknown): TranscriptActorConfig | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const id = typeof record.id === "string" ? record.id.trim() : "";
+  const name = typeof record.name === "string" ? record.name.trim() : "";
+  if (!id || !name) return null;
+
+  const resumeMetadata = normalizeResumeMetadata(record.resumeMetadata);
+  return {
+    id,
+    name,
+    ...(typeof record.model === "string" && record.model.trim()
+      ? { model: record.model.trim() }
+      : {}),
+    ...(typeof record.maxIterations === "number" && Number.isFinite(record.maxIterations)
+      ? { maxIterations: record.maxIterations }
+      : {}),
+    ...(resumeMetadata ? { resumeMetadata } : {}),
+  };
+}
+
+function normalizeActorConfigs(value: unknown): TranscriptActorConfig[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => normalizeActorConfig(entry))
+    .filter((entry): entry is TranscriptActorConfig => Boolean(entry));
+}
+
+function normalizeSessionRecord(
+  sessionId: string,
+  value: unknown,
+): TranscriptSession {
+  if (!value || typeof value !== "object") {
+    return {
+      sessionId,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      entries: [],
+      actorConfigs: [],
+    };
+  }
+
+  const record = value as Record<string, unknown>;
+  const createdAt = typeof record.createdAt === "number" && Number.isFinite(record.createdAt)
+    ? record.createdAt
+    : Date.now();
+  const updatedAt = typeof record.updatedAt === "number" && Number.isFinite(record.updatedAt)
+    ? record.updatedAt
+    : createdAt;
+  const entries = Array.isArray(record.entries)
+    ? record.entries.filter((entry): entry is TranscriptEntry => Boolean(entry && typeof entry === "object"))
+    : [];
+
+  return {
+    sessionId: typeof record.sessionId === "string" && record.sessionId.trim()
+      ? record.sessionId.trim()
+      : sessionId,
+    createdAt,
+    updatedAt,
+    entries,
+    actorConfigs: normalizeActorConfigs(record.actorConfigs),
+  };
+}
+
+function matchResumeIdentifierScore(
+  actor: TranscriptActorConfig,
+  identifier: string,
+): number {
+  const normalized = identifier.trim();
+  if (!normalized) return 0;
+  if (actor.id === normalized) return 500;
+  if (actor.resumeMetadata?.taskId === normalized) return 450;
+  if (actor.resumeMetadata?.agentId === normalized) return 400;
+  if (actor.name === normalized) return 300;
+
+  const lowered = normalized.toLowerCase();
+  if (actor.name.trim().toLowerCase() === lowered) return 200;
+  if (actor.resumeMetadata?.agentName?.trim().toLowerCase() === lowered) return 180;
+  return 0;
+}
+
 // ── 完整 Session 读写 ──
 
 async function loadSessionFromDisk(
@@ -208,7 +610,7 @@ async function loadSessionFromDisk(
 
   try {
     // 尝试解析为完整的 TranscriptSession JSON
-    return JSON.parse(content) as TranscriptSession;
+    return normalizeSessionRecord(sessionId, JSON.parse(content));
   } catch {
     // 如果不是完整 JSON，可能是旧格式或损坏，尝试 JSONL 解析
     const lines = parseJsonl<TranscriptEntry>(content);
@@ -553,9 +955,98 @@ export async function updateTranscriptActors(
   actors: Array<{ id: string; name: string; model?: string }>,
 ): Promise<void> {
   const session = await loadTranscriptSession(sessionId);
-  session.actorConfigs = actors;
+  const existingById = new Map(
+    session.actorConfigs.map((actor) => [actor.id, actor] as const),
+  );
+  const activeActorIds = new Set(actors.map((actor) => actor.id));
+  const nextActors: TranscriptActorConfig[] = actors.map((actor) => {
+    const existing = existingById.get(actor.id);
+    return {
+      ...(existing ?? {}),
+      id: actor.id,
+      name: actor.name,
+      ...(actor.model !== undefined
+        ? { model: actor.model }
+        : existing?.model !== undefined
+          ? { model: existing.model }
+          : {}),
+    };
+  });
+  const preservedResumeOnlyActors = session.actorConfigs.filter((actor) =>
+    !activeActorIds.has(actor.id) && actor.resumeMetadata,
+  );
+  session.actorConfigs = [...nextActors, ...preservedResumeOnlyActors];
+  session.updatedAt = Date.now();
   await saveSessionToDisk(session);
-  sessionCache.delete(sessionId);
+  setCached(sessionCache, sessionId, session, DEFAULT_CACHE_TTL_MS);
+}
+
+export async function persistTranscriptActorResumeMetadata(
+  sessionId: string,
+  actorId: string,
+  metadata: TranscriptActorResumeMetadata,
+): Promise<void> {
+  const normalizedActorId = String(actorId ?? "").trim() || metadata.agentId.trim();
+  const normalizedMetadata = normalizeResumeMetadata({
+    ...metadata,
+    agentId: normalizedActorId,
+    updatedAt: Date.now(),
+  });
+  if (!normalizedActorId || !normalizedMetadata) return;
+
+  const session = await loadTranscriptSession(sessionId);
+  const existingIndex = session.actorConfigs.findIndex((actor) => actor.id === normalizedActorId);
+  const existingActor = existingIndex >= 0 ? session.actorConfigs[existingIndex] : undefined;
+  const nextActor: TranscriptActorConfig = {
+    ...(existingActor ?? {}),
+    id: normalizedActorId,
+    name: normalizedMetadata.agentName || existingActor?.name || normalizedActorId,
+    ...(normalizedMetadata.model !== undefined
+      ? { model: normalizedMetadata.model }
+      : existingActor?.model !== undefined
+        ? { model: existingActor.model }
+        : {}),
+    resumeMetadata: cloneResumeMetadata(normalizedMetadata),
+  };
+
+  if (existingIndex >= 0) {
+    session.actorConfigs.splice(existingIndex, 1, nextActor);
+  } else {
+    session.actorConfigs.push(nextActor);
+  }
+  session.updatedAt = Date.now();
+  await saveSessionToDisk(session);
+  setCached(sessionCache, sessionId, session, DEFAULT_CACHE_TTL_MS);
+}
+
+export async function readTranscriptActorResumeMetadata(
+  sessionId: string,
+  identifier: string,
+): Promise<TranscriptActorResumeMetadata | null> {
+  const normalizedIdentifier = String(identifier ?? "").trim();
+  if (!normalizedIdentifier) return null;
+
+  const session = await loadTranscriptSession(sessionId);
+  const matchedActor = session.actorConfigs
+    .map((actor) => ({
+      actor,
+      score: matchResumeIdentifierScore(actor, normalizedIdentifier),
+    }))
+    .filter((entry) => entry.score > 0 && entry.actor.resumeMetadata)
+    .sort((left, right) => {
+      if (right.score !== left.score) return right.score - left.score;
+      const leftUpdatedAt = left.actor.resumeMetadata?.updatedAt
+        ?? left.actor.resumeMetadata?.createdAt
+        ?? 0;
+      const rightUpdatedAt = right.actor.resumeMetadata?.updatedAt
+        ?? right.actor.resumeMetadata?.createdAt
+        ?? 0;
+      return rightUpdatedAt - leftUpdatedAt;
+    })[0]?.actor;
+
+  return matchedActor?.resumeMetadata
+    ? cloneResumeMetadata(matchedActor.resumeMetadata)
+    : null;
 }
 
 // ── 辅助函数 ──

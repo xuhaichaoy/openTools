@@ -118,6 +118,211 @@ describe("createActorCommunicationTools", () => {
     );
   });
 
+  it("auto-enables implicit fork for spawn_task when the named target does not exist", async () => {
+    const spawnTask = vi.fn(() => ({
+      runId: "run-implicit-fork-1",
+      mode: "run" as const,
+      label: "课程整理",
+      targetActorId: "spawned-course-worker",
+      roleBoundary: "executor" as const,
+      workerProfileId: "content_worker" as const,
+    }));
+
+    const system = {
+      get: (id: string) => {
+        if (id === "coordinator") return { id, role: { name: "Coordinator" } };
+        return undefined;
+      },
+      getAll: () => [],
+      spawnTask,
+    } as any;
+
+    const tools = createActorCommunicationTools("coordinator", system);
+    const spawnTool = tools.find((tool) => tool.name === "spawn_task");
+
+    expect(spawnTool).toBeTruthy();
+    if (!spawnTool) return;
+
+    await spawnTool.execute({
+      target_agent: "课程整理员",
+      task: "基于当前附件整理课程清单并返回结构化结果",
+      worker_profile: "content_worker",
+    });
+
+    expect(spawnTask).toHaveBeenCalledWith(
+      "coordinator",
+      "课程整理员",
+      "基于当前附件整理课程清单并返回结构化结果",
+      expect.objectContaining({
+        createIfMissing: true,
+        overrides: expect.objectContaining({
+          workerProfileId: "content_worker",
+        }),
+      }),
+    );
+  });
+
+  it("applies builtin specialized-agent defaults for spawn_task", async () => {
+    const spawnTask = vi.fn(() => ({
+      runId: "run-builtin-1",
+      mode: "run" as const,
+      label: "独立验证",
+      targetActorId: "spawned-verifier",
+      roleBoundary: "validator" as const,
+      workerProfileId: "validator_worker" as const,
+    }));
+
+    const system = {
+      get: (id: string) => {
+        if (id === "coordinator") return { id, role: { name: "Coordinator" } };
+        if (id === "spawned-verifier") return { id, role: { name: "Verifier" } };
+        return undefined;
+      },
+      getAll: () => [],
+      spawnTask,
+    } as any;
+
+    const tools = createActorCommunicationTools("coordinator", system);
+    const spawnTool = tools.find((tool) => tool.name === "spawn_task");
+
+    expect(spawnTool).toBeTruthy();
+    if (!spawnTool) return;
+
+    const result = await spawnTool.execute({
+      task: "独立验证本轮改动是否真的修复了报错，并给出回归结论",
+      label: "独立验证",
+      builtin_agent: "verification_agent",
+    });
+
+    expect(spawnTask).toHaveBeenCalledWith(
+      "coordinator",
+      "Verifier",
+      "独立验证本轮改动是否真的修复了报错，并给出回归结论",
+      expect.objectContaining({
+        label: "独立验证",
+        createIfMissing: true,
+        roleBoundary: "validator",
+        createChildSpec: expect.objectContaining({
+          description: expect.stringContaining("独立验证实现结果"),
+          capabilities: expect.arrayContaining(["testing", "debugging"]),
+        }),
+        overrides: expect.objectContaining({
+          workerProfileId: "validator_worker",
+          maxIterations: 18,
+          thinkingLevel: "medium",
+          systemPromptAppend: expect.stringContaining("built-in verification agent"),
+        }),
+      }),
+    );
+    expect(result).toEqual(expect.objectContaining({
+      spawned: true,
+      builtin_agent: "verification_agent",
+      worker_profile: "validator_worker",
+      role_boundary: "validator",
+    }));
+  });
+
+  it("applies builtin spreadsheet-generation defaults for spawn_task", async () => {
+    const spawnTask = vi.fn(() => ({
+      runId: "run-builtin-sheet-1",
+      mode: "run" as const,
+      label: "生成表格行",
+      targetActorId: "spawned-sheet-generator",
+      roleBoundary: "executor" as const,
+      workerProfileId: "spreadsheet_worker" as const,
+    }));
+
+    const system = {
+      get: (id: string) => {
+        if (id === "coordinator") return { id, role: { name: "Coordinator" } };
+        if (id === "spawned-sheet-generator") return { id, role: { name: "Spreadsheet Generator" } };
+        return undefined;
+      },
+      getAll: () => [],
+      spawnTask,
+    } as any;
+
+    const tools = createActorCommunicationTools("coordinator", system);
+    const spawnTool = tools.find((tool) => tool.name === "spawn_task");
+
+    expect(spawnTool).toBeTruthy();
+    if (!spawnTool) return;
+
+    const result = await spawnTool.execute({
+      task: "把候选主题整理成结构化 rows，供主线程统一汇总",
+      label: "生成表格行",
+      builtin_agent: "spreadsheet_generation_agent",
+    });
+
+    expect(spawnTask).toHaveBeenCalledWith(
+      "coordinator",
+      "Spreadsheet Generator",
+      "把候选主题整理成结构化 rows，供主线程统一汇总",
+      expect.objectContaining({
+        label: "生成表格行",
+        createIfMissing: true,
+        roleBoundary: "executor",
+        createChildSpec: expect.objectContaining({
+          description: expect.stringContaining("结构化表格 rows"),
+          capabilities: expect.arrayContaining(["data_analysis", "synthesis"]),
+        }),
+        overrides: expect.objectContaining({
+          workerProfileId: "spreadsheet_worker",
+          resultContract: "inline_structured_result",
+          maxIterations: 20,
+          thinkingLevel: "medium",
+          systemPromptAppend: expect.stringContaining("built-in spreadsheet generation agent"),
+        }),
+      }),
+    );
+    expect(result).toEqual(expect.objectContaining({
+      spawned: true,
+      builtin_agent: "spreadsheet_generation_agent",
+      worker_profile: "spreadsheet_worker",
+      role_boundary: "executor",
+    }));
+  });
+
+  it("rejects aggregate workbook delegation under single_workbook contracts", async () => {
+    const spawnTask = vi.fn();
+    const system = {
+      get: (id: string) => {
+        if (id === "coordinator") return { id, role: { name: "Coordinator" } };
+        return undefined;
+      },
+      getAll: () => [],
+      spawnTask,
+      getActiveExecutionContract: () => ({
+        contractId: "contract-sheet-1",
+        structuredDeliveryManifest: {
+          source: "strategy" as const,
+          deliveryContract: "spreadsheet" as const,
+          parentContract: "single_workbook" as const,
+          requiresSpreadsheetOutput: true,
+          applyInitialIsolation: true,
+          adapterEnabled: false,
+        },
+      }),
+    } as any;
+
+    const tools = createActorCommunicationTools("coordinator", system);
+    const spawnTool = tools.find((tool) => tool.name === "spawn_task");
+
+    expect(spawnTool).toBeTruthy();
+    if (!spawnTool) return;
+
+    const result = await spawnTool.execute({
+      task: "整合所有 AI 培训课程并生成 Excel 文件，收集全部子任务结果后输出最终工作簿",
+      worker_profile: "spreadsheet_worker",
+    });
+
+    expect(spawnTask).not.toHaveBeenCalled();
+    expect(result).toEqual(expect.objectContaining({
+      spawned: false,
+      error: expect.stringContaining("禁止再委派"),
+    }));
+  });
+
   it("derives a temporary agent target from the label when create_if_missing omits target_agent", async () => {
     const spawnTask = vi.fn(() => ({
       runId: "run-derive-target-1",
@@ -265,6 +470,63 @@ describe("createActorCommunicationTools", () => {
       delegated: true,
       interface: "delegate_task",
       task_id: "run-delegate-1",
+    }));
+  });
+
+  it("passes builtin specialized-agent defaults through delegate_task", async () => {
+    const spawnTask = vi.fn(() => ({
+      runId: "run-delegate-plan-1",
+      mode: "run" as const,
+      label: "先出执行计划",
+      targetActorId: "spawned-planner",
+      roleBoundary: "general" as const,
+      workerProfileId: "general_worker" as const,
+    }));
+
+    const system = {
+      get: (id: string) => {
+        if (id === "coordinator") return { id, role: { name: "Coordinator" } };
+        if (id === "spawned-planner") return { id, role: { name: "Planner" } };
+        return undefined;
+      },
+      getAll: () => [],
+      spawnTask,
+    } as any;
+
+    const tools = createActorCommunicationTools("coordinator", system);
+    const delegateTool = tools.find((tool) => tool.name === "delegate_task");
+
+    expect(delegateTool).toBeTruthy();
+    if (!delegateTool) return;
+
+    const result = await delegateTool.execute({
+      goal: "先把这轮改动拆成执行顺序、风险和依赖，再告诉我建议的 next step",
+      label: "先出执行计划",
+      builtin_agent: "plan_agent",
+    });
+
+    expect(spawnTask).toHaveBeenCalledWith(
+      "coordinator",
+      "Planner",
+      expect.stringContaining("## 验收标准"),
+      expect.objectContaining({
+        roleBoundary: "general",
+        createIfMissing: true,
+        createChildSpec: expect.objectContaining({
+          description: expect.stringContaining("拆解目标"),
+        }),
+        overrides: expect.objectContaining({
+          workerProfileId: "general_worker",
+          maxIterations: 14,
+          thinkingLevel: "high",
+          systemPromptAppend: expect.stringContaining("built-in plan agent"),
+        }),
+      }),
+    );
+    expect(result).toEqual(expect.objectContaining({
+      delegated: true,
+      builtin_agent: "plan_agent",
+      task_id: "run-delegate-plan-1",
     }));
   });
 
@@ -510,17 +772,14 @@ describe("createActorCommunicationTools", () => {
     }));
   });
 
-  it("retries delegate_task with create_if_missing when target is missing", async () => {
-    const spawnTask = vi
-      .fn()
-      .mockReturnValueOnce({ error: "Target not found" })
-      .mockReturnValueOnce({
-        runId: "run-delegate-retry",
-        mode: "run" as const,
-        label: "AI 应用开发课程组",
-        targetActorId: "ai-app-course-worker",
-        roleBoundary: "executor" as const,
-      });
+  it("auto-enables delegate_task implicit fork when target is missing", async () => {
+    const spawnTask = vi.fn().mockReturnValue({
+      runId: "run-delegate-retry",
+      mode: "run" as const,
+      label: "AI 应用开发课程组",
+      targetActorId: "ai-app-course-worker",
+      roleBoundary: "executor" as const,
+    });
 
     const system = {
       get: (id: string) => {
@@ -543,17 +802,8 @@ describe("createActorCommunicationTools", () => {
       target_agent: "AI 应用开发课程组",
     });
 
-    expect(spawnTask).toHaveBeenNthCalledWith(
-      1,
-      "coordinator",
-      "AI 应用开发课程组",
-      expect.stringContaining("## 任务目标"),
-      expect.objectContaining({
-        createIfMissing: false,
-      }),
-    );
-    expect(spawnTask).toHaveBeenNthCalledWith(
-      2,
+    expect(spawnTask).toHaveBeenCalledTimes(1);
+    expect(spawnTask).toHaveBeenCalledWith(
       "coordinator",
       "AI 应用开发课程组",
       expect.stringContaining("## 任务目标"),
@@ -622,7 +872,10 @@ describe("createActorCommunicationTools", () => {
     }));
 
     const system = {
-      get: (id: string) => ({ id, role: { name: id === "coordinator" ? "Coordinator" : "Executor" } }),
+      get: (id: string) => {
+        if (id === "coordinator") return { id, role: { name: "Coordinator" } };
+        return undefined;
+      },
       getAll: () => [],
       spawnTask,
       getActiveSpawnedTasks: () => ([
@@ -670,6 +923,72 @@ describe("createActorCommunicationTools", () => {
     }));
   });
 
+  it("auto-queues implicit content-worker spawn_task requests when concurrency is full", async () => {
+    const spawnTask = vi.fn();
+    const enqueueDeferredSpawnTask = vi.fn(() => ({
+      id: "queued-content-1",
+      profile: "executor" as const,
+      roleBoundary: "executor" as const,
+      mode: "run" as const,
+      overrides: {
+        workerProfileId: "content_worker" as const,
+      },
+    }));
+
+    const system = {
+      get: (id: string) => {
+        if (id === "coordinator") return { id, role: { name: "Coordinator" } };
+        return undefined;
+      },
+      getAll: () => [],
+      spawnTask,
+      getActiveSpawnedTasks: () => ([
+        { runId: "run-a" },
+        { runId: "run-b" },
+        { runId: "run-c" },
+      ]),
+      getPendingDeferredSpawnTaskCount: vi.fn()
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(1),
+      getDialogSpawnConcurrencyLimit: () => 3,
+      enqueueDeferredSpawnTask,
+    } as any;
+
+    const tools = createActorCommunicationTools("coordinator", system);
+    const spawnTool = tools.find((tool) => tool.name === "spawn_task");
+
+    expect(spawnTool).toBeTruthy();
+    if (!spawnTool) return;
+
+    const result = await spawnTool.execute({
+      target_agent: "课程整理员",
+      task: "根据 source shard 产出课程 rows",
+      worker_profile: "content_worker",
+    });
+
+    expect(enqueueDeferredSpawnTask).toHaveBeenCalledWith(
+      "coordinator",
+      "课程整理员",
+      "根据 source shard 产出课程 rows",
+      expect.objectContaining({
+        createIfMissing: true,
+        overrides: expect.objectContaining({
+          workerProfileId: "content_worker",
+        }),
+      }),
+    );
+    expect(spawnTask).not.toHaveBeenCalled();
+    expect(result).toEqual(expect.objectContaining({
+      spawned: false,
+      queued: true,
+      dispatch_status: "queued",
+      queue_id: "queued-content-1",
+      pending_dispatch_count: 1,
+      worker_profile: "content_worker",
+      role_boundary: "executor",
+    }));
+  });
+
   it("returns structured runtime state for wait_for_spawned_tasks", async () => {
     const buildWaitForSpawnedTasksResult = vi.fn(() => ({
       wait_complete: true,
@@ -712,7 +1031,12 @@ describe("createActorCommunicationTools", () => {
     }));
 
     const system = {
-      get: (id: string) => ({ id, role: { name: id === "coordinator" ? "Coordinator" : id }, status: "running" }),
+      get: (id: string) => ({
+        id,
+        role: { name: id === "coordinator" ? "Coordinator" : id },
+        status: "running",
+        currentTask: { id: "task-wait-1" },
+      }),
       getAll: () => [],
       buildWaitForSpawnedTasksResult,
     } as any;
@@ -725,7 +1049,9 @@ describe("createActorCommunicationTools", () => {
 
     const result = await waitTool.execute({});
 
-    expect(buildWaitForSpawnedTasksResult).toHaveBeenCalledWith("coordinator");
+    expect(buildWaitForSpawnedTasksResult).toHaveBeenCalledWith("coordinator", {
+      ownerTaskId: "task-wait-1",
+    });
     expect(result).toEqual(expect.objectContaining({
       wait_complete: true,
       pending_count: 0,
@@ -788,7 +1114,12 @@ describe("createActorCommunicationTools", () => {
     const waitForSpawnedTaskUpdate = vi.fn(async () => ({ reason: "task_update" as const }));
 
     const system = {
-      get: (id: string) => ({ id, role: { name: "Coordinator" }, status: "running" }),
+      get: (id: string) => ({
+        id,
+        role: { name: "Coordinator" },
+        status: "running",
+        currentTask: { id: "task-wait-2" },
+      }),
       getAll: () => [],
       buildWaitForSpawnedTasksResult,
       waitForSpawnedTaskUpdate,
@@ -1074,5 +1405,242 @@ describe("createActorCommunicationTools", () => {
         attachments: [{ path: "/Users/haichao/Downloads/file", fileName: "file" }],
       }),
     );
+  });
+
+  it("creates a named team through create_team", async () => {
+    const createTeam = vi.fn(() => ({
+      created: true,
+      updated: false,
+      team: {
+        id: "team-delivery",
+        name: "Delivery Team",
+        defaultBackendId: "in_process",
+        teammates: [
+          { id: "mate-specialist", name: "Specialist", actorId: "specialist", backendId: "in_process" },
+          { id: "mate-reviewer", name: "Reviewer", actorId: "reviewer", backendId: "in_process" },
+        ],
+      },
+    }));
+
+    const system = {
+      get: (id: string) => ({ id, role: { name: id === "coordinator" ? "Coordinator" : id } }),
+      getAll: () => [],
+      getCoordinatorId: () => "coordinator",
+      createTeam,
+      getBackendRegistry: () => ({
+        list: () => [
+          { id: "in_process", kind: "in_process", label: "In-Process Actor Runtime", available: true },
+          { id: "worktree", kind: "worktree", label: "Worktree Backend", available: false },
+        ],
+      }),
+    } as any;
+
+    const tools = createActorCommunicationTools("coordinator", system);
+    const createTeamTool = tools.find((tool) => tool.name === "create_team");
+
+    expect(createTeamTool).toBeTruthy();
+    if (!createTeamTool) return;
+
+    const result = await createTeamTool.execute({
+      team_name: "Delivery Team",
+      teammates: "Specialist\nReviewer",
+      backend: "in_process",
+      description: "负责交付和复核",
+    });
+
+    expect(createTeam).toHaveBeenCalledWith({
+      name: "Delivery Team",
+      description: "负责交付和复核",
+      defaultBackendId: "in_process",
+      createdByActorId: "coordinator",
+      teammates: ["Specialist", "Reviewer"],
+    });
+    expect(result).toEqual(expect.objectContaining({
+      created: true,
+      team_id: "team-delivery",
+      teammate_count: 2,
+    }));
+  });
+
+  it("routes team messages through send_team_message and broadcast_team_message", async () => {
+    const sendTeamMessage = vi.fn(async () => ({
+      sent: true,
+      teamId: "team-delivery",
+      teamName: "Delivery Team",
+      backendId: "in_process",
+      targetId: "specialist",
+      targetName: "Specialist",
+      messageId: "msg-team-1",
+    }));
+    const broadcastTeamMessage = vi.fn(async () => ({
+      sent: true,
+      teamId: "team-delivery",
+      teamName: "Delivery Team",
+      total: 2,
+      sentCount: 2,
+      failedCount: 0,
+      results: [],
+    }));
+
+    const system = {
+      get: (id: string) => ({ id, role: { name: id === "coordinator" ? "Coordinator" : id } }),
+      getAll: () => [],
+      getCoordinatorId: () => "coordinator",
+      sendTeamMessage,
+      broadcastTeamMessage,
+    } as any;
+
+    const tools = createActorCommunicationTools("coordinator", system);
+    const sendTeamTool = tools.find((tool) => tool.name === "send_team_message");
+    const broadcastTeamTool = tools.find((tool) => tool.name === "broadcast_team_message");
+
+    expect(sendTeamTool).toBeTruthy();
+    expect(broadcastTeamTool).toBeTruthy();
+    if (!sendTeamTool || !broadcastTeamTool) return;
+
+    const sendResult = await sendTeamTool.execute({
+      team_name: "Delivery Team",
+      teammate: "Specialist",
+      content: "请先补齐交付说明",
+      reply_to: "msg-prev-1",
+    });
+    const broadcastResult = await broadcastTeamTool.execute({
+      team_name: "Delivery Team",
+      content: "同步一下当前 blocker",
+    });
+
+    expect(sendTeamMessage).toHaveBeenCalledWith({
+      senderActorId: "coordinator",
+      team: "Delivery Team",
+      teammate: "Specialist",
+      content: "请先补齐交付说明",
+      replyTo: "msg-prev-1",
+    });
+    expect(broadcastTeamMessage).toHaveBeenCalledWith({
+      senderActorId: "coordinator",
+      team: "Delivery Team",
+      content: "同步一下当前 blocker",
+      replyTo: undefined,
+    });
+    expect(sendResult).toEqual(expect.objectContaining({
+      sent: true,
+      messageId: "msg-team-1",
+    }));
+    expect(broadcastResult).toEqual(expect.objectContaining({
+      sent: true,
+      sentCount: 2,
+    }));
+  });
+
+  it("dispatches team tasks with builtin teammate defaults", async () => {
+    const dispatchTeamTask = vi.fn(async () => ({
+      dispatched: true,
+      teamId: "team-delivery",
+      teamName: "Delivery Team",
+      backendId: "in_process",
+      runId: "run-team-1",
+      taskId: "run-team-1",
+    }));
+
+    const system = {
+      get: (id: string) => ({ id, role: { name: id === "coordinator" ? "Coordinator" : id } }),
+      getAll: () => [],
+      getCoordinatorId: () => "coordinator",
+      dispatchTeamTask,
+    } as any;
+
+    const tools = createActorCommunicationTools("coordinator", system);
+    const dispatchTeamTaskTool = tools.find((tool) => tool.name === "dispatch_team_task");
+
+    expect(dispatchTeamTaskTool).toBeTruthy();
+    if (!dispatchTeamTaskTool) return;
+
+    const result = await dispatchTeamTaskTool.execute({
+      team_name: "Delivery Team",
+      teammate: "Verifier",
+      task: "独立验证最新改动并给出 PASS/FAIL 结论",
+      label: "回归验证",
+      builtin_agent: "verification_agent",
+      create_if_missing: true,
+      agent_workspace: "/tmp/worktree-a",
+    });
+
+    expect(dispatchTeamTask).toHaveBeenCalledWith(expect.objectContaining({
+      senderActorId: "coordinator",
+      team: "Delivery Team",
+      teammate: "Verifier",
+      task: "独立验证最新改动并给出 PASS/FAIL 结论",
+      label: "回归验证",
+      createIfMissing: true,
+      targetDescription: expect.stringContaining("独立验证实现结果"),
+      targetCapabilities: expect.arrayContaining(["testing", "debugging"]),
+      targetWorkspace: "/tmp/worktree-a",
+      roleBoundary: "validator",
+      overrides: expect.objectContaining({
+        workerProfileId: "validator_worker",
+        maxIterations: 18,
+      }),
+    }));
+    expect(result).toEqual(expect.objectContaining({
+      dispatched: true,
+      runId: "run-team-1",
+      builtin_agent: "verification_agent",
+    }));
+  });
+
+  it("dispatches team tasks with builtin review-agent defaults", async () => {
+    const dispatchTeamTask = vi.fn(async () => ({
+      dispatched: true,
+      teamId: "team-review",
+      teamName: "Review Team",
+      backendId: "in_process",
+      runId: "run-team-review-1",
+      taskId: "run-team-review-1",
+    }));
+
+    const system = {
+      get: (id: string) => ({ id, role: { name: id === "coordinator" ? "Coordinator" : id } }),
+      getAll: () => [],
+      getCoordinatorId: () => "coordinator",
+      dispatchTeamTask,
+    } as any;
+
+    const tools = createActorCommunicationTools("coordinator", system);
+    const dispatchTeamTaskTool = tools.find((tool) => tool.name === "dispatch_team_task");
+
+    expect(dispatchTeamTaskTool).toBeTruthy();
+    if (!dispatchTeamTaskTool) return;
+
+    const result = await dispatchTeamTaskTool.execute({
+      team_name: "Review Team",
+      teammate: "Reviewer",
+      task: "独立审查本轮改动的设计风险与潜在回归点",
+      label: "风险审查",
+      builtin_agent: "review_agent",
+      create_if_missing: true,
+    });
+
+    expect(dispatchTeamTask).toHaveBeenCalledWith(expect.objectContaining({
+      senderActorId: "coordinator",
+      team: "Review Team",
+      teammate: "Reviewer",
+      task: "独立审查本轮改动的设计风险与潜在回归点",
+      label: "风险审查",
+      createIfMissing: true,
+      targetDescription: expect.stringContaining("独立审查实现"),
+      targetCapabilities: expect.arrayContaining(["code_review", "code_analysis"]),
+      roleBoundary: "reviewer",
+      overrides: expect.objectContaining({
+        workerProfileId: "review_worker",
+        maxIterations: 18,
+        thinkingLevel: "medium",
+        systemPromptAppend: expect.stringContaining("built-in review agent"),
+      }),
+    }));
+    expect(result).toEqual(expect.objectContaining({
+      dispatched: true,
+      runId: "run-team-review-1",
+      builtin_agent: "review_agent",
+    }));
   });
 });

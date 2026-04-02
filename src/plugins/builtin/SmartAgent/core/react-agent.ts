@@ -24,6 +24,16 @@ import {
   type PromptSection,
 } from "@/core/agent/context-budget";
 import { mergeStreamChunk } from "@/core/ai/stream-chunk-merge";
+import {
+  replaceLargeToolResults,
+  type ToolResultReplacementRecord,
+  type ToolResultReplacementState,
+} from "@/core/agent/runtime/tool-result-replacement";
+import {
+  cloneTranscriptMessages,
+  prepareTranscriptMessagesForResume,
+  type RuntimeTranscriptMessage,
+} from "@/core/agent/runtime/transcript-messages";
 import { parseToolCallArguments } from "./tool-call-arguments";
 import {
   hasArtifactPayloadKey,
@@ -138,6 +148,8 @@ export interface AgentConfig {
   dangerousToolPatterns?: string[];
   /** 强制使用文本 ReAct 模式（跳过 Function Calling） */
   forceTextMode?: boolean;
+  /** 当前阶段必须维持 Function Calling，不允许降级为文本 ReAct */
+  requireFunctionCalling?: boolean;
   /** Function Calling 兼容性缓存 key（建议按模型/提供商组合） */
   fcCompatibilityKey?: string;
   /** 用户记忆片段，注入到 system prompt 中 */
@@ -177,12 +189,22 @@ export interface AgentConfig {
   }[];
   /** 对话历史上下文：作为多轮 messages 注入（system 之后、当前 query 之前），用于 Actor 会话连续性 */
   contextMessages?: Array<{ role: "user" | "assistant"; content: string }>;
+  /** Claude Code 风格的真实 transcript messages，用于恢复/续跑 */
+  resumeMessages?: RuntimeTranscriptMessage[];
   /** 将传入工具列表视为最终真相，禁止自动注入 delegate_subtask / enter_plan_mode / exit_plan_mode */
   authoritativeToolList?: boolean;
   /** 在送模型前修补历史中缺失的 tool result，避免 dangling tool_calls 污染消息格式 */
   patchDanglingToolCalls?: boolean;
   /** 运行时 loop guardrail 配置 */
   loopDetection?: LoopDetectionConfig;
+  /** Claude Code 风格的大 tool result replacement 状态 */
+  toolResultReplacementState?: ToolResultReplacementState;
+  /** 大 tool result 的落盘目录 */
+  toolResultPersistenceDir?: string;
+  /** 新产生的 tool result replacement 记录 */
+  onToolResultReplaced?: (records: ToolResultReplacementRecord[]) => void;
+  /** 当前 run 的真实 transcript messages 快照 */
+  onConversationMessagesUpdated?: (messages: RuntimeTranscriptMessage[]) => void;
 }
 
 export interface DangerousActionConfirmationContext {
@@ -203,6 +225,60 @@ interface IterationStopDiagnostics {
 }
 
 const EMPTY_MODEL_OUTPUT_LIMIT = 3;
+
+export type FunctionCallingRequiredReason =
+  | "unavailable"
+  | "incompatible"
+  | "first_chunk_stall"
+  | "transport_unstable";
+
+export class FunctionCallingRequiredError extends Error {
+  readonly code = "FUNCTION_CALLING_REQUIRED";
+  readonly reason: FunctionCallingRequiredReason;
+
+  constructor(
+    reason: FunctionCallingRequiredReason,
+    message: string,
+  ) {
+    super(message);
+    this.reason = reason;
+    this.name = "FunctionCallingRequiredError";
+  }
+}
+
+type FCMessage = {
+  role: string;
+  content: string | null;
+  images?: string[];
+  tool_calls?: AIToolCall[];
+  tool_call_id?: string;
+  name?: string;
+};
+
+type FCCheckpointEntry = {
+  toolName: string;
+  error: boolean;
+};
+
+type FCSessionState = {
+  messages: FCMessage[];
+  nextIteration: number;
+  unknownToolCount: number;
+  rejectedDangerousActionCount: number;
+  guardRailRetryCount: number;
+  memoryRecallCorrectionCount: number;
+  toolFailCounts: Map<string, number>;
+  toolCallsSinceCheckpoint: number;
+  fcCheckpointBuffer: FCCheckpointEntry[];
+  iterationWarningIdx: number;
+  fcEmptyCount: number;
+  fcStaleCount: number;
+  repeatedToolCorrectionIssued: boolean;
+  prevToolCallsKey: string;
+  lastDisabledKey: string;
+  lastMode: AgentMode;
+  transportRetryNoticeInjected: boolean;
+};
 
 function formatIterationStopReason(reason: IterationStopReason): string {
   switch (reason) {
@@ -342,6 +418,30 @@ const PATH_BASED_FUZZY_CACHE_TOOLS = new Set([
   "read_document",
   "read_file",
 ]);
+const FILE_DISCOVERY_TOOL_NAMES = [
+  "read_file",
+  "read_file_range",
+  "read_document",
+  "list_directory",
+  "search_in_files",
+];
+const SHELL_TOOL_NAMES = [
+  "run_shell_command",
+  "persistent_shell",
+];
+const CODING_CONTEXT_TOOL_NAMES = [
+  ...FILE_DISCOVERY_TOOL_NAMES,
+  ...SHELL_TOOL_NAMES,
+  "str_replace_edit",
+  "write_file",
+  "json_edit",
+  "run_lint",
+];
+const DELIVERY_ONLY_TOOL_NAMES = [
+  "task_done",
+  "export_spreadsheet",
+  "export_document",
+];
 const MEMORY_RECALL_QUERY_PATTERNS: RegExp[] = [
   /之前|先前|前面|上次|刚才|历史|记得|还记得|回忆|回顾/,
   /偏好|习惯|默认|常驻地|常住地|居住地|所在城市|我的城市/,
@@ -355,6 +455,13 @@ function extractPrimaryUserIntent(input: string): string {
   const normalized = String(input || "").trim();
   if (!normalized) return "";
 
+  const labeledIntent = normalized.match(
+    /(?:^|\n)(?:原始任务|用户要求|用户需求|用户问题|任务目标)[:：]\s*([^\n]+)/i,
+  );
+  if (labeledIntent?.[1]) {
+    return labeledIntent[1].trim();
+  }
+
   const wrappedUserBlock = normalized.match(
     /(?:^|\n)\[用户\]:\s*([\s\S]*?)(?=\n\s*\[(?:system|系统)\]:|$)/i,
   );
@@ -363,6 +470,13 @@ function extractPrimaryUserIntent(input: string): string {
   }
 
   return normalized;
+}
+
+function hasAnyAvailableTool(
+  availableToolNames: ReadonlySet<string>,
+  candidateToolNames: readonly string[],
+): boolean {
+  return candidateToolNames.some((toolName) => availableToolNames.has(toolName));
 }
 
 function pruneFCCache() {
@@ -1170,6 +1284,7 @@ export class ReActAgent {
   private fcCompatibilityKey: string | null = null;
   private running = false;
   private currentSignal?: AbortSignal;
+  private conversationMessages: RuntimeTranscriptMessage[] = [];
   private loopDetectionConfig = DEFAULT_LOOP_DETECTION_CONFIG;
   private loopDetector = new LoopDetector(this.loopDetectionConfig);
   private approvedDangerousKeys = new Set<string>();
@@ -1897,6 +2012,78 @@ export class ReActAgent {
 
   listVisibleToolNames(): string[] {
     return this.getAvailableTools().map((tool) => tool.name);
+  }
+
+  getConversationMessages(): RuntimeTranscriptMessage[] {
+    return cloneTranscriptMessages(this.conversationMessages);
+  }
+
+  private snapshotConversationMessages(
+    messages: Array<{
+      role: string;
+      content: string | null;
+      images?: string[];
+      tool_calls?: AIToolCall[];
+      tool_call_id?: string;
+      name?: string;
+    }>,
+  ): void {
+    const transcriptMessages = cloneTranscriptMessages(
+      messages
+        .filter((message, index) => !(index === 0 && message.role === "system"))
+        .filter((message): message is RuntimeTranscriptMessage =>
+          message.role === "user"
+          || message.role === "assistant"
+          || message.role === "tool",
+        ),
+    );
+    this.conversationMessages = transcriptMessages;
+    this.config.onConversationMessagesUpdated?.(cloneTranscriptMessages(transcriptMessages));
+  }
+
+  private getAvailableToolNameSet(): Set<string> {
+    return new Set(this.getAvailableTools().map((tool) => tool.name));
+  }
+
+  private isDeliveryOnlyToolset(): boolean {
+    const availableToolNames = this.getAvailableTools().map((tool) => tool.name);
+    return (
+      availableToolNames.length > 0
+      && availableToolNames.every((toolName) => DELIVERY_ONLY_TOOL_NAMES.includes(toolName))
+    );
+  }
+
+  private buildToolAvailabilityBlock(): string {
+    const availableToolNames = this.getAvailableTools().map((tool) => tool.name);
+    if (availableToolNames.length === 0) return "";
+
+    const availableToolSet = new Set(availableToolNames);
+    const hasFileDiscoveryTools = hasAnyAvailableTool(availableToolSet, FILE_DISCOVERY_TOOL_NAMES);
+    const hasShellTools = hasAnyAvailableTool(availableToolSet, SHELL_TOOL_NAMES);
+
+    if (this.isDeliveryOnlyToolset()) {
+      const exportTools = availableToolNames.filter((toolName) => toolName.startsWith("export_"));
+      return [
+        "## 当前阶段工具边界",
+        `- 当前仅暴露最终交付相关工具：${availableToolNames.join("、")}。`,
+        "- 当前没有额外的文件探索或命令行工具；禁止再建议、假设或伪造额外读取、扫描目录或执行命令的步骤。",
+        "- 必须只基于当前消息中的结构化结果、已有 tool observation 与当前 run artifacts 收尾。",
+        exportTools.length > 0
+          ? `- 如需生成最终文件，直接使用 ${exportTools.join(" / ")} 完成交付；不要先输出执行计划或继续猜测路径。`
+          : "- 当前没有导出工具时，直接调用 `task_done` 返回最终结论或真实 blocker；不要停留在“继续整理/稍后输出”。",
+      ].join("\n");
+    }
+
+    if (!hasFileDiscoveryTools && !hasShellTools) {
+      return [
+        "## 当前阶段工具边界",
+        `- 当前可用工具：${availableToolNames.join("、")}。`,
+        "- 当前没有文件探索或 shell 工具；禁止在回答中继续安排额外读取、目录扫描或命令执行步骤。",
+        "- 请直接基于当前消息、已有 observation 和上下文完成推理与交付。",
+      ].join("\n");
+    }
+
+    return "";
   }
 
   private buildMemoryPolicyBlock(): string {
@@ -2735,6 +2922,8 @@ ${s.taskStrategy}
 
 ${s.documentToolBlock}
 
+${s.toolAvailabilityBlock}
+
 用中文回答`;
 
     const sections: PromptSection[] = [
@@ -2787,6 +2976,50 @@ ${s.documentToolBlock}
       content: string;
       images?: string[];
     }[] = [{ role: "system", content: this.buildSystemPrompt(userInput) }];
+
+    const resumeMessages = this.config.resumeMessages?.length
+      ? prepareTranscriptMessagesForResume(this.config.resumeMessages)
+      : [];
+
+    if (resumeMessages.length > 0) {
+      for (const message of resumeMessages) {
+        if (message.role === "user") {
+          messages.push({
+            role: "user",
+            content: String(message.content ?? ""),
+            ...(message.images?.length ? { images: [...message.images] } : {}),
+          });
+          continue;
+        }
+        if (message.role === "assistant") {
+          const toolCallSummary = message.tool_calls?.length
+            ? message.tool_calls
+              .map((toolCall) =>
+                `[工具调用] ${toolCall.function.name}(${toolCall.function.arguments ?? ""})`)
+              .join("\n")
+            : "";
+          const content = [
+            String(message.content ?? "").trim(),
+            toolCallSummary,
+          ].filter(Boolean).join("\n");
+          if (content) {
+            messages.push({
+              role: "assistant",
+              content,
+            });
+          }
+          continue;
+        }
+        const toolContent = String(message.content ?? "").trim();
+        messages.push({
+          role: "user",
+          content: message.name
+            ? `Observation (${message.name}): ${toolContent}`
+            : `Observation: ${toolContent}`,
+        });
+      }
+      return messages;
+    }
 
     if (this.config.contextMessages?.length) {
       for (const cm of this.config.contextMessages) {
@@ -3005,9 +3238,19 @@ ${s.documentToolBlock}
    * 避免在纯 Q&A / 翻译 / 总结等场景中注入编程指令。
    */
   private detectCodingContext(userInput: string): boolean {
+    const availableToolNames = this.getAvailableToolNameSet();
+    if (!hasAnyAvailableTool(availableToolNames, CODING_CONTEXT_TOOL_NAMES)) {
+      return false;
+    }
+    if (this.isDeliveryOnlyToolset()) {
+      return false;
+    }
+
+    const primaryIntent = extractPrimaryUserIntent(userInput);
+    const text = primaryIntent.trim() || userInput.trim();
     const strongPatterns =
       /(?:代码|编程|编码|修复|debug|fix\b|bug|重构|refactor|编译|compile|str_replace_edit|read_file|write_file|run_lint|persistent_shell|json_edit|search_in_files|代码审查|code review|package\.json|tsconfig|Cargo\.toml|requirements\.txt)/i;
-    if (strongPatterns.test(userInput)) return true;
+    if (strongPatterns.test(text)) return true;
     const weakPatterns = [
       /(?:写一个|实现|创建)/i,
       /(?:函数|function|class|组件|component|接口|interface)/i,
@@ -3019,7 +3262,7 @@ ${s.documentToolBlock}
       /(?:API|build)\b/i,
       /(?:项目路径|工作上下文)/i,
     ];
-    const weakCount = weakPatterns.filter((p) => p.test(userInput)).length;
+    const weakCount = weakPatterns.filter((p) => p.test(text)).length;
     if (weakCount >= 2) return true;
     const recentHistory = this.history.slice(-6);
     const codingTools = new Set([
@@ -3065,6 +3308,9 @@ ${s.documentToolBlock}
       !this.config.skipInternalCodingBlock && userInput
         ? this.detectCodingContext(userInput)
         : false;
+    const availableToolSet = this.getAvailableToolNameSet();
+    const lacksFileDiscoveryTools = !hasAnyAvailableTool(availableToolSet, FILE_DISCOVERY_TOOL_NAMES);
+    const lacksShellTools = !hasAnyAvailableTool(availableToolSet, SHELL_TOOL_NAMES);
 
     const modeSwitching = this.hasBothModeSwitchTools()
       ? `## 模式切换
@@ -3079,7 +3325,11 @@ ${s.documentToolBlock}
 4. **结果验证**：完成关键操作后，通过读取或查询验证结果是否正确
 5. **错误恢复**：工具失败时分析根因，尝试替代方案而非简单重试`;
 
-    const documentToolBlock = `## 文档/表格读取规则
+    const documentToolBlock = this.isDeliveryOnlyToolset() || (lacksFileDiscoveryTools && lacksShellTools)
+      ? `## 文档/表格处理规则
+- 当前阶段不再提供额外文档读取或命令执行工具，请直接基于现有结构化结果、tool observation 与 artifacts 收尾。
+- 如需最终文件，直接使用当前可见的交付工具；不要回头扫描路径或重跑探索步骤。`
+      : `## 文档/表格读取规则
 - 遇到 xlsx/xls/csv/pdf/docx/ppt/pptx/xmind/mm 这类文件时，优先使用 read_document。
 - md/txt/json/yaml/toml/log/html/xml 这类文本文档也可以直接使用 read_document；代码文件仍优先使用 read_file / read_file_range。
 - 不要对 Office/PDF/表格文件使用 read_file / read_file_range。
@@ -3090,6 +3340,7 @@ ${s.documentToolBlock}
 - 不要用 write_file 手写 RTF 控制符，也不要伪造 .docx 二进制内容。
 - 普通文本、Markdown、代码文件仍优先使用 write_file。`
       : "";
+    const toolAvailabilityBlock = this.buildToolAvailabilityBlock();
 
     const codingBlock = isCoding
       ? `## 编程任务工作流（7 步法）
@@ -3133,6 +3384,7 @@ ${s.documentToolBlock}
       taskStrategy,
       documentToolBlock,
       documentExportBlock,
+      toolAvailabilityBlock,
       skillsBlock,
       memoryPolicyBlock,
       memoryBlock,
@@ -3167,6 +3419,8 @@ ${s.taskStrategy}
 ${s.documentToolBlock}
 
 ${s.documentExportBlock}
+
+${s.toolAvailabilityBlock}
 
 ## 工具使用规则
 - 需要工具时直接调用，**严禁在回复文本中写出工具调用**（如"调用工具: web_search(...)"），必须通过 function call 真正执行
@@ -3468,31 +3722,45 @@ ${this.hasDelegateSubtaskTool() ? "- 如有 delegate_subtask 工具可用，可�
   /**
    * Function Calling 模式的执行循环
    */
-  private async runFC(
+  private createFCSessionState(
     userInput: string,
-    signal?: AbortSignal,
     images?: string[],
-  ): Promise<string> {
-    type FCMessage = {
-      role: string;
-      content: string | null;
-      images?: string[];
-      tool_calls?: AIToolCall[];
-      tool_call_id?: string;
-      name?: string;
-    };
-
+  ): FCSessionState {
     const messages: FCMessage[] = [
       { role: "system", content: this.buildFCSystemPrompt(userInput) },
     ];
 
-    if (this.config.contextMessages?.length) {
+    const resumeMessages = this.config.resumeMessages?.length
+      ? prepareTranscriptMessagesForResume(this.config.resumeMessages)
+      : [];
+
+    if (resumeMessages.length > 0) {
+      for (const message of resumeMessages) {
+        messages.push({
+          role: message.role,
+          content: message.content,
+          ...(message.images?.length ? { images: [...message.images] } : {}),
+          ...(message.tool_calls?.length
+            ? {
+                tool_calls: message.tool_calls.map((toolCall) => ({
+                  ...toolCall,
+                  function: {
+                    ...toolCall.function,
+                  },
+                })),
+              }
+            : {}),
+          ...(message.tool_call_id ? { tool_call_id: message.tool_call_id } : {}),
+          ...(message.name ? { name: message.name } : {}),
+        });
+      }
+    } else if (this.config.contextMessages?.length) {
       for (const cm of this.config.contextMessages) {
         messages.push({ role: cm.role, content: cm.content });
       }
     }
 
-    if (this.history.length > 0) {
+    if (resumeMessages.length === 0 && this.history.length > 0) {
       const historyParts: string[] = [];
       for (const step of this.history) {
         if (step.type === "action") {
@@ -3530,283 +3798,396 @@ ${this.hasDelegateSubtaskTool() ? "- 如有 delegate_subtask 工具可用，可�
     if (images?.length) lastUserMsg.images = images;
     messages.push(lastUserMsg);
 
-    let unknownToolCount = 0;
-    let rejectedDangerousActionCount = 0;
-    let guardRailRetryCount = 0;
-    let memoryRecallCorrectionCount = 0;
+    return {
+      messages,
+      nextIteration: 0,
+      unknownToolCount: 0,
+      rejectedDangerousActionCount: 0,
+      guardRailRetryCount: 0,
+      memoryRecallCorrectionCount: 0,
+      toolFailCounts: new Map<string, number>(),
+      toolCallsSinceCheckpoint: 0,
+      fcCheckpointBuffer: [],
+      iterationWarningIdx: -1,
+      fcEmptyCount: 0,
+      fcStaleCount: 0,
+      repeatedToolCorrectionIssued: false,
+      prevToolCallsKey: "",
+      lastDisabledKey: this.loopDetector.getDisabledTools().join(","),
+      lastMode: this.mode,
+      transportRetryNoticeInjected: false,
+    };
+  }
+
+  private injectFCTransportRetryNotice(state: FCSessionState): void {
+    if (state.transportRetryNoticeInjected) return;
+    state.messages.push({
+      role: "user",
+      content: [
+        "[系统提示] 上一轮 Function Calling 因网络/流传输中断而自动重试。",
+        "请保留之前已经成功的工具结果与执行进度，不要把整个任务重新开始。",
+        "不要重复已成功的工具调用，不要重新派发等价子任务；若已有子任务在运行，优先继续等待/消费现有结果。",
+      ].join("\n"),
+    });
+    state.transportRetryNoticeInjected = true;
+  }
+
+  private async runFC(
+    userInput: string,
+    signal?: AbortSignal,
+    images?: string[],
+    sessionState?: FCSessionState,
+  ): Promise<string> {
+    const state = sessionState ?? this.createFCSessionState(userInput, images);
+    const messages = state.messages;
+    let nextIteration = state.nextIteration;
+    let unknownToolCount = state.unknownToolCount;
+    let rejectedDangerousActionCount = state.rejectedDangerousActionCount;
+    let guardRailRetryCount = state.guardRailRetryCount;
+    let memoryRecallCorrectionCount = state.memoryRecallCorrectionCount;
     const MAX_GUARD_RAIL_RETRIES = 2;
-    const toolFailCounts = new Map<string, number>();
-    let toolCallsSinceCheckpoint = 0;
+    const toolFailCounts = state.toolFailCounts;
+    let toolCallsSinceCheckpoint = state.toolCallsSinceCheckpoint;
     const CHECKPOINT_INTERVAL = 3;
-    const fcCheckpointBuffer: Array<{ toolName: string; error: boolean }> = [];
+    const fcCheckpointBuffer = state.fcCheckpointBuffer;
 
-    let iterationWarningIdx = -1;
-    let fcEmptyCount = 0;
-    let fcStaleCount = 0;
-    let repeatedToolCorrectionIssued = false;
-    let prevToolCallsKey = "";
-    let lastDisabledKey = this.loopDetector.getDisabledTools().join(",");
-    let lastMode = this.mode;
+    let iterationWarningIdx = state.iterationWarningIdx;
+    let fcEmptyCount = state.fcEmptyCount;
+    let fcStaleCount = state.fcStaleCount;
+    let repeatedToolCorrectionIssued = state.repeatedToolCorrectionIssued;
+    let prevToolCallsKey = state.prevToolCallsKey;
+    let lastDisabledKey = state.lastDisabledKey;
+    let lastMode = state.lastMode;
 
-    for (let i = 0; i < this.config.maxIterations; i++) {
-      if (signal?.aborted) throw new Error("Aborted");
-      this.emitTraceEvent("llm_round_started", {
-        count: i + 1,
-        phase: "fc",
-      });
+    const persistSessionState = () => {
+      state.nextIteration = nextIteration;
+      state.unknownToolCount = unknownToolCount;
+      state.rejectedDangerousActionCount = rejectedDangerousActionCount;
+      state.guardRailRetryCount = guardRailRetryCount;
+      state.memoryRecallCorrectionCount = memoryRecallCorrectionCount;
+      state.toolCallsSinceCheckpoint = toolCallsSinceCheckpoint;
+      state.iterationWarningIdx = iterationWarningIdx;
+      state.fcEmptyCount = fcEmptyCount;
+      state.fcStaleCount = fcStaleCount;
+      state.repeatedToolCorrectionIssued = repeatedToolCorrectionIssued;
+      state.prevToolCallsKey = prevToolCallsKey;
+      state.lastDisabledKey = lastDisabledKey;
+      state.lastMode = lastMode;
+    };
 
-      // Actor inbox 注入点：在每个 iteration 间隙检查是否有新消息
-      if (this.config.inboxDrain) {
-        const pending = this.config.inboxDrain();
-        if (pending.length > 0) {
-          for (const m of pending) {
-            const replyHint = m.expectReply
-              ? `（等待你的回复，请用 send_message 回复，reply_to 填 "${m.id}"）`
-              : "";
-            messages.push({
-              role: "user",
-              content: `[收件箱消息]\n来自 ${m.from}（消息ID: ${m.id}）${replyHint}\n\n${m.content}`,
-              ...(m.images?.length ? { images: m.images } : {}),
-            });
-          }
-          const hasAgentMsg = pending.some(
-            (m) => m.from !== "用户" && m.from !== "user",
-          );
-          const replyGuide = hasAgentMsg
-            ? "如果有其他 Agent 的消息需要回应，使用 send_message 回复。然后继续当前任务。"
-            : "请根据消息内容继续当前任务。";
-          messages.push({
-            role: "user",
-            content: `[收件箱处理要求]\n你在执行任务期间收到了 ${pending.length} 条新消息。\n${replyGuide}`,
-          });
-        }
-      }
-
-      // 仅在模式切换或 doom loop 禁用工具后才重建 system prompt
-      if (i > 0) {
-        const currentDisabled = this.loopDetector.getDisabledTools().join(",");
-        const disabledChanged = currentDisabled !== (lastDisabledKey ?? "");
-        const modeChanged = this.mode !== lastMode;
-        if (disabledChanged || modeChanged) {
-          messages[0] = {
-            role: "system",
-            content: this.buildFCSystemPrompt(userInput),
-          };
-          lastDisabledKey = currentDisabled;
-          lastMode = this.mode;
-        }
-      }
-
-      const remaining = this.config.maxIterations - i;
-      const isFinalWarningTurn = remaining === 1;
-
-      if (remaining <= 3 && remaining > 0) {
-        const warningContent = isFinalWarningTurn
-          ? `[Final Warning] 这是最后一步。请立即基于目前收集到的所有信息，给出完整的最终答案。不要再调用任何工具。`
-          : `[系统提示] 剩余可用步骤仅 ${remaining} 步。请尽快基于已收集的信息给出最终答案。如果信息已足够，直接回复最终结论；如果还需关键操作，只做最必要的一步。`;
-        const warningMsg = { role: "user" as const, content: warningContent };
-        if (iterationWarningIdx >= 0) {
-          messages[iterationWarningIdx] = warningMsg;
-        } else {
-          iterationWarningIdx = messages.length;
-          messages.push(warningMsg);
-        }
-      }
-
-      const preparedMessages = prepareMessagesForModel(
-        messages,
-        this.config.contextLimit ?? DEFAULT_CONTEXT_LIMIT,
-        this.config.patchDanglingToolCalls === true,
-      );
-      this.recordTrajectory({
-        type: "llm_call",
-        mode: this.mode,
-        tokenEstimate: estimateMessagesTokens(preparedMessages),
-      });
-      const result = await this.streamFCLLM(
-        preparedMessages,
-        signal,
-        isFinalWarningTurn,
-      );
-      this.emitTraceEvent("llm_round_completed", {
-        count: i + 1,
-        phase: "fc",
-        status: result.type,
-        tool_count: result.type === "tool_calls" ? result.toolCalls.length : undefined,
-        preview: result.type === "content" ? previewTraceValue(result.content) : undefined,
-      });
-
-      if (signal?.aborted) throw new Error("Aborted");
-
-      if (result.type === "content") {
-        const answer = result.content.trim();
-        if (answer) {
-          const memoryRecallCorrection =
-            memoryRecallCorrectionCount < 2
-              ? this.buildMemoryRecallCorrection(userInput)
-              : null;
-          if (memoryRecallCorrection) {
-            memoryRecallCorrectionCount++;
-            messages.push({ role: "assistant", content: answer });
-            messages.push({ role: "user", content: memoryRecallCorrection });
-            continue;
-          }
-          const guardRailCorrection =
-            guardRailRetryCount < MAX_GUARD_RAIL_RETRIES
-              ? this.checkAnswerGuardRails(
-                  answer,
-                  userInput,
-                  rejectedDangerousActionCount,
-                )
-              : null;
-          if (guardRailCorrection) {
-            guardRailRetryCount++;
-            messages.push({ role: "assistant", content: answer });
-            messages.push({ role: "user", content: guardRailCorrection });
-            continue;
-          }
-          this.addStep({
-            type: "answer",
-            content: answer,
-            timestamp: Date.now(),
-          });
-          return answer;
-        }
-        fcEmptyCount++;
-        if (fcEmptyCount >= EMPTY_MODEL_OUTPUT_LIMIT) {
-          const fallback = this.buildIterationExhaustedSummary({
-            iterationsUsed: i + 1,
-            stopReason: "empty_model_output",
-          });
-          this.addStep({
-            type: "answer",
-            content: fallback,
-            timestamp: Date.now(),
-          });
-          return fallback;
-        }
-        messages.push({ role: "assistant", content: "" });
-        messages.push({ role: "user", content: "请继续回答或使用工具。" });
-        continue;
-      }
-
-      const validToolCalls = result.toolCalls.filter(
-        (tc) => tc.function.name && tc.function.name.trim(),
-      );
-
-      if (validToolCalls.length === 0) {
-        throw new Error(
-          "FC_INCOMPATIBLE: model returned tool_calls with empty function names",
-        );
-      }
-
-      // 循环 tool_calls 检测：连续 2 轮计划完全相同则触发纠偏/停止
-      const curToolCallsKey = validToolCalls
-        .map((tc) => `${tc.function.name}::${tc.function.arguments ?? ""}`)
-        .join("|");
-      if (curToolCallsKey === prevToolCallsKey) {
-        fcStaleCount++;
-        if (!repeatedToolCorrectionIssued) {
-          repeatedToolCorrectionIssued = true;
-          const repeatedToolPattern = formatRepeatedToolPattern(validToolCalls);
-          this.addStep({
-            type: "observation",
-            content: repeatedToolPattern
-              ? `检测到连续重复的工具计划，已要求模型调整策略：${repeatedToolPattern}`
-              : "检测到连续重复的工具计划，已要求模型调整策略。",
-            timestamp: Date.now(),
-          });
-          messages.push({
-            role: "user",
-            content:
-              buildRepeatedToolCallCorrectionMessage(repeatedToolPattern),
-          });
-          continue;
-        }
-        if (fcStaleCount >= 2) {
-          const fallback = this.buildIterationExhaustedSummary({
-            iterationsUsed: i + 1,
-            stopReason: "repeated_tool_calls",
-            repeatedToolPattern: formatRepeatedToolPattern(validToolCalls),
-          });
-          this.addStep({
-            type: "answer",
-            content: fallback,
-            timestamp: Date.now(),
-          });
-          return fallback;
-        }
-      } else {
-        fcStaleCount = 0;
-        repeatedToolCorrectionIssued = false;
-      }
-      prevToolCallsKey = curToolCallsKey;
-
-      const parsedCalls = validToolCalls.map((tc) => {
-        const { params: toolParams, parseError } = parseToolCallArguments(
-          tc.function.arguments || "{}",
-        );
-        return { tc, toolName: tc.function.name, toolParams, parseError };
-      });
-
-      for (const { toolName } of parsedCalls) {
-        if (!this.tools.find((t) => t.name === toolName)) {
-          unknownToolCount++;
-          if (unknownToolCount >= 3) {
-            throw new Error(
-              "FC_INCOMPATIBLE: too many unknown tool calls, model may not be compatible with FC",
-            );
-          }
-        } else {
-          unknownToolCount = 0;
-        }
-      }
-
-      const canParallel =
-        parsedCalls.length > 1 &&
-        parsedCalls.every(({ toolName }) => {
-          const tool = this.tools.find((t) => t.name === toolName);
-          if (!tool) return false;
-          if (toolName === "ask_clarification") return false;
-          if (tool.readonly) return true;
-          return (
-            !tool.dangerous &&
-            !this.config.dangerousToolPatterns?.some((p) =>
-              toolName.toLowerCase().includes(p.toLowerCase()),
-            )
-          );
+    try {
+      try {
+        for (; nextIteration < this.config.maxIterations; nextIteration++) {
+        if (signal?.aborted) throw new Error("Aborted");
+        this.emitTraceEvent("llm_round_started", {
+          count: nextIteration + 1,
+          phase: "fc",
         });
 
-      type PipelineResult = Awaited<
-        ReturnType<ReActAgent["executeToolPipeline"]>
-      >;
-      type CallResult = {
-        tc: AIToolCall;
-        toolName: string;
-        result: PipelineResult;
-      };
+        // Actor inbox 注入点：在每个 iteration 间隙检查是否有新消息
+        if (this.config.inboxDrain) {
+          const pending = this.config.inboxDrain();
+          if (pending.length > 0) {
+            for (const m of pending) {
+              const replyHint = m.expectReply
+                ? `（等待你的回复，请用 send_message 回复，reply_to 填 "${m.id}"）`
+                : "";
+              messages.push({
+                role: "user",
+                content: `[收件箱消息]\n来自 ${m.from}（消息ID: ${m.id}）${replyHint}\n\n${m.content}`,
+                ...(m.images?.length ? { images: m.images } : {}),
+              });
+            }
+            const hasAgentMsg = pending.some(
+              (m) => m.from !== "用户" && m.from !== "user",
+            );
+            const replyGuide = hasAgentMsg
+              ? "如果有其他 Agent 的消息需要回应，使用 send_message 回复。然后继续当前任务。"
+              : "请根据消息内容继续当前任务。";
+            messages.push({
+              role: "user",
+              content: `[收件箱处理要求]\n你在执行任务期间收到了 ${pending.length} 条新消息。\n${replyGuide}`,
+            });
+          }
+        }
 
-      let callResults: CallResult[];
-      if (canParallel) {
-        callResults = await Promise.all(
-          parsedCalls.map(
-            async ({
-              tc,
-              toolName,
-              toolParams,
-              parseError,
-            }): Promise<CallResult> => {
-              if (parseError) {
-                this.maybeLogRepeatedMalformedWriteToolCall(
-                  toolName,
-                  tc.function.arguments || "{}",
-                  parseError,
-                  userInput,
-                );
+        // 仅在模式切换或 doom loop 禁用工具后才重建 system prompt
+        if (nextIteration > 0) {
+          const currentDisabled = this.loopDetector.getDisabledTools().join(",");
+          const disabledChanged = currentDisabled !== (lastDisabledKey ?? "");
+          const modeChanged = this.mode !== lastMode;
+          if (disabledChanged || modeChanged) {
+            messages[0] = {
+              role: "system",
+              content: this.buildFCSystemPrompt(userInput),
+            };
+            lastDisabledKey = currentDisabled;
+            lastMode = this.mode;
+          }
+        }
+
+        const remaining = this.config.maxIterations - nextIteration;
+        const isFinalWarningTurn = remaining === 1;
+
+        if (remaining <= 3 && remaining > 0) {
+          const warningContent = isFinalWarningTurn
+            ? `[Final Warning] 这是最后一步。请立即基于目前收集到的所有信息，给出完整的最终答案。不要再调用任何工具。`
+            : `[系统提示] 剩余可用步骤仅 ${remaining} 步。请尽快基于已收集的信息给出最终答案。如果信息已足够，直接回复最终结论；如果还需关键操作，只做最必要的一步。`;
+          const warningMsg = { role: "user" as const, content: warningContent };
+          if (iterationWarningIdx >= 0) {
+            messages[iterationWarningIdx] = warningMsg;
+          } else {
+            iterationWarningIdx = messages.length;
+            messages.push(warningMsg);
+          }
+        }
+
+        const preparedMessages = prepareMessagesForModel(
+          messages,
+          this.config.contextLimit ?? DEFAULT_CONTEXT_LIMIT,
+          this.config.patchDanglingToolCalls === true,
+        );
+        this.recordTrajectory({
+          type: "llm_call",
+          mode: this.mode,
+          tokenEstimate: estimateMessagesTokens(preparedMessages),
+        });
+        const lastStreamingAnswerSnapshot = this.lastStreamingAnswer;
+        let result:
+          | { type: "content"; content: string }
+          | { type: "tool_calls"; toolCalls: AIToolCall[] };
+        try {
+          result = await this.streamFCLLM(
+            preparedMessages,
+            signal,
+            isFinalWarningTurn,
+          );
+        } catch (error) {
+          this.lastStreamingAnswer = lastStreamingAnswerSnapshot;
+          throw error;
+        }
+        this.emitTraceEvent("llm_round_completed", {
+          count: nextIteration + 1,
+          phase: "fc",
+          status: result.type,
+          tool_count: result.type === "tool_calls" ? result.toolCalls.length : undefined,
+          preview: result.type === "content" ? previewTraceValue(result.content) : undefined,
+        });
+
+        if (signal?.aborted) throw new Error("Aborted");
+
+        if (result.type === "content") {
+          const answer = result.content.trim();
+          if (answer) {
+            const memoryRecallCorrection =
+              memoryRecallCorrectionCount < 2
+                ? this.buildMemoryRecallCorrection(userInput)
+                : null;
+            if (memoryRecallCorrection) {
+              memoryRecallCorrectionCount++;
+              messages.push({ role: "assistant", content: answer });
+              messages.push({ role: "user", content: memoryRecallCorrection });
+              continue;
+            }
+            const guardRailCorrection =
+              guardRailRetryCount < MAX_GUARD_RAIL_RETRIES
+                ? this.checkAnswerGuardRails(
+                    answer,
+                    userInput,
+                    rejectedDangerousActionCount,
+                  )
+                : null;
+            if (guardRailCorrection) {
+              guardRailRetryCount++;
+              messages.push({ role: "assistant", content: answer });
+              messages.push({ role: "user", content: guardRailCorrection });
+              continue;
+            }
+            this.addStep({
+              type: "answer",
+              content: answer,
+              timestamp: Date.now(),
+            });
+            messages.push({ role: "assistant", content: answer });
+            return answer;
+          }
+          fcEmptyCount++;
+          if (fcEmptyCount >= EMPTY_MODEL_OUTPUT_LIMIT) {
+            const fallback = this.buildIterationExhaustedSummary({
+              iterationsUsed: nextIteration + 1,
+              stopReason: "empty_model_output",
+            });
+            this.addStep({
+              type: "answer",
+              content: fallback,
+              timestamp: Date.now(),
+            });
+            messages.push({ role: "assistant", content: fallback });
+            return fallback;
+          }
+          messages.push({ role: "assistant", content: "" });
+          messages.push({ role: "user", content: "请继续回答或使用工具。" });
+          continue;
+        }
+
+        const validToolCalls = result.toolCalls.filter(
+          (tc) => tc.function.name && tc.function.name.trim(),
+        );
+
+        if (validToolCalls.length === 0) {
+          throw new Error(
+            "FC_INCOMPATIBLE: model returned tool_calls with empty function names",
+          );
+        }
+
+        // 循环 tool_calls 检测：连续 2 轮计划完全相同则触发纠偏/停止
+        const curToolCallsKey = validToolCalls
+          .map((tc) => `${tc.function.name}::${tc.function.arguments ?? ""}`)
+          .join("|");
+        if (curToolCallsKey === prevToolCallsKey) {
+          fcStaleCount++;
+          if (!repeatedToolCorrectionIssued) {
+            repeatedToolCorrectionIssued = true;
+            const repeatedToolPattern = formatRepeatedToolPattern(validToolCalls);
+            this.addStep({
+              type: "observation",
+              content: repeatedToolPattern
+                ? `检测到连续重复的工具计划，已要求模型调整策略：${repeatedToolPattern}`
+                : "检测到连续重复的工具计划，已要求模型调整策略。",
+              timestamp: Date.now(),
+            });
+            messages.push({
+              role: "user",
+              content:
+                buildRepeatedToolCallCorrectionMessage(repeatedToolPattern),
+            });
+            continue;
+          }
+          if (fcStaleCount >= 2) {
+            const fallback = this.buildIterationExhaustedSummary({
+              iterationsUsed: nextIteration + 1,
+              stopReason: "repeated_tool_calls",
+              repeatedToolPattern: formatRepeatedToolPattern(validToolCalls),
+            });
+            this.addStep({
+              type: "answer",
+              content: fallback,
+              timestamp: Date.now(),
+            });
+            messages.push({ role: "assistant", content: fallback });
+            return fallback;
+          }
+        } else {
+          fcStaleCount = 0;
+          repeatedToolCorrectionIssued = false;
+        }
+        prevToolCallsKey = curToolCallsKey;
+
+        const parsedCalls = validToolCalls.map((tc) => {
+          const { params: toolParams, parseError } = parseToolCallArguments(
+            tc.function.arguments || "{}",
+          );
+          return { tc, toolName: tc.function.name, toolParams, parseError };
+        });
+
+        for (const { toolName } of parsedCalls) {
+          if (!this.tools.find((t) => t.name === toolName)) {
+            unknownToolCount++;
+            if (unknownToolCount >= 3) {
+              throw new Error(
+                "FC_INCOMPATIBLE: too many unknown tool calls, model may not be compatible with FC",
+              );
+            }
+          } else {
+            unknownToolCount = 0;
+          }
+        }
+
+        const canParallel =
+          parsedCalls.length > 1 &&
+          parsedCalls.every(({ toolName }) => {
+            const tool = this.tools.find((t) => t.name === toolName);
+            if (!tool) return false;
+            if (toolName === "ask_clarification") return false;
+            if (tool.readonly) return true;
+            return (
+              !tool.dangerous &&
+              !this.config.dangerousToolPatterns?.some((p) =>
+                toolName.toLowerCase().includes(p.toLowerCase()),
+              )
+            );
+          });
+
+        type PipelineResult = Awaited<
+          ReturnType<ReActAgent["executeToolPipeline"]>
+        >;
+        type CallResult = {
+          tc: AIToolCall;
+          toolName: string;
+          result: PipelineResult;
+        };
+
+        let callResults: CallResult[];
+        if (canParallel) {
+          callResults = await Promise.all(
+            parsedCalls.map(
+              async ({
+                tc,
+                toolName,
+                toolParams,
+                parseError,
+              }): Promise<CallResult> => {
+                if (parseError) {
+                  this.maybeLogRepeatedMalformedWriteToolCall(
+                    toolName,
+                    tc.function.arguments || "{}",
+                    parseError,
+                    userInput,
+                  );
+                  return {
+                    tc,
+                    toolName,
+                    result: {
+                      outputStr: parseError,
+                      error: parseError,
+                      errorResult: {
+                        type: ToolErrorType.ParseError,
+                        tool: toolName,
+                        message: parseError,
+                        recoverable: true,
+                      },
+                    },
+                  };
+                }
                 return {
                   tc,
                   toolName,
-                  result: {
+                  result: await this.executeToolPipeline(
+                    toolName,
+                    toolParams,
+                    userInput,
+                    signal,
+                  ),
+                };
+              },
+            ),
+          );
+        } else {
+          callResults = [];
+          for (const { tc, toolName, toolParams, parseError } of parsedCalls) {
+            if (parseError) {
+              this.maybeLogRepeatedMalformedWriteToolCall(
+                toolName,
+                tc.function.arguments || "{}",
+                parseError,
+                userInput,
+              );
+            }
+            callResults.push({
+              tc,
+              toolName,
+              result: parseError
+                ? {
                     outputStr: parseError,
                     error: parseError,
                     errorResult: {
@@ -3815,208 +4196,198 @@ ${this.hasDelegateSubtaskTool() ? "- 如有 delegate_subtask 工具可用，可�
                       message: parseError,
                       recoverable: true,
                     },
-                  },
-                };
-              }
-              return {
-                tc,
-                toolName,
-                result: await this.executeToolPipeline(
-                  toolName,
-                  toolParams,
-                  userInput,
-                  signal,
-                ),
-              };
-            },
-          ),
-        );
-      } else {
-        callResults = [];
-        for (const { tc, toolName, toolParams, parseError } of parsedCalls) {
-          if (parseError) {
-            this.maybeLogRepeatedMalformedWriteToolCall(
-              toolName,
-              tc.function.arguments || "{}",
-              parseError,
-              userInput,
-            );
-          }
-          callResults.push({
-            tc,
-            toolName,
-            result: parseError
-              ? {
-                  outputStr: parseError,
-                  error: parseError,
-                  errorResult: {
-                    type: ToolErrorType.ParseError,
-                    tool: toolName,
-                    message: parseError,
-                    recoverable: true,
-                  },
-                }
-              : await this.executeToolPipeline(
-                  toolName,
-                  toolParams,
-                  userInput,
-                  signal,
-                ),
-          });
-        }
-      }
-      let quickAnswerFound: string | undefined;
-
-      messages.push({
-        role: "assistant",
-        content: null,
-        tool_calls: callResults.map((r) => r.tc),
-      });
-
-      let taskDoneResult: string | undefined;
-      /** task_done params.summary（纯文本，比 JSON outputStr 更适合展示） */
-      let taskDoneSummary: string | undefined;
-      /** task_done params.result / params.answer（用于内容型子任务显式交付完整结果） */
-      let taskDoneExplicitResult: string | undefined;
-
-      for (const { tc, toolName, result: pipelineResult } of callResults) {
-        if (pipelineResult.quickAnswer && !quickAnswerFound) {
-          quickAnswerFound = pipelineResult.quickAnswer;
-        }
-        if (pipelineResult.rejected) rejectedDangerousActionCount++;
-
-        if (toolName === "task_done") {
-          taskDoneResult = pipelineResult.outputStr || "任务已完成。";
-          // 尝试从工具调用参数中提取 summary 文本（人类可读，非 JSON）
-          try {
-            const doneParams = parseToolCallArguments(
-              tc.function.arguments || "{}",
-            ).params as { summary?: string; result?: unknown; answer?: unknown };
-            if (doneParams.summary) taskDoneSummary = doneParams.summary.trim();
-            const explicitResultCandidates = [doneParams.result, doneParams.answer]
-              .map((value) => {
-                if (typeof value === "string") return value.trim();
-                if (value == null) return "";
-                try {
-                  return JSON.stringify(value);
-                } catch {
-                  return String(value);
-                }
-              })
-              .filter((value) => value.length > 0);
-            if (explicitResultCandidates.length > 0) {
-              taskDoneExplicitResult = explicitResultCandidates[0];
-            }
-          } catch {
-            /* ignore */
+                  }
+                : await this.executeToolPipeline(
+                    toolName,
+                    toolParams,
+                    userInput,
+                    signal,
+                  ),
+            });
           }
         }
+        let quickAnswerFound: string | undefined;
 
-        if (
-          toolName === "install_clawhub_skill"
-          && pipelineResult.rawOutput
-          && typeof pipelineResult.rawOutput === "object"
-        ) {
-          const installOutput = pipelineResult.rawOutput as {
-            installed?: unknown;
-            resumeRequired?: unknown;
-            resumePrompt?: unknown;
-          };
-          if (installOutput.installed === true && installOutput.resumeRequired === true) {
-            taskDoneSummary =
-              typeof installOutput.resumePrompt === "string" && installOutput.resumePrompt.trim()
-                ? installOutput.resumePrompt.trim()
-                : "已安装所需 ClawHub skill，已自动排入后续续跑任务。";
-            taskDoneResult =
-              "ClawHub skill 安装完成。当前 run 到此结束，系统会在下一次 run 中基于新 skill 继续处理刚才任务。";
-          }
-        }
-
-        if (pipelineResult.error) {
-          const failCount = (toolFailCounts.get(toolName) ?? 0) + 1;
-          toolFailCounts.set(toolName, failCount);
-          let outputWithHint = pipelineResult.outputStr;
-          if (failCount >= 2) {
-            outputWithHint += `\n\n[系统提示] 工具 ${toolName} 已连续失败 ${failCount} 次。请仔细检查参数格式是否正确，或改用其他工具/方式完成任务。不要再以相同方式重试。`;
-          }
-          if (pipelineResult.reflection) {
-            outputWithHint += `\n\n[反思] ${pipelineResult.reflection}`;
-          }
-          messages.push({
-            role: "tool",
-            content: outputWithHint,
-            tool_call_id: tc.id,
-            name: toolName,
-          });
-        } else {
-          toolFailCounts.delete(toolName);
-          messages.push({
-            role: "tool",
-            content: pipelineResult.outputStr,
-            tool_call_id: tc.id,
-            name: toolName,
-          });
-        }
-      }
-
-      // ── Checkpoint: 阶段性进度总结 ──
-      for (const r of callResults) {
-        fcCheckpointBuffer.push({
-          toolName: r.toolName,
-          error: !!r.result.error,
+        messages.push({
+          role: "assistant",
+          content: null,
+          tool_calls: callResults.map((r) => r.tc),
         });
-      }
-      toolCallsSinceCheckpoint += callResults.length;
-      if (toolCallsSinceCheckpoint >= CHECKPOINT_INTERVAL) {
-        const summary = this.buildCheckpointSummary(fcCheckpointBuffer);
-        if (summary) {
-          this.addStep({
-            type: "checkpoint",
-            content: summary,
-            timestamp: Date.now(),
+
+        const toolResultReplacement = await replaceLargeToolResults({
+          candidates: callResults
+            .map(({ tc, toolName, result: pipelineResult }) => ({
+              toolUseId: String(tc.id ?? "").trim(),
+              toolName,
+              content: pipelineResult.outputStr,
+            }))
+            .filter((candidate) => candidate.toolUseId && candidate.content),
+          state: this.config.toolResultReplacementState,
+          contextLimit: this.config.contextLimit ?? DEFAULT_CONTEXT_LIMIT,
+          persistDir: this.config.toolResultPersistenceDir,
+        });
+        if (toolResultReplacement.newlyReplaced.length > 0) {
+          this.config.onToolResultReplaced?.(toolResultReplacement.newlyReplaced);
+        }
+
+        let taskDoneResult: string | undefined;
+        /** task_done params.summary（纯文本，比 JSON outputStr 更适合展示） */
+        let taskDoneSummary: string | undefined;
+        /** task_done params.result / params.answer（用于内容型子任务显式交付完整结果） */
+        let taskDoneExplicitResult: string | undefined;
+
+        for (const { tc, toolName, result: pipelineResult } of callResults) {
+          if (pipelineResult.quickAnswer && !quickAnswerFound) {
+            quickAnswerFound = pipelineResult.quickAnswer;
+          }
+          if (pipelineResult.rejected) rejectedDangerousActionCount++;
+          const replacedOutput = toolResultReplacement.replacements.get(String(tc.id ?? "").trim());
+          const toolMessageContent = replacedOutput ?? pipelineResult.outputStr;
+
+          if (toolName === "task_done") {
+            taskDoneResult = toolMessageContent || "任务已完成。";
+            // 尝试从工具调用参数中提取 summary 文本（人类可读，非 JSON）
+            try {
+              const doneParams = parseToolCallArguments(
+                tc.function.arguments || "{}",
+              ).params as { summary?: string; result?: unknown; answer?: unknown };
+              if (doneParams.summary) taskDoneSummary = doneParams.summary.trim();
+              const explicitResultCandidates = [doneParams.result, doneParams.answer]
+                .map((value) => {
+                  if (typeof value === "string") return value.trim();
+                  if (value == null) return "";
+                  try {
+                    return JSON.stringify(value);
+                  } catch {
+                    return String(value);
+                  }
+                })
+                .filter((value) => value.length > 0);
+              if (explicitResultCandidates.length > 0) {
+                taskDoneExplicitResult = explicitResultCandidates[0];
+              }
+            } catch {
+              /* ignore */
+            }
+          }
+
+          if (
+            toolName === "install_clawhub_skill"
+            && pipelineResult.rawOutput
+            && typeof pipelineResult.rawOutput === "object"
+          ) {
+            const installOutput = pipelineResult.rawOutput as {
+              installed?: unknown;
+              resumeRequired?: unknown;
+              resumePrompt?: unknown;
+            };
+            if (installOutput.installed === true && installOutput.resumeRequired === true) {
+              taskDoneSummary =
+                typeof installOutput.resumePrompt === "string" && installOutput.resumePrompt.trim()
+                  ? installOutput.resumePrompt.trim()
+                  : "已安装所需 ClawHub skill，已自动排入后续续跑任务。";
+              taskDoneResult =
+                "ClawHub skill 安装完成。当前 run 到此结束，系统会在下一次 run 中基于新 skill 继续处理刚才任务。";
+            }
+          }
+
+          if (pipelineResult.error) {
+            const failCount = (toolFailCounts.get(toolName) ?? 0) + 1;
+            toolFailCounts.set(toolName, failCount);
+            let outputWithHint = pipelineResult.outputStr;
+            if (failCount >= 2) {
+              outputWithHint += `\n\n[系统提示] 工具 ${toolName} 已连续失败 ${failCount} 次。请仔细检查参数格式是否正确，或改用其他工具/方式完成任务。不要再以相同方式重试。`;
+            }
+            if (pipelineResult.reflection) {
+              outputWithHint += `\n\n[反思] ${pipelineResult.reflection}`;
+            }
+            messages.push({
+              role: "tool",
+              content: replacedOutput ?? outputWithHint,
+              tool_call_id: tc.id,
+              name: toolName,
+            });
+          } else {
+            toolFailCounts.delete(toolName);
+            messages.push({
+              role: "tool",
+              content: toolMessageContent,
+              tool_call_id: tc.id,
+              name: toolName,
+            });
+          }
+        }
+
+        // ── Checkpoint: 阶段性进度总结 ──
+        for (const r of callResults) {
+          fcCheckpointBuffer.push({
+            toolName: r.toolName,
+            error: !!r.result.error,
           });
         }
-        toolCallsSinceCheckpoint = 0;
-        fcCheckpointBuffer.length = 0;
-      }
-
-      if (quickAnswerFound) return quickAnswerFound;
-
-      if (taskDoneResult) {
-        const lastAnswerStep = [...this.steps]
-          .reverse()
-          .find((s) => s.type === "answer");
-        const answer =
-          this.pickBestFinalAnswer(userInput, [
-            taskDoneExplicitResult,
-            lastAnswerStep?.content,
-            this.lastStreamingAnswer.length > 50
-              ? this.lastStreamingAnswer
-              : undefined,
-            taskDoneSummary,
-            taskDoneResult,
-          ]) || taskDoneResult;
-        if (!lastAnswerStep) {
-          this.addStep({
-            type: "answer",
-            content: answer,
-            timestamp: Date.now(),
-          });
+        toolCallsSinceCheckpoint += callResults.length;
+        if (toolCallsSinceCheckpoint >= CHECKPOINT_INTERVAL) {
+          const summary = this.buildCheckpointSummary(fcCheckpointBuffer);
+          if (summary) {
+            this.addStep({
+              type: "checkpoint",
+              content: summary,
+              timestamp: Date.now(),
+            });
+          }
+          toolCallsSinceCheckpoint = 0;
+          fcCheckpointBuffer.length = 0;
         }
-        return answer;
+
+        if (quickAnswerFound) {
+          messages.push({ role: "assistant", content: quickAnswerFound });
+          return quickAnswerFound;
+        }
+
+        if (taskDoneResult) {
+          const lastAnswerStep = [...this.steps]
+            .reverse()
+            .find((s) => s.type === "answer");
+          const answer =
+            this.pickBestFinalAnswer(userInput, [
+              taskDoneExplicitResult,
+              lastAnswerStep?.content,
+              this.lastStreamingAnswer.length > 50
+                ? this.lastStreamingAnswer
+                : undefined,
+              taskDoneSummary,
+              taskDoneResult,
+            ]) || taskDoneResult;
+          if (!lastAnswerStep) {
+            this.addStep({
+              type: "answer",
+              content: answer,
+              timestamp: Date.now(),
+            });
+          }
+          messages.push({ role: "assistant", content: answer });
+          return answer;
+        }
+        }
+      } catch (error) {
+        persistSessionState();
+        throw error;
       }
+
+      const fallback = this.buildIterationExhaustedSummary({
+        iterationsUsed: this.config.maxIterations,
+        stopReason: "iteration_limit_reached",
+      });
+      this.addStep({
+        type: "answer",
+        content: fallback,
+        timestamp: Date.now(),
+      });
+      messages.push({ role: "assistant", content: fallback });
+      return fallback;
+    } finally {
+      this.snapshotConversationMessages(messages);
     }
-
-    const fallback = this.buildIterationExhaustedSummary({
-      iterationsUsed: this.config.maxIterations,
-      stopReason: "iteration_limit_reached",
-    });
-    this.addStep({
-      type: "answer",
-      content: fallback,
-      timestamp: Date.now(),
-    });
-    return fallback;
   }
 
   // ── 文本 ReAct 模式的执行循环 ──
@@ -4053,17 +4424,18 @@ ${this.hasDelegateSubtaskTool() ? "- 如有 delegate_subtask 工具可用，可�
     let staleCount = 0;
     let textEmptyCount = 0;
 
-    for (let i = 0; i < this.config.maxIterations; i++) {
-      if (signal?.aborted) throw new Error("Aborted");
-      this.emitTraceEvent("llm_round_started", {
-        count: i + 1,
-        phase: "text",
-      });
+    try {
+      for (let i = 0; i < this.config.maxIterations; i++) {
+        if (signal?.aborted) throw new Error("Aborted");
+        this.emitTraceEvent("llm_round_started", {
+          count: i + 1,
+          phase: "text",
+        });
 
-      const remaining = this.config.maxIterations - i;
-      const isFinalWarningTurn = remaining === 1;
+        const remaining = this.config.maxIterations - i;
+        const isFinalWarningTurn = remaining === 1;
 
-      if (remaining <= 3 && remaining > 0) {
+        if (remaining <= 3 && remaining > 0) {
         const warningContent = isFinalWarningTurn
           ? `[Final Warning] 这是最后一步。请立即写出 Final Answer，不要再使用任何工具。基于目前收集到的信息给出最终答案。`
           : `[系统提示] 剩余可用步骤仅 ${remaining} 步。请尽快给出 Final Answer。如果信息已足够，直接写 Final Answer；如果还需关键操作，只做最必要的一步。`;
@@ -4076,43 +4448,43 @@ ${this.hasDelegateSubtaskTool() ? "- 如有 delegate_subtask 工具可用，可�
         }
       }
 
-      let responseContent: string;
-      let usedChatFallback = false;
-      const compactedTextMessages = prepareMessagesForModel(
-        messages,
-        this.config.contextLimit ?? DEFAULT_CONTEXT_LIMIT,
-        this.config.patchDanglingToolCalls === true,
-      );
-      this.recordTrajectory({
-        type: "llm_call",
-        mode: this.mode,
-        tokenEstimate: estimateMessagesTokens(compactedTextMessages),
-      });
-      try {
-        responseContent = await this.streamTextLLM(
-          compactedTextMessages,
-          signal,
+        let responseContent: string;
+        let usedChatFallback = false;
+        const compactedTextMessages = prepareMessagesForModel(
+          messages,
+          this.config.contextLimit ?? DEFAULT_CONTEXT_LIMIT,
+          this.config.patchDanglingToolCalls === true,
         );
-      } catch (e) {
-        if ((e as Error).message === "Aborted") throw e;
-        this.emitTraceEvent("llm_retry", {
-          count: i + 1,
-          phase: "text_chat_fallback",
-          preview: previewTraceValue(e instanceof Error ? e.message : String(e)),
+        this.recordTrajectory({
+          type: "llm_call",
+          mode: this.mode,
+          tokenEstimate: estimateMessagesTokens(compactedTextMessages),
         });
-        const response = await this.ai.chat({
-          messages: compactedTextMessages,
-          temperature: this.config.temperature,
-          signal,
-        });
-        responseContent = response.content;
-        usedChatFallback = true;
-      }
+        try {
+          responseContent = await this.streamTextLLM(
+            compactedTextMessages,
+            signal,
+          );
+        } catch (e) {
+          if ((e as Error).message === "Aborted") throw e;
+          this.emitTraceEvent("llm_retry", {
+            count: i + 1,
+            phase: "text_chat_fallback",
+            preview: previewTraceValue(e instanceof Error ? e.message : String(e)),
+          });
+          const response = await this.ai.chat({
+            messages: compactedTextMessages,
+            temperature: this.config.temperature,
+            signal,
+          });
+          responseContent = response.content;
+          usedChatFallback = true;
+        }
 
-      if (signal?.aborted) throw new Error("Aborted");
+        if (signal?.aborted) throw new Error("Aborted");
 
-      let trimmed = responseContent.trim();
-      if (!trimmed && !usedChatFallback) {
+        let trimmed = responseContent.trim();
+        if (!trimmed && !usedChatFallback) {
         try {
           this.emitTraceEvent("llm_retry", {
             count: i + 1,
@@ -4131,7 +4503,7 @@ ${this.hasDelegateSubtaskTool() ? "- 如有 delegate_subtask 工具可用，可�
         }
       }
 
-      if (!trimmed) {
+        if (!trimmed) {
         textEmptyCount++;
         if (textEmptyCount >= EMPTY_MODEL_OUTPUT_LIMIT) {
           const fallback = this.buildIterationExhaustedSummary({
@@ -4143,6 +4515,7 @@ ${this.hasDelegateSubtaskTool() ? "- 如有 delegate_subtask 工具可用，可�
             content: fallback,
             timestamp: Date.now(),
           });
+          messages.push({ role: "assistant", content: fallback });
           return fallback;
         }
         this.addStep({
@@ -4157,20 +4530,20 @@ ${this.hasDelegateSubtaskTool() ? "- 如有 delegate_subtask 工具可用，可�
         });
         continue;
       }
-      textEmptyCount = 0;
-      this.emitTraceEvent("llm_round_completed", {
+        textEmptyCount = 0;
+        this.emitTraceEvent("llm_round_completed", {
         count: i + 1,
         phase: "text",
         status: usedChatFallback ? "chat_fallback" : "content",
         preview: previewTraceValue(trimmed),
       });
 
-      const prevTrimmed = prevResponseContent.trim();
-      const compareLen = Math.min(300, trimmed.length, prevTrimmed.length);
-      const isSimilar =
+        const prevTrimmed = prevResponseContent.trim();
+        const compareLen = Math.min(300, trimmed.length, prevTrimmed.length);
+        const isSimilar =
         compareLen > 20 &&
         trimmed.slice(0, compareLen) === prevTrimmed.slice(0, compareLen);
-      if (isSimilar) {
+        if (isSimilar) {
         staleCount++;
         if (staleCount >= 2) {
           this.addStep({
@@ -4178,16 +4551,17 @@ ${this.hasDelegateSubtaskTool() ? "- 如有 delegate_subtask 工具可用，可�
             content: trimmed,
             timestamp: Date.now(),
           });
+          messages.push({ role: "assistant", content: trimmed });
           return trimmed;
         }
-      } else {
-        staleCount = 0;
-      }
-      prevResponseContent = responseContent;
+        } else {
+          staleCount = 0;
+        }
+        prevResponseContent = responseContent;
 
-      const parsed = this.parseResponse(responseContent);
+        const parsed = this.parseResponse(responseContent);
 
-      if (parsed.thought) {
+        if (parsed.thought) {
         this.addStep({
           type: "thought",
           content: parsed.thought,
@@ -4195,7 +4569,7 @@ ${this.hasDelegateSubtaskTool() ? "- 如有 delegate_subtask 工具可用，可�
         });
       }
 
-      if (parsed.finalAnswer) {
+        if (parsed.finalAnswer) {
         const memoryRecallCorrection =
           memoryRecallCorrectionCount < 2
             ? this.buildMemoryRecallCorrection(userInput)
@@ -4225,10 +4599,11 @@ ${this.hasDelegateSubtaskTool() ? "- 如有 delegate_subtask 工具可用，可�
           content: parsed.finalAnswer,
           timestamp: Date.now(),
         });
+        messages.push({ role: "assistant", content: parsed.finalAnswer });
         return parsed.finalAnswer;
       }
 
-      if (parsed.action) {
+        if (parsed.action) {
         if (parsed.actionInputParseError) {
           this.emitTraceEvent("tool_call_blocked", {
             tool: parsed.action,
@@ -4252,7 +4627,10 @@ ${this.hasDelegateSubtaskTool() ? "- 如有 delegate_subtask 工具可用，可�
           signal,
         );
 
-        if (pipelineResult.quickAnswer) return pipelineResult.quickAnswer;
+        if (pipelineResult.quickAnswer) {
+          messages.push({ role: "assistant", content: pipelineResult.quickAnswer });
+          return pipelineResult.quickAnswer;
+        }
         if (pipelineResult.rejected) rejectedDangerousActionCount++;
 
         let observation = pipelineResult.outputStr;
@@ -4290,26 +4668,30 @@ ${this.hasDelegateSubtaskTool() ? "- 如有 delegate_subtask 工具可用，可�
           textToolCallsSinceCheckpoint = 0;
           textCheckpointBuffer.length = 0;
         }
-      } else {
+        } else {
         messages.push({ role: "assistant", content: responseContent });
         messages.push({
           role: "user",
           content:
             "请按照规定格式回复：使用 Thought/Action/Action Input 或 Thought/Final Answer",
         });
+        }
       }
-    }
 
-    const fallback = this.buildIterationExhaustedSummary({
-      iterationsUsed: this.config.maxIterations,
-      stopReason: "iteration_limit_reached",
-    });
-    this.addStep({
-      type: "answer",
-      content: fallback,
-      timestamp: Date.now(),
-    });
-    return fallback;
+      const fallback = this.buildIterationExhaustedSummary({
+        iterationsUsed: this.config.maxIterations,
+        stopReason: "iteration_limit_reached",
+      });
+      this.addStep({
+        type: "answer",
+        content: fallback,
+        timestamp: Date.now(),
+      });
+      messages.push({ role: "assistant", content: fallback });
+      return fallback;
+    } finally {
+      this.snapshotConversationMessages(messages);
+    }
   }
 
   // ── 公共入口 ──
@@ -4342,13 +4724,37 @@ ${this.hasDelegateSubtaskTool() ? "- 如有 delegate_subtask 工具可用，可�
       const canUseFC =
         !this.config.forceTextMode &&
         typeof this.ai.streamWithTools === "function";
+      const blockTextFallback = (
+        reason: FunctionCallingRequiredReason,
+        message: string,
+      ): never => {
+        this.emitTraceEvent("llm_text_fallback_blocked", {
+          phase: "fc_required",
+          status: reason,
+          preview: previewTraceValue(message),
+        });
+        this.addStep({
+          type: "observation",
+          content: message,
+          timestamp: Date.now(),
+        });
+        throw new FunctionCallingRequiredError(reason, message);
+      };
+
+      if (this.config.requireFunctionCalling && (!canUseFC || this.fcAvailable === false)) {
+        blockTextFallback(
+          "unavailable",
+          "当前阶段必须通过 Function Calling 完成工具闭环；本次运行禁止降级为文本 ReAct。",
+        );
+      }
 
       if (canUseFC && this.fcAvailable !== false) {
         const FC_MAX_TRANSPORT_RETRIES = 1;
         const FC_FIRST_CHUNK_RETRIES = 1;
+        const fcSessionState = this.createFCSessionState(userInput, images);
         for (let fcRetryCount = 0; ; fcRetryCount++) {
           try {
-            const result = await this.runFC(userInput, signal, images);
+            const result = await this.runFC(userInput, signal, images, fcSessionState);
             this.fcAvailable = true;
             return result;
           } catch (e) {
@@ -4374,6 +4780,12 @@ ${this.hasDelegateSubtaskTool() ? "- 如有 delegate_subtask 工具可用，可�
                 level: ErrorLevel.Warning,
                 silent: true,
               });
+              if (this.config.requireFunctionCalling) {
+                blockTextFallback(
+                  "incompatible",
+                  "Function Calling 模式不可用，且当前阶段禁止切换到文本 ReAct。",
+                );
+              }
               this.addStep({
                 type: "observation",
                 content:
@@ -4406,6 +4818,12 @@ ${this.hasDelegateSubtaskTool() ? "- 如有 delegate_subtask 工具可用，可�
                 level: ErrorLevel.Warning,
                 silent: true,
               });
+              if (this.config.requireFunctionCalling) {
+                blockTextFallback(
+                  "first_chunk_stall",
+                  "Function Calling 首个响应持续卡住，且当前阶段禁止切换到文本 ReAct。",
+                );
+              }
               this.addStep({
                 type: "observation",
                 content:
@@ -4421,6 +4839,7 @@ ${this.hasDelegateSubtaskTool() ? "- 如有 delegate_subtask 工具可用，可�
               fcRetryCount < FC_MAX_TRANSPORT_RETRIES
             ) {
               const delay = (fcRetryCount + 1) * 3000;
+              this.injectFCTransportRetryNotice(fcSessionState);
               this.emitTraceEvent("llm_retry", {
                 count: fcRetryCount + 1,
                 phase: "fc_transport_retry",
@@ -4442,6 +4861,12 @@ ${this.hasDelegateSubtaskTool() ? "- 如有 delegate_subtask 工具可用，可�
                 level: ErrorLevel.Warning,
                 silent: true,
               });
+              if (this.config.requireFunctionCalling) {
+                blockTextFallback(
+                  "transport_unstable",
+                  "Function Calling 连接不稳定，且当前阶段禁止切换到文本 ReAct。",
+                );
+              }
               this.addStep({
                 type: "observation",
                 content:
@@ -4462,6 +4887,13 @@ ${this.hasDelegateSubtaskTool() ? "- 如有 delegate_subtask 工具可用，可�
             throw e;
           }
         }
+      }
+
+      if (this.config.requireFunctionCalling) {
+        blockTextFallback(
+          "unavailable",
+          "当前阶段必须通过 Function Calling 完成工具闭环；本次运行禁止降级为文本 ReAct。",
+        );
       }
 
       // 文本 ReAct 模式

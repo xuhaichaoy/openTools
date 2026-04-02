@@ -75,6 +75,7 @@ const hoisted = vi.hoisted(() => ({
 }));
 
 vi.mock("../core/react-agent", () => ({
+  FunctionCallingRequiredError: class FunctionCallingRequiredError extends Error {},
   ReActAgent: class {
     constructor(
       _ai: unknown,

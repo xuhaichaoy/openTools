@@ -6,8 +6,8 @@ import type { ActorMiddleware, ActorRunContext } from "../actor-middleware";
 import type { AssistantMemoryPromptBundle } from "@/core/ai/assistant-memory";
 
 const log = createLogger("MemoryMiddleware");
-const MEMORY_BOOTSTRAP_TIMEOUT_MS = 800;
-const MEMORY_RECALL_SOFT_TIMEOUT_MS = 1_200;
+const MEMORY_BOOTSTRAP_TIMEOUT_MS = 3000;
+const MEMORY_RECALL_SOFT_TIMEOUT_MS = 5000;
 
 const EMPTY_MEMORY_BUNDLE: AssistantMemoryPromptBundle = {
   prompt: "",

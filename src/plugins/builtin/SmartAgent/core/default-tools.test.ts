@@ -109,6 +109,34 @@ describe("default-tools read_document", () => {
     expect(hoisted.runShellCommand).not.toHaveBeenCalled();
   });
 
+  it("blocks malformed shell commands before runtime execution", async () => {
+    const { tools } = createBuiltinAgentTools(async () => true);
+    const tool = tools.find((item) => item.name === "run_shell_command");
+
+    const result = await tool!.execute({
+      command: "ls-la/Users/haichao/Desktop/work/51ToolBox",
+    });
+
+    expect(result).toMatchObject({
+      error: expect.stringContaining("缺少空格"),
+    });
+    expect(hoisted.runShellCommand).not.toHaveBeenCalled();
+  });
+
+  it("blocks long sleep polling commands before runtime execution", async () => {
+    const { tools } = createBuiltinAgentTools(async () => true);
+    const tool = tools.find((item) => item.name === "run_shell_command");
+
+    const result = await tool!.execute({
+      command: "sleep 30",
+    });
+
+    expect(result).toMatchObject({
+      error: expect.stringContaining("wait_for_spawned_tasks"),
+    });
+    expect(hoisted.runShellCommand).not.toHaveBeenCalled();
+  });
+
   it("exports docx documents via export_document", async () => {
     const { tools } = createBuiltinAgentTools(async () => true);
     const tool = tools.find((item) => item.name === "export_document");
@@ -216,6 +244,70 @@ describe("default-tools read_document", () => {
         name: "Sheet1",
         headers: ["课程", "数量", "启用", "备注"],
         rows: [["A", 3, true, null]],
+      }]),
+    });
+  });
+
+  it("publishes structured raw schemas for spreadsheet export and task_done", () => {
+    const { tools } = createBuiltinAgentTools(async () => Promise.resolve(true));
+    const spreadsheetTool = tools.find((item) => item.name === "export_spreadsheet");
+    const taskDoneTool = tools.find((item) => item.name === "task_done");
+
+    expect(spreadsheetTool?.rawParametersSchema).toMatchObject({
+      type: "object",
+      required: ["file_name", "sheets"],
+      properties: {
+        sheets: {
+          type: "array",
+          items: {
+            type: "object",
+          },
+        },
+      },
+    });
+    expect(taskDoneTool?.rawParametersSchema).toMatchObject({
+      type: "object",
+      properties: {
+        result: {
+          oneOf: expect.arrayContaining([
+            expect.objectContaining({ type: "array" }),
+            expect.objectContaining({ type: "object" }),
+          ]),
+        },
+        answer: {
+          oneOf: expect.arrayContaining([
+            expect.objectContaining({ type: "array" }),
+            expect.objectContaining({ type: "object" }),
+          ]),
+        },
+      },
+    });
+  });
+
+  it("recovers spreadsheet JSON strings that contain raw newlines inside cell text", async () => {
+    const { tools } = createBuiltinAgentTools(async () => true);
+    const tool = tools.find((item) => item.name === "export_spreadsheet");
+    const malformedSheets = `[
+      {
+        "name": "Sheet1",
+        "headers": ["课程", "课程介绍"],
+        "rows": [["A", "第一行
+第二行"]]
+      }
+    ]`;
+
+    const result = await tool!.execute({
+      file_name: "课程清单.xlsx",
+      sheets: malformedSheets,
+    });
+
+    expect(result).toBe("已导出 Excel 文件: /Users/haichao/Downloads/课程清单.xlsx");
+    expect(hoisted.invoke).toHaveBeenCalledWith("export_spreadsheet", {
+      outputPath: "/Users/haichao/Downloads/课程清单.xlsx",
+      sheetsJson: JSON.stringify([{
+        name: "Sheet1",
+        headers: ["课程", "课程介绍"],
+        rows: [["A", "第一行\n第二行"]],
       }]),
     });
   });

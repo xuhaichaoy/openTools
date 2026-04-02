@@ -130,6 +130,78 @@ function compactText(value: string | undefined, maxLength = 120): string | undef
   return `${normalized.slice(0, Math.max(1, maxLength - 3)).trimEnd()}...`;
 }
 
+function basename(path: string): string {
+  return path.split("/").pop() || path;
+}
+
+function extractStructuredPayloadCandidate(content: string | undefined): string | undefined {
+  const normalized = String(content ?? "").trim();
+  if (!normalized) return undefined;
+  const codeBlockMatch = normalized.match(/^```(?:json)?\s*([\s\S]*?)```$/iu);
+  if (codeBlockMatch?.[1]?.trim()) return codeBlockMatch[1].trim();
+  if (normalized.startsWith("{") || normalized.startsWith("[")) return normalized;
+  return undefined;
+}
+
+function extractArtifactPath(content: string | undefined): string | undefined {
+  const normalized = String(content ?? "").trim();
+  if (!normalized) return undefined;
+  return normalized.match(/\/[^\s"'`]+\.(?:json|md|html?|tsx?|jsx?|css|scss|less|pdf|docx?|xlsx?|csv|pptx?)/i)?.[0];
+}
+
+function summarizeStructuredWorkerPayload(content: string | undefined): string | undefined {
+  const candidate = extractStructuredPayloadCandidate(content);
+  if (!candidate) return undefined;
+  try {
+    const parsed = JSON.parse(candidate) as unknown;
+    if (Array.isArray(parsed)) {
+      return parsed.length > 0 ? `已返回 ${parsed.length} 条结构化结果` : "已返回结构化结果";
+    }
+    if (!parsed || typeof parsed !== "object") return undefined;
+    const value = parsed as Record<string, unknown>;
+    const rowGroups = [
+      Array.isArray(value.rows) ? value.rows.length : null,
+      Array.isArray(value.results) ? value.results.length : null,
+      Array.isArray(value.items) ? value.items.length : null,
+      Array.isArray(value.structured_rows) ? value.structured_rows.length : null,
+      Array.isArray(value.data) ? value.data.length : null,
+      Array.isArray(value.artifacts) ? value.artifacts.length : null,
+    ].filter((count): count is number => typeof count === "number");
+    if (rowGroups.length > 0) {
+      const count = rowGroups[0];
+      return count > 0 ? `已返回 ${count} 条结构化结果` : "已返回结构化结果";
+    }
+    const artifactPath = [
+      typeof value.path === "string" ? value.path : undefined,
+      typeof value.output_path === "string" ? value.output_path : undefined,
+      typeof value.file_path === "string" ? value.file_path : undefined,
+      typeof value.artifact_path === "string" ? value.artifact_path : undefined,
+      typeof value.message === "string" ? extractArtifactPath(value.message) : undefined,
+    ].find((item) => Boolean(item));
+    if (artifactPath) {
+      return `已生成产物：${basename(artifactPath)}`;
+    }
+    return `已返回 ${Object.keys(value).length} 个字段的结构化结果`;
+  } catch {
+    return undefined;
+  }
+}
+
+function summarizeWorkerTerminalResult(content: string | undefined): string | undefined {
+  const structuredSummary = summarizeStructuredWorkerPayload(content);
+  if (structuredSummary) return structuredSummary;
+  const artifactPath = extractArtifactPath(content);
+  if (artifactPath) return `已生成产物：${basename(artifactPath)}`;
+  return compactText(content, 140);
+}
+
+function summarizeWorkerTerminalError(content: string | undefined): string | undefined {
+  const normalized = String(content ?? "").trim();
+  if (!normalized) return undefined;
+  if (normalized === "Aborted") return undefined;
+  return compactText(normalized, 140);
+}
+
 function formatShortTime(timestamp?: number): string {
   if (!timestamp) return "--";
   return new Date(timestamp).toLocaleTimeString("zh-CN", {
@@ -445,6 +517,9 @@ function buildWorkerDetail(worker: LocalCollaborationTimelineWorker): string {
       ?? `该 worker（${roleBoundaryMeta.label}）已完成。`;
   }
   if (worker.status === "error" || worker.status === "aborted") {
+    if (worker.status === "aborted" && !worker.timeoutReason && !worker.errorMessage) {
+      return "该 worker 已中止。";
+    }
     const timeoutPrefix = worker.timeoutReason === "idle"
       ? "该 worker 长时间无进展，已按空闲租约收敛。"
       : worker.timeoutReason === "budget"
@@ -527,8 +602,10 @@ function buildWorkerFromSources(params: {
     ?? task?.spawnedAt
     ?? startedAt;
   const runtimeProgress = compactText(task?.runtime?.progressSummary, 140);
-  const runtimeResult = compactText(task?.runtime?.terminalResult, 140);
-  const runtimeError = compactText(task?.runtime?.terminalError, 140);
+  const rawRuntimeResult = task?.runtime?.terminalResult ?? task?.result ?? terminalEvent?.terminalResult ?? terminalEvent?.result;
+  const rawRuntimeError = task?.runtime?.terminalError ?? task?.error ?? terminalEvent?.terminalError ?? terminalEvent?.error;
+  const runtimeResult = summarizeWorkerTerminalResult(rawRuntimeResult);
+  const runtimeError = summarizeWorkerTerminalError(rawRuntimeError);
   const status = task?.status
     ?? terminalEvent?.status
     ?? latestEvent?.status
@@ -561,8 +638,8 @@ function buildWorkerFromSources(params: {
           ?? latestEvent?.message,
         140,
       ),
-    resultPreview: runtimeResult ?? compactText(task?.result ?? terminalEvent?.terminalResult ?? terminalEvent?.result, 140),
-    errorMessage: runtimeError ?? compactText(task?.error ?? terminalEvent?.terminalError ?? terminalEvent?.error, 140),
+    resultPreview: runtimeResult,
+    errorMessage: runtimeError,
     timeoutReason: task?.timeoutReason ?? terminalEvent?.timeoutReason,
     budgetSeconds: task?.budgetSeconds ?? latestEvent?.budgetSeconds ?? startEvent?.budgetSeconds,
     idleLeaseSeconds: task?.idleLeaseSeconds ?? latestEvent?.idleLeaseSeconds ?? startEvent?.idleLeaseSeconds,

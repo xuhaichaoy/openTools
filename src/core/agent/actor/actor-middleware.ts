@@ -10,6 +10,11 @@ import type {
   MiddlewareOverrides,
 } from "./types";
 import type { AskUserCallback, ConfirmDangerousAction } from "./agent-actor";
+import type {
+  ToolResultReplacementSnapshot,
+  ToolResultReplacementState,
+} from "@/core/agent/runtime/tool-result-replacement";
+import type { RuntimeTranscriptMessage } from "@/core/agent/runtime/transcript-messages";
 import { createLogger } from "@/core/logger";
 
 const log = createLogger("ActorMiddleware");
@@ -64,12 +69,17 @@ export interface ActorRunContext {
   hasCodingWorkflowSkill: boolean;
   fcCompatibilityKey: string;
   contextMessages: Array<{ role: "user" | "assistant"; content: string }>;
+  transcriptMessages?: RuntimeTranscriptMessage[];
+  requireFunctionCalling?: boolean;
   patchDanglingToolCalls?: boolean;
   loopDetectionConfig?: LoopDetectionConfig;
   threadData?: ThreadDataContext;
+  toolResultReplacementState?: ToolResultReplacementState;
+  toolResultReplacementSnapshot?: ToolResultReplacementSnapshot;
 
   // ── Callbacks (set by middlewares) ──
   notifyToolCalled?: (toolName: string) => void;
+  onConversationMessagesUpdated?: (messages: RuntimeTranscriptMessage[]) => void;
   inboxDrain?: () => Array<Pick<InboxMessage, "id" | "from" | "content" | "expectReply" | "replyTo" | "images">>;
 
   // ── Retry (set by ModelRetryMiddleware) ──

@@ -2,6 +2,15 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { ActorConfig, DialogExecutionMode, ExecutionPolicy, ToolPolicy } from "./types";
 import type { ExecutionContract } from "@/core/collaboration/types";
+import { getAgentTaskManager, resetAgentTaskManager } from "@/core/task-center";
+import { AgentBackendRegistry } from "@/core/agent/backends/registry";
+import type {
+  AgentBackendMessageRequest,
+  AgentBackendMessageResult,
+  AgentBackendStatus,
+  AgentBackendTaskRequest,
+  AgentExecutorBackend,
+} from "@/core/agent/backends/types";
 
 vi.mock("./actor-transcript", () => ({
   appendDialogMessageSync: vi.fn(),
@@ -215,8 +224,41 @@ vi.mock("./spawned-task-result-validator", () => ({
 
 let ActorSystem: typeof import("./actor-system").ActorSystem;
 
+class FakeRemoteTaskBackend implements AgentExecutorBackend {
+  readonly id = "remote";
+  readonly kind = "remote" as const;
+  readonly label = "Fake Remote Backend";
+
+  getStatus(): AgentBackendStatus {
+    return { available: true };
+  }
+
+  async dispatchTask(_request: AgentBackendTaskRequest) {
+    return {
+      taskId: "remote-task-1",
+      runId: "remote-run-1",
+      status: "running" as const,
+      summary: "远程任务已提交，等待外部执行器回流",
+      outputPath: "/tmp/remote-task-1.log",
+      metadata: {
+        provider: "fake-remote",
+      },
+    };
+  }
+
+  async sendMessage(_request: AgentBackendMessageRequest): Promise<AgentBackendMessageResult> {
+    return {
+      sent: false,
+      backendId: this.id,
+      error: "not used",
+    };
+  }
+}
+
 afterEach(() => {
   vi.useRealTimers();
+  localStorage.clear();
+  resetAgentTaskManager();
 });
 
 beforeAll(async () => {
@@ -303,6 +345,24 @@ describe("ActorSystem dialog execution mode", () => {
 
     expect(system.getDialogExecutionMode()).toBe("execute");
     expect(system.getDialogSubagentEnabled()).toBe(false);
+  });
+
+  it("tracks coordinator mode independently and allows explicit toggling", () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("lead", "Lead"));
+    system.spawn(buildActorConfig("reviewer", "Reviewer"));
+
+    expect(system.isCoordinatorModeEnabled()).toBe(false);
+
+    system.setCoordinatorModeEnabled(true);
+    expect(system.isCoordinatorModeEnabled()).toBe(true);
+
+    system.setDialogExecutionMode("plan");
+    expect(system.isCoordinatorModeEnabled()).toBe(true);
+
+    system.setCoordinatorModeEnabled(false);
+    expect(system.isCoordinatorModeEnabled()).toBe(false);
+    expect(system.getDialogExecutionMode()).toBe("plan");
   });
 });
 
@@ -635,6 +695,59 @@ describe("ActorSystem.spawnTask", () => {
     expect(specialist.lastAssignedQuery).toContain("## 交付要求");
   });
 
+  it("reuses the same running child task instead of rejecting a duplicate spawn", async () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+    const specialist = system.spawn(buildActorConfig("specialist", "Specialist")) as unknown as {
+      assignTask: ReturnType<typeof vi.fn>;
+      emitEvent: (type: string, detail?: unknown) => void;
+      _status?: string;
+      lastAssignedQuery?: string;
+    };
+
+    let finishTask: (() => void) | undefined;
+    specialist.assignTask = vi.fn((query: string) => {
+      specialist.lastAssignedQuery = query;
+      specialist._status = "running";
+      specialist.emitEvent("task_started", { taskId: "task-duplicate", query });
+      return new Promise((resolve) => {
+        finishTask = () => {
+          specialist._status = "idle";
+          specialist.emitEvent("task_completed", { taskId: "task-duplicate", result: "ok" });
+          resolve({
+            id: "task-duplicate",
+            query,
+            status: "completed" as const,
+            result: "ok",
+            steps: [],
+            startedAt: Date.now(),
+            finishedAt: Date.now(),
+          });
+        };
+      });
+    });
+
+    const first = system.spawnTask("coordinator", "specialist", "补充实现验证清单", {
+      label: "实现验证",
+      cleanup: "keep",
+    });
+    const duplicated = system.spawnTask("coordinator", "specialist", "补充实现验证清单", {
+      label: "实现验证",
+      cleanup: "keep",
+    });
+
+    expect("error" in first).toBe(false);
+    expect("error" in duplicated).toBe(false);
+    if ("error" in first || "error" in duplicated) return;
+
+    expect(duplicated.runId).toBe(first.runId);
+    expect(specialist.assignTask).toHaveBeenCalledTimes(1);
+
+    finishTask?.();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
   it("can create a temporary child agent when the target does not exist", () => {
     const system = new ActorSystem();
     system.spawn(buildActorConfig("coordinator", "Coordinator"));
@@ -674,6 +787,88 @@ describe("ActorSystem.spawnTask", () => {
       fromActorId: record.targetActorId,
       toActorId: "coordinator",
     });
+  });
+
+  it("implicitly forks a temporary child agent when the target name is missing from the roster", () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+
+    system.armExecutionContract(buildExecutionContract({
+      contractId: "contract-implicit-fork-1",
+      summary: "Coordinator 可隐式 fork 临时子 Agent",
+      approvedAt: Date.now(),
+      initialRecipientActorIds: ["coordinator"],
+      participantActorIds: ["coordinator"],
+      allowedMessagePairs: [],
+      allowedSpawnPairs: [],
+    }));
+
+    const record = system.spawnTask("coordinator", "课程整理员", "基于当前附件整理课程候选", {
+      cleanup: "keep",
+      overrides: {
+        workerProfileId: "content_worker",
+      },
+    });
+
+    expect("error" in record).toBe(false);
+    if ("error" in record) return;
+
+    const child = system.get(record.targetActorId);
+    expect(child?.role.name).toBe("课程整理员");
+    expect(child?.persistent).toBe(false);
+    expect(record.workerProfileId).toBe("content_worker");
+    expect(system.getActiveExecutionContract()?.participantActorIds).toContain(record.targetActorId);
+  });
+
+  it("respects explicit createIfMissing=false and keeps rejecting unknown targets", () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+
+    const record = system.spawnTask("coordinator", "课程整理员", "基于当前附件整理课程候选", {
+      createIfMissing: false,
+    });
+
+    expect(record).toEqual({
+      error: "Target 课程整理员 not found",
+    });
+  });
+
+  it("forks a temporary child when the named target is busy and create_if_missing is enabled", () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+    const specialist = system.spawn(buildActorConfig("specialist", "Specialist", {
+      capabilities: {
+        tags: ["code_write", "debugging"],
+        description: "负责实现与修复",
+      },
+    })) as unknown as {
+      assignTask: ReturnType<typeof vi.fn>;
+      emitEvent: (type: string, detail?: unknown) => void;
+      _status?: string;
+    };
+
+    specialist.assignTask = vi.fn((query: string) => {
+      specialist._status = "running";
+      specialist.emitEvent("task_started", { taskId: "task-busy", query });
+      return new Promise(() => undefined);
+    });
+
+    const running = system.spawnTask("coordinator", "specialist", "先处理已有的实现任务", {
+      cleanup: "keep",
+    });
+    const forked = system.spawnTask("coordinator", "specialist", "补充另一条并行修复", {
+      createIfMissing: true,
+      cleanup: "keep",
+    });
+
+    expect("error" in running).toBe(false);
+    expect("error" in forked).toBe(false);
+    if ("error" in running || "error" in forked) return;
+
+    expect(forked.runId).not.toBe(running.runId);
+    expect(forked.targetActorId).not.toBe("specialist");
+    expect(system.get(forked.targetActorId)?.persistent).toBe(false);
+    expect(system.get(forked.targetActorId)?.role.name).toBe("Specialist (2)");
   });
 
   it("falls back to the label when create_if_missing omits a target name", () => {
@@ -1145,7 +1340,7 @@ describe("ActorSystem.spawnTask", () => {
     ]));
     expect(child?.toolPolicyConfig?.allow).not.toContain("export_spreadsheet");
     expect(child?.lastAssignedQuery).toContain("不要写入任何中间 JSON / 临时文件");
-    expect(child?.lastAssignedQuery).toContain("先给完整结果，再在末尾补一行简短摘要");
+    expect(child?.lastAssignedQuery).toContain("完成后直接调用 `task_done`，将完整结果放在 result 参数中。");
     expect(child?.lastAssignedQuery).not.toContain("/Users/demo/Downloads/课程候选A_重跑.json");
   });
 
@@ -1199,7 +1394,7 @@ describe("ActorSystem.spawnTask", () => {
       "persistent_shell",
     ]));
     expect(child?.lastAssignedQuery).toContain("不要写入任何中间 JSON / 临时文件");
-    expect(child?.lastAssignedQuery).toContain("先给完整结果，再在末尾补一行简短摘要");
+    expect(child?.lastAssignedQuery).toContain("完成后直接调用 `task_done`，将完整结果放在 result 参数中。");
     expect(child?.lastAssignedQuery).not.toContain("/Users/demo/Downloads/课程候选A_本轮.json");
   });
 
@@ -1825,6 +2020,32 @@ describe("ActorSystem.spawnTask", () => {
     }));
   });
 
+  it("attaches related run ids when a spawned worker publishes a local result", async () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+    const specialist = system.spawn(buildActorConfig("specialist", "Specialist")) as unknown as {
+      assignTask: ReturnType<typeof vi.fn>;
+    };
+
+    specialist.assignTask = vi.fn(async () => ({
+      status: "completed",
+      result: "[{\"courseName\":\"A\"},{\"courseName\":\"B\"}]",
+    }));
+
+    const record = system.spawnTask("coordinator", "specialist", "生成课程 JSON", {
+      cleanup: "keep",
+    });
+
+    expect("error" in record).toBe(false);
+    if ("error" in record) return;
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const workerPublished = system.publishResult("specialist", "已返回 2 条结构化结果。");
+    expect(workerPublished?.relatedRunId).toBe(record.runId);
+  });
+
   it("times out a worker as idle when no activity arrives within the lease", () => {
     vi.useFakeTimers();
     const system = new ActorSystem();
@@ -2091,5 +2312,156 @@ describe("ActorSystem dialog recall metadata", () => {
       "Agent：继续处理页面布局",
       "Ask：之前确认过配色",
     ]);
+  });
+
+  it("initializes default swarm backends and routes team messages in-process", async () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+    system.spawn(buildActorConfig("specialist", "Specialist"));
+    system.spawn(buildActorConfig("reviewer", "Reviewer"));
+
+    const created = system.createTeam({
+      name: "Delivery Team",
+      createdByActorId: "coordinator",
+      teammates: ["specialist", "Reviewer"],
+    });
+
+    expect(created.created).toBe(true);
+    expect(system.getBackendRegistry().list()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "in_process", available: true }),
+      expect.objectContaining({ id: "worktree", available: false }),
+      expect.objectContaining({ id: "remote", available: false }),
+    ]));
+
+    const sendResult = await system.sendTeamMessage({
+      senderActorId: "coordinator",
+      team: "Delivery Team",
+      teammate: "Specialist",
+      content: "请先整理交付摘要",
+    });
+
+    expect(sendResult).toEqual(expect.objectContaining({
+      sent: true,
+      targetId: "specialist",
+      targetName: "Specialist",
+    }));
+    expect(system.getTeamMailboxSnapshot("Delivery Team")).toEqual([
+      expect.objectContaining({
+        recipientName: "Specialist",
+        status: "sent",
+      }),
+    ]);
+    expect(system.getDialogHistory()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        from: "coordinator",
+        to: "specialist",
+        content: "请先整理交付摘要",
+      }),
+    ]));
+
+    const broadcastResult = await system.broadcastTeamMessage({
+      senderActorId: "coordinator",
+      team: "Delivery Team",
+      content: "同步当前 blocker",
+    });
+
+    expect(broadcastResult).toEqual(expect.objectContaining({
+      sent: true,
+      total: 2,
+      sentCount: 2,
+      failedCount: 0,
+    }));
+    expect(system.getTeamMailboxSnapshot("Delivery Team")).toHaveLength(3);
+  });
+
+  it("records remote team-task dispatch failures in the unified agent task center", async () => {
+    const system = new ActorSystem();
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+    system.spawn(buildActorConfig("specialist", "Specialist"));
+
+    system.createTeam({
+      name: "Remote Team",
+      createdByActorId: "coordinator",
+      teammates: [
+        {
+          name: "Remote Reviewer",
+          actorId: "specialist",
+          backendId: "remote",
+        },
+      ],
+    });
+
+    const result = await system.dispatchTeamTask({
+      senderActorId: "coordinator",
+      team: "Remote Team",
+      teammate: "Remote Reviewer",
+      task: "在远程环境里独立审查这轮改动",
+      label: "远程审查",
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      dispatched: false,
+      backendId: "remote",
+      error: expect.stringContaining("remote backend"),
+    }));
+    expect(getAgentTaskManager().list({ sessionId: system.sessionId })).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        backend: "remote",
+        source: "remote",
+        status: "failed",
+        title: "远程审查",
+        error: expect.stringContaining("remote backend"),
+      }),
+    ]));
+  });
+
+  it("registers external backend task handles in the unified agent task center", async () => {
+    const backendRegistry = new AgentBackendRegistry({ defaultBackendId: "remote" });
+    backendRegistry.register(new FakeRemoteTaskBackend());
+
+    const system = new ActorSystem({ backendRegistry });
+    system.spawn(buildActorConfig("coordinator", "Coordinator"));
+    system.spawn(buildActorConfig("specialist", "Specialist"));
+
+    system.createTeam({
+      name: "Remote Team",
+      createdByActorId: "coordinator",
+      teammates: [
+        {
+          name: "Remote Reviewer",
+          actorId: "specialist",
+          backendId: "remote",
+        },
+      ],
+    });
+
+    const result = await system.dispatchTeamTask({
+      senderActorId: "coordinator",
+      team: "Remote Team",
+      teammate: "Remote Reviewer",
+      task: "在远程环境里独立验证本轮改动",
+      label: "远程验证",
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      dispatched: true,
+      backendId: "remote",
+      externalTask: true,
+      taskId: "remote-task-1",
+      runId: "remote-run-1",
+      outputPath: "/tmp/remote-task-1.log",
+    }));
+    expect(getAgentTaskManager().list({ sessionId: system.sessionId })).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        backend: "remote",
+        source: "remote",
+        status: "running",
+        title: "远程验证",
+        metadata: expect.objectContaining({
+          outputPath: "/tmp/remote-task-1.log",
+          provider: "fake-remote",
+        }),
+      }),
+    ]));
   });
 });

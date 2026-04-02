@@ -4,7 +4,10 @@ import {
   resolveStructuredDeliveryManifest,
   resolveStructuredDeliveryStrategy,
 } from "./structured-delivery-strategy";
-import { WAIT_FOR_SPAWNED_TASKS_DEFERRED_RESULT } from "@/plugins/builtin/SmartAgent/core/react-agent";
+import {
+  FunctionCallingRequiredError,
+  WAIT_FOR_SPAWNED_TASKS_DEFERRED_RESULT,
+} from "@/plugins/builtin/SmartAgent/core/react-agent";
 
 vi.mock("@/core/ai/mtools-ai", () => ({
   getMToolsAI: () => ({}) as unknown,
@@ -34,6 +37,15 @@ vi.mock("./actor-middleware", async (importOriginal) => {
 vi.mock("@/plugins/builtin/SmartAgent/core/react-agent", () => ({
   WAIT_FOR_SPAWNED_TASKS_DEFERRED_RESULT: "__WAIT_FOR_SPAWNED_TASKS_DEFERRED__",
   WaitForSpawnedTasksInterrupt: class WaitForSpawnedTasksInterrupt extends Error {},
+  FunctionCallingRequiredError: class FunctionCallingRequiredError extends Error {
+    readonly reason: string;
+
+    constructor(reason: string, message: string) {
+      super(message);
+      this.name = "FunctionCallingRequiredError";
+      this.reason = reason;
+    }
+  },
   ReActAgent: class MockReActAgent {
     private readonly tools: Array<{ name: string }>;
 
@@ -327,6 +339,93 @@ describe("AgentActor host workbook fast paths", () => {
     }));
   });
 
+  it("accepts camelCase child rows when the workbook schema requires chinese headers", () => {
+    const structuredResults = [
+      {
+        runId: "run-1",
+        subtaskId: "run-1",
+        targetActorId: "worker-1",
+        targetActorName: "结果清单生成（第1组）",
+        deliveryTargetLabel: "结果清单",
+        label: "结果清单生成（第1组）",
+        task: "处理前 6 个条目",
+        mode: "run",
+        roleBoundary: "executor",
+        profile: "executor",
+        executionIntent: "content_executor",
+        status: "completed",
+        terminalResult: JSON.stringify([
+          { sourceItemId: "source-item-1", topicIndex: 1, topicTitle: "AI应用开发工程化实战", coverageType: "direct", courseName: "课程A", courseIntro: "介绍A" },
+          { sourceItemId: "source-item-2", topicIndex: 2, topicTitle: "智能体开发与知识库落地", coverageType: "direct", courseName: "课程B", courseIntro: "介绍B" },
+          { sourceItemId: "source-item-3", topicIndex: 3, topicTitle: "大模型安全治理与测试", coverageType: "direct", courseName: "课程C", courseIntro: "介绍C" },
+          { sourceItemId: "source-item-4", topicIndex: 4, topicTitle: "AI产品需求转化与方案设计", coverageType: "direct", courseName: "课程D", courseIntro: "介绍D" },
+          { sourceItemId: "source-item-5", topicIndex: 5, topicTitle: "AI产品运营增长与商业闭环", coverageType: "direct", courseName: "课程E", courseIntro: "介绍E" },
+          { sourceItemId: "source-item-6", topicIndex: 6, topicTitle: "银行AI解决方案咨询方法论", coverageType: "direct", courseName: "课程F", courseIntro: "介绍F" },
+        ]),
+        startedAt: 1,
+        completedAt: 2,
+        timeoutSeconds: 600,
+        eventCount: 3,
+        resultKind: "structured_rows",
+      },
+      {
+        runId: "run-2",
+        subtaskId: "run-2",
+        targetActorId: "worker-2",
+        targetActorName: "结果清单生成（第2组）",
+        deliveryTargetLabel: "结果清单",
+        label: "结果清单生成（第2组）",
+        task: "处理后 3 个条目",
+        mode: "run",
+        roleBoundary: "executor",
+        profile: "executor",
+        executionIntent: "content_executor",
+        status: "completed",
+        terminalResult: JSON.stringify([
+          { sourceItemId: "source-item-7", topicIndex: 7, topicTitle: "数据分析与经营洞察实战", coverageType: "direct", courseName: "课程G", courseIntro: "介绍G" },
+          { sourceItemId: "source-item-8", topicIndex: 8, topicTitle: "全员AI办公赋能与协同提效", coverageType: "direct", courseName: "课程H", courseIntro: "介绍H" },
+          { sourceItemId: "source-item-9", topicIndex: 9, topicTitle: "AI通识与智能素养提升", coverageType: "direct", courseName: "课程I", courseIntro: "介绍I" },
+        ]),
+        startedAt: 1,
+        completedAt: 2,
+        timeoutSeconds: 600,
+        eventCount: 3,
+        resultKind: "structured_rows",
+      },
+    ];
+    const manifest = resolveStructuredDeliveryManifest(STRUCTURED_QUERY);
+    const strategy = resolveStructuredDeliveryStrategy(STRUCTURED_QUERY);
+    const exportPlan = strategy?.buildHostExportPlan?.({
+      taskText: STRUCTURED_QUERY,
+      manifest,
+      structuredResults,
+    });
+
+    expect(exportPlan).not.toBeNull();
+    expect(exportPlan && "blocker" in exportPlan).toBe(false);
+    if (!exportPlan || "blocker" in exportPlan) return;
+    expect(exportPlan.toolInput).toEqual(expect.objectContaining({
+      file_name: "source.xlsx",
+      sheets: expect.arrayContaining([
+        expect.objectContaining({
+          name: "结果清单",
+          headers: ["课程名称", "课程介绍"],
+          rows: [
+            ["课程A", "介绍A"],
+            ["课程B", "介绍B"],
+            ["课程C", "介绍C"],
+            ["课程D", "介绍D"],
+            ["课程E", "介绍E"],
+            ["课程F", "介绍F"],
+            ["课程G", "介绍G"],
+            ["课程H", "介绍H"],
+            ["课程I", "介绍I"],
+          ],
+        }),
+      ]),
+    }));
+  });
+
   it("returns a repair plan when host export is blocked by missing topic coverage", () => {
     const structuredResults = [
       {
@@ -380,6 +479,60 @@ describe("AgentActor host workbook fast paths", () => {
           missingThemes: ["AI通识与智能素养提升"],
         }),
       ],
+    }));
+  });
+
+  it("returns a repair plan when workbook building is blocked before quality analysis", () => {
+    const structuredResults = [
+      {
+        runId: "run-blocked-1",
+        subtaskId: "run-blocked-1",
+        targetActorId: "worker-1",
+        targetActorName: "结果清单生成（第1组）",
+        deliveryTargetLabel: "结果清单",
+        label: "结果清单生成（第1组）",
+        task: "处理前 8 个条目",
+        mode: "run",
+        roleBoundary: "executor",
+        profile: "executor",
+        executionIntent: "content_executor",
+        status: "completed",
+        terminalResult: "工具参数不是有效 JSON。请严格返回合法 JSON。",
+        startedAt: 1,
+        completedAt: 2,
+        timeoutSeconds: 600,
+        eventCount: 3,
+        resultKind: "blocker",
+        sourceItemIds: [
+          "source-item-1",
+          "source-item-2",
+          "source-item-3",
+          "source-item-4",
+          "source-item-5",
+          "source-item-6",
+          "source-item-7",
+          "source-item-8",
+        ],
+        sourceItemCount: 8,
+      },
+    ];
+    const manifest = resolveStructuredDeliveryManifest(STRUCTURED_QUERY);
+    const strategy = resolveStructuredDeliveryStrategy(STRUCTURED_QUERY);
+    const exportPlan = strategy?.buildHostExportPlan?.({
+      taskText: STRUCTURED_QUERY,
+      manifest,
+      structuredResults,
+    });
+
+    expect(exportPlan && "blocker" in exportPlan).toBe(true);
+    if (!exportPlan || !("blocker" in exportPlan)) return;
+    expect(exportPlan.blocker).toContain("无法");
+    expect(exportPlan.repairPlan).toEqual(expect.objectContaining({
+      suggestions: expect.arrayContaining([
+        expect.objectContaining({
+          label: expect.stringContaining("补派"),
+        }),
+      ]),
     }));
   });
 
@@ -638,6 +791,105 @@ describe("AgentActor host workbook fast paths", () => {
     expect(result.result).toContain("/Users/demo/Downloads/source.xlsx");
     expect(recordArtifact).toHaveBeenCalledWith(expect.objectContaining({
       actorId: "lead-deterministic-host-export",
+      path: "/Users/demo/Downloads/source.xlsx",
+      toolName: "export_spreadsheet",
+      source: "tool_write",
+    }));
+    expect(publishResult).not.toHaveBeenCalled();
+  });
+
+  it("completes deterministic host export after structured waits with camelCase child rows", async () => {
+    const artifacts: Array<Record<string, unknown>> = [];
+    let active = true;
+    let deliveredStructuredResult = false;
+    const publishResult = vi.fn();
+    const recordArtifact = vi.fn((artifact: Record<string, unknown>) => {
+      artifacts.push(artifact);
+    });
+    const manifest = resolveStructuredDeliveryManifest(STRUCTURED_QUERY);
+
+    const actor = new AgentActor({
+      id: "lead-deterministic-host-export-alias",
+      role: { name: "Lead", systemPrompt: "You are lead." },
+      capabilities: ["general_task"],
+      workspace: "/Users/demo/project",
+    }, {
+      actorSystem: {
+        sessionId: "session-deterministic-host-export-alias",
+        recordDialogFlowEvent: vi.fn(),
+        publishResult,
+        recordArtifact,
+        getArtifactRecordsSnapshot: () => artifacts as never,
+        cancelPendingInteractionsForActor: () => undefined,
+        getActiveExecutionContract: () => ({
+          structuredDeliveryManifest: manifest,
+        }),
+        getActiveSpawnedTasks: () => (active
+          ? [{ runId: "run-child-alias", spawnedAt: 1, lastActiveAt: Date.now() }]
+          : []),
+        collectStructuredSpawnedTaskResults: () => {
+          if (active || deliveredStructuredResult) return [];
+          deliveredStructuredResult = true;
+          return [{
+            runId: "run-child-alias",
+            subtaskId: "run-child-alias",
+            targetActorId: "worker-alias",
+            targetActorName: "结果清单生成（第1组）",
+            deliveryTargetLabel: "结果清单",
+            label: "结果清单生成（第1组）",
+            task: "处理 9 个条目",
+            mode: "run",
+            roleBoundary: "executor",
+            profile: "executor",
+            executionIntent: "content_executor",
+            status: "completed",
+            terminalResult: JSON.stringify([
+              { sourceItemId: "source-item-1", topicIndex: 1, topicTitle: "AI应用开发工程化实战", coverageType: "direct", courseName: "课程A", courseIntro: "介绍A" },
+              { sourceItemId: "source-item-2", topicIndex: 2, topicTitle: "智能体开发与知识库落地", coverageType: "direct", courseName: "课程B", courseIntro: "介绍B" },
+              { sourceItemId: "source-item-3", topicIndex: 3, topicTitle: "大模型安全治理与测试", coverageType: "direct", courseName: "课程C", courseIntro: "介绍C" },
+              { sourceItemId: "source-item-4", topicIndex: 4, topicTitle: "AI产品需求转化与方案设计", coverageType: "direct", courseName: "课程D", courseIntro: "介绍D" },
+              { sourceItemId: "source-item-5", topicIndex: 5, topicTitle: "AI产品运营增长与商业闭环", coverageType: "direct", courseName: "课程E", courseIntro: "介绍E" },
+              { sourceItemId: "source-item-6", topicIndex: 6, topicTitle: "银行AI解决方案咨询方法论", coverageType: "direct", courseName: "课程F", courseIntro: "介绍F" },
+              { sourceItemId: "source-item-7", topicIndex: 7, topicTitle: "数据分析与经营洞察实战", coverageType: "direct", courseName: "课程G", courseIntro: "介绍G" },
+              { sourceItemId: "source-item-8", topicIndex: 8, topicTitle: "全员AI办公赋能与协同提效", coverageType: "direct", courseName: "课程H", courseIntro: "介绍H" },
+              { sourceItemId: "source-item-9", topicIndex: 9, topicTitle: "AI通识与智能素养提升", coverageType: "direct", courseName: "课程I", courseIntro: "介绍I" },
+            ]),
+            startedAt: 1,
+            completedAt: 2,
+            timeoutSeconds: 600,
+            eventCount: 3,
+            resultKind: "structured_rows",
+          }];
+        },
+        getSpawnedTasksSnapshot: () => [],
+        get: (id: string) => (id === "worker-alias"
+          ? { id, role: { name: "结果清单生成（第1组）" } }
+          : { id, role: { name: "Lead" } }),
+      } as never,
+    });
+
+    const actorAny = actor as unknown as {
+      runWithClarifications: ReturnType<typeof vi.fn>;
+      waitForInbox: ReturnType<typeof vi.fn>;
+    };
+    actorAny.runWithClarifications = vi.fn(async (query: string) => ({
+      result: WAIT_FOR_SPAWNED_TASKS_DEFERRED_RESULT,
+      finalQuery: query,
+    }));
+    actorAny.waitForInbox = vi.fn(async () => {
+      active = false;
+    });
+
+    const result = await actor.assignTask(STRUCTURED_QUERY, undefined, {
+      publishResult: false,
+    });
+
+    expect(actorAny.runWithClarifications).toHaveBeenCalledTimes(1);
+    expect(actorAny.waitForInbox).toHaveBeenCalled();
+    expect(result.status).toBe("completed");
+    expect(result.result).toContain("/Users/demo/Downloads/source.xlsx");
+    expect(recordArtifact).toHaveBeenCalledWith(expect.objectContaining({
+      actorId: "lead-deterministic-host-export-alias",
       path: "/Users/demo/Downloads/source.xlsx",
       toolName: "export_spreadsheet",
       source: "tool_write",
@@ -911,6 +1163,88 @@ describe("AgentActor host workbook fast paths", () => {
     expect(actorAny.runWithClarifications.mock.calls[1]?.[0]).toContain("补派");
     expect(result.status).toBe("completed");
     expect(result.result).toContain("阻塞原因");
+  });
+
+  it("directly returns a host blocker when final synthesis cannot keep function calling", async () => {
+    let active = true;
+    let deliveredStructuredResult = false;
+    const manifest = resolveStructuredDeliveryManifest(STRUCTURED_QUERY);
+
+    const actor = new AgentActor({
+      id: "lead-host-export-fc-required",
+      role: { name: "Lead", systemPrompt: "You are lead." },
+      capabilities: ["general_task"],
+      workspace: "/Users/demo/project",
+    }, {
+      actorSystem: {
+        sessionId: "session-host-export-fc-required",
+        recordDialogFlowEvent: vi.fn(),
+        cancelPendingInteractionsForActor: () => undefined,
+        getActiveExecutionContract: () => ({
+          structuredDeliveryManifest: manifest,
+        }),
+        getActiveSpawnedTasks: () => (active
+          ? [{ runId: "run-child-fc", spawnedAt: 1, lastActiveAt: Date.now() }]
+          : []),
+        collectStructuredSpawnedTaskResults: () => {
+          if (active || deliveredStructuredResult) return [];
+          deliveredStructuredResult = true;
+          return [{
+            runId: "run-child-fc",
+            subtaskId: "run-child-fc",
+            targetActorId: "worker-fc",
+            targetActorName: "结果清单生成（第1组）",
+            deliveryTargetLabel: "结果清单",
+            label: "结果清单生成（第1组）",
+            task: "处理前 8 个条目",
+            mode: "run",
+            roleBoundary: "executor",
+            profile: "executor",
+            executionIntent: "content_executor",
+            status: "completed",
+            terminalResult: JSON.stringify([
+              { sourceItemId: "source-item-1", topicIndex: 1, topicTitle: "AI应用开发工程化实战", coverageType: "direct", 课程名称: "课程A", 课程介绍: "介绍A" },
+            ]),
+            startedAt: 1,
+            completedAt: 2,
+            timeoutSeconds: 600,
+            eventCount: 3,
+            resultKind: "structured_rows",
+          }];
+        },
+        getSpawnedTasksSnapshot: () => [],
+        getArtifactRecordsSnapshot: () => [],
+        get: (id: string) => ({ id, role: { name: id } }),
+      } as never,
+    });
+
+    const actorAny = actor as unknown as {
+      runWithClarifications: ReturnType<typeof vi.fn>;
+      waitForInbox: ReturnType<typeof vi.fn>;
+    };
+    actorAny.runWithClarifications = vi.fn(async (query: string) => {
+      if (query === STRUCTURED_QUERY) {
+        return {
+          result: WAIT_FOR_SPAWNED_TASKS_DEFERRED_RESULT,
+          finalQuery: query,
+        };
+      }
+      throw new FunctionCallingRequiredError(
+        "incompatible",
+        "Function Calling 模式不可用，且当前阶段禁止切换到文本 ReAct。",
+      );
+    });
+    actorAny.waitForInbox = vi.fn(async () => {
+      active = false;
+    });
+
+    const result = await actor.assignTask(STRUCTURED_QUERY, undefined, {
+      publishResult: false,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.result).toContain("阻塞原因");
+    expect(result.result).not.toContain("文本 ReAct");
   });
 
   it("does not overwrite a deterministic host export with takeover synthesis when stale child runs were aborted", async () => {

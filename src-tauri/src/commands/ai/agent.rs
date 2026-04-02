@@ -13,6 +13,8 @@ const CONNECT_TIMEOUT_SECS: u64 = 15;
 const REQUEST_TIMEOUT_SECS: u64 = 600;
 const FIRST_CHUNK_TIMEOUT_SECS: u64 = 300;
 const STREAM_IDLE_TIMEOUT_SECS: u64 = 120;
+const START_REQUEST_MAX_RETRIES: usize = 2;
+const START_REQUEST_RETRY_DELAYS_MS: [u64; START_REQUEST_MAX_RETRIES] = [1200, 2800];
 
 fn build_http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
@@ -40,6 +42,37 @@ fn emit_stream_done(app: &AppHandle, conversation_id: &str) {
         "ai-stream-done",
         serde_json::json!({ "conversation_id": conversation_id }),
     );
+}
+
+fn preview_text(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
+
+fn summarize_retryable_headers(headers: &reqwest::header::HeaderMap) -> String {
+    const KEYS: [&str; 8] = [
+        "x-request-id",
+        "x-trace-id",
+        "traceparent",
+        "cf-ray",
+        "server",
+        "via",
+        "retry-after",
+        "content-type",
+    ];
+
+    KEYS.iter()
+        .filter_map(|key| {
+            headers
+                .get(*key)
+                .and_then(|value| value.to_str().ok())
+                .map(|value| format!("{}={}", key, value))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn is_retryable_upstream_status(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 429 | 502 | 503 | 504)
 }
 
 fn value_as_nonempty_str(value: &serde_json::Value) -> Option<&str> {
@@ -353,62 +386,123 @@ async fn agent_stream_openai(
         }),
     );
 
-    let response = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", config.api_key))
-        .header("Content-Type", "application/json")
-        .header("Accept-Encoding", "identity")
-        .json(&request)
-        .send()
-        .await
-        .map_err(|e| {
-            let msg = format!("请求失败: {} (source: {:?})", e, e.source());
-            log::error!(
-                "[ai_agent_stream/openai] request failed conv={} err={:?}",
-                conversation_id,
-                e
-            );
-            AppError::Custom(msg)
-        })?;
+    let response = loop {
+        let mut response_opt = None;
+        for attempt in 0..=START_REQUEST_MAX_RETRIES {
+            let response = client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", config.api_key))
+                .header("Content-Type", "application/json")
+                .header("Accept-Encoding", "identity")
+                .json(&request)
+                .send()
+                .await;
 
-    let status = response.status();
-    log::info!(
-        "[ai_agent_stream/openai] HTTP {} conv={} elapsed={}ms",
-        status,
-        conversation_id,
-        started_at.elapsed().as_millis()
-    );
+            match response {
+                Ok(response) => {
+                    let status = response.status();
+                    let header_summary = summarize_retryable_headers(response.headers());
+                    log::info!(
+                        "[ai_agent_stream/openai] HTTP {} conv={} elapsed={}ms attempt={} headers=[{}]",
+                        status,
+                        conversation_id,
+                        started_at.elapsed().as_millis(),
+                        attempt + 1,
+                        header_summary
+                    );
 
-    let _ = app.emit(
-        "ai-stream-raw",
-        serde_json::json!({
-            "conversation_id": conversation_id,
-            "raw_line": format!("[RUST RESPONSE HEADERS RECEIVED] HTTP {} Elapsed: {}ms", status, started_at.elapsed().as_millis()),
-        }),
-    );
+                    let _ = app.emit(
+                        "ai-stream-raw",
+                        serde_json::json!({
+                            "conversation_id": conversation_id,
+                            "raw_line": format!(
+                                "[RUST RESPONSE HEADERS RECEIVED] HTTP {} Elapsed: {}ms Attempt: {} Headers: {}",
+                                status,
+                                started_at.elapsed().as_millis(),
+                                attempt + 1,
+                                header_summary
+                            ),
+                        }),
+                    );
 
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        let preview: String = body.chars().take(800).collect();
+                    if status.is_success() {
+                        response_opt = Some(response);
+                        break;
+                    }
 
-        let _ = app.emit(
-            "ai-stream-raw",
-            serde_json::json!({
-                "conversation_id": conversation_id,
-                "raw_line": format!("[RUST ERROR BODY] {}", preview),
-            }),
-        );
+                    let body = response.text().await.unwrap_or_default();
+                    let preview = preview_text(&body, 800);
+                    let retryable =
+                        is_retryable_upstream_status(status) && attempt < START_REQUEST_MAX_RETRIES;
 
-        let error_msg = format!("API 错误 (HTTP {}): {}", status.as_u16(), preview);
-        log::error!(
-            "[ai_agent_stream/openai] non-success conv={} err={}",
-            conversation_id,
-            error_msg
-        );
-        emit_stream_error(app, conversation_id, &error_msg);
-        cancellation.clear(conversation_id);
-        return Err(AppError::Custom(error_msg));
-    }
+                    let _ = app.emit(
+                        "ai-stream-raw",
+                        serde_json::json!({
+                            "conversation_id": conversation_id,
+                            "raw_line": format!("[RUST ERROR BODY] {}", preview),
+                        }),
+                    );
+
+                    log::error!(
+                        "[ai_agent_stream/openai] non-success conv={} status={} attempt={} retryable={} headers=[{}] body={}",
+                        conversation_id,
+                        status,
+                        attempt + 1,
+                        retryable,
+                        header_summary,
+                        preview
+                    );
+
+                    if retryable {
+                        let delay = START_REQUEST_RETRY_DELAYS_MS[attempt];
+                        log::warn!(
+                            "[ai_agent_stream/openai] retrying upstream request conv={} status={} attempt={} delay={}ms",
+                            conversation_id,
+                            status,
+                            attempt + 1,
+                            delay
+                        );
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                        continue;
+                    }
+
+                    let error_msg = format!("API 错误 (HTTP {}): {}", status.as_u16(), preview);
+                    emit_stream_error(app, conversation_id, &error_msg);
+                    cancellation.clear(conversation_id);
+                    return Err(AppError::Custom(error_msg));
+                }
+                Err(e) => {
+                    let retryable = attempt < START_REQUEST_MAX_RETRIES;
+                    let msg = format!("请求失败: {} (source: {:?})", e, e.source());
+                    log::error!(
+                        "[ai_agent_stream/openai] request failed conv={} attempt={} retryable={} err={:?}",
+                        conversation_id,
+                        attempt + 1,
+                        retryable,
+                        e
+                    );
+
+                    if retryable {
+                        let delay = START_REQUEST_RETRY_DELAYS_MS[attempt];
+                        log::warn!(
+                            "[ai_agent_stream/openai] retrying request send failure conv={} attempt={} delay={}ms",
+                            conversation_id,
+                            attempt + 1,
+                            delay
+                        );
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                        continue;
+                    }
+
+                    cancellation.clear(conversation_id);
+                    return Err(AppError::Custom(msg));
+                }
+            }
+        }
+        if let Some(response) = response_opt {
+            break response;
+        }
+    };
 
     use futures_util::StreamExt;
     let mut stream = response.bytes_stream();

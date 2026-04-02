@@ -1,5 +1,6 @@
 import type { AgentStep } from "@/plugins/builtin/SmartAgent/core/react-agent";
 import type { AgentRole } from "@/core/agent/cluster/types";
+import type { ToolResultReplacementSnapshot } from "@/core/agent/runtime/tool-result-replacement";
 import type { TimeoutReason } from "./timeout-policy";
 import type { DialogStructuredSubtaskResult } from "./dialog-subtask-runtime";
 
@@ -255,6 +256,22 @@ export interface DialogRoomCompactionState {
   updatedAt: number;
 }
 
+// ── Tool Runtime Types ──
+
+export interface ToolExecutionContext {
+  actorId?: string;
+}
+
+export interface ToolDefinition<Input = any, Output = any> {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  handler: (
+    input: Input,
+    context: ToolExecutionContext,
+  ) => Promise<Output> | Output;
+}
+
 // ── Agent Configuration ──
 
 /** Agent 协作能力标签（用于智能路由） */
@@ -353,6 +370,8 @@ export interface ActorConfig {
   contextTokens?: number;
   /** 思维深度控制（对标 OpenClaw thinkingLevel） */
   thinkingLevel?: ThinkingLevel;
+  /** Claude Code 风格的大 tool result replacement 快照 */
+  toolResultReplacementSnapshot?: ToolResultReplacementSnapshot;
   /** 协作能力（用于智能路由和展示） */
   capabilities?: AgentCapabilities;
   /**
@@ -407,6 +426,8 @@ export interface SpawnTaskOverrides {
   middlewareOverrides?: MiddlewareOverrides;
   /** 覆盖温度 */
   temperature?: number;
+  /** 当前运行必须维持 Function Calling，不允许降级为文本模式 */
+  requireFunctionCalling?: boolean;
 }
 
 /** 单次运行级别的覆盖配置，避免污染 Actor 常驻实例状态 */
@@ -454,6 +475,7 @@ export interface DialogFlowTraceEvent {
 export interface SpawnedTaskEventDetail {
   runId: string;
   spawnerActorId: string;
+  ownerTaskId?: string;
   targetActorId: string;
   targetName: string;
   spawnerName: string;
@@ -596,12 +618,17 @@ export interface DialogSubtaskRuntimeState {
   completedAt?: number;
   timeoutSeconds?: number;
   eventCount: number;
+  toolUseCount?: number;
+  lastToolName?: string;
+  lastToolAt?: number;
 }
 
 /** SpawnedTaskRecord：对标 OpenClaw subagent registry entry */
 export interface SpawnedTaskRecord {
   runId: string;
   spawnerActorId: string;
+  /** 顶层父 ActorTask.id，用于严格隔离当前用户回合的子任务范围 */
+  ownerTaskId?: string;
   targetActorId: string;
   /** 关联的父 execution contract；无 contract 的手动派工可为空 */
   contractId?: string;

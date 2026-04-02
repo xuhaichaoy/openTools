@@ -1,5 +1,13 @@
 import type { DialogStructuredSubtaskResult } from "./dialog-subtask-runtime";
 import type { StructuredDeliveryResultSchema } from "./structured-delivery-strategy";
+export {
+  extractStructuredJsonCandidate,
+  tryParseStructuredPayload,
+} from "./structured-json-utils";
+import {
+  extractStructuredJsonCandidate,
+  tryParseStructuredPayload,
+} from "./structured-json-utils";
 
 // ── Types ──
 
@@ -31,32 +39,6 @@ export interface DynamicWorkbookRowCoverage {
   sourceItemIds: string[];
   topicIndexes: number[];
   coverageType?: string;
-}
-
-// ── JSON Extraction ──
-
-export function extractStructuredJsonCandidate(value: string | undefined): string | undefined {
-  const normalized = String(value ?? "").trim();
-  if (!normalized) return undefined;
-  const blockMatch = normalized.match(/```(?:json)?\s*([\s\S]*?)```/iu);
-  if (blockMatch?.[1]?.trim()) return blockMatch[1].trim();
-  if (
-    (normalized.startsWith("{") && normalized.endsWith("}"))
-    || (normalized.startsWith("[") && normalized.endsWith("]"))
-  ) {
-    return normalized;
-  }
-  return undefined;
-}
-
-export function tryParseStructuredPayload(value: string | undefined): unknown {
-  const candidate = extractStructuredJsonCandidate(value);
-  if (!candidate) return undefined;
-  try {
-    return JSON.parse(candidate);
-  } catch {
-    return undefined;
-  }
 }
 
 // ── Column Inference ──
@@ -95,13 +77,51 @@ export function normalizeGenericRow(
 ): string[] | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
+  const normalizedEntries = new Map<string, unknown>();
+  for (const [key, entryValue] of Object.entries(record)) {
+    normalizedEntries.set(normalizeColumnLookupKey(key), entryValue);
+  }
   const cells = columns.map((col) => {
-    const raw = record[col];
+    const raw = readRecordValueByColumn(record, normalizedEntries, col);
     if (raw == null) return "";
     return String(raw).replace(/\s+/g, " ").trim();
   });
   if (cells.every((cell) => !cell)) return null;
   return cells;
+}
+
+function normalizeColumnLookupKey(value: string): string {
+  return String(value ?? "")
+    .trim()
+    .replace(/[\s_\-]/g, "")
+    .toLowerCase();
+}
+
+const STRUCTURED_FIELD_ALIASES = new Map<string, string[]>([
+  ["课程名称", ["courseName", "course_name", "courseTitle", "course_title", "title", "name", "课程名"]],
+  ["课程介绍", ["courseIntro", "course_intro", "courseIntroduction", "course_introduction", "introduction", "description", "课程简介", "简介", "介绍"]],
+]);
+
+function buildColumnLookupCandidates(column: string): string[] {
+  const normalizedColumn = String(column ?? "").trim();
+  const aliases = STRUCTURED_FIELD_ALIASES.get(normalizedColumn) ?? [];
+  return [normalizedColumn, ...aliases];
+}
+
+function readRecordValueByColumn(
+  record: Record<string, unknown>,
+  normalizedEntries: ReadonlyMap<string, unknown>,
+  column: string,
+): unknown {
+  if (column in record) return record[column];
+  for (const candidate of buildColumnLookupCandidates(column)) {
+    if (candidate in record) return record[candidate];
+    const normalizedCandidate = normalizeColumnLookupKey(candidate);
+    if (normalizedEntries.has(normalizedCandidate)) {
+      return normalizedEntries.get(normalizedCandidate);
+    }
+  }
+  return undefined;
 }
 
 const SOURCE_ITEM_ID_KEYS = [
@@ -247,6 +267,37 @@ export function filterExportableStructuredResults(params: {
       resultSchema: params.resultSchema,
     })
   );
+}
+
+export interface StructuredResultExportabilitySummary {
+  runId: string;
+  label: string;
+  rowCount: number;
+  hasStructuredRows: boolean;
+  hasJsonCandidate: boolean;
+  resultKind: string;
+  status: string;
+}
+
+export function inspectStructuredResultExportability(params: {
+  structuredResults: readonly DialogStructuredSubtaskResult[];
+  resultSchema?: StructuredDeliveryResultSchema;
+}): StructuredResultExportabilitySummary[] {
+  return params.structuredResults.map((result) => {
+    const rows = extractNormalizedStructuredRows({
+      result,
+      resultSchema: params.resultSchema,
+    });
+    return {
+      runId: result.runId,
+      label: result.label ?? result.deliveryTargetLabel ?? result.targetActorName ?? result.runId,
+      rowCount: rows.length,
+      hasStructuredRows: Array.isArray(result.structuredRows) && result.structuredRows.length > 0,
+      hasJsonCandidate: Boolean(extractStructuredJsonCandidate(result.terminalResult)),
+      resultKind: result.resultKind ?? "unknown",
+      status: result.status,
+    };
+  });
 }
 
 // ── File Name Derivation ──

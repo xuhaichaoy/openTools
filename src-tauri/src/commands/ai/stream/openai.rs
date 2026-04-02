@@ -12,6 +12,39 @@ use crate::commands::ai::types::{AIConfig, ChatMessage, FunctionCall, ToolCall};
 
 const FIRST_CHUNK_TIMEOUT_SECS: u64 = 120;
 const STREAM_IDLE_TIMEOUT_SECS: u64 = 120;
+const START_REQUEST_MAX_RETRIES: usize = 2;
+const START_REQUEST_RETRY_DELAYS_MS: [u64; START_REQUEST_MAX_RETRIES] = [1200, 2800];
+
+fn preview_text(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
+
+fn summarize_retryable_headers(headers: &reqwest::header::HeaderMap) -> String {
+    const KEYS: [&str; 8] = [
+        "x-request-id",
+        "x-trace-id",
+        "traceparent",
+        "cf-ray",
+        "server",
+        "via",
+        "retry-after",
+        "content-type",
+    ];
+
+    KEYS.iter()
+        .filter_map(|key| {
+            headers
+                .get(*key)
+                .and_then(|value| value.to_str().ok())
+                .map(|value| format!("{}={}", key, value))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn is_retryable_upstream_status(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 429 | 502 | 503 | 504)
+}
 
 fn value_as_nonempty_str(value: &serde_json::Value) -> Option<&str> {
     value
@@ -169,39 +202,101 @@ pub async fn openai_stream_loop(
         config.team_config_id
     );
 
-    let mut req_builder = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", config.api_key))
-        .header("Content-Type", "application/json")
-        .header("Accept-Encoding", "identity");
-    if url.contains("coding.dashscope") || url.contains("coding-intl.dashscope") {
-        req_builder = req_builder.header("User-Agent", "openclaw/1.0.0");
-    }
-    let response = req_builder
-        .json(&request)
-        .send()
-        .await
-        .map_err(|e| format!("请求失败: {}", e))?;
+    let response = loop {
+        let mut response_opt = None;
+        for attempt in 0..=START_REQUEST_MAX_RETRIES {
+            let mut req_builder = client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", config.api_key))
+                .header("Content-Type", "application/json")
+                .header("Accept-Encoding", "identity");
+            if url.contains("coding.dashscope") || url.contains("coding-intl.dashscope") {
+                req_builder = req_builder.header("User-Agent", "openclaw/1.0.0");
+            }
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        log::error!(
-            "[ai_chat_stream] {} → HTTP {} body={}",
-            url,
-            status,
-            &body[..body.len().min(200)]
-        );
-        let _ = app.emit(
-            "ai-stream-error",
-            serde_json::json!({
-                "conversation_id": conversation_id,
-                "error": format!("API 错误: {}", body),
-            }),
-        );
-        cancellation.clear(conversation_id);
-        return Err(format!("API 错误: {}", body));
-    }
+            match req_builder.json(&request).send().await {
+                Ok(response) => {
+                    let status = response.status();
+                    let header_summary = summarize_retryable_headers(response.headers());
+                    log::info!(
+                        "[ai_chat_stream] {} → HTTP {} attempt={} headers=[{}]",
+                        url,
+                        status,
+                        attempt + 1,
+                        header_summary
+                    );
+
+                    if status.is_success() {
+                        response_opt = Some(response);
+                        break;
+                    }
+
+                    let body = response.text().await.unwrap_or_default();
+                    let preview = preview_text(&body, 240);
+                    let retryable =
+                        is_retryable_upstream_status(status) && attempt < START_REQUEST_MAX_RETRIES;
+                    log::error!(
+                        "[ai_chat_stream] {} → HTTP {} attempt={} retryable={} headers=[{}] body={}",
+                        url,
+                        status,
+                        attempt + 1,
+                        retryable,
+                        header_summary,
+                        preview
+                    );
+
+                    if retryable {
+                        let delay = START_REQUEST_RETRY_DELAYS_MS[attempt];
+                        log::warn!(
+                            "[ai_chat_stream] retrying upstream request conv={} status={} attempt={} delay={}ms",
+                            conversation_id,
+                            status,
+                            attempt + 1,
+                            delay
+                        );
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                        continue;
+                    }
+
+                    let _ = app.emit(
+                        "ai-stream-error",
+                        serde_json::json!({
+                            "conversation_id": conversation_id,
+                            "error": format!("API 错误: {}", body),
+                        }),
+                    );
+                    cancellation.clear(conversation_id);
+                    return Err(format!("API 错误: {}", body));
+                }
+                Err(e) => {
+                    let retryable = attempt < START_REQUEST_MAX_RETRIES;
+                    log::error!(
+                        "[ai_chat_stream] request failed conv={} attempt={} retryable={} err={}",
+                        conversation_id,
+                        attempt + 1,
+                        retryable,
+                        e
+                    );
+                    if retryable {
+                        let delay = START_REQUEST_RETRY_DELAYS_MS[attempt];
+                        log::warn!(
+                            "[ai_chat_stream] retrying request send failure conv={} attempt={} delay={}ms",
+                            conversation_id,
+                            attempt + 1,
+                            delay
+                        );
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                        continue;
+                    }
+                    cancellation.clear(conversation_id);
+                    return Err(format!("请求失败: {}", e));
+                }
+            }
+        }
+        if let Some(response) = response_opt {
+            break response;
+        }
+    };
 
     use futures_util::StreamExt;
     let mut stream = response.bytes_stream();

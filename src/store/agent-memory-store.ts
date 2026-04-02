@@ -43,6 +43,7 @@ interface AgentMemoryState {
       topK?: number;
       conversationId?: string;
       workspaceId?: string;
+      timeoutMs?: number;
       preferSemantic?: boolean;
     },
   ) => Promise<string>;
@@ -52,6 +53,7 @@ interface AgentMemoryState {
       topK?: number;
       conversationId?: string;
       workspaceId?: string;
+      timeoutMs?: number;
       preferSemantic?: boolean;
     },
   ) => Promise<AssistantMemoryPromptBundle>;
@@ -138,6 +140,7 @@ export const useAgentMemoryStore = create<AgentMemoryState>((set, get) => ({
       topK: options?.topK ?? 6,
       conversationId: options?.conversationId,
       workspaceId: options?.workspaceId,
+      timeoutMs: options?.timeoutMs,
       preferSemantic: options?.preferSemantic ?? true,
       enableTranscriptFallback: true,
     });
@@ -149,6 +152,7 @@ export const useAgentMemoryStore = create<AgentMemoryState>((set, get) => ({
       topK: options?.topK ?? 6,
       conversationId: options?.conversationId,
       workspaceId: options?.workspaceId,
+      timeoutMs: options?.timeoutMs,
       preferSemantic: options?.preferSemantic ?? true,
       enableTranscriptFallback: true,
     });

@@ -27,8 +27,8 @@ import {
 } from "@/core/ai/assistant-memory";
 
 const aiLog = createLogger("MToolsAI");
-const STREAM_STALL_TIMEOUT_MS = 60_000;
-const STREAM_FIRST_CHUNK_TIMEOUT_MS = 45_000;
+const STREAM_STALL_TIMEOUT_MS = 90_000;
+const STREAM_FIRST_CHUNK_TIMEOUT_MS = 90_000;
 const STREAM_HARD_TIMEOUT_MS = 600_000;
 const MANAGED_AUTH_STREAM_ERROR_PATTERNS = [
   /\b401\b/,
@@ -193,7 +193,7 @@ export function classifyRecoverableStreamResult(params: {
 
 function getTauriWindow(): TauriWindowLike | null {
   if (typeof window === "undefined") return null;
-  return window as TauriWindowLike;
+  return window as unknown as TauriWindowLike;
 }
 
 function getTauriEventListenersObject(
@@ -353,7 +353,9 @@ async function listenAIStreamEvent<T>(
     disposed = true;
     forgetAIStreamEventListener(persistedListener);
     const tauriWindow = getTauriWindow();
-    removeAIStreamEventListenerFromCurrentPage(tauriWindow, event, eventId);
+    if (tauriWindow) {
+      removeAIStreamEventListenerFromCurrentPage(tauriWindow, event, eventId);
+    }
     tauriWindow?.__TAURI_INTERNALS__?.unregisterCallback?.(callbackId);
     await invoke("plugin:event|unlisten", { event, eventId }).catch(() => undefined);
   };

@@ -1,8 +1,7 @@
 /**
- * TaskCenterPanel — 定时任务中心
+ * TaskCenterPanel — 任务中心
  *
- * 只展示持久化的 once / interval / cron 任务，
- * 用于统一查看、筛选和维护长期任务。
+ * 展示长期定时任务，并附带最近的 Agent 协作任务状态概览。
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -30,6 +29,8 @@ import {
   isScheduledTaskDone,
   parsePersistentScheduledQuery,
 } from "@/core/agent/scheduled-task-utils";
+import { useActorSystemStore } from "@/store/actor-system-store";
+import { useTaskCenterStore } from "@/store/task-center-store";
 
 type ScheduledFilter = "all" | "active" | "paused" | "attention" | "done";
 type ScheduledSourceFilter = "all" | AgentTaskOriginMode;
@@ -78,6 +79,22 @@ const STATUS_BADGE_STYLES: Record<AgentTaskStatus, string> = {
   cancelled: "bg-slate-500/10 text-slate-600",
 };
 
+const AGENT_TASK_STATUS_LABELS = {
+  queued: "排队中",
+  running: "运行中",
+  completed: "已完成",
+  failed: "失败",
+  aborted: "已中止",
+} as const;
+
+const AGENT_TASK_STATUS_BADGE_STYLES = {
+  queued: "bg-slate-500/10 text-slate-700",
+  running: "bg-blue-500/10 text-blue-700",
+  completed: "bg-emerald-500/10 text-emerald-700",
+  failed: "bg-red-500/10 text-red-700",
+  aborted: "bg-amber-500/10 text-amber-700",
+} as const;
+
 function formatDate(timestamp?: number): string {
   if (!timestamp) return "-";
   const value = new Date(timestamp);
@@ -104,6 +121,13 @@ function formatDuration(durationMs?: number): string {
   if (durationMs < 1000) return `${durationMs}ms`;
   if (durationMs < 60_000) return `${(durationMs / 1000).toFixed(1)}s`;
   return `${(durationMs / 60_000).toFixed(1)}min`;
+}
+
+function formatCompactPath(filePath?: string): string | null {
+  const normalized = String(filePath ?? "").trim();
+  if (!normalized) return null;
+  const segments = normalized.split("/");
+  return segments.slice(-2).join("/") || normalized;
 }
 
 function formatScheduledValue(task: AgentScheduledTask): string {
@@ -314,6 +338,10 @@ const TaskCenterPanel: React.FC = () => {
   const resumeScheduledTask = useAgentStore((state) => state.resumeScheduledTask);
   const cancelScheduledTask = useAgentStore((state) => state.cancelScheduledTask);
   const deleteScheduledTask = useAgentStore((state) => state.deleteScheduledTask);
+  const currentDialogSessionId = useActorSystemStore((state) => state.getSystem()?.sessionId ?? null);
+  const agentTasks = useTaskCenterStore((state) => state.agentTasks);
+  const setAgentFilter = useTaskCenterStore((state) => state.setAgentFilter);
+  const subscribeTaskCenter = useTaskCenterStore((state) => state.subscribe);
 
   const panelRef = useRef<HTMLDivElement | null>(null);
   const [scheduledFilter, setScheduledFilter] = useState<ScheduledFilter>("all");
@@ -324,6 +352,12 @@ const TaskCenterPanel: React.FC = () => {
   useEffect(() => {
     void loadScheduledTasks();
   }, [loadScheduledTasks]);
+
+  useEffect(() => subscribeTaskCenter(), [subscribeTaskCenter]);
+
+  useEffect(() => {
+    setAgentFilter(currentDialogSessionId ? { sessionId: currentDialogSessionId } : {});
+  }, [currentDialogSessionId, setAgentFilter]);
 
   useEffect(() => {
     const element = panelRef.current;
@@ -414,6 +448,20 @@ const TaskCenterPanel: React.FC = () => {
     };
   }, [persistentTasks]);
 
+  const recentAgentTasks = useMemo(() => {
+    return agentTasks.slice(0, 5);
+  }, [agentTasks]);
+
+  const agentTaskStats = useMemo(() => {
+    const running = agentTasks.filter((task) => task.status === "running").length;
+    const failed = agentTasks.filter((task) => task.status === "failed" || task.status === "aborted").length;
+    return {
+      total: agentTasks.length,
+      running,
+      failed,
+    };
+  }, [agentTasks]);
+
   const refreshTasks = useCallback(() => {
     void loadScheduledTasks();
   }, [loadScheduledTasks]);
@@ -445,6 +493,11 @@ const TaskCenterPanel: React.FC = () => {
       key: "attention",
       label: `需关注 ${stats.attention}`,
       className: "bg-red-500/10 text-red-700",
+    },
+    {
+      key: "agent",
+      label: `协作任务 ${agentTaskStats.total}`,
+      className: "bg-violet-500/10 text-violet-700",
     },
   ];
 
@@ -525,169 +578,243 @@ const TaskCenterPanel: React.FC = () => {
       </div>
 
       <div className={`min-h-0 flex-1 ${isDenseLayout ? "p-1.5" : "p-2"}`}>
-        {filteredTasks.length === 0 ? (
-          <div className="flex h-full items-center justify-center rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-secondary)]/25 px-6 text-center">
-            <div className="max-w-sm">
-              <ListChecks className="mx-auto mb-3 h-10 w-10 text-[var(--color-text-tertiary)] opacity-40" />
-              <div className="text-[15px] font-medium text-[var(--color-text)]">当前没有匹配的定时任务</div>
-              <p className="mt-2 text-[12px] leading-6 text-[var(--color-text-secondary)]">
-                这里会统一展示 Agent 创建的 once、interval、cron 任务。你可以切换状态或来源筛选看看。
-              </p>
-            </div>
-          </div>
-        ) : (
-          <div className={isCompactLayout ? "grid h-full min-h-0 gap-2 grid-rows-[minmax(180px,0.95fr)_minmax(240px,1.1fr)]" : "grid h-full min-h-0 gap-2 grid-cols-[minmax(0,1fr)_260px]"}>
-            <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/20">
-              <div className={`shrink-0 border-b border-[var(--color-border)] ${isDenseLayout ? "px-2.5 py-1.5 text-[10px]" : "px-3 py-1.5 text-[11px]"} text-[var(--color-text-secondary)]`}>
-                当前列表 {filteredTasks.length} 项
+        <div className="flex h-full min-h-0 flex-col gap-2">
+          {recentAgentTasks.length > 0 && (
+            <div className="shrink-0 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/20">
+              <div className={`flex items-center justify-between border-b border-[var(--color-border)] ${isDenseLayout ? "px-2.5 py-1.5" : "px-3 py-2"}`}>
+                <div>
+                  <div className="text-[12px] font-semibold text-[var(--color-text)]">Agent 协作任务</div>
+                  <div className="text-[10px] text-[var(--color-text-secondary)]">
+                    最近同步的 child / background / remote agent 生命周期
+                  </div>
+                </div>
+                <div className="flex items-center gap-1 text-[10px]">
+                  <span className="rounded-full bg-blue-500/10 px-2 py-0.5 text-blue-700">运行中 {agentTaskStats.running}</span>
+                  <span className="rounded-full bg-red-500/10 px-2 py-0.5 text-red-700">异常 {agentTaskStats.failed}</span>
+                </div>
               </div>
-              <div className={`min-h-0 flex-1 overflow-y-auto ${isDenseLayout ? "space-y-1 p-1.5" : "space-y-1.5 p-2"}`}>
-                {filteredTasks.map((task) => (
-                  <ScheduledTaskRow
-                    key={task.id}
-                    task={task}
-                    selected={task.id === selectedTaskId}
-                    dense
-                    onSelect={() => setSelectedTaskId(task.id)}
-                    onPause={() => void pauseScheduledTask(task.id)}
-                    onResume={() => void resumeScheduledTask(task.id)}
-                    onCancel={() => void cancelScheduledTask(task.id)}
-                    onDelete={() => void deleteScheduledTask(task.id)}
-                  />
-                ))}
-              </div>
-            </div>
 
-            <div
-              className={`flex min-h-0 flex-col overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/20 ${
-                "h-full"
-              }`}
-            >
-              {selectedTask && selectedDisplay ? (
-                <div className="flex h-full min-h-0 flex-col">
-                  <div className={`shrink-0 border-b border-[var(--color-border)] ${isDenseLayout ? "px-2.5 py-2" : "px-3 py-2.5"}`}>
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0 flex-1">
-                        <div className="flex min-w-0 items-center gap-1.5">
-                          {getStatusIcon(selectedTask.status)}
-                          <h3 className={`${isDenseLayout ? "text-[13px]" : "text-[14px]"} min-w-0 flex-1 truncate whitespace-nowrap font-semibold text-[var(--color-text)]`}>
-                            {selectedDisplay.title}
-                          </h3>
-                        </div>
-                        <div className="mt-1 flex items-center gap-1 overflow-x-auto whitespace-nowrap pb-0.5">
-                          <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${ORIGIN_BADGE_STYLES[getTaskOriginMode(selectedTask)]}`}>
-                            {getTaskOriginLabel(selectedTask)}
-                          </span>
-                          {isScheduledTaskActive(selectedTask) && selectedTask.status !== "running" && (
-                            <span className="rounded-full bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium text-sky-700">
-                              已启用
+              <div className={`${isDenseLayout ? "space-y-1 p-1.5" : "space-y-1.5 p-2"}`}>
+                {recentAgentTasks.map((task) => {
+                  const actorLabel = task.targetName ?? task.title;
+                  const secondaryLine = [
+                    task.spawnerName ? `派发者 ${task.spawnerName}` : null,
+                    task.mode === "session" ? "会话模式" : "运行模式",
+                    task.pendingMessageCount > 0 ? `待处理消息 ${task.pendingMessageCount}` : null,
+                    task.progress?.toolUseCount ? `工具 ${task.progress.toolUseCount}` : null,
+                    formatDate(task.lastActiveAt ?? task.completedAt ?? task.startedAt ?? task.createdAt),
+                  ].filter(Boolean).join(" · ");
+                  const detailBadges = [
+                    task.progress?.latestToolName ? `最近工具 ${task.progress.latestToolName}` : null,
+                    task.outputFile ? `产物 ${formatCompactPath(task.outputFile)}` : null,
+                    task.progress?.eventCount ? `事件 ${task.progress.eventCount}` : null,
+                  ].filter(Boolean);
+                  return (
+                    <div
+                      key={task.taskId}
+                      className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)]/60 px-2.5 py-2"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex min-w-0 items-center gap-1.5">
+                            <span className="truncate text-[12px] font-semibold text-[var(--color-text)]">
+                              {actorLabel}
                             </span>
+                            <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${AGENT_TASK_STATUS_BADGE_STYLES[task.status]}`}>
+                              {AGENT_TASK_STATUS_LABELS[task.status]}
+                            </span>
+                          </div>
+                          <div className="mt-1 text-[10px] text-[var(--color-text-secondary)]">
+                            {secondaryLine}
+                          </div>
+                          <div className="mt-1 line-clamp-2 text-[11px] text-[var(--color-text)]">
+                            {task.recentActivitySummary ?? task.outputSummary ?? task.description}
+                          </div>
+                          {detailBadges.length > 0 && (
+                            <div className="mt-2 flex flex-wrap gap-1">
+                              {detailBadges.map((badge) => (
+                                <span
+                                  key={`${task.taskId}-${badge}`}
+                                  className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]"
+                                >
+                                  {badge}
+                                </span>
+                              ))}
+                            </div>
                           )}
-                          <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${STATUS_BADGE_STYLES[selectedTask.status]}`}>
-                            {STATUS_LABELS[selectedTask.status]}
-                          </span>
                         </div>
                       </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
-                      <div className="flex shrink-0 items-center gap-1 self-start">
-                        {selectedTask.status === "paused" && (
+          {filteredTasks.length === 0 ? (
+            <div className="flex min-h-0 flex-1 items-center justify-center rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-secondary)]/25 px-6 text-center">
+              <div className="max-w-sm">
+                <ListChecks className="mx-auto mb-3 h-10 w-10 text-[var(--color-text-tertiary)] opacity-40" />
+                <div className="text-[15px] font-medium text-[var(--color-text)]">当前没有匹配的定时任务</div>
+                <p className="mt-2 text-[12px] leading-6 text-[var(--color-text-secondary)]">
+                  这里会统一展示 Agent 创建的 once、interval、cron 任务，也会在上方显示最近的协作 AgentTask 状态。
+                </p>
+              </div>
+            </div>
+          ) : (
+            <div className={isCompactLayout ? "grid min-h-0 flex-1 gap-2 grid-rows-[minmax(180px,0.95fr)_minmax(240px,1.1fr)]" : "grid min-h-0 flex-1 gap-2 grid-cols-[minmax(0,1fr)_260px]"}>
+              <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/20">
+                <div className={`shrink-0 border-b border-[var(--color-border)] ${isDenseLayout ? "px-2.5 py-1.5 text-[10px]" : "px-3 py-1.5 text-[11px]"} text-[var(--color-text-secondary)]`}>
+                  当前列表 {filteredTasks.length} 项
+                </div>
+                <div className={`min-h-0 flex-1 overflow-y-auto ${isDenseLayout ? "space-y-1 p-1.5" : "space-y-1.5 p-2"}`}>
+                  {filteredTasks.map((task) => (
+                    <ScheduledTaskRow
+                      key={task.id}
+                      task={task}
+                      selected={task.id === selectedTaskId}
+                      dense
+                      onSelect={() => setSelectedTaskId(task.id)}
+                      onPause={() => void pauseScheduledTask(task.id)}
+                      onResume={() => void resumeScheduledTask(task.id)}
+                      onCancel={() => void cancelScheduledTask(task.id)}
+                      onDelete={() => void deleteScheduledTask(task.id)}
+                    />
+                  ))}
+                </div>
+              </div>
+
+              <div
+                className={`flex min-h-0 flex-col overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/20 ${
+                  "h-full"
+                }`}
+              >
+                {selectedTask && selectedDisplay ? (
+                  <div className="flex h-full min-h-0 flex-col">
+                    <div className={`shrink-0 border-b border-[var(--color-border)] ${isDenseLayout ? "px-2.5 py-2" : "px-3 py-2.5"}`}>
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex min-w-0 items-center gap-1.5">
+                            {getStatusIcon(selectedTask.status)}
+                            <h3 className={`${isDenseLayout ? "text-[13px]" : "text-[14px]"} min-w-0 flex-1 truncate whitespace-nowrap font-semibold text-[var(--color-text)]`}>
+                              {selectedDisplay.title}
+                            </h3>
+                          </div>
+                          <div className="mt-1 flex items-center gap-1 overflow-x-auto whitespace-nowrap pb-0.5">
+                            <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${ORIGIN_BADGE_STYLES[getTaskOriginMode(selectedTask)]}`}>
+                              {getTaskOriginLabel(selectedTask)}
+                            </span>
+                            {isScheduledTaskActive(selectedTask) && selectedTask.status !== "running" && (
+                              <span className="rounded-full bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium text-sky-700">
+                                已启用
+                              </span>
+                            )}
+                            <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${STATUS_BADGE_STYLES[selectedTask.status]}`}>
+                              {STATUS_LABELS[selectedTask.status]}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="flex shrink-0 items-center gap-1 self-start">
+                          {selectedTask.status === "paused" && (
+                            <button
+                              type="button"
+                              onClick={() => void resumeScheduledTask(selectedTask.id)}
+                              className={isCompactLayout
+                                ? "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-emerald-500/10 hover:text-emerald-700 transition-colors"
+                                : "shrink-0 whitespace-nowrap rounded-md border border-[var(--color-border)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)] hover:bg-emerald-500/10 hover:text-emerald-700 transition-colors"}
+                              title="恢复"
+                            >
+                              {isCompactLayout ? <Play className="h-3.5 w-3.5" /> : "恢复"}
+                            </button>
+                          )}
+                          {isScheduledTaskActive(selectedTask) && selectedTask.status !== "paused" && (
+                            <button
+                              type="button"
+                              onClick={() => void pauseScheduledTask(selectedTask.id)}
+                              className={isCompactLayout
+                                ? "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-amber-500/10 hover:text-amber-700 transition-colors"
+                                : "shrink-0 whitespace-nowrap rounded-md border border-[var(--color-border)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)] hover:bg-amber-500/10 hover:text-amber-700 transition-colors"}
+                              title="暂停"
+                            >
+                              {isCompactLayout ? <Pause className="h-3.5 w-3.5" /> : "暂停"}
+                            </button>
+                          )}
+                          {!isScheduledTaskDone(selectedTask) && (
+                            <button
+                              type="button"
+                              onClick={() => void cancelScheduledTask(selectedTask.id)}
+                              className={isCompactLayout
+                                ? "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-red-500/10 hover:text-red-600 transition-colors"
+                                : "shrink-0 whitespace-nowrap rounded-md border border-[var(--color-border)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)] hover:bg-red-500/10 hover:text-red-600 transition-colors"}
+                              title="取消"
+                            >
+                              {isCompactLayout ? <XCircle className="h-3.5 w-3.5" /> : "取消"}
+                            </button>
+                          )}
                           <button
                             type="button"
-                            onClick={() => void resumeScheduledTask(selectedTask.id)}
-                            className={isCompactLayout
-                              ? "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-emerald-500/10 hover:text-emerald-700 transition-colors"
-                              : "shrink-0 whitespace-nowrap rounded-md border border-[var(--color-border)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)] hover:bg-emerald-500/10 hover:text-emerald-700 transition-colors"}
-                            title="恢复"
-                          >
-                            {isCompactLayout ? <Play className="h-3.5 w-3.5" /> : "恢复"}
-                          </button>
-                        )}
-                        {isScheduledTaskActive(selectedTask) && selectedTask.status !== "paused" && (
-                          <button
-                            type="button"
-                            onClick={() => void pauseScheduledTask(selectedTask.id)}
-                            className={isCompactLayout
-                              ? "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-amber-500/10 hover:text-amber-700 transition-colors"
-                              : "shrink-0 whitespace-nowrap rounded-md border border-[var(--color-border)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)] hover:bg-amber-500/10 hover:text-amber-700 transition-colors"}
-                            title="暂停"
-                          >
-                            {isCompactLayout ? <Pause className="h-3.5 w-3.5" /> : "暂停"}
-                          </button>
-                        )}
-                        {!isScheduledTaskDone(selectedTask) && (
-                          <button
-                            type="button"
-                            onClick={() => void cancelScheduledTask(selectedTask.id)}
+                            onClick={() => void deleteScheduledTask(selectedTask.id)}
                             className={isCompactLayout
                               ? "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-red-500/10 hover:text-red-600 transition-colors"
                               : "shrink-0 whitespace-nowrap rounded-md border border-[var(--color-border)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)] hover:bg-red-500/10 hover:text-red-600 transition-colors"}
-                            title="取消"
+                            title="删除"
                           >
-                            {isCompactLayout ? <XCircle className="h-3.5 w-3.5" /> : "取消"}
+                            {isCompactLayout ? <Trash2 className="h-3.5 w-3.5" /> : "删除"}
                           </button>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => void deleteScheduledTask(selectedTask.id)}
-                          className={isCompactLayout
-                            ? "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-red-500/10 hover:text-red-600 transition-colors"
-                            : "shrink-0 whitespace-nowrap rounded-md border border-[var(--color-border)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)] hover:bg-red-500/10 hover:text-red-600 transition-colors"}
-                          title="删除"
-                        >
-                          {isCompactLayout ? <Trash2 className="h-3.5 w-3.5" /> : "删除"}
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className={isCompactLayout ? "min-h-0 flex-1 overflow-y-auto px-3 py-2" : `min-h-0 flex-1 overflow-y-auto ${isDenseLayout ? "px-2.5 py-2" : "px-3 py-2.5"}`}>
-                    <div className={`grid ${isCompactLayout ? "grid-cols-3 gap-2" : "grid-cols-1 gap-1.5"} text-[10px] text-[var(--color-text-secondary)]`}>
-                      {selectedDetailItems.map((item) => (
-                        <div
-                          key={item.key}
-                          className="min-w-0 rounded-lg bg-[var(--color-bg)]/70 px-2.5 py-1.5"
-                        >
-                          <div className="truncate text-[10px] text-[var(--color-text-tertiary)]">
-                            {item.label}
-                          </div>
-                          <div
-                            className={`mt-0.5 truncate font-medium text-[var(--color-text)] ${isCompactLayout ? "text-[12px]" : "text-[12px]"}`}
-                            title={item.value}
-                          >
-                            {item.value}
-                          </div>
                         </div>
-                      ))}
-                    </div>
-
-                    <div className="mt-2 rounded-lg bg-[var(--color-bg)]/60 px-2.5 py-1.5 text-[10px] text-[var(--color-text-secondary)]">
-                      <div className="text-[10px] text-[var(--color-text-tertiary)]">关联会话</div>
-                      <div className="mt-0.5 truncate text-[12px] text-[var(--color-text)]" title={selectedTask.session_id ?? "-"}>
-                        {selectedTask.session_id ?? "-"}
                       </div>
                     </div>
 
-                    {selectedTask.last_error && (
-                      <div className="mt-3 rounded-lg bg-red-500/8 px-2.5 py-2 text-[10px] text-red-600">
-                        最近错误: {selectedTask.last_error}
+                    <div className={isCompactLayout ? "min-h-0 flex-1 overflow-y-auto px-3 py-2" : `min-h-0 flex-1 overflow-y-auto ${isDenseLayout ? "px-2.5 py-2" : "px-3 py-2.5"}`}>
+                      <div className={`grid ${isCompactLayout ? "grid-cols-3 gap-2" : "grid-cols-1 gap-1.5"} text-[10px] text-[var(--color-text-secondary)]`}>
+                        {selectedDetailItems.map((item) => (
+                          <div
+                            key={item.key}
+                            className="min-w-0 rounded-lg bg-[var(--color-bg)]/70 px-2.5 py-1.5"
+                          >
+                            <div className="truncate text-[10px] text-[var(--color-text-tertiary)]">
+                              {item.label}
+                            </div>
+                            <div
+                              className={`mt-0.5 truncate font-medium text-[var(--color-text)] ${isCompactLayout ? "text-[12px]" : "text-[12px]"}`}
+                              title={item.value}
+                            >
+                              {item.value}
+                            </div>
+                          </div>
+                        ))}
                       </div>
-                    )}
+
+                      <div className="mt-2 rounded-lg bg-[var(--color-bg)]/60 px-2.5 py-1.5 text-[10px] text-[var(--color-text-secondary)]">
+                        <div className="text-[10px] text-[var(--color-text-tertiary)]">关联会话</div>
+                        <div className="mt-0.5 truncate text-[12px] text-[var(--color-text)]" title={selectedTask.session_id ?? "-"}>
+                          {selectedTask.session_id ?? "-"}
+                        </div>
+                      </div>
+
+                      {selectedTask.last_error && (
+                        <div className="mt-3 rounded-lg bg-red-500/8 px-2.5 py-2 text-[10px] text-red-600">
+                          最近错误: {selectedTask.last_error}
+                        </div>
+                      )}
+                    </div>
                   </div>
-                </div>
-              ) : (
-                <div className="flex h-full items-center justify-center px-6 text-center">
-                  <div className="max-w-xs">
-                    <Clock className="mx-auto mb-3 h-10 w-10 text-[var(--color-text-tertiary)] opacity-35" />
-                    <div className="text-[14px] font-medium text-[var(--color-text)]">选择一条任务查看详情</div>
-                    <p className="mt-2 text-[12px] leading-6 text-[var(--color-text-secondary)]">
-                      右侧会展示执行者、调度方式、最近结果和错误信息。
-                    </p>
+                ) : (
+                  <div className="flex h-full items-center justify-center px-6 text-center">
+                    <div className="max-w-xs">
+                      <Clock className="mx-auto mb-3 h-10 w-10 text-[var(--color-text-tertiary)] opacity-35" />
+                      <div className="text-[14px] font-medium text-[var(--color-text)]">选择一条任务查看详情</div>
+                      <p className="mt-2 text-[12px] leading-6 text-[var(--color-text-secondary)]">
+                        右侧会展示执行者、调度方式、最近结果和错误信息。
+                      </p>
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
+              </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
     </div>
   );

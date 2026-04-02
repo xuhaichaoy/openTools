@@ -50,6 +50,10 @@ import {
   loadLocalFontScalePreference,
   saveLocalFontScalePreference,
 } from "@/core/ui/local-ui-preferences";
+import {
+  getDialogStepTraceMode,
+  setDialogStepTraceMode,
+} from "@/core/agent/actor/dialog-step-trace";
 
 const BRAND = "#F28F36";
 
@@ -569,6 +573,7 @@ function GeneralSettingsTab() {
   const [loading, setLoading] = useState(true);
   const [shortcutMsg, setShortcutMsg] = useState("");
   const [fontScale, setFontScale] = useState(loadLocalFontScalePreference);
+  const [dialogTraceEnabled, setDialogTraceEnabled] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -581,6 +586,9 @@ function GeneralSettingsTab() {
         setLoading(false);
       }
     })();
+    const mode = getDialogStepTraceMode();
+    console.log("[GeneralSettings] Dialog trace mode:", mode);
+    setDialogTraceEnabled(mode === "full");
   }, []);
 
   const updateSetting = <K extends keyof AppSettings>(
@@ -672,6 +680,21 @@ function GeneralSettingsTab() {
             <ToggleSwitch
               on={settings.developerMode}
               onChange={(v) => updateSetting("developerMode", v)}
+            />
+          }
+        />
+        <SettingRow
+          label="Dialog 调试追踪"
+          description="记录所有 Dialog 运行步骤到文件"
+          action={
+            <ToggleSwitch
+              on={dialogTraceEnabled}
+              onChange={(v) => {
+                console.log("[GeneralSettings] Toggle dialog trace:", v);
+                const result = setDialogStepTraceMode(v ? "full" : "off");
+                console.log("[GeneralSettings] Set result:", result);
+                setDialogTraceEnabled(v);
+              }}
             />
           }
         />

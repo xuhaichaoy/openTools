@@ -15,6 +15,12 @@ import {
   listTranscriptSessionIds,
 } from "./actor-transcript";
 import {
+  applyBuiltinAgentDefaults,
+  listBuiltinAgentIds,
+  resolveBuiltinAgentDefinition,
+  type BuiltinAgentId,
+} from "@/core/agent/definitions/builtin";
+import {
   enableStructuredDeliveryAdapter,
   getStructuredDeliveryStrategyReferenceId,
   resolveStructuredDeliveryManifest,
@@ -59,6 +65,7 @@ const KNOWN_WORKER_PROFILES = new Set<WorkerProfileId>([
   "review_worker",
   "spreadsheet_worker",
 ]);
+const BUILTIN_AGENT_DESCRIPTION = listBuiltinAgentIds().join("', '");
 
 function previewSpawnTargetText(value?: string, maxLength = 32): string | undefined {
   const normalized = String(value ?? "").replace(/\s+/g, " ").trim();
@@ -266,6 +273,38 @@ function isSpreadsheetDeliveryManifest(
   );
 }
 
+function isWorkbookAggregationDelegation(params: {
+  task: string;
+  manifest: ReturnType<typeof resolveStructuredDeliveryManifest> | null | undefined;
+  workerProfileId?: WorkerProfileId;
+  resultContract?: "default" | "inline_structured_result";
+}): boolean {
+  if (!params.manifest || params.manifest.parentContract !== "single_workbook") {
+    return false;
+  }
+
+  const normalizedTask = String(params.task ?? "").trim();
+  if (!normalizedTask) return false;
+
+  const aggregateWorkbookIntent =
+    /(?:整合|汇总|合并|聚合|aggregate|combine|collect all)/iu.test(normalizedTask)
+    && /(?:excel|xlsx|xls|csv|表格|工作簿|导出|生成文件|最终文件|最终工作簿|export)/iu.test(normalizedTask)
+    && /(?:所有|全部|all|子任务|工作簿|结果文件|current\s*run)/iu.test(normalizedTask);
+  const childResultScanningIntent =
+    /(?:子任务|子Agent|当前\s*run|结果文件|工作目录|其他\d*个?子)/iu.test(normalizedTask)
+    && /(?:整合|汇总|读取|收集|访问|扫描|导出)/iu.test(normalizedTask);
+
+  return (
+    aggregateWorkbookIntent
+    || childResultScanningIntent
+    || (
+      String(params.workerProfileId ?? "").trim() === "spreadsheet_worker"
+      && params.resultContract !== "inline_structured_result"
+      && /(?:excel|xlsx|xls|csv|表格|工作簿)/iu.test(normalizedTask)
+    )
+  );
+}
+
 function buildScopedSourceItemsFromGroundingItems(
   items: readonly SourceGroundingItem[] | undefined,
 ): ScopedSourceItem[] | undefined {
@@ -390,6 +429,17 @@ function buildDefaultDelegationAcceptance(params: {
   }
 }
 
+function mergeDelegationAcceptance(...groups: Array<string[] | undefined>): string[] {
+  const merged = new Set<string>();
+  for (const group of groups) {
+    for (const item of group ?? []) {
+      const normalized = String(item ?? "").trim();
+      if (normalized) merged.add(normalized);
+    }
+  }
+  return [...merged];
+}
+
 async function doesMediaPathExist(path: string): Promise<boolean> {
   if (/^https?:\/\//i.test(path)) return true;
   try {
@@ -413,17 +463,34 @@ export function createActorCommunicationTools(
 ): AgentTool[] {
   const tools: AgentTool[] = [];
 
-  const resolveTarget = (nameOrId: string): string => {
+  const resolveExistingTargetActor = (nameOrId: string) => {
     const actor = system.get(nameOrId);
-    if (actor) return nameOrId;
+    if (actor) return actor;
     const all = system.getAll();
     const found = all.find((a) => a.role.name === nameOrId);
-    return found?.id ?? nameOrId;
+    return found;
+  };
+
+  const resolveTarget = (nameOrId: string): string => {
+    const found = resolveExistingTargetActor(nameOrId);
+    return found?.id ?? "";
   };
 
   const getActorName = (id: string): string => {
     const actor = system.get(id);
     return actor?.role.name ?? id;
+  };
+
+  const requireCoordinatorForTeamTool = (toolName: string) => {
+    const coordinatorId = system.getCoordinatorId();
+    if (coordinatorId && actorId !== coordinatorId) {
+      return {
+        error: `${toolName} 只能由协调者调用；请把 team/swarm 操作建议回传给 ${getActorName(coordinatorId)} 统一执行。`,
+        coordinator: getActorName(coordinatorId),
+        delegated: true,
+      };
+    }
+    return null;
   };
 
   const parseCapabilities = (raw: unknown): AgentCapability[] | undefined => {
@@ -445,6 +512,11 @@ export function createActorCommunicationTools(
     if (!raw) return undefined;
     const value = String(raw).trim() as WorkerProfileId;
     return KNOWN_WORKER_PROFILES.has(value) ? value : undefined;
+  };
+
+  const parseBuiltinAgentId = (raw: unknown): BuiltinAgentId | undefined => {
+    const definition = resolveBuiltinAgentDefinition(typeof raw === "string" ? raw : undefined);
+    return definition?.id;
   };
 
   tools.push({
@@ -523,11 +595,11 @@ export function createActorCommunicationTools(
       "目标 Agent 完成后结果会自动发送到你的收件箱。此操作是非阻塞的。" +
       "适用于将大任务分解为子任务分配给不同 Agent 并行执行。" +
       "默认仅顶层协调者可以继续创建子线程；非协调子 Agent 应把新增分工建议回传给协调者。" +
-      "当目标 Agent 不存在时，也可以按需创建临时子 Agent。",
+      "当未提供 target_agent，或提供的名称当前不存在时，系统会按 Claude Code 风格自动 fork 一个临时子 Agent。",
     parameters: {
       target_agent: {
         type: "string",
-        description: "目标 Agent 的名称；若不存在且 create_if_missing=true，则会创建同名临时子 Agent",
+        description: "目标 Agent 的名称。可留空；留空或名称当前不存在时，系统默认自动 fork 一个临时子 Agent。",
         required: false,
       },
       planned_delegation_id: {
@@ -578,7 +650,7 @@ export function createActorCommunicationTools(
       },
       create_if_missing: {
         type: "boolean",
-        description: "当目标 Agent 不存在时，是否自动创建一个临时子 Agent（默认 false）",
+        description: "是否显式要求自动创建临时子 Agent。默认会在 target_agent 留空或目标不存在时自动 fork；设为 false 可关闭该行为。",
         required: false,
       },
       agent_description: {
@@ -604,6 +676,11 @@ export function createActorCommunicationTools(
       worker_profile: {
         type: "string",
         description: "显式指定 worker profile：'general_worker'、'content_worker'、'coding_worker'、'review_worker'、'validator_worker' 或 'spreadsheet_worker'。优先于系统 heuristics。",
+        required: false,
+      },
+      builtin_agent: {
+        type: "string",
+        description: `显式指定内建专用 agent：'${BUILTIN_AGENT_DESCRIPTION}'。系统会自动补齐默认角色边界、worker profile、提示词约束和临时 agent 画像。`,
         required: false,
       },
       result_contract: {
@@ -645,6 +722,9 @@ export function createActorCommunicationTools(
         ? Number(params.__spawn_limit)
         : undefined;
       const targetInput = params.target_agent ? String(params.target_agent).trim() : "";
+      const actor = system.get(actorId) as { currentTask?: { id?: string } } | null;
+      const currentOwnerTaskId = actor?.currentTask?.id?.trim();
+      const existingTargetActor = targetInput ? resolveExistingTargetActor(targetInput) : undefined;
       const target = targetInput ? resolveTarget(targetInput) : "";
       const plannedDelegationId = params.planned_delegation_id ? String(params.planned_delegation_id).trim() : undefined;
       const task = String(params.task);
@@ -655,14 +735,17 @@ export function createActorCommunicationTools(
         ? String(params.attachments).split(",").map((s) => s.trim()).filter(Boolean)
         : undefined;
       const mode = params.mode === "session" ? "session" : "run";
-      const createIfMissing = params.create_if_missing === true;
       const cleanup = params.cleanup === "delete"
         ? "delete"
         : (params.cleanup === "keep" ? "keep" : undefined);
       const expectsCompletionMessage = params.expects_completion !== false;
       const childCapabilities = parseCapabilities(params.agent_capabilities);
-      const roleBoundary = parseRoleBoundary(params.role_boundary);
-      const workerProfileId = parseWorkerProfileId(params.worker_profile);
+      const requestedRoleBoundary = parseRoleBoundary(params.role_boundary);
+      const requestedWorkerProfileId = parseWorkerProfileId(params.worker_profile);
+      const builtinAgentId = parseBuiltinAgentId(params.builtin_agent);
+      const explicitCreateIfMissing = params.create_if_missing === true
+        ? true
+        : (params.create_if_missing === false ? false : undefined);
       const resultContract = params.result_contract === "inline_structured_result"
         ? "inline_structured_result"
         : undefined;
@@ -680,54 +763,95 @@ export function createActorCommunicationTools(
         ? Number(params.sourceItemCount)
         : undefined;
       const scopedSourceItems = parseScopedSourceItemsParam(params.scopedSourceItems);
-      const derivedTarget = createIfMissing
-        ? deriveEphemeralSpawnTarget({
-            target,
-            label,
-            description: params.agent_description ? String(params.agent_description) : undefined,
-            task,
-            roleBoundary,
-          })
-        : "";
-      const resolvedTarget = target || derivedTarget;
-
-      // Subagent 独立配置
-      const overrides: import("./types").SpawnTaskOverrides = {};
-      if (workerProfileId) overrides.workerProfileId = workerProfileId;
-      if (resultContract) overrides.resultContract = resultContract;
-      if (deliveryTargetId) overrides.deliveryTargetId = deliveryTargetId;
-      if (deliveryTargetLabel) overrides.deliveryTargetLabel = deliveryTargetLabel;
-      if (sheetName) overrides.sheetName = sheetName;
-      if (sourceItemIds?.length) overrides.sourceItemIds = sourceItemIds;
-      if (typeof sourceItemCount === "number" && sourceItemCount > 0) overrides.sourceItemCount = sourceItemCount;
-      if (scopedSourceItems?.length) overrides.scopedSourceItems = scopedSourceItems;
-      if (params.override_model) overrides.model = String(params.override_model);
-      if (params.override_max_iterations) overrides.maxIterations = Number(params.override_max_iterations);
+      const baseOverrides: import("./types").SpawnTaskOverrides = {};
+      if (requestedWorkerProfileId) baseOverrides.workerProfileId = requestedWorkerProfileId;
+      if (resultContract) baseOverrides.resultContract = resultContract;
+      if (deliveryTargetId) baseOverrides.deliveryTargetId = deliveryTargetId;
+      if (deliveryTargetLabel) baseOverrides.deliveryTargetLabel = deliveryTargetLabel;
+      if (sheetName) baseOverrides.sheetName = sheetName;
+      if (sourceItemIds?.length) baseOverrides.sourceItemIds = sourceItemIds;
+      if (typeof sourceItemCount === "number" && sourceItemCount > 0) baseOverrides.sourceItemCount = sourceItemCount;
+      if (scopedSourceItems?.length) baseOverrides.scopedSourceItems = scopedSourceItems;
+      if (params.override_model) baseOverrides.model = String(params.override_model);
+      if (params.override_max_iterations) baseOverrides.maxIterations = Number(params.override_max_iterations);
       if (params.override_tools_allow || params.override_tools_deny) {
-        overrides.toolPolicy = {};
+        baseOverrides.toolPolicy = {};
         if (params.override_tools_allow) {
-          overrides.toolPolicy.allow = String(params.override_tools_allow).split(",").map((s) => s.trim()).filter(Boolean);
+          baseOverrides.toolPolicy.allow = String(params.override_tools_allow).split(",").map((s) => s.trim()).filter(Boolean);
         }
         if (params.override_tools_deny) {
-          overrides.toolPolicy.deny = String(params.override_tools_deny).split(",").map((s) => s.trim()).filter(Boolean);
+          baseOverrides.toolPolicy.deny = String(params.override_tools_deny).split(",").map((s) => s.trim()).filter(Boolean);
         }
       }
       if (params.override_system_prompt_append) {
-        overrides.systemPromptAppend = String(params.override_system_prompt_append);
+        baseOverrides.systemPromptAppend = String(params.override_system_prompt_append);
       }
+      const builtinDefaults = applyBuiltinAgentDefaults({
+        builtinAgentId,
+        requestedTargetName: targetInput || undefined,
+        requestedRoleBoundary,
+        requestedWorkerProfileId,
+        requestedChildDescription: params.agent_description ? String(params.agent_description) : undefined,
+        requestedChildCapabilities: childCapabilities,
+        overrides: baseOverrides,
+      });
+      const effectiveRoleBoundary = builtinDefaults.roleBoundary ?? requestedRoleBoundary;
+      const shouldImplicitFork = explicitCreateIfMissing !== false
+        && !plannedDelegationId
+        && !existingTargetActor;
+      const createIfMissing = explicitCreateIfMissing
+        ?? (shouldImplicitFork ? true : undefined);
+      const derivedTarget = createIfMissing
+        ? (
+          builtinDefaults.targetName
+          || deriveEphemeralSpawnTarget({
+            target: targetInput || existingTargetActor?.role.name,
+            label,
+            description: builtinDefaults.childDescription,
+            task,
+            roleBoundary: effectiveRoleBoundary,
+          })
+        )
+        : "";
+      const resolvedTarget = target || derivedTarget || targetInput;
+      const overrides = builtinDefaults.overrides;
       const hasOverrides = Object.keys(overrides).length > 0;
+      const shouldAutoQueueIfBusy = !queueIfBusy
+        && mode === "run"
+        && explicitCreateIfMissing !== false
+        && !existingTargetActor
+        && (overrides.workerProfileId === "content_worker" || overrides.workerProfileId === "spreadsheet_worker");
+      const effectiveQueueIfBusy = queueIfBusy || shouldAutoQueueIfBusy;
+      const effectiveSoftSpawnLimit = softSpawnLimit
+        ?? (
+          effectiveQueueIfBusy && typeof system.getDialogSpawnConcurrencyLimit === "function"
+            ? system.getDialogSpawnConcurrencyLimit()
+            : undefined
+        );
+      const parentManifest = resolveParentStructuredDeliveryManifest(actorId, system);
+      if (isWorkbookAggregationDelegation({
+        task,
+        manifest: parentManifest,
+        workerProfileId: overrides.workerProfileId,
+        resultContract: overrides.resultContract,
+      })) {
+        return {
+          spawned: false,
+          error: "single_workbook / host-managed 表格合同下，禁止再委派“整合所有结果并导出 Excel”的聚合型子任务；请继续派发表格分片，或直接调用 wait_for_spawned_tasks 进入主线程聚合。",
+        };
+      }
       const queuedSpawnCount = typeof system.getPendingDeferredSpawnTaskCount === "function"
-        ? system.getPendingDeferredSpawnTaskCount(actorId)
+        ? system.getPendingDeferredSpawnTaskCount(actorId, { ownerTaskId: currentOwnerTaskId })
         : 0;
       const activeSpawnCount = typeof system.getActiveSpawnedTasks === "function"
-        ? system.getActiveSpawnedTasks(actorId).length
+        ? system.getActiveSpawnedTasks(actorId, { ownerTaskId: currentOwnerTaskId }).length
         : 0;
 
       if (
-        queueIfBusy
+        effectiveQueueIfBusy
         && mode === "run"
-        && typeof softSpawnLimit === "number"
-        && (activeSpawnCount >= softSpawnLimit || queuedSpawnCount > 0)
+        && typeof effectiveSoftSpawnLimit === "number"
+        && (activeSpawnCount >= effectiveSoftSpawnLimit || queuedSpawnCount > 0)
         && typeof system.enqueueDeferredSpawnTask === "function"
       ) {
         const queued = system.enqueueDeferredSpawnTask(actorId, resolvedTarget, task, {
@@ -739,20 +863,21 @@ export function createActorCommunicationTools(
           mode,
           cleanup,
           expectsCompletionMessage,
-          roleBoundary,
+          roleBoundary: effectiveRoleBoundary,
           createIfMissing,
           createChildSpec: createIfMissing
             ? {
-                description: params.agent_description ? String(params.agent_description) : undefined,
-                capabilities: childCapabilities,
+                description: builtinDefaults.childDescription,
+                capabilities: builtinDefaults.childCapabilities,
                 workspace: params.agent_workspace ? String(params.agent_workspace) : undefined,
               }
             : undefined,
           overrides: hasOverrides ? overrides : undefined,
           plannedDelegationId,
+          ownerTaskId: currentOwnerTaskId,
         });
         const pendingDispatchCount = typeof system.getPendingDeferredSpawnTaskCount === "function"
-          ? system.getPendingDeferredSpawnTaskCount(actorId)
+          ? system.getPendingDeferredSpawnTaskCount(actorId, { ownerTaskId: currentOwnerTaskId })
           : queuedSpawnCount + 1;
         return {
           spawned: false,
@@ -765,6 +890,7 @@ export function createActorCommunicationTools(
           execution_intent: queued.executionIntent ?? queued.overrides?.executionIntent,
           role_boundary: queued.roleBoundary ?? "general",
           roleBoundary: queued.roleBoundary,
+          builtin_agent: builtinDefaults.definition?.id,
           mode: queued.mode ?? mode,
           hint: `已加入待派发队列（第 ${pendingDispatchCount} 个）。当前并发达到上限时，系统会在空位出现后自动补派。`,
         };
@@ -779,17 +905,18 @@ export function createActorCommunicationTools(
         mode,
         cleanup,
         expectsCompletionMessage,
-        roleBoundary,
+        roleBoundary: effectiveRoleBoundary,
         createIfMissing,
         createChildSpec: createIfMissing
           ? {
-              description: params.agent_description ? String(params.agent_description) : undefined,
-              capabilities: childCapabilities,
+              description: builtinDefaults.childDescription,
+              capabilities: builtinDefaults.childCapabilities,
               workspace: params.agent_workspace ? String(params.agent_workspace) : undefined,
             }
           : undefined,
         overrides: hasOverrides ? overrides : undefined,
         plannedDelegationId,
+        ownerTaskId: currentOwnerTaskId,
       });
 
       if ("error" in result) {
@@ -808,6 +935,7 @@ export function createActorCommunicationTools(
         execution_intent: result.executionIntent,
         role_boundary: result.roleBoundary ?? "general",
         roleBoundary: result.roleBoundary,
+        builtin_agent: builtinDefaults.definition?.id,
         hint: `任务已派发（mode=${result.mode}）。当你的下一步明确依赖这些子任务结果时，再调用 wait_for_spawned_tasks 挂起等待。`,
       };
     },
@@ -833,7 +961,7 @@ export function createActorCommunicationTools(
       },
       target_agent: {
         type: "string",
-        description: "目标 Agent 名称；若留空且 create_if_missing=true，系统会根据 label/goal 自动生成临时子 Agent 名称。",
+        description: "目标 Agent 名称；若留空或名称当前不存在，系统会自动 fork 一个临时子 Agent。",
         required: false,
       },
       label: {
@@ -863,7 +991,7 @@ export function createActorCommunicationTools(
       },
       create_if_missing: {
         type: "boolean",
-        description: "当目标 Agent 不存在时，是否自动创建临时子 Agent。",
+        description: "是否显式要求自动创建临时子 Agent。默认在 target_agent 留空或目标不存在时会自动 fork；设为 false 可关闭。",
         required: false,
       },
       agent_description: {
@@ -891,6 +1019,11 @@ export function createActorCommunicationTools(
         description: "显式指定 worker profile。",
         required: false,
       },
+      builtin_agent: {
+        type: "string",
+        description: `显式指定内建专用 agent：'${BUILTIN_AGENT_DESCRIPTION}'。适用于稳定拉起 Planner / Explorer / Verifier / Implementer 这类产品化角色。`,
+        required: false,
+      },
     },
     readonly: false,
     execute: async (params) => {
@@ -901,6 +1034,9 @@ export function createActorCommunicationTools(
       const explicitTargetAgent = typeof params.target_agent === "string"
         ? String(params.target_agent).trim()
         : "";
+      const explicitTargetActor = explicitTargetAgent
+        ? resolveExistingTargetActor(explicitTargetAgent)
+        : undefined;
       const explicitCreateIfMissing = params.create_if_missing;
       const requestedLabel = typeof params.label === "string"
         ? String(params.label).trim()
@@ -908,12 +1044,26 @@ export function createActorCommunicationTools(
       const effectiveLabel = requestedLabel || previewSpawnTargetText(goal, 24);
       const requestedRoleBoundary = parseRoleBoundary(params.role_boundary);
       const requestedWorkerProfileId = parseWorkerProfileId(params.worker_profile);
+      const builtinAgentId = parseBuiltinAgentId(params.builtin_agent);
       const goalManifest = resolveStructuredDeliveryManifest(goal);
       const parentManifest = resolveParentStructuredDeliveryManifest(actorId, system);
+      const initialBuiltinDefaults = applyBuiltinAgentDefaults({
+        builtinAgentId,
+        requestedTargetName: explicitTargetAgent || undefined,
+        requestedRoleBoundary,
+        requestedWorkerProfileId,
+        requestedChildDescription: typeof params.agent_description === "string"
+          ? String(params.agent_description).trim()
+          : undefined,
+        requestedChildCapabilities: parseCapabilities(params.agent_capabilities),
+      });
       const spreadsheetInheritanceAllowed = !requestedWorkerProfileId
+        && !initialBuiltinDefaults.definition
         && (!requestedRoleBoundary || requestedRoleBoundary === "general" || requestedRoleBoundary === "executor");
       const effectiveStructuredManifest = (
-        spreadsheetInheritanceAllowed
+        initialBuiltinDefaults.definition
+        ? null
+        : spreadsheetInheritanceAllowed
         && !isSpreadsheetDeliveryManifest(goalManifest)
         && isSpreadsheetDeliveryManifest(parentManifest)
       )
@@ -939,17 +1089,25 @@ export function createActorCommunicationTools(
               : {}),
           }
         : undefined;
+      const builtinDefaults = applyBuiltinAgentDefaults({
+        builtinAgentId,
+        requestedTargetName: initialBuiltinDefaults.targetName,
+        requestedRoleBoundary: initialBuiltinDefaults.roleBoundary,
+        requestedWorkerProfileId: initialBuiltinDefaults.workerProfileId ?? manifestSuggestedWorkerProfileId,
+        requestedChildDescription: initialBuiltinDefaults.childDescription,
+        requestedChildCapabilities: initialBuiltinDefaults.childCapabilities,
+        overrides: manifestStructuredOverrides,
+      });
       const resolvedWorkerProfile = resolveWorkerProfile({
-        roleBoundary: requestedRoleBoundary ?? "general",
+        roleBoundary: builtinDefaults.roleBoundary ?? requestedRoleBoundary ?? "general",
         task: goal,
-        explicitWorkerProfileId: requestedWorkerProfileId ?? manifestSuggestedWorkerProfileId,
-        resultContract: manifestStructuredOverrides?.resultContract,
+        explicitWorkerProfileId: builtinDefaults.workerProfileId,
+        resultContract: builtinDefaults.overrides.resultContract,
         allowGeneralPromotion: true,
       });
-      const effectiveWorkerProfileId = requestedWorkerProfileId
-        ?? manifestSuggestedWorkerProfileId
+      const effectiveWorkerProfileId = builtinDefaults.workerProfileId
         ?? resolvedWorkerProfile.id;
-      const effectiveRoleBoundary = requestedRoleBoundary ?? resolvedWorkerProfile.roleBoundary;
+      const effectiveRoleBoundary = builtinDefaults.roleBoundary ?? resolvedWorkerProfile.roleBoundary;
       const spawnTool = tools.find((tool) => tool.name === "spawn_task");
       if (!spawnTool) {
         return { delegated: false, error: "spawn_task 工具不可用，无法完成委派。" };
@@ -957,39 +1115,54 @@ export function createActorCommunicationTools(
       const delegationTask = buildDelegationTaskText({
         goal,
         acceptance: typeof params.acceptance === "string" ? params.acceptance : undefined,
-        defaultAcceptance: buildDefaultDelegationAcceptance({
-          roleBoundary: effectiveRoleBoundary,
-          workerProfileId: effectiveWorkerProfileId,
-        }),
+        defaultAcceptance: mergeDelegationAcceptance(
+          buildDefaultDelegationAcceptance({
+            roleBoundary: effectiveRoleBoundary,
+            workerProfileId: effectiveWorkerProfileId,
+          }),
+          builtinDefaults.defaultAcceptance,
+        ),
       });
+      if (isWorkbookAggregationDelegation({
+        task: delegationTask,
+        manifest: effectiveStructuredManifest,
+        workerProfileId: effectiveWorkerProfileId,
+        resultContract: builtinDefaults.overrides.resultContract,
+      })) {
+        return {
+          delegated: false,
+          error: "single_workbook / host-managed 表格合同下，禁止再委派“整合所有结果并导出 Excel”的聚合型子任务；请继续派发表格分片，或直接调用 wait_for_spawned_tasks 进入主线程聚合。",
+        };
+      }
       const shouldAutoCreateIfMissing = explicitCreateIfMissing === true
         || (
           explicitCreateIfMissing !== false
-          && !explicitTargetAgent
           && !params.planned_delegation_id
+          && (!explicitTargetAgent || !explicitTargetActor)
         );
-      const shouldQueueIfBusy = manifestSuggestedWorkerProfileId === "spreadsheet_worker";
+      const shouldQueueIfBusy = effectiveWorkerProfileId === "spreadsheet_worker";
       const spawnLimit = typeof system.getDialogSpawnConcurrencyLimit === "function"
         ? system.getDialogSpawnConcurrencyLimit()
         : undefined;
-      const executeDelegatedSpawn = async (createIfMissing: boolean) => spawnTool.execute({
-        target_agent: params.target_agent,
+      const executeDelegatedSpawn = async (createIfMissing?: boolean) => spawnTool.execute({
+        target_agent: builtinDefaults.targetName ?? params.target_agent,
         planned_delegation_id: params.planned_delegation_id,
         task: delegationTask,
         label: effectiveLabel,
         context: params.context,
         timeout_seconds: params.timeout_seconds,
         attachments: params.attachments,
-        create_if_missing: createIfMissing,
-        agent_description: params.agent_description,
-        agent_capabilities: params.agent_capabilities,
+        ...(createIfMissing !== undefined ? { create_if_missing: createIfMissing } : {}),
+        agent_description: builtinDefaults.childDescription ?? params.agent_description,
+        agent_capabilities: builtinDefaults.childCapabilities?.join(",") ?? params.agent_capabilities,
         agent_workspace: params.agent_workspace,
         role_boundary: effectiveRoleBoundary,
         worker_profile: effectiveWorkerProfileId,
-        result_contract: manifestStructuredOverrides?.resultContract,
+        builtin_agent: builtinAgentId,
+        result_contract: builtinDefaults.overrides.resultContract,
         __queue_if_busy: shouldQueueIfBusy,
         ...(typeof spawnLimit === "number" ? { __spawn_limit: spawnLimit } : {}),
-        ...(manifestStructuredOverrides ?? {}),
+        ...(builtinDefaults.overrides ?? {}),
       });
       let result = await executeDelegatedSpawn(shouldAutoCreateIfMissing);
       const shouldRetryWithAutoCreate = Boolean(
@@ -1009,12 +1182,13 @@ export function createActorCommunicationTools(
         ...resultObject,
         delegated: !("error" in resultObject),
         interface: "delegate_task",
+        builtin_agent: builtinAgentId,
         auto_create_if_missing: explicitCreateIfMissing === undefined
           ? (shouldAutoCreateIfMissing || shouldRetryWithAutoCreate)
           : undefined,
-        inferred_role_boundary: requestedRoleBoundary ? undefined : effectiveRoleBoundary,
-        inferred_worker_profile: requestedWorkerProfileId ? undefined : effectiveWorkerProfileId,
-        result_contract: manifestStructuredOverrides?.resultContract,
+        inferred_role_boundary: requestedRoleBoundary || builtinAgentId ? undefined : effectiveRoleBoundary,
+        inferred_worker_profile: requestedWorkerProfileId || builtinAgentId ? undefined : effectiveWorkerProfileId,
+        result_contract: builtinDefaults.overrides.resultContract,
       };
     },
   });
@@ -1034,14 +1208,19 @@ export function createActorCommunicationTools(
       if (!actor || actor.status !== "running") {
         return { error: "任务已终止或被叫停，结束等待。" };
       }
+      const currentOwnerTaskId = actor.currentTask?.id?.trim();
 
-      const initialState = system.buildWaitForSpawnedTasksResult(actorId);
+      const initialState = system.buildWaitForSpawnedTasksResult(actorId, {
+        ownerTaskId: currentOwnerTaskId,
+      });
       if (initialState.pending_count === 0 && (initialState.pending_dispatch_count ?? 0) === 0) {
         return initialState;
       }
 
       await system.waitForSpawnedTaskUpdate(actorId, WAIT_UPDATE_TIMEOUT_MS);
-      const latestState = system.buildWaitForSpawnedTasksResult(actorId);
+      const latestState = system.buildWaitForSpawnedTasksResult(actorId, {
+        ownerTaskId: currentOwnerTaskId,
+      });
       if (latestState.pending_count === 0 && (latestState.pending_dispatch_count ?? 0) === 0) {
         return latestState;
       }
@@ -1091,6 +1270,368 @@ export function createActorCommunicationTools(
       } catch (e) {
         return { sent: false, error: e instanceof Error ? e.message : String(e) };
       }
+    },
+  });
+
+  tools.push({
+    name: "create_team",
+    description:
+      "创建或更新一个命名 team/swarm。team 会保存 teammate roster、默认 backend 和 mailbox，便于后续按 teammate 名称路由。",
+    parameters: {
+      team_name: {
+        type: "string",
+        description: "team 名称",
+        required: true,
+      },
+      teammates: {
+        type: "string",
+        description: "teammate 列表，支持逗号或换行分隔；留空时默认收纳当前房间里的其他 Agent",
+        required: false,
+      },
+      backend: {
+        type: "string",
+        description: "默认 backend id，默认 in_process；可选 worktree / remote 作为未来扩展点",
+        required: false,
+      },
+      description: {
+        type: "string",
+        description: "team 说明",
+        required: false,
+      },
+    },
+    readonly: false,
+    execute: async (params) => {
+      const coordinatorGuard = requireCoordinatorForTeamTool("create_team");
+      if (coordinatorGuard) return coordinatorGuard;
+
+      const teamName = String(params.team_name ?? "").trim();
+      if (!teamName) return { error: "team_name 不能为空" };
+
+      try {
+        const result = system.createTeam({
+          name: teamName,
+          description: typeof params.description === "string" ? params.description.trim() : undefined,
+          defaultBackendId: typeof params.backend === "string" ? params.backend.trim() : undefined,
+          createdByActorId: actorId,
+          teammates: parseStringArrayParam(params.teammates),
+        });
+
+        return {
+          created: result.created,
+          updated: result.updated,
+          team_id: result.team.id,
+          team_name: result.team.name,
+          backend: result.team.defaultBackendId,
+          teammate_count: result.team.teammates.length,
+          teammates: result.team.teammates.map((teammate) => ({
+            id: teammate.id,
+            name: teammate.name,
+            actorId: teammate.actorId ?? null,
+            backend: teammate.backendId ?? result.team.defaultBackendId,
+          })),
+          available_backends: system.getBackendRegistry().list(),
+        };
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
+    },
+  });
+
+  tools.push({
+    name: "delete_team",
+    description: "删除一个已创建的 team/swarm。",
+    parameters: {
+      team_name: {
+        type: "string",
+        description: "要删除的 team 名称或 team id",
+        required: true,
+      },
+    },
+    readonly: false,
+    execute: async (params) => {
+      const coordinatorGuard = requireCoordinatorForTeamTool("delete_team");
+      if (coordinatorGuard) return coordinatorGuard;
+
+      const teamName = String(params.team_name ?? "").trim();
+      if (!teamName) return { error: "team_name 不能为空" };
+
+      return system.deleteTeam(teamName, actorId);
+    },
+  });
+
+  tools.push({
+    name: "send_team_message",
+    description:
+      "按 team roster 中的 teammate 名称路由消息。适合 coordinator 基于 team/swarm 抽象给指定成员发指令。",
+    parameters: {
+      team_name: {
+        type: "string",
+        description: "team 名称或 id",
+        required: true,
+      },
+      teammate: {
+        type: "string",
+        description: "目标 teammate 名称、别名或 actor id",
+        required: true,
+      },
+      content: {
+        type: "string",
+        description: "消息正文",
+        required: true,
+      },
+      reply_to: {
+        type: "string",
+        description: "可选：回复某条消息的 ID",
+        required: false,
+      },
+    },
+    readonly: false,
+    execute: async (params) => {
+      const coordinatorGuard = requireCoordinatorForTeamTool("send_team_message");
+      if (coordinatorGuard) return coordinatorGuard;
+
+      const teamName = String(params.team_name ?? "").trim();
+      const teammate = String(params.teammate ?? "").trim();
+      const content = String(params.content ?? "").trim();
+      if (!teamName) return { error: "team_name 不能为空" };
+      if (!teammate) return { error: "teammate 不能为空" };
+      if (!content) return { error: "content 不能为空" };
+
+      return system.sendTeamMessage({
+        senderActorId: actorId,
+        team: teamName,
+        teammate,
+        content,
+        replyTo: typeof params.reply_to === "string" ? params.reply_to.trim() : undefined,
+      });
+    },
+  });
+
+  tools.push({
+    name: "broadcast_team_message",
+    description: "向某个 team 的全部 teammate 广播消息。",
+    parameters: {
+      team_name: {
+        type: "string",
+        description: "team 名称或 id",
+        required: true,
+      },
+      content: {
+        type: "string",
+        description: "广播正文",
+        required: true,
+      },
+      reply_to: {
+        type: "string",
+        description: "可选：回复某条消息的 ID",
+        required: false,
+      },
+    },
+    readonly: false,
+    execute: async (params) => {
+      const coordinatorGuard = requireCoordinatorForTeamTool("broadcast_team_message");
+      if (coordinatorGuard) return coordinatorGuard;
+
+      const teamName = String(params.team_name ?? "").trim();
+      const content = String(params.content ?? "").trim();
+      if (!teamName) return { error: "team_name 不能为空" };
+      if (!content) return { error: "content 不能为空" };
+
+      return system.broadcastTeamMessage({
+        senderActorId: actorId,
+        team: teamName,
+        content,
+        replyTo: typeof params.reply_to === "string" ? params.reply_to.trim() : undefined,
+      });
+    },
+  });
+
+  tools.push({
+    name: "dispatch_team_task",
+    description:
+      "按 team roster 中的 teammate 名称派发任务。适合 coordinator 基于 team/swarm 抽象并行拉起多个执行者。",
+    parameters: {
+      team_name: {
+        type: "string",
+        description: "team 名称或 id",
+        required: true,
+      },
+      teammate: {
+        type: "string",
+        description: "目标 teammate 名称、别名或 actor id",
+        required: true,
+      },
+      task: {
+        type: "string",
+        description: "要派发给 teammate 的详细任务描述",
+        required: true,
+      },
+      label: {
+        type: "string",
+        description: "短标签，用于识别该 team task",
+        required: false,
+      },
+      context: {
+        type: "string",
+        description: "补充上下文",
+        required: false,
+      },
+      attachments: {
+        type: "string",
+        description: "附件路径列表，逗号分隔",
+        required: false,
+      },
+      mode: {
+        type: "string",
+        description: "spawn 模式：'run' 或 'session'",
+        required: false,
+      },
+      cleanup: {
+        type: "string",
+        description: "结束后的清理策略：'keep' 或 'delete'",
+        required: false,
+      },
+      expects_completion: {
+        type: "boolean",
+        description: "是否期望收到完成通知（默认 true）",
+        required: false,
+      },
+      create_if_missing: {
+        type: "boolean",
+        description: "当 teammate 还不是现存 actor 时，允许按 roster 信息创建临时 teammate",
+        required: false,
+      },
+      agent_description: {
+        type: "string",
+        description: "创建临时 teammate 时使用的职责描述",
+        required: false,
+      },
+      agent_capabilities: {
+        type: "string",
+        description: "创建临时 teammate 时的能力标签，逗号分隔",
+        required: false,
+      },
+      agent_workspace: {
+        type: "string",
+        description: "创建临时 teammate 时的工作目录",
+        required: false,
+      },
+      role_boundary: {
+        type: "string",
+        description: "职责边界：'executor'、'reviewer'、'validator' 或 'general'",
+        required: false,
+      },
+      worker_profile: {
+        type: "string",
+        description: "显式指定 worker profile",
+        required: false,
+      },
+      builtin_agent: {
+        type: "string",
+        description: `显式指定内建专用 agent：'${BUILTIN_AGENT_DESCRIPTION}'。`,
+        required: false,
+      },
+      override_model: {
+        type: "string",
+        description: "覆盖 teammate 的模型",
+        required: false,
+      },
+      override_max_iterations: {
+        type: "number",
+        description: "覆盖 teammate 的最大迭代次数",
+        required: false,
+      },
+      override_tools_allow: {
+        type: "string",
+        description: "覆盖允许工具列表，逗号分隔",
+        required: false,
+      },
+      override_tools_deny: {
+        type: "string",
+        description: "覆盖禁止工具列表，逗号分隔",
+        required: false,
+      },
+      override_system_prompt_append: {
+        type: "string",
+        description: "追加到 teammate 系统提示的额外约束",
+        required: false,
+      },
+    },
+    readonly: false,
+    execute: async (params) => {
+      const coordinatorGuard = requireCoordinatorForTeamTool("dispatch_team_task");
+      if (coordinatorGuard) return coordinatorGuard;
+
+      const teamName = String(params.team_name ?? "").trim();
+      const teammate = String(params.teammate ?? "").trim();
+      const task = String(params.task ?? "").trim();
+      if (!teamName) return { error: "team_name 不能为空" };
+      if (!teammate) return { error: "teammate 不能为空" };
+      if (!task) return { error: "task 不能为空" };
+
+      const requestedRoleBoundary = parseRoleBoundary(params.role_boundary);
+      const requestedWorkerProfileId = parseWorkerProfileId(params.worker_profile);
+      const builtinAgentId = parseBuiltinAgentId(params.builtin_agent);
+      const childCapabilities = parseCapabilities(params.agent_capabilities);
+      const attachments = params.attachments
+        ? String(params.attachments).split(",").map((item) => item.trim()).filter(Boolean)
+        : undefined;
+      const mode = params.mode === "session" ? "session" : "run";
+      const cleanup = params.cleanup === "delete"
+        ? "delete"
+        : (params.cleanup === "keep" ? "keep" : undefined);
+
+      const baseOverrides: import("./types").SpawnTaskOverrides = {};
+      if (requestedWorkerProfileId) baseOverrides.workerProfileId = requestedWorkerProfileId;
+      if (params.override_model) baseOverrides.model = String(params.override_model);
+      if (params.override_max_iterations) baseOverrides.maxIterations = Number(params.override_max_iterations);
+      if (params.override_tools_allow || params.override_tools_deny) {
+        baseOverrides.toolPolicy = {};
+        if (params.override_tools_allow) {
+          baseOverrides.toolPolicy.allow = String(params.override_tools_allow).split(",").map((item) => item.trim()).filter(Boolean);
+        }
+        if (params.override_tools_deny) {
+          baseOverrides.toolPolicy.deny = String(params.override_tools_deny).split(",").map((item) => item.trim()).filter(Boolean);
+        }
+      }
+      if (params.override_system_prompt_append) {
+        baseOverrides.systemPromptAppend = String(params.override_system_prompt_append);
+      }
+
+      const builtinDefaults = applyBuiltinAgentDefaults({
+        builtinAgentId,
+        requestedTargetName: teammate,
+        requestedRoleBoundary,
+        requestedWorkerProfileId,
+        requestedChildDescription: typeof params.agent_description === "string"
+          ? String(params.agent_description).trim()
+          : undefined,
+        requestedChildCapabilities: childCapabilities,
+        overrides: baseOverrides,
+      });
+
+      return system.dispatchTeamTask({
+        senderActorId: actorId,
+        team: teamName,
+        teammate,
+        task,
+        label: typeof params.label === "string" ? params.label.trim() : undefined,
+        context: typeof params.context === "string" ? params.context.trim() : undefined,
+        attachments,
+        images: opts?.getInheritedImages?.() ?? opts?.inheritedImages,
+        mode,
+        cleanup,
+        expectsCompletionMessage: params.expects_completion !== false,
+        roleBoundary: builtinDefaults.roleBoundary ?? requestedRoleBoundary,
+        overrides: Object.keys(builtinDefaults.overrides).length > 0 ? builtinDefaults.overrides : undefined,
+        createIfMissing: params.create_if_missing === true,
+        targetDescription: builtinDefaults.childDescription,
+        targetCapabilities: builtinDefaults.childCapabilities,
+        targetWorkspace: typeof params.agent_workspace === "string" ? params.agent_workspace.trim() : undefined,
+      }).then((result) => ({
+        ...result,
+        builtin_agent: builtinDefaults.definition?.id,
+      }));
     },
   });
 
@@ -1276,7 +1817,11 @@ export function createActorCommunicationTools(
       // action === "list"
       const allActors = system.getAll();
       const selfActor = system.get(actorId);
-      const descendants = system.getDescendantTasks(actorId);
+      const currentOwnerTaskId = selfActor?.currentTask?.id?.trim();
+      const descendants = system.getDescendantTasks(
+        actorId,
+        currentOwnerTaskId ? { ownerTaskId: currentOwnerTaskId } : undefined,
+      );
 
       return {
         agents: allActors

@@ -29,7 +29,7 @@ describe("interactive-tool-approval", () => {
       ai,
       toolName: "run_shell_command",
       params: {
-        command: "wc-l /tmp/a.js /tmp/b.js",
+        command: "fd '.ts$' src",
       },
       source: "actor_dialog",
       openConfirmDialog,
@@ -48,7 +48,7 @@ describe("interactive-tool-approval", () => {
       ai,
       toolName: "run_shell_command",
       params: {
-        command: "wc-l /tmp/a.js /tmp/b.js",
+        command: "fd '.ts$' src",
       },
       source: "actor_dialog",
       openConfirmDialog,
@@ -61,7 +61,7 @@ describe("interactive-tool-approval", () => {
       reviewedByModel: true,
       source: "actor_dialog",
     });
-    expect(String(openConfirmDialog.mock.calls[0]?.[0]?.reason ?? "")).toContain("模型复核后仍需人工确认");
+    expect(String(openConfirmDialog.mock.calls[0]?.[0]?.reason ?? "")).toBe("无法高置信度确认该命令不会触发副作用。");
   });
 
   it("skips model review in strict manual mode", async () => {
@@ -102,6 +102,25 @@ describe("interactive-tool-approval", () => {
         approvalMode: "off",
       },
       workspace: "/tmp",
+    });
+
+    expect(approved).toBe(false);
+    expect(ai.chat).not.toHaveBeenCalled();
+    expect(openConfirmDialog).not.toHaveBeenCalled();
+  });
+
+  it("denies suspicious malformed shell commands before opening approval", async () => {
+    const ai = createMockAI('{"decision":"allow","confidence":"high","reason":"不会生效"}');
+    const openConfirmDialog = vi.fn(async () => true);
+
+    const approved = await resolveInteractiveToolApproval({
+      ai,
+      toolName: "run_shell_command",
+      params: {
+        command: "find/Users/haichao/Desktop/work/51ToolBox -name '*.ts'",
+      },
+      source: "actor_dialog",
+      openConfirmDialog,
     });
 
     expect(approved).toBe(false);

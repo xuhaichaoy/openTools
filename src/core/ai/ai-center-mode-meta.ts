@@ -34,9 +34,6 @@ function buildModeMeta(mode: HumanSelectableAIProductMode): AICenterModeMeta {
 
 export const AI_CENTER_MODE_META: Record<HumanSelectableAIProductMode, AICenterModeMeta> = {
   explore: buildModeMeta("explore"),
-  build: buildModeMeta("build"),
-  plan: buildModeMeta("plan"),
-  review: buildModeMeta("review"),
   dialog: buildModeMeta("dialog"),
 };
 

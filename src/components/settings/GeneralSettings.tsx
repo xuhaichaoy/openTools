@@ -11,6 +11,7 @@ import {
   Download,
   CheckCircle,
   AlertCircle,
+  Bug,
 } from "lucide-react";
 import { handleError } from "@/core/errors";
 import { invoke } from "@tauri-apps/api/core";
@@ -24,6 +25,12 @@ import {
   loadLocalFontScalePreference,
   saveLocalFontScalePreference,
 } from "@/core/ui/local-ui-preferences";
+import {
+  getDialogStepTraceMode,
+  setDialogStepTraceMode,
+  isDialogStepTraceEnabled,
+  getDialogStepTracePath,
+} from "@/core/agent/actor/dialog-step-trace";
 
 interface AppSettings {
   hideOnBlur: boolean;
@@ -176,6 +183,8 @@ export function GeneralSettings() {
   const [updateError, setUpdateError] = useState("");
   const [shortcutSaveMsg, setShortcutSaveMsg] = useState("");
   const [fontScale, setFontScale] = useState(loadLocalFontScalePreference);
+  const [dialogTraceEnabled, setDialogTraceEnabled] = useState(false);
+  const [tracePath, setTracePath] = useState("");
 
   useEffect(() => {
     loadSettings().then((s) => {
@@ -183,6 +192,10 @@ export function GeneralSettings() {
       setLoading(false);
     });
     getVersion().then(setAppVersion).catch(() => {});
+    setDialogTraceEnabled(getDialogStepTraceMode() === "full");
+    if (isDialogStepTraceEnabled()) {
+      getDialogStepTracePath().then(setTracePath).catch(() => {});
+    }
   }, []);
 
   const handleCheckUpdate = async () => {
@@ -348,6 +361,33 @@ export function GeneralSettings() {
             className="w-4 h-4 rounded accent-[var(--color-accent)]"
             checked={settings.developerMode}
             onChange={(e) => updateSetting("developerMode", e.target.checked)}
+          />
+        </label>
+
+        <label className="flex items-center justify-between cursor-pointer">
+          <div>
+            <div className="flex items-center gap-1.5">
+              <Bug className="w-3.5 h-3.5 text-orange-500" />
+              <span className="text-xs text-[var(--color-text)]">Dialog 调试追踪</span>
+            </div>
+            <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
+              记录所有 Dialog 运行步骤到文件
+            </p>
+            {tracePath && (
+              <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5 font-mono opacity-60">
+                {tracePath}
+              </p>
+            )}
+          </div>
+          <input
+            type="checkbox"
+            className="w-4 h-4 rounded accent-[var(--color-accent)]"
+            checked={dialogTraceEnabled}
+            onChange={(e) => {
+              const enabled = e.target.checked;
+              setDialogStepTraceMode(enabled ? "full" : "off");
+              setDialogTraceEnabled(enabled);
+            }}
           />
         </label>
       </div>

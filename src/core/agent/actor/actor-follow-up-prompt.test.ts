@@ -142,4 +142,52 @@ describe("actor-follow-up-prompt", () => {
     expect(prompt).toContain("当前 run 关联");
     expect(prompt).toContain("禁止只输出过程纪要");
   });
+
+  it("biases synthesis toward structured rows instead of path rediscovery", () => {
+    const prompt = buildFinalSynthesisPrompt({
+      structuredTasks: [
+        {
+          runId: "run-rows-1",
+          subtaskId: "run-rows-1",
+          targetActorId: "planner",
+          targetActorName: "Planner",
+          label: "课程清单",
+          task: "生成课程清单",
+          mode: "run",
+          roleBoundary: "executor",
+          profile: "executor",
+          status: "completed",
+          progressSummary: "已产出结构化课程结果",
+          terminalResult: "已生成文件：/Users/demo/Downloads/courses.json",
+          startedAt: 1,
+          completedAt: 2,
+          timeoutSeconds: 600,
+          eventCount: 4,
+          resultKind: "structured_rows",
+          rowCount: 2,
+          schemaFields: ["课程名称", "课程介绍"],
+          structuredRows: [
+            {
+              课程名称: "AI应用知识库构建实战",
+              课程介绍: "面向研发与运维的知识库课程",
+            },
+            {
+              课程名称: "AI安全风险与防护体系",
+              课程介绍: "覆盖常见安全风险与治理",
+            },
+          ],
+          artifacts: [{
+            path: "/Users/demo/Downloads/courses.json",
+            source: "tool_write",
+            timestamp: 2,
+            relatedRunId: "run-rows-1",
+          }],
+        },
+      ],
+    });
+
+    expect(prompt).toContain("structured rows");
+    expect(prompt).toContain("禁止再次根据路径猜测文件并手动 read_file");
+    expect(prompt).toContain("AI应用知识库构建实战");
+  });
 });

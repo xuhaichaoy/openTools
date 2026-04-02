@@ -27,6 +27,7 @@ import type {
   ChatMessage,
   Conversation,
   AIConfig,
+  AIRequestMessage,
   PendingToolConfirm,
 } from "@/core/ai/types";
 
@@ -184,7 +185,7 @@ export function prepareEditMessages(
 export async function startStreamingChat(opts: {
   conversationId: string;
   assistantMessageId: string;
-  apiMessages: Array<{ role: string; content: string; images?: string[] }>;
+  apiMessages: AIRequestMessage[];
   config: AIConfig;
   mode?: AICenterMode;
   callbacks: StreamCallbacks;

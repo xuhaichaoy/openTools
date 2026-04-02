@@ -50,6 +50,26 @@ describe("tool-approval-policy", () => {
     expect(assessment.layer).toBe("human");
   });
 
+  it("denies suspicious malformed shell commands before approval", () => {
+    const assessment = assessToolApproval("run_shell_command", {
+      command: "find/Users/haichao/Desktop/work/51ToolBox -name '*.ts'",
+    });
+
+    expect(assessment.decision).toBe("deny");
+    expect(assessment.risk).toBe("high");
+    expect(assessment.reason).toContain("缺少空格");
+  });
+
+  it("denies long sleep polling commands before approval", () => {
+    const assessment = assessToolApproval("run_shell_command", {
+      command: "sleep 30",
+    });
+
+    expect(assessment.decision).toBe("deny");
+    expect(assessment.risk).toBe("high");
+    expect(assessment.reason).toContain("wait_for_spawned_tasks");
+  });
+
   it("auto-allows workspace file edits in auto review mode", () => {
     const assessment = assessToolApproval(
       "write_file",

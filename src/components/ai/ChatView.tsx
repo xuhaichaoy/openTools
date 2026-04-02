@@ -288,15 +288,11 @@ export const ChatView = forwardRef<ChatViewHandle, { onBack?: () => void; hideMo
     });
   }, [attachmentSummary, attachments, conversation, fileContextBlock, imagePaths.length, input]);
 
-  const continueAskInMode = useCallback((mode: Extract<HumanSelectableAIProductMode, "build" | "plan" | "dialog">) => {
+  const continueAskInMode = useCallback((mode: Extract<HumanSelectableAIProductMode, "dialog">) => {
     const handoff = buildAskModeHandoff();
     routeToAICenter({
       mode,
-      source: mode === "build"
-        ? "ask_continue_to_agent"
-        : mode === "plan"
-          ? "ask_continue_to_cluster"
-          : "ask_continue_to_dialog",
+      source: "ask_continue_to_dialog",
       ...(handoff ? { handoff } : {}),
       navigate: false,
     });

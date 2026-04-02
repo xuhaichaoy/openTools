@@ -41,6 +41,7 @@ vi.mock("@/core/plugin-system/registry", () => ({
 }));
 
 vi.mock("@/plugins/builtin/SmartAgent/core/react-agent", () => ({
+  FunctionCallingRequiredError: class FunctionCallingRequiredError extends Error {},
   ReActAgent: class {},
   pluginActionToTool: () => ({
     name: "noop",

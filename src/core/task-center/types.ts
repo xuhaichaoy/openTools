@@ -74,11 +74,13 @@ export interface TaskRecord extends TaskDefinition {
 /** 任务队列事件 */
 export type TaskEvent =
   | { type: "task_created"; task: TaskRecord }
+  | { type: "task_updated"; taskId: string; patch: Partial<TaskRecord> }
   | { type: "task_started"; taskId: string }
   | { type: "task_progress"; taskId: string; progress: number; label?: string }
   | { type: "task_completed"; taskId: string; result?: string }
   | { type: "task_failed"; taskId: string; error: string }
   | { type: "task_cancelled"; taskId: string }
+  | { type: "task_deleted"; taskId: string }
   | { type: "task_retrying"; taskId: string; retryCount: number };
 
 export type TaskEventHandler = (event: TaskEvent) => void;

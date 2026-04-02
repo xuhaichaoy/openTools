@@ -77,13 +77,7 @@ export function AICenter({
   const aiCenterModelScopes = useAppStore((s) => s.aiCenterModelScopes);
   const setAICenterModelScope = useAppStore((s) => s.setAICenterModelScope);
   const mode = normalizeHumanSelectableAIProductMode(rawMode);
-  const primaryMode: "explore" | "build" | "dialog" = mode === "plan"
-    ? "build"
-    : mode === "review"
-      ? "dialog"
-      : mode;
   const modeMeta = getAICenterModeMeta(mode);
-  const compactModeMetaBar = mode === "dialog" || mode === "review" || mode === "explore";
   const aiConfig = useAIStore((s) => s.config);
   const aiSourceLabel = getAIConfigSourceLabel(aiConfig.source);
   const assistantConfigBrief = describeAssistantConfigBrief(aiConfig);
@@ -139,15 +133,11 @@ export function AICenter({
   ]);
 
   const [mounted, setMounted] = useState({
-    build: mode === "build",
-    plan: mode === "plan",
-    actor: mode === "review" || mode === "dialog",
+    dialog: mode === "dialog",
   });
   useEffect(() => {
     setMounted((prev) => {
-      if (mode === "build" && !prev.build) return { ...prev, build: true };
-      if (mode === "plan" && !prev.plan) return { ...prev, plan: true };
-      if ((mode === "review" || mode === "dialog") && !prev.actor) return { ...prev, actor: true };
+      if (mode === "dialog" && !prev.dialog) return { ...prev, dialog: true };
       return prev;
     });
   }, [mode]);
@@ -213,7 +203,7 @@ export function AICenter({
         setMode(m);
       }}
       className={`flex items-center gap-1 text-[11px] px-2 py-1 rounded-md transition-all ${
-        primaryMode === m
+        mode === m
           ? "bg-[var(--color-bg)] text-[var(--color-text)] shadow-sm"
           : "text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
       }`}
@@ -255,28 +245,10 @@ export function AICenter({
         {/* 主模式切换 */}
         <div className="flex items-center bg-[var(--color-bg-secondary)] rounded-lg p-0.5 border border-[var(--color-border)]">
           {modeBtn("explore", <MessageCircle className="w-3 h-3" />, AI_CENTER_MODE_META.explore.label)}
-          {modeBtn("build", <Bot className="w-3 h-3" />, AI_CENTER_MODE_META.build.label)}
           {modeBtn("dialog", <Users className="w-3 h-3" />, AI_CENTER_MODE_META.dialog.label)}
         </div>
 
         <div className="w-px h-4 bg-[var(--color-border)] mx-0.5" />
-
-        {primaryMode === "build" && (
-          <div className="flex items-center gap-1">
-            {secondaryLaneBtn("build", "执行", "直接落地、改文件、跑命令")}
-            {secondaryLaneBtn("plan", "规划", "复杂任务拆解、并行分析与汇总")}
-            {mode === "plan" && isClusterRunning() && (
-              <span className="inline-flex h-2 w-2 rounded-full bg-cyan-500 animate-pulse" />
-            )}
-          </div>
-        )}
-
-        {primaryMode === "dialog" && (
-          <div className="flex items-center gap-1">
-            {secondaryLaneBtn("dialog", "协作", "多 Agent 持续协作")}
-            {secondaryLaneBtn("review", "审查", "只读审查与风险归纳")}
-          </div>
-        )}
 
         {/* Explore 模式操作按钮 */}
         {mode === "explore" && (
@@ -366,65 +338,6 @@ export function AICenter({
           </>
         )}
 
-        {/* Build 模式操作按钮 */}
-        {mode === "build" && (
-          <>
-            <button
-              onClick={() => agentRef.current?.toggleHistory()}
-              className={`${iconBtn} relative`}
-              title="任务历史"
-            >
-              <History className="w-4 h-4" />
-              {agentSessionCount > 1 && (
-                <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 bg-emerald-500 text-white text-[7px] rounded-full flex items-center justify-center font-medium">
-                  {agentSessionCount > 99 ? "99+" : agentSessionCount}
-                </span>
-              )}
-            </button>
-            <button
-              onClick={() => agentRef.current?.toggleTools()}
-              className={iconBtn}
-              title="查看可用工具"
-            >
-              <Wrench className="w-3.5 h-3.5" />
-            </button>
-            <button
-              onClick={() => agentRef.current?.toggleOrchestrator()}
-              className={`${iconBtn} relative`}
-              title="编排任务"
-            >
-              <Clock3 className="w-3.5 h-3.5" />
-              {scheduledTaskCount > 0 && (
-                <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 bg-amber-500 text-white text-[7px] rounded-full flex items-center justify-center font-medium">
-                  {scheduledTaskCount > 99 ? "99+" : scheduledTaskCount}
-                </span>
-              )}
-            </button>
-            <button
-              onClick={() => agentRef.current?.newSession()}
-              className={iconBtn}
-              title="新任务"
-            >
-              <Plus className="w-4 h-4" />
-            </button>
-          </>
-        )}
-
-        {/* Plan 模式操作按钮 */}
-        {mode === "plan" && (
-          <span className="text-[11px] text-[var(--color-text-secondary)]">
-            {clusterSessionCount > 0
-              ? `${clusterSessionCount} 个会话`
-              : "输入任务开始"}
-          </span>
-        )}
-
-        {mode === "review" && (
-          <span className="text-[11px] text-[var(--color-text-secondary)]">
-            Dialog 的只读审查 lane，默认收紧权限与审批
-          </span>
-        )}
-
         <div className="flex-1" />
 
         <button
@@ -447,43 +360,34 @@ export function AICenter({
         <ModelSelector scopeMode={mode} />
       </div>
 
-      <div className="shrink-0 border-b border-[var(--color-border)] bg-[var(--color-bg-secondary)]/45">
-        <div
-          className={`flex flex-wrap items-center gap-1.5 px-3 text-[10px] text-[var(--color-text-secondary)] ${
-            compactModeMetaBar ? "py-1" : "py-1.5"
-          }`}
-        >
-          <span className="font-medium text-[var(--color-text)]">{modeMeta.boundaryHeadline}</span>
-          {!compactModeMetaBar && <span className="opacity-75">{modeMeta.boundaryDetail}</span>}
-          {compactModeMetaBar && compactMetaCopy && <span className="opacity-70">{compactMetaCopy.detail}</span>}
-          <div className="ml-auto flex flex-wrap items-center gap-1.5">
-            <span
-              className={`rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] ${
-                compactModeMetaBar ? "px-1.5 py-0.5 text-[9px]" : "px-2 py-0.5"
-              }`}
-              title={`管理中心来源：${aiSourceLabel}；${assistantConfigBrief}`}
-            >
-              来源：{aiSourceLabel}
-            </span>
-            <span
-              className={`rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] ${
-                compactModeMetaBar ? "px-1.5 py-0.5 text-[9px]" : "px-2 py-0.5"
-              }`}
-              title={modeMeta.modelScope}
-            >
-              模型：{compactModeMetaBar && compactMetaCopy ? compactMetaCopy.model : modeMeta.modelScopeShort}
-            </span>
-            <span
-              className={`rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] ${
-                compactModeMetaBar ? "px-1.5 py-0.5 text-[9px]" : "px-2 py-0.5"
-              }`}
-              title={modeMeta.skillScope}
-            >
-              技能：{compactModeMetaBar && compactMetaCopy ? compactMetaCopy.skill : modeMeta.skillScopeShort}
-            </span>
+      {mode !== "dialog" && (
+        <div className="shrink-0 border-b border-[var(--color-border)] bg-[var(--color-bg-secondary)]/45">
+          <div className="flex flex-wrap items-center gap-1.5 px-3 py-1 text-[10px] text-[var(--color-text-secondary)]">
+            <span className="font-medium text-[var(--color-text)]">{modeMeta.boundaryHeadline}</span>
+            <span className="opacity-75">{modeMeta.boundaryDetail}</span>
+            <div className="ml-auto flex flex-wrap items-center gap-1.5">
+              <span
+                className="rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-1.5 py-0.5 text-[9px]"
+                title={`管理中心来源：${aiSourceLabel}；${assistantConfigBrief}`}
+              >
+                来源：{aiSourceLabel}
+              </span>
+              <span
+                className="rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-1.5 py-0.5 text-[9px]"
+                title={modeMeta.modelScope}
+              >
+                模型：{modeMeta.modelScopeShort}
+              </span>
+              <span
+                className="rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-1.5 py-0.5 text-[9px]"
+                title={modeMeta.skillScope}
+              >
+                技能：{modeMeta.skillScopeShort}
+              </span>
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
       {/* ====== 内容区 ====== */}
       <div className="flex-1 overflow-hidden relative">
@@ -491,21 +395,11 @@ export function AICenter({
           <div className={`absolute inset-0 ${mode === "explore" ? "" : "invisible pointer-events-none"}`}>
             <ChatView ref={chatRef} headless hideModelSelector active={mode === "explore"} />
           </div>
-          {mounted.build && (
-            <div className={`absolute inset-0 ${mode === "build" ? "" : "invisible pointer-events-none"}`}>
-              <SmartAgentPlugin ref={agentRef} ai={ai} headless active={mode === "build"} />
-            </div>
-          )}
-          {mounted.plan && (
-            <div className={`absolute inset-0 ${mode === "plan" ? "" : "invisible pointer-events-none"}`}>
-              <ClusterPanel active={mode === "plan"} />
-            </div>
-          )}
-          {mounted.actor && (
-            <div className={`absolute inset-0 ${mode === "review" || mode === "dialog" ? "" : "invisible pointer-events-none"}`}>
+          {mounted.dialog && (
+            <div className={`absolute inset-0 ${mode === "dialog" ? "" : "invisible pointer-events-none"}`}>
               <ActorChatPanel
-                active={mode === "review" || mode === "dialog"}
-                productMode={mode === "review" ? "review" : "dialog"}
+                active={mode === "dialog"}
+                productMode="dialog"
               />
             </div>
           )}

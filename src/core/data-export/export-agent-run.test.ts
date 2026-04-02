@@ -34,6 +34,7 @@ vi.mock("./runtime-catalog", () => ({
 }));
 
 vi.mock("@/plugins/builtin/SmartAgent/core/react-agent", () => ({
+  FunctionCallingRequiredError: class FunctionCallingRequiredError extends Error {},
   ReActAgent: class {
     run(prompt: string) {
       return hoisted.agentRun(prompt);

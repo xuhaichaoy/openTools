@@ -23,6 +23,7 @@ import {
 } from "@/core/navigation/view-stack";
 
 import { useColorPicker } from "@/hooks/useColorPicker";
+import { useAuthSessionKeeper } from "@/hooks/useAuthSessionKeeper";
 import { useAppInitializer } from "@/hooks/useAppInitializer";
 import { useSearchResults } from "@/hooks/useSearchResults";
 import { usePluginLifecycle } from "@/hooks/usePluginLifecycle";
@@ -88,6 +89,7 @@ function MainApp() {
 
   // ── Extracted hooks ──
   const { handleDirectColorPicker } = useColorPicker();
+  useAuthSessionKeeper();
   useAppInitializer(pushView, setContextText);
 
   const { embedTarget, setEmbedTarget, embedBridgeToken } = usePluginEmbed(

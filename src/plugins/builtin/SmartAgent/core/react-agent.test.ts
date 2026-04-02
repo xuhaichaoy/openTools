@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import type { MToolsAI, AIToolCall } from "@/core/plugin-system/plugin-interface";
-import { ReActAgent, patchDanglingToolCallMessages, type AgentTool } from "./react-agent";
+import {
+  FunctionCallingRequiredError,
+  ReActAgent,
+  patchDanglingToolCallMessages,
+  type AgentTool,
+} from "./react-agent";
+import {
+  createToolResultReplacementState,
+  PERSISTED_TOOL_RESULT_TAG,
+} from "@/core/agent/runtime/tool-result-replacement";
 
 const noopTools: AgentTool[] = [
   {
@@ -117,6 +126,48 @@ describe("ReActAgent FC compatibility cache", () => {
     expect(toolNames).not.toContain("delegate_subtask");
     expect(toolNames).not.toContain("enter_plan_mode");
     expect(toolNames).not.toContain("exit_plan_mode");
+  });
+
+  it("does not inject coding workflow for delivery-only aggregation prompts", () => {
+    const ai = createMockAI(async () => ({
+      type: "content",
+      content: "done",
+    }));
+
+    const agent = new ReActAgent(ai, [
+      {
+        name: "task_done",
+        description: "done",
+        execute: async () => ({ ok: true }),
+      },
+      {
+        name: "export_spreadsheet",
+        description: "export",
+        parameters: {
+          file_name: { type: "string", description: "file name" },
+          sheets: { type: "string", description: "sheets json" },
+        },
+        execute: async () => ({ ok: true }),
+      },
+    ], {
+      maxIterations: 2,
+      fcCompatibilityKey: "delivery-only-aggregation-prompt",
+      authoritativeToolList: true,
+    });
+
+    const prompt = (agent as unknown as {
+      buildFCSystemPrompt: (userInput?: string) => string;
+    }).buildFCSystemPrompt([
+      "## 最终综合阶段",
+      "结构化子任务摘要：",
+      "- 已有 2 个子任务回传 structured rows，禁止再次根据路径猜测文件并手动 read_file。",
+      "原始任务：根据附件生成课程并导出 Excel 文件。",
+    ].join("\n"));
+
+    expect(prompt).toContain("## 当前阶段工具边界");
+    expect(prompt).toContain("禁止再建议、假设或伪造额外读取、扫描目录或执行命令的步骤");
+    expect(prompt).not.toContain("## 编程任务工作流");
+    expect(prompt).not.toContain("run_shell_command");
   });
 
   it("should not expose delegate_subtask when managed dialog delegation tools exist", () => {
@@ -1297,6 +1348,111 @@ describe("ReActAgent FC compatibility cache", () => {
     expect(fcCalls).toBe(1);
   });
 
+  it("should block text fallback when the current stage requires function calling", async () => {
+    let fcCalls = 0;
+    let streamCalls = 0;
+    const ai: MToolsAI = {
+      chat: async () => ({ content: "文本模式回答" }),
+      stream: async ({ onDone }) => {
+        streamCalls += 1;
+        onDone?.("Thought: fallback\nFinal Answer: 文本模式回答");
+      },
+      streamWithTools: async () => {
+        fcCalls += 1;
+        throw new Error("tools are not supported for this model");
+      },
+      embedding: async () => [],
+      getModels: async () => [],
+    };
+
+    const agent = new ReActAgent(ai, noopTools, {
+      maxIterations: 2,
+      fcCompatibilityKey: "fc-required-no-text-fallback",
+      requireFunctionCalling: true,
+    });
+
+    await expect(agent.run("继续完成最终综合")).rejects.toBeInstanceOf(FunctionCallingRequiredError);
+    expect(fcCalls).toBe(1);
+    expect(streamCalls).toBe(0);
+  });
+
+  it("should preserve fc loop state across transport retries instead of restarting from scratch", async () => {
+    let fcCalls = 0;
+    let executeCalls = 0;
+
+    const ai = createMockAI(async ({ messages }) => {
+      fcCalls += 1;
+      const hasExistingNoopResult = messages.some((message) => (
+        message.role === "tool"
+        && message.name === "noop"
+        && String(message.content ?? "").includes("noop ok")
+      ));
+
+      if (fcCalls === 1) {
+        return {
+          type: "tool_calls",
+          toolCalls: [
+            {
+              id: "call-noop-first",
+              type: "function",
+              function: {
+                name: "noop",
+                arguments: "{}",
+              },
+            },
+          ],
+        };
+      }
+
+      if (fcCalls === 2) {
+        expect(hasExistingNoopResult).toBe(true);
+        throw new Error("API 错误 (HTTP 502): gateway");
+      }
+
+      if (!hasExistingNoopResult) {
+        return {
+          type: "tool_calls",
+          toolCalls: [
+            {
+              id: `call-noop-restarted-${fcCalls}`,
+              type: "function",
+              function: {
+                name: "noop",
+                arguments: "{}",
+              },
+            },
+          ],
+        };
+      }
+
+      return {
+        type: "content",
+        content: "已沿用之前的工具结果继续执行，没有重新开始整个任务。",
+      };
+    });
+
+    const agent = new ReActAgent(ai, [
+      {
+        name: "noop",
+        description: "noop",
+        execute: async () => {
+          executeCalls += 1;
+          return "noop ok";
+        },
+      },
+    ], {
+      maxIterations: 5,
+      fcCompatibilityKey: "preserve-fc-state-across-transport-retries",
+      requireFunctionCalling: true,
+    });
+
+    const answer = await agent.run("继续处理当前任务");
+
+    expect(answer).toContain("沿用之前的工具结果");
+    expect(executeCalls).toBe(1);
+    expect(fcCalls).toBe(3);
+  });
+
   it("should stop early when downgraded text mode keeps returning empty content", async () => {
     let fcCalls = 0;
     let streamCalls = 0;
@@ -1567,6 +1723,82 @@ describe("ReActAgent FC compatibility cache", () => {
     expect(inboxImageMessage?.images).toEqual(["/tmp/design-shot.png"]);
   });
 
+  it("should persist oversized FC tool results and reuse replacement state", async () => {
+    const hugeOutput = "A".repeat(18_000);
+    const snapshots: Array<Array<{ role: string; content: string | null; tool_call_id?: string }>> = [];
+    let fcCalls = 0;
+    const replacementState = createToolResultReplacementState();
+
+    const ai = createMockAI(async ({ messages }) => {
+      snapshots.push(messages.map((message) => ({
+        role: message.role,
+        content: message.content,
+        ...(message.tool_call_id ? { tool_call_id: message.tool_call_id } : {}),
+      })));
+      fcCalls += 1;
+      if (fcCalls === 1) {
+        return {
+          type: "tool_calls",
+          toolCalls: [
+            {
+              id: "call-huge-1",
+              type: "function",
+              function: {
+                name: "big_tool",
+                arguments: "{\"label\":\"first\"}",
+              },
+            },
+          ],
+        };
+      }
+      return {
+        type: "content",
+        content: "我已经基于持久化预览继续执行。",
+      };
+    });
+
+    const tools: AgentTool[] = [
+      {
+        name: "big_tool",
+        description: "return huge output",
+        parameters: {
+          label: { type: "string", description: "label" },
+        },
+        execute: async () => hugeOutput,
+      },
+    ];
+
+    const replacedRecords: Array<{ toolUseId: string; replacement: string }> = [];
+    const agent = new ReActAgent(ai, tools, {
+      maxIterations: 4,
+      contextLimit: 1600,
+      fcCompatibilityKey: "tool-result-persist-budget",
+      toolResultReplacementState: replacementState,
+      toolResultPersistenceDir: "/tmp/51toolbox-tool-results",
+      onToolResultReplaced: (records) => {
+        replacedRecords.push(...records.map((record) => ({
+          toolUseId: record.toolUseId,
+          replacement: record.replacement,
+        })));
+      },
+    });
+
+    const answer = await agent.run("请继续处理大段工具输出");
+
+    expect(answer).toContain("持久化预览继续执行");
+    expect(replacedRecords).toHaveLength(1);
+    expect(replacedRecords[0]?.toolUseId).toBe("call-huge-1");
+    expect(replacedRecords[0]?.replacement).toContain(PERSISTED_TOOL_RESULT_TAG);
+    expect(replacementState.replacements.get("call-huge-1")).toContain(PERSISTED_TOOL_RESULT_TAG);
+
+    const secondRoundToolMessage = snapshots[1]?.find((message) => message.role === "tool");
+    expect(
+      secondRoundToolMessage?.content?.includes(PERSISTED_TOOL_RESULT_TAG)
+      || secondRoundToolMessage?.content?.includes("已移出上下文"),
+    ).toBe(true);
+    expect(secondRoundToolMessage?.content?.length ?? 0).toBeLessThan(3000);
+  });
+
   it("should include structured diagnostics when FC stops due to repeated tool calls", async () => {
     let fcCalls = 0;
     const ai = createMockAI(async () => {
@@ -1755,5 +1987,195 @@ describe("ReActAgent FC compatibility cache", () => {
     expect(answer).toContain("轮数定义：1 轮 = 1 次模型决策（返回回答或 tool_calls），不等于 1 次工具执行");
     expect(answer).toContain("停止原因：已达到迭代上限");
     expect(answer).toContain("工具执行次数：2");
+  });
+
+  it("sanitizes resume transcript messages before FC resume and publishes updated snapshots", async () => {
+    let seenMessages: Array<{
+      role: string;
+      content: string | null;
+      tool_calls?: AIToolCall[];
+      tool_call_id?: string;
+      name?: string;
+    }> = [];
+    const snapshots: Array<ReturnType<ReActAgent["getConversationMessages"]>> = [];
+
+    const ai = createMockAI(async (options) => {
+      seenMessages = options.messages.map((message) => ({
+        role: message.role,
+        content: message.content,
+        ...(message.tool_calls?.length ? { tool_calls: message.tool_calls } : {}),
+        ...(message.tool_call_id ? { tool_call_id: message.tool_call_id } : {}),
+        ...(message.name ? { name: message.name } : {}),
+      }));
+      return {
+        type: "content",
+        content: "恢复后的最终答案",
+      };
+    });
+
+    const resolvedToolCall: AIToolCall = {
+      id: "call-keep",
+      type: "function",
+      function: {
+        name: "noop",
+        arguments: "{\"tag\":\"resume\"}",
+      },
+    };
+
+    const agent = new ReActAgent(ai, noopTools, {
+      maxIterations: 4,
+      fcCompatibilityKey: "resume-transcript-sanitization",
+      resumeMessages: [
+        {
+          role: "user",
+          content: "旧需求",
+        },
+        {
+          role: "assistant",
+          content: " \n ",
+        },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call-drop",
+              type: "function",
+              function: {
+                name: "noop",
+                arguments: "{\"tag\":\"drop\"}",
+              },
+            },
+          ],
+        },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [resolvedToolCall],
+        },
+        {
+          role: "tool",
+          content: "旧结果",
+          tool_call_id: "call-keep",
+          name: "noop",
+        },
+        {
+          role: "tool",
+          content: "孤立结果",
+          tool_call_id: "missing-parent",
+          name: "noop",
+        },
+      ],
+      onConversationMessagesUpdated: (messages) => {
+        snapshots.push(messages);
+      },
+    });
+
+    const answer = await agent.run("继续处理");
+
+    expect(answer).toBe("恢复后的最终答案");
+    expect(seenMessages.filter((message) => message.role !== "system")).toEqual([
+      {
+        role: "user",
+        content: "旧需求",
+      },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [resolvedToolCall],
+      },
+      {
+        role: "tool",
+        content: "旧结果",
+        tool_call_id: "call-keep",
+        name: "noop",
+      },
+      {
+        role: "user",
+        content: "继续处理",
+      },
+    ]);
+    expect(snapshots.at(-1)).toEqual([
+      {
+        role: "user",
+        content: "旧需求",
+      },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [resolvedToolCall],
+      },
+      {
+        role: "tool",
+        content: "旧结果",
+        tool_call_id: "call-keep",
+        name: "noop",
+      },
+      {
+        role: "user",
+        content: "继续处理",
+      },
+      {
+        role: "assistant",
+        content: "恢复后的最终答案",
+      },
+    ]);
+  });
+
+  it("forwards raw parameter schemas to function-calling tool definitions", async () => {
+    let forwardedTools: Array<{ function: { parameters?: Record<string, unknown> } }> = [];
+    const ai = createMockAI(async (options) => {
+      forwardedTools = options.tools;
+      return {
+        type: "content",
+        content: "done",
+      };
+    });
+
+    const agent = new ReActAgent(ai, [
+      {
+        name: "structured_tool",
+        description: "structured tool",
+        rawParametersSchema: {
+          type: "object",
+          properties: {
+            payload: {
+              oneOf: [
+                { type: "array", items: {} },
+                { type: "object", additionalProperties: true },
+              ],
+            },
+          },
+          required: ["payload"],
+        },
+        parameters: {
+          payload: {
+            type: "string",
+            description: "legacy string payload",
+          },
+        },
+        execute: async () => ({ ok: true }),
+      },
+    ], {
+      maxIterations: 4,
+      authoritativeToolList: true,
+      fcCompatibilityKey: "raw-schema-forwarding",
+    });
+
+    await agent.run("继续处理");
+
+    expect(forwardedTools).toHaveLength(1);
+    expect(forwardedTools[0]?.function.parameters).toMatchObject({
+      type: "object",
+      properties: {
+        payload: {
+          oneOf: expect.arrayContaining([
+            expect.objectContaining({ type: "array" }),
+            expect.objectContaining({ type: "object" }),
+          ]),
+        },
+      },
+      required: ["payload"],
+    });
   });
 });

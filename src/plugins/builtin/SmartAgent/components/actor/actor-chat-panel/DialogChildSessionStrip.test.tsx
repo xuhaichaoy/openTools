@@ -120,4 +120,32 @@ describe("DialogChildSessionStrip", () => {
 
     expect(onOpenWorkspace).toHaveBeenCalledTimes(1);
   });
+
+  it("allows focusing a retained child session", () => {
+    const onFocusSession = vi.fn();
+
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    act(() => {
+      root?.render(
+        <DialogChildSessionStrip
+          sessions={[
+            createSession({ id: "run-1", runId: "run-1", targetActorId: "reviewer", label: "Review" }),
+          ]}
+          actorNameById={new Map([["reviewer", "Reviewer"]])}
+          pendingSteerSessionRunId={null}
+          focusedSessionRunId={null}
+          onFocusSession={onFocusSession}
+        />,
+      );
+    });
+
+    act(() => {
+      findButton(container!, "接管对话")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(onFocusSession).toHaveBeenCalledWith("run-1");
+  });
 });

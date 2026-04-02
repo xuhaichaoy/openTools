@@ -500,6 +500,32 @@ export class ChannelManager {
       ?? "IM 会话管理器尚未初始化。";
   }
 
+  /** 从桌面端继续向指定 IM 会话发送消息 */
+  async sendDesktopMessageToConversation(params: {
+    channelId: string;
+    channelType: ChannelType;
+    conversationId: string;
+    conversationType: ChannelIncomingMessage["conversationType"];
+    text: string;
+    topicId?: string | null;
+    senderName?: string;
+    images?: string[];
+    timestamp?: number;
+    messageId?: string;
+  }): Promise<{
+    handled: boolean;
+    queued?: boolean;
+    runtimeKey?: string;
+    sessionId?: string;
+  }> {
+    if (!this._conversationRuntimeManager) {
+      return {
+        handled: true,
+      };
+    }
+    return this._conversationRuntimeManager.submitDesktopMessage(params);
+  }
+
   clearConversation(channelId: string, conversationId: string): number {
     const removedConversationIds = this._conversationRuntimeManager?.clearConversation(channelId, conversationId) ?? [];
     this._dataExportRuntimeManager?.clearConversation(channelId, conversationId);
@@ -900,8 +926,13 @@ declare global {
 }
 
 export function getChannelManager(): ChannelManager {
-  if (!globalThis.__MTOOLS_CHANNEL_MANAGER__) {
+  const existing = globalThis.__MTOOLS_CHANNEL_MANAGER__;
+  if (!existing) {
     globalThis.__MTOOLS_CHANNEL_MANAGER__ = new ChannelManager();
+    return globalThis.__MTOOLS_CHANNEL_MANAGER__;
   }
-  return globalThis.__MTOOLS_CHANNEL_MANAGER__;
+  if (Object.getPrototypeOf(existing) !== ChannelManager.prototype) {
+    Object.setPrototypeOf(existing, ChannelManager.prototype);
+  }
+  return existing;
 }

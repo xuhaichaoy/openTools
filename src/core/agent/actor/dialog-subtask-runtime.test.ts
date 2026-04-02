@@ -1,10 +1,15 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   DialogSubtaskRuntime,
   type DialogStructuredSubtaskResult,
 } from "./dialog-subtask-runtime";
 import type { SpawnedTaskRecord } from "./types";
+import {
+  getAgentTaskManager,
+  resetAgentTaskManager,
+  resolveAgentTaskIdFromRunId,
+} from "@/core/task-center";
 
 function createDeferred<T>() {
   let resolve!: (value: T) => void;
@@ -21,6 +26,7 @@ class FakeActor {
   persistent = false;
   timeoutSeconds?: number;
   idleLeaseSeconds?: number;
+  pendingInboxCount = 0;
   assignTask = vi.fn(async () => ({
     status: "completed" as const,
     result: "ok",
@@ -61,6 +67,7 @@ function createRecord(overrides: Partial<SpawnedTaskRecord> = {}): SpawnedTaskRe
   return {
     runId: overrides.runId ?? "run-1",
     spawnerActorId: overrides.spawnerActorId ?? "coordinator",
+    ownerTaskId: overrides.ownerTaskId,
     targetActorId: overrides.targetActorId ?? "worker",
     dispatchSource: overrides.dispatchSource ?? "manual",
     parentRunId: overrides.parentRunId,
@@ -155,6 +162,106 @@ function createRuntimeHarness(params?: {
 }
 
 describe("DialogSubtaskRuntime", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    resetAgentTaskManager();
+  });
+
+  it("isolates structured child results by ownerTaskId and prunes stale completed scope", () => {
+    const { runtime } = createRuntimeHarness();
+    runtime.registerRecord(createRecord({
+      runId: "run-stale",
+      ownerTaskId: "task-stale",
+      status: "completed",
+      resultContract: "inline_structured_result",
+      result: JSON.stringify([
+        { sourceItemId: "source-item-1", topicIndex: 1, topicTitle: "旧主题", coverageType: "direct", 课程名称: "旧课程", 课程介绍: "旧介绍" },
+      ]),
+      completedAt: 2,
+      runtime: {
+        subtaskId: "run-stale",
+        profile: "executor",
+        startedAt: 1,
+        completedAt: 2,
+        terminalResult: JSON.stringify([
+          { sourceItemId: "source-item-1", topicIndex: 1, topicTitle: "旧主题", coverageType: "direct", 课程名称: "旧课程", 课程介绍: "旧介绍" },
+        ]),
+        timeoutSeconds: 420,
+        eventCount: 1,
+      },
+    }));
+    runtime.registerRecord(createRecord({
+      runId: "run-current",
+      ownerTaskId: "task-current",
+      status: "completed",
+      resultContract: "inline_structured_result",
+      result: JSON.stringify([
+        { sourceItemId: "source-item-2", topicIndex: 2, topicTitle: "新主题", coverageType: "direct", 课程名称: "新课程", 课程介绍: "新介绍" },
+      ]),
+      completedAt: 3,
+      runtime: {
+        subtaskId: "run-current",
+        profile: "executor",
+        startedAt: 1,
+        completedAt: 3,
+        terminalResult: JSON.stringify([
+          { sourceItemId: "source-item-2", topicIndex: 2, topicTitle: "新主题", coverageType: "direct", 课程名称: "新课程", 课程介绍: "新介绍" },
+        ]),
+        timeoutSeconds: 420,
+        eventCount: 1,
+      },
+    }));
+
+    const filteredResults = runtime.collectStructuredSpawnedTaskResults("coordinator", {
+      ownerTaskId: "task-current",
+      terminalOnly: true,
+    });
+    expect(filteredResults.map((result) => result.runId)).toEqual(["run-current"]);
+
+    const removedCount = runtime.pruneCompletedTasksForSpawner("coordinator", {
+      excludeOwnerTaskId: "task-current",
+    });
+    expect(removedCount).toBe(1);
+    expect(runtime.getSpawnedTasks("coordinator").map((record) => record.runId)).toEqual(["run-current"]);
+  });
+
+  it("aborts stale running child tasks outside the active owner scope", () => {
+    const { runtime, actors } = createRuntimeHarness();
+    const staleWorker = actors.get("worker");
+    if (!staleWorker) throw new Error("missing stale worker");
+    const currentWorker = new FakeActor("worker-current", { name: "Current Worker" });
+    actors.set("worker-current", currentWorker);
+
+    runtime.registerRecord(createRecord({
+      runId: "run-stale-running",
+      ownerTaskId: "task-stale",
+      targetActorId: "worker",
+      status: "running",
+      mode: "run",
+    }));
+    runtime.registerRecord(createRecord({
+      runId: "run-current-running",
+      ownerTaskId: "task-current",
+      targetActorId: "worker-current",
+      status: "running",
+      mode: "run",
+    }));
+
+    const abortedCount = runtime.abortActiveRunTasksForSpawner(
+      "coordinator",
+      "新的顶层任务已接管当前对话。",
+      {
+        excludeOwnerTaskId: "task-current",
+      },
+    );
+
+    expect(abortedCount).toBe(1);
+    expect(staleWorker.abort).toHaveBeenCalledWith("新的顶层任务已接管当前对话。");
+    expect(currentWorker.abort).not.toHaveBeenCalled();
+    expect(runtime.getSpawnedTask("run-stale-running")?.status).toBe("aborted");
+    expect(runtime.getSpawnedTask("run-current-running")?.status).toBe("running");
+  });
+
   it("projects streaming child progress into runtime state without waiting for a terminal step", async () => {
     const deferred = createDeferred<{ status: "completed"; result: string }>();
     const { runtime, events, actors } = createRuntimeHarness();
@@ -245,6 +352,14 @@ describe("DialogSubtaskRuntime", () => {
       "spawned_task_running",
       "spawned_task_completed",
     ]));
+
+    const taskId = resolveAgentTaskIdFromRunId("run-progress-1");
+    expect(getAgentTaskManager().get(taskId)).toEqual(expect.objectContaining({
+      taskId,
+      status: "completed",
+      targetName: "Worker",
+      result: "已创建 /Users/demo/Downloads/index.html",
+    }));
   });
 
   it("attaches current-run artifacts to structured child results", async () => {
@@ -311,6 +426,80 @@ describe("DialogSubtaskRuntime", () => {
         path: "/Users/demo/Downloads/index.html",
         source: "tool_write",
         relatedRunId: "run-artifact-1",
+      }),
+    ]);
+  });
+
+  it("hydrates structured rows from current-run json artifacts before coordinator follow-up", async () => {
+    const { runtime, actors } = createRuntimeHarness({
+      artifacts: [
+        {
+          id: "artifact-json-1",
+          actorId: "worker",
+          path: "/Users/demo/Downloads/courses.json",
+          fileName: "courses.json",
+          directory: "/Users/demo/Downloads",
+          source: "tool_write",
+          summary: "课程 JSON",
+          fullContent: JSON.stringify([
+            {
+              courseName: "AI应用知识库构建实战",
+              courseIntro: "面向研发与运维的知识库课程",
+              sourceItemId: "topic-1",
+            },
+            {
+              courseName: "AI安全风险与防护体系",
+              courseIntro: "覆盖常见安全风险与治理",
+              sourceItemId: "topic-2",
+            },
+          ]),
+          timestamp: 20,
+          relatedRunId: "run-json-artifact-1",
+        },
+      ],
+    });
+    const worker = actors.get("worker");
+    if (!worker) throw new Error("missing worker");
+    worker.assignTask = vi.fn(async () => ({
+      status: "completed" as const,
+      result: "已生成文件：/Users/demo/Downloads/courses.json",
+    }));
+
+    runtime.startTask({
+      record: createRecord({
+        runId: "run-json-artifact-1",
+        status: "running",
+        mode: "run",
+        spawnedAt: 10,
+        resultContract: "inline_structured_result",
+        deliveryTargetLabel: "技术方向课程",
+        sheetName: "技术方向课程",
+      }),
+      target: worker as any,
+      fullTask: "执行任务",
+      runOverrides: {
+        timeoutSeconds: 600,
+        idleLeaseSeconds: 180,
+      },
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const result = runtime.getStructuredSubtaskResult("run-json-artifact-1");
+    expect(result?.resultKind).toBe("structured_rows");
+    expect(result?.rowCount).toBe(2);
+    expect(result?.schemaFields).toEqual(expect.arrayContaining(["courseName", "courseIntro", "sourceItemId"]));
+    expect(result?.structuredRows).toEqual([
+      expect.objectContaining({
+        courseName: "AI应用知识库构建实战",
+        courseIntro: "面向研发与运维的知识库课程",
+        sourceItemId: "topic-1",
+      }),
+      expect.objectContaining({
+        courseName: "AI安全风险与防护体系",
+        courseIntro: "覆盖常见安全风险与治理",
+        sourceItemId: "topic-2",
       }),
     ]);
   });
@@ -526,6 +715,34 @@ describe("DialogSubtaskRuntime", () => {
       record,
       status: "aborted",
     }));
+    expect(getAgentTaskManager().getByRunId("run-restored-1")).toEqual(expect.objectContaining({
+      status: "aborted",
+      error: expect.stringContaining("无法自动续跑"),
+    }));
+  });
+
+  it("rebinds projected task records when the runtime adopts a restored session id", () => {
+    const { runtime } = createRuntimeHarness();
+    const record = createRecord({
+      runId: "run-rebind-session-1",
+      status: "completed",
+      completedAt: 5,
+      result: "已完成",
+    });
+
+    runtime.restoreRecord(record);
+    expect(getAgentTaskManager().getByRunId("run-rebind-session-1")).toEqual(expect.objectContaining({
+      sessionId: "session-test",
+      status: "completed",
+    }));
+
+    runtime.replaceSessionId("session-restored");
+
+    expect(getAgentTaskManager().list({ sessionId: "session-test" })).toEqual([]);
+    expect(getAgentTaskManager().getByRunId("run-rebind-session-1")).toEqual(expect.objectContaining({
+      sessionId: "session-restored",
+      status: "completed",
+    }));
   });
 
   it("keeps restored child sessions open while marking interrupted execution as aborted", () => {
@@ -548,6 +765,43 @@ describe("DialogSubtaskRuntime", () => {
     });
     expect(record.status).toBe("running");
     expect(record.runtime?.terminalError).toBeUndefined();
+  });
+
+  it("projects pending session messages into the agent task view", () => {
+    const { runtime, actors } = createRuntimeHarness();
+    const worker = actors.get("worker");
+    if (!worker) throw new Error("missing worker");
+    const record = createRecord({
+      runId: "run-session-pending-1",
+      targetActorId: "worker",
+      mode: "session",
+      sessionOpen: true,
+      status: "completed",
+      completedAt: 60,
+    });
+
+    runtime.restoreRecord(record);
+    worker.pendingInboxCount = 2;
+    runtime.refreshTaskProjection("run-session-pending-1");
+
+    const taskId = resolveAgentTaskIdFromRunId("run-session-pending-1");
+    expect(getAgentTaskManager().get(taskId)).toEqual(expect.objectContaining({
+      pendingMessageCount: 2,
+    }));
+
+    worker.pendingInboxCount = 0;
+    runtime.markSessionTaskStarted("worker", 90);
+
+    expect(getAgentTaskManager().get(taskId)).toEqual(expect.objectContaining({
+      status: "running",
+      pendingMessageCount: 0,
+      recentActivity: expect.arrayContaining([
+        expect.objectContaining({
+          kind: "message",
+          summary: "待处理消息已清空",
+        }),
+      ]),
+    }));
   });
 
   it("converts rejected child runs into structured failures", async () => {

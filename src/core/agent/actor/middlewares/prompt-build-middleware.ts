@@ -3,6 +3,7 @@ import {
   assembleAgentExecutionContext,
   buildAgentExecutionContextPlan,
 } from "@/core/agent/context-runtime";
+import { buildCoordinatorModePrompt } from "@/core/agent/actor/coordinator-mode";
 import { buildExecutionContractPresentationText } from "@/core/collaboration/presentation";
 import { useAIStore } from "@/store/ai-store";
 import type { ActorMiddleware, ActorRunContext } from "../actor-middleware";
@@ -80,6 +81,15 @@ export class PromptBuildMiddleware implements ActorMiddleware {
     const coordinator = system.getCoordinator();
     const isCoordinator = coordinator?.id === ctx.actorId;
     const activeContract = system.getActiveExecutionContract();
+    const coordinatorModeEnabled = (
+      typeof (system as typeof system & { isCoordinatorModeEnabled?: () => boolean }).isCoordinatorModeEnabled === "function"
+        ? (system as typeof system & { isCoordinatorModeEnabled: () => boolean }).isCoordinatorModeEnabled()
+        : false
+    ) || (
+      typeof (system as typeof system & { hasLiveDialogSubagentContext?: () => boolean }).hasLiveDialogSubagentContext === "function"
+        ? (system as typeof system & { hasLiveDialogSubagentContext: () => boolean }).hasLiveDialogSubagentContext()
+        : false
+    ) || Boolean(activeContract);
     const delegationHint = activeContract?.plannedDelegations.length
       ? `已批准建议委派 ${activeContract.plannedDelegations.length} 条，可按需参考和复用。`
       : "";
@@ -96,6 +106,13 @@ ${buildExecutionContractPresentationText(activeContract)}`;
     }
 
     if (isCoordinator) {
+      const coordinatorModePrompt = coordinatorModeEnabled
+        ? `\n\n${buildCoordinatorModePrompt({
+            isCoordinator: true,
+            teammateNames: otherAgents.map((agent) => agent.role.name),
+            hasPlannedDelegations: Boolean(activeContract?.plannedDelegations.length),
+          })}`
+        : "";
       section += `\n\n你有以下方式与其他 Agent 协作：
 
 1. **派发子任务**：优先用 \`delegate_task\` 做高层委派；需要完全控制底层参数时再用 \`spawn_task\`（如 @${agentNames}）。
@@ -117,10 +134,17 @@ ${buildExecutionContractPresentationText(activeContract)}`;
 - 使用 \`delegate_task\` 时，至少写清目标、验收标准、补充上下文和职责边界；若未指定目标且需要协作，系统会自动补建临时子 Agent。
 - 使用 \`spawn_task\` 时，任务描述至少写清：目标、范围/相关文件、补充上下文、职责边界、验收标准；子 Agent 应在这个边界内自行决定执行步骤，而不是等你逐步遥控。
 - 【严禁操作】不要在派发完 \`delegate_task\` / \`spawn_task\` 后，没拿到结果就自己靠想象输出"最终总结"或"结论"！你必须等 \`wait_for_spawned_tasks\` 返回真实的详细结果。
-- \`wait_for_spawned_tasks\` 结束并拿到各方结果后，你要继续 review、补充整合，输出一份结构清晰的全局最终结论。`;
+- \`wait_for_spawned_tasks\` 结束并拿到各方结果后，你要继续 review、补充整合，输出一份结构清晰的全局最终结论。${coordinatorModePrompt}`;
     }
 
     if (!isCoordinator) {
+      const workerModePrompt = coordinatorModeEnabled
+        ? `\n\n${buildCoordinatorModePrompt({
+            isCoordinator: false,
+            teammateNames: otherAgents.map((agent) => agent.role.name),
+            hasPlannedDelegations: Boolean(activeContract?.plannedDelegations.length),
+          })}`
+        : "";
       section += `\n\n你当前主要通过以下方式协作：
 
 1. **执行分配给你的任务**：聚焦完成本轮职责边界，不要自己改写整轮分工。
@@ -132,7 +156,7 @@ ${buildExecutionContractPresentationText(activeContract)}`;
 - 默认不要重复做整轮分工，也不要宣称"我来协调"。
 - 当前默认由协调者统一创建子线程；你如果发现需要新增实现、审查或验证线程，请把建议回传协调者。
 - **最终交付要求（十分重要）**：当你的执行步骤走完，要输出最终 answer（或告知任务完成）时，请只输出 **最精简的一两句话摘要**。
-- 不要输出长篇大论的报告！你的工作全过程和完整结论已经被系统在后台自动原封不动地传给了协调者去汇总。你这里的 answer 只是公屏的一个已完成进度通知。`;
+- 不要输出长篇大论的报告！你的工作全过程和完整结论已经被系统在后台自动原封不动地传给了协调者去汇总。你这里的 answer 只是公屏的一个已完成进度通知。${workerModePrompt}`;
     }
 
     return section;

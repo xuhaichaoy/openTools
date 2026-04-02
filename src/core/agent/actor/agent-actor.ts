@@ -1,11 +1,10 @@
 import {
   filterExportableStructuredResults,
+  inspectStructuredResultExportability,
 } from "./dynamic-workbook-builder";
-import { getMToolsAI } from "@/core/ai/mtools-ai";
 import {
-  ReActAgent,
+  FunctionCallingRequiredError,
   WAIT_FOR_SPAWNED_TASKS_DEFERRED_RESULT,
-  WaitForSpawnedTasksInterrupt,
   type AgentTool,
   type AgentStep,
   type DangerousActionConfirmationContext,
@@ -33,9 +32,7 @@ import {
   recoverDialogRoomCompactionFromContextPressure,
 } from "./dialog-context-pressure";
 import { validateActorTaskResult, validateSpawnedTaskResult } from "./spawned-task-result-validator";
-import { appendToolCallSync as appendToolCall, appendToolResultSync as appendToolResult } from "./actor-transcript";
 import type { ActorRunContext } from "./actor-middleware";
-import { runMiddlewareChain } from "./actor-middleware";
 import { isLegacySingleDefaultDialogLead } from "./dialog-actor-persistence";
 import {
   DIALOG_PLAN_MODE_EXECUTION_POLICY,
@@ -74,6 +71,19 @@ import {
   buildSourceGroundingSnapshot,
   type SourceGroundingSnapshot,
 } from "./source-grounding";
+import { QueryEngine } from "@/core/agent/runtime/query-engine";
+import { createRuntimeTranscriptBridge } from "@/core/agent/runtime/runtime-transcript-bridge";
+import {
+  cloneTranscriptMessages,
+  prepareTranscriptMessagesForResume,
+  trimTranscriptMessagesToBudget,
+  type RuntimeTranscriptMessage,
+} from "@/core/agent/runtime/transcript-messages";
+import {
+  createToolResultReplacementState,
+  snapshotToolResultReplacementState,
+  type ToolResultReplacementState,
+} from "@/core/agent/runtime/tool-result-replacement";
 import type {
   AgentCapabilities,
   ActorConfig,
@@ -152,6 +162,7 @@ const AGGREGATION_DENIED_TOOL_NAMES = [
   ...TAKEOVER_DENIED_TOOL_NAMES,
   "list_directory",
   "read_file",
+  "read_file_range",
   "read_document",
   "search_in_files",
   "run_shell_command",
@@ -186,6 +197,7 @@ const INITIAL_STRUCTURED_DELIVERY_ALLOWED_TOOL_NAMES = [
 const INITIAL_STRUCTURED_DELIVERY_DENIED_TOOL_NAMES = [
   "list_directory",
   "read_file",
+  "read_file_range",
   "search_in_files",
   "run_shell_command",
   "persistent_shell",
@@ -444,8 +456,12 @@ function buildStructuredDispatchSuggestionBlock(params: {
     `- strategy: ${params.dispatchPlan.strategyId}`,
     `- delivery_contract: ${params.dispatchPlan.deliveryContract} / ${params.dispatchPlan.parentContract}`,
     `- 推荐分片数：${params.dispatchPlan.shards.length}`,
-    "- 这些只是系统根据 source snapshot 给出的建议，不是强制自动派工。",
-    "- 你需要先判断是否真的要派工；如果派工，请优先复用这些 label / delivery target / source item count。",
+    params.dispatchPlan.parentContract === "single_workbook"
+      ? "- 这是 host-managed single_workbook 合同：优先按这些分片派工，完成派发后应进入 wait_for_spawned_tasks；禁止额外派一个“整合/导出 Excel”的聚合子任务。"
+      : "- 这些只是系统根据 source snapshot 给出的建议，不是强制自动派工。",
+    params.dispatchPlan.parentContract === "single_workbook"
+      ? "- 子任务只负责返回 inline structured result；最终聚合与导出由主线程/host 完成。"
+      : "- 你需要先判断是否真的要派工；如果派工，请优先复用这些 label / delivery target / source item count。",
   ];
   params.dispatchPlan.shards.slice(0, 12).forEach((shard, index) => {
     lines.push(
@@ -510,7 +526,11 @@ function buildStructuredDeliveryGuidanceBlock(params: {
   if (targetLabels.length > 0) {
     lines.push(`- 推荐 shard 分组: ${targetLabels.join("、")}`);
   }
-  lines.push("- 如果你判断确实需要派工，优先复用推荐的 shard / delivery target，并让子任务返回 inline structured result。");
+  lines.push(
+    manifest.parentContract === "single_workbook"
+      ? "- 当前是 single_workbook 合同：优先复用推荐 shard / delivery target，让子任务只返回 inline structured result；不要委派聚合 Excel 子任务。"
+      : "- 如果你判断确实需要派工，优先复用推荐的 shard / delivery target，并让子任务返回 inline structured result。",
+  );
   return lines.join("\n");
 }
 
@@ -699,11 +719,36 @@ function collectActorArtifactsForTask(params: {
     .sort((left, right) => right.timestamp - left.timestamp);
 }
 
+function extractArtifactPathFromTaskSteps(params: {
+  taskText: string;
+  task: Pick<ActorTask, "steps">;
+}): string | undefined {
+  const steps = [...(params.task.steps ?? [])].reverse();
+  const requestedSpreadsheetExtensions = resolveRequestedSpreadsheetExtensions(params.taskText);
+
+  for (const step of steps) {
+    if (step.type !== "observation" || !step.toolName) continue;
+    const pathFromOutput = extractPathFromToolOutput(step.toolName, step.toolOutput);
+    if (pathFromOutput) return pathFromOutput;
+
+    const content = typeof step.content === "string" ? step.content.trim() : "";
+    if (!content) continue;
+    const contentPaths = requestedSpreadsheetExtensions.length > 0
+      ? extractPathsByExtensions(content, requestedSpreadsheetExtensions)
+      : [];
+    if (contentPaths.length > 0) {
+      return contentPaths[0];
+    }
+  }
+
+  return undefined;
+}
+
 function buildConcreteResultFromArtifacts(params: {
   result?: string;
   taskText: string;
   actorId: string;
-  task: Pick<ActorTask, "startedAt" | "finishedAt">;
+  task: Pick<ActorTask, "startedAt" | "finishedAt" | "steps">;
   actorSystem?: Pick<ActorSystem, "getArtifactRecordsSnapshot">;
   structuredResults: readonly DialogStructuredSubtaskResult[];
 }): { result?: string; blockedReason?: string } {
@@ -738,6 +783,18 @@ function buildConcreteResultFromArtifacts(params: {
     return { result: lines.join("\n") };
   }
 
+  const spreadsheetPathFromSteps = extractArtifactPathFromTaskSteps({
+    taskText: params.taskText,
+    task: params.task,
+  });
+  if (spreadsheetPathFromSteps) {
+    const lines = [`已导出 Excel 文件：${spreadsheetPathFromSteps}`];
+    if (params.structuredResults.length > 0) {
+      lines.push(`本轮已汇总 ${params.structuredResults.length} 个子任务的结构化结果。`);
+    }
+    return { result: lines.join("\n") };
+  }
+
   if (spreadsheetRequired) {
     return {
       blockedReason: `当前任务要求表格交付，但当前 run 没有可用的 ${requestedSpreadsheetExtensions.join('/')} 产物，禁止改写成泛化文件成功提示。`,
@@ -757,27 +814,45 @@ function hasStructuredRowEvidence(
   }).length > 0;
 }
 
+function hasStructuredBlockerEvidence(
+  structuredResults: readonly DialogStructuredSubtaskResult[],
+): boolean {
+  return structuredResults.some((task) =>
+    task.resultKind === "blocker" || Boolean(task.blocker?.trim()),
+  );
+}
+
 function buildSpreadsheetTerminalBlocker(params: {
   taskText: string;
   candidateResult?: string;
   structuredResults: readonly DialogStructuredSubtaskResult[];
   hostExportRepairPlan?: StructuredDeliveryRepairPlan;
   fallbackReason?: string;
+  preferRepair?: boolean;
 }): string | undefined {
   const candidate = String(params.candidateResult ?? "").trim();
+  const shouldPreferRepair = params.preferRepair === true
+    && !hasStructuredBlockerEvidence(params.structuredResults);
   if (!taskRequestsSpreadsheetOutput(params.taskText)) return undefined;
+  const requestedSpreadsheetExtensions = resolveRequestedSpreadsheetExtensions(params.taskText);
   if (!candidate) {
+    if (shouldPreferRepair) return undefined;
     return params.hostExportRepairPlan?.summary ?? params.fallbackReason;
+  }
+  if (extractPathsByExtensions(candidate, requestedSpreadsheetExtensions).length > 0) {
+    return undefined;
   }
   if (/阻塞(?:原因|点)?[:：]?/u.test(candidate) || /无法(?:完成|导出|生成|写入|交付)/u.test(candidate)) {
     return candidate;
   }
   if (isLikelyExecutionPlanReply(candidate) || isLikelyInterimSynthesisReply(candidate)) {
+    if (shouldPreferRepair) return undefined;
     return params.hostExportRepairPlan?.summary
       ?? params.fallbackReason
       ?? "阻塞原因：当前表格任务尚未产生可交付的 Excel 文件，也没有足够的结构化 rows 可供 host 导出。";
   }
   if (!hasStructuredRowEvidence(params.structuredResults)) {
+    if (shouldPreferRepair) return undefined;
     return params.hostExportRepairPlan?.summary
       ?? params.fallbackReason
       ?? "阻塞原因：当前所有子任务都没有返回可导出的结构化 rows，无法构建最终工作簿。";
@@ -906,6 +981,7 @@ export class AgentActor {
   private _workspace?: string;
   private _contextTokens?: number;
   private _thinkingLevel?: ThinkingLevel;
+  private toolResultReplacementState: ToolResultReplacementState;
   private _executionPolicy?: ExecutionPolicy;
   private _middlewareOverrides?: import("./types").MiddlewareOverrides;
   private _dialogExecutionMode: DialogExecutionMode = "execute";
@@ -914,9 +990,11 @@ export class AgentActor {
 
   /** 会话记忆：跨任务保留对话上下文（对标 OpenClaw 持久会话） */
   private sessionHistory: Array<{ role: "user" | "assistant"; content: string; timestamp: number }> = [];
+  /** Claude Code 风格的真实 transcript messages（user / assistant / tool） */
+  private sessionTranscriptMessages: RuntimeTranscriptMessage[] = [];
 
-  /** inboxDrain 捕获的真实用户消息（用于替代 "[inbox]" 占位符写入 sessionHistory） */
-  private _capturedInboxUserQuery?: string;
+  /** inboxDrain 捕获的真实用户消息（用于补录执行中新增的用户输入） */
+  private _capturedInboxUserQueries: string[] = [];
   private _lastMemoryRecallAttempted = false;
   private _lastMemoryRecallPreview: string[] = [];
   private _lastTranscriptRecallAttempted = false;
@@ -930,17 +1008,21 @@ export class AgentActor {
     actorId?: string | null,
   ): void {
     if (!this.actorSystem) return;
-    this.actorSystem.recordDialogFlowEvent({
-      event,
-      actorId: actorId ?? this.id,
-      detail,
-    });
-    traceDialogFlowEvent({
-      sessionId: this.actorSystem.sessionId,
-      actorId: actorId ?? this.id,
-      event,
-      detail,
-    });
+    if (typeof this.actorSystem.recordDialogFlowEvent === "function") {
+      this.actorSystem.recordDialogFlowEvent({
+        event,
+        actorId: actorId ?? this.id,
+        detail,
+      });
+    }
+    if (typeof this.actorSystem.sessionId === "string" && this.actorSystem.sessionId) {
+      traceDialogFlowEvent({
+        sessionId: this.actorSystem.sessionId,
+        actorId: actorId ?? this.id,
+        event,
+        detail,
+      });
+    }
   }
 
   constructor(config: ActorConfig, opts?: {
@@ -966,6 +1048,9 @@ export class AgentActor {
     this._workspace = config.workspace;
     this._contextTokens = config.contextTokens;
     this._thinkingLevel = config.thinkingLevel;
+    this.toolResultReplacementState = createToolResultReplacementState(
+      config.toolResultReplacementSnapshot,
+    );
     const compatState = synchronizeExecutionPolicyCompat({
       executionPolicy: config.executionPolicy,
       middlewareOverrides: config.middlewareOverrides,
@@ -1118,6 +1203,10 @@ export class AgentActor {
     return this._thinkingLevel;
   }
 
+  getToolResultReplacementSnapshot() {
+    return snapshotToolResultReplacementState(this.toolResultReplacementState);
+  }
+
   get toolPolicyConfig(): ToolPolicy | undefined {
     const effective = mergeToolPolicies(
       this.toolPolicy,
@@ -1251,8 +1340,14 @@ export class AgentActor {
       : undefined;
   }
 
-  private getDialogSubagentToolPolicy(params?: { activeOwnerRecord?: boolean }): ToolPolicy | undefined {
+  private getDialogSubagentToolPolicy(params?: {
+    activeOwnerRecord?: boolean;
+    allowStructuredOrchestration?: boolean;
+  }): ToolPolicy | undefined {
     if (params?.activeOwnerRecord) return undefined;
+    if (params?.allowStructuredOrchestration) {
+      return undefined;
+    }
     const subagentEnabled = this.actorSystem?.getDialogSubagentEnabled?.() === true;
     const liveSubagentContext = this.actorSystem?.hasLiveDialogSubagentContext?.() === true;
     if (!this.actorSystem || subagentEnabled || liveSubagentContext) {
@@ -1411,6 +1506,7 @@ export class AgentActor {
       steps: [],
     };
     this.tasks.push(task);
+    const currentSpawnOwnerTaskId = task.id;
     actorInfoLog(this.role.name, "assignTask start", {
       actorId: this.id,
       taskId: task.id,
@@ -1432,6 +1528,7 @@ export class AgentActor {
         ...(detail ?? {}),
       });
     };
+    this.actorSystem?.pruneStaleSpawnedTaskState?.(this.id, currentSpawnOwnerTaskId);
     const getActiveOwnerRecord = () => this.actorSystem?.getSpawnedTasksSnapshot?.()
       .filter((record) =>
         record.targetActorId === this.id
@@ -1450,6 +1547,12 @@ export class AgentActor {
     let hostExportRepairRoundCount = 0;
     const dispatchedRepairSuggestionKeys = new Set<string>();
     let successLock: ActorSuccessLock | null = null;
+    const getActiveSpawnedTasksForCurrentTask = () => this.actorSystem?.getActiveSpawnedTasks(this.id, {
+      ownerTaskId: currentSpawnOwnerTaskId,
+    }) ?? [];
+    const getPendingDeferredSpawnCount = () => this.actorSystem?.getPendingDeferredSpawnTaskCount?.(this.id, {
+      ownerTaskId: currentSpawnOwnerTaskId,
+    }) ?? 0;
     const validateCandidateFinalResult = (candidate: string | undefined) => {
       const ownerRecord = getActiveOwnerRecord();
       if (ownerRecord) {
@@ -1633,7 +1736,7 @@ export class AgentActor {
         return Math.max(0, now - task.startedAt - pausedBudgetMs - activePausedMs);
       };
       const getLatestSpawnActivityAt = (): number => {
-        const activeTasks = this.actorSystem?.getActiveSpawnedTasks(this.id) ?? [];
+        const activeTasks = getActiveSpawnedTasksForCurrentTask();
         return activeTasks.reduce((latest, record) => Math.max(latest, record.lastActiveAt ?? record.spawnedAt), 0);
       };
       const refreshSpawnActivity = () => {
@@ -1667,6 +1770,18 @@ export class AgentActor {
       const throwIfTimedOut = () => {
         if (timeoutErrorMessage) throw new Error(timeoutErrorMessage);
       };
+      const transcriptBridge = this.actorSystem
+        ? createRuntimeTranscriptBridge({
+            sessionId: this.actorSystem.sessionId,
+            actorId: this.id,
+            onToolCall: (toolName, params) => {
+              buildArtifactPayloadFromToolCall(this.id, this.actorSystem!, toolName, params);
+            },
+            onToolResult: (toolName, result) => {
+              buildArtifactPayloadFromToolResult(this.id, this.actorSystem!, toolName, result);
+            },
+          })
+        : null;
       const emitTaskStep = (step: AgentStep) => {
         if (!isTaskActive()) return;
         const stepTimestamp = step.timestamp ?? Date.now();
@@ -1745,15 +1860,7 @@ export class AgentActor {
             preview: lastStreamingAnswerSnapshot.slice(0, 120),
           });
         }
-        if (this.actorSystem && step.toolName) {
-          if (step.type === "action" && step.toolInput) {
-            appendToolCall(this.actorSystem.sessionId, this.id, step.toolName, step.toolInput);
-            buildArtifactPayloadFromToolCall(this.id, this.actorSystem, step.toolName, step.toolInput);
-          } else if (step.type === "observation" && step.toolOutput !== undefined) {
-            appendToolResult(this.actorSystem.sessionId, this.id, step.toolName, step.toolOutput);
-            buildArtifactPayloadFromToolResult(this.id, this.actorSystem, step.toolName, step.toolOutput);
-          }
-        }
+        transcriptBridge?.recordStep(step);
         task.steps = applyIncomingAgentStep(task.steps, step);
         this.emit("step", { taskId: task.id, step });
       };
@@ -1793,7 +1900,7 @@ export class AgentActor {
       }
 
       actorDebugLog(this.role.name, `📝 assignTask: executing with sessionHistory=${this.sessionHistory.length} entries, inbox=${this.inbox.length}`);
-      this._capturedInboxUserQuery = undefined;
+      this._capturedInboxUserQueries = [];
       const { result: initialResult, finalQuery: executedQuery } = await runWithTimeoutGuard(
         this.runWithClarifications(
           query,
@@ -1806,9 +1913,10 @@ export class AgentActor {
       throwIfTimedOut();
       const yieldedForSpawnWait = initialResult === WAIT_FOR_SPAWNED_TASKS_DEFERRED_RESULT;
       let result = yieldedForSpawnWait ? "" : initialResult;
-      const historyQuery = this._capturedInboxUserQuery || executedQuery;
-      this._capturedInboxUserQuery = undefined;
-      this.appendSessionHistory("user", historyQuery);
+      this.appendUserHistoryWithInboxCaptures(
+        executedQuery,
+        this.consumeCapturedInboxUserQueries(),
+      );
       if (!yieldedForSpawnWait) {
         this.appendSessionHistory("assistant", result ?? "");
       }
@@ -1833,11 +1941,12 @@ export class AgentActor {
         });
       };
       const readSpawnRuntimeCounts = () => ({
-        activeCount: this.actorSystem?.getActiveSpawnedTasks(this.id).length ?? 0,
-        queuedCount: this.actorSystem?.getPendingDeferredSpawnTaskCount?.(this.id) ?? 0,
+        activeCount: getActiveSpawnedTasksForCurrentTask().length,
+        queuedCount: getPendingDeferredSpawnCount(),
       });
       const collectStructuredSpawnFollowUps = (): DialogStructuredSubtaskResult[] =>
         this.actorSystem?.collectStructuredSpawnedTaskResults?.(this.id, {
+          ownerTaskId: currentSpawnOwnerTaskId,
           terminalOnly: true,
           excludeRunIds: processedStructuredRunIds,
         }) ?? [];
@@ -1855,6 +1964,8 @@ export class AgentActor {
         const aggregateOnlySpreadsheet = spreadsheetOnly
           && params?.aggregateOnly === true
           && deterministicSpreadsheetHostExport;
+        const requireFunctionCalling = spreadsheetOnly
+          && (params?.stage === "final_synthesis" || params?.stage === "validation_repair");
         const stageLabel = params?.stage === "validation_repair"
           ? "结果修复"
           : params?.stage === "final_synthesis"
@@ -1864,7 +1975,7 @@ export class AgentActor {
           `## ${stageLabel}阶段（高优先级）`,
           "你当前处于父 Agent 的收尾/聚合阶段。",
           "- 本阶段只允许消费结构化子任务结果与当前 run 关联 artifacts，并完成最终交付。",
-          "- 默认不要再次调用 `spawn_task`、`wait_for_spawned_tasks`、`ask_user`、`ask_clarification`、`send_message`、`agents`、`memory_*`、`list_directory`、`read_file`、`read_document`、shell 工具。",
+          "- 默认不要再次调用 `spawn_task`、`wait_for_spawned_tasks`、`ask_user`、`ask_clarification`、`send_message`、`agents`、`memory_*`、`list_directory`、`read_file`、`read_file_range`、`read_document`、`search_in_files`、shell 工具。",
           "- 优先把结构化子任务结果当作主要事实来源，直接完成最终收尾。",
           "- 如果结构化结果里已经有 terminal_result / terminal_error / progressSummary，就不要为了“再确认一次”而重复猜测或重跑派工。",
           "- 只允许引用当前 run 关联 artifacts；禁止扫描 Downloads、历史目录、旧文件和记忆结果。",
@@ -1889,6 +2000,7 @@ export class AgentActor {
           : resolveAggregationAllowedToolNames();
         return {
           ...(opts?.runOverrides ?? {}),
+          requireFunctionCalling: opts?.runOverrides?.requireFunctionCalling ?? requireFunctionCalling,
           toolPolicy: mergeToolPolicies(
             opts?.runOverrides?.toolPolicy,
             {
@@ -1917,6 +2029,8 @@ export class AgentActor {
         const aggregateOnlySpreadsheet = spreadsheetOnly
           && params?.aggregateOnly === true
           && deterministicSpreadsheetHostExport;
+        const requireFunctionCalling = spreadsheetOnly
+          && (params?.stage === "final_synthesis" || params?.stage === "validation_repair");
         const stageLabel = params?.stage === "validation_repair"
           ? "结果修复"
           : params?.stage === "final_synthesis"
@@ -1928,7 +2042,7 @@ export class AgentActor {
           labels.length > 0 ? `需要优先接管的失败子任务：${labels.join("、")}` : "",
           "- 本阶段只允许消费结构化子任务结果与当前 run 关联 artifacts，并完成最终交付。",
           "- 本轮禁止继续调用 `spawn_task` / `delegate_task` / `wait_for_spawned_tasks`。",
-          "- 本轮禁止调用 `ask_user` / `ask_clarification` / `send_message` / `agents` / `memory_*` / `list_directory` / `read_file` / `read_document` / `search_in_files` / shell / `send_local_media`。",
+          "- 本轮禁止调用 `ask_user` / `ask_clarification` / `send_message` / `agents` / `memory_*` / `list_directory` / `read_file` / `read_file_range` / `read_document` / `search_in_files` / shell / `send_local_media`。",
           "- 若用户已经指定文件格式/路径，直接按原要求完成，不要改成中间产物或过程汇报。",
           "- 优先直接产出真实结果：文件路径、导出结果或明确 blocker。",
           aggregateOnlySpreadsheet
@@ -1951,6 +2065,7 @@ export class AgentActor {
           : resolveAggregationAllowedToolNames();
         return {
           ...(opts?.runOverrides ?? {}),
+          requireFunctionCalling: opts?.runOverrides?.requireFunctionCalling ?? requireFunctionCalling,
           toolPolicy: mergeToolPolicies(
             opts?.runOverrides?.toolPolicy,
             {
@@ -2126,21 +2241,23 @@ export class AgentActor {
             ),
           ),
         );
-        this.appendSessionHistory("user", followUpHistoryQuery);
+        this.appendUserHistoryWithInboxCaptures(
+          followUpHistoryQuery,
+          this.consumeCapturedInboxUserQueries(),
+        );
         this.appendSessionHistory("assistant", followUpResult ?? "");
         result = followUpResult ?? result;
         processedSpawnFollowUps++;
         traceTaskFlow("follow_up_rerun_completed", {
           count: processedSpawnFollowUps,
           status: followUp.summary.hasTaskFailure ? "takeover" : "completed",
-          active_count: this.actorSystem?.getActiveSpawnedTasks(this.id).length ?? 0,
+          active_count: getActiveSpawnedTasksForCurrentTask().length,
           queued_count: readSpawnRuntimeCounts().queuedCount,
           buffered_structured_count: accumulatedStructuredTaskResults.size,
           artifact_scope: "current_run",
           preview: previewActorText(followUpResult),
         });
       };
-      const getPendingDeferredSpawnCount = () => this.actorSystem?.getPendingDeferredSpawnTaskCount?.(this.id) ?? 0;
       const waitForSpawnedTasksToDrain = async (params?: {
         phase?: "primary" | "repair_round";
       }) => {
@@ -2149,16 +2266,18 @@ export class AgentActor {
         let localWaitRound = 0;
         while (
           (
-            (this.actorSystem?.getActiveSpawnedTasks(this.id).length ?? 0) > 0
+            getActiveSpawnedTasksForCurrentTask().length > 0
             || getPendingDeferredSpawnCount() > 0
           )
           && waitRound < MAX_WAIT_ROUNDS
         ) {
-          this.actorSystem?.dispatchDeferredSpawnTasks?.(this.id);
+          this.actorSystem?.dispatchDeferredSpawnTasks?.(this.id, {
+            ownerTaskId: currentSpawnOwnerTaskId,
+          });
           if (!localWaitWasActive) {
             localWaitWasActive = true;
             waitWasActive = true;
-            const activeAtStart = this.actorSystem?.getActiveSpawnedTasks(this.id).length ?? 0;
+            const activeAtStart = getActiveSpawnedTasksForCurrentTask().length;
             const queuedAtStart = getPendingDeferredSpawnCount();
             traceTaskFlow("wait_started", {
               phase,
@@ -2174,7 +2293,7 @@ export class AgentActor {
             });
           }
           refreshSpawnActivity();
-          const activeCount = this.actorSystem?.getActiveSpawnedTasks(this.id).length ?? 0;
+          const activeCount = getActiveSpawnedTasksForCurrentTask().length;
           const queuedCount = getPendingDeferredSpawnCount();
           actorDebugLog(this.role.name, `assignTask: waiting for ${activeCount} spawned tasks (round ${waitRound + 1})...`);
           traceTaskFlow("wait_round", {
@@ -2192,11 +2311,13 @@ export class AgentActor {
           }
           throwIfTimedOut();
           refreshSpawnActivity();
-          this.actorSystem?.dispatchDeferredSpawnTasks?.(this.id);
+          this.actorSystem?.dispatchDeferredSpawnTasks?.(this.id, {
+            ownerTaskId: currentSpawnOwnerTaskId,
+          });
           traceTaskFlow("wait_resumed", {
             phase,
             count: waitRound + 1,
-            active_count: this.actorSystem?.getActiveSpawnedTasks(this.id).length ?? 0,
+            active_count: getActiveSpawnedTasksForCurrentTask().length,
             queued_count: getPendingDeferredSpawnCount(),
             inbox_count: this.inbox.length,
           });
@@ -2211,7 +2332,7 @@ export class AgentActor {
           waitRound++;
           localWaitRound++;
           if (waitRound % 12 === 0) {
-            const activeNow = this.actorSystem?.getActiveSpawnedTasks(this.id).length ?? 0;
+            const activeNow = getActiveSpawnedTasksForCurrentTask().length;
             actorDebugLog(this.role.name, `assignTask: still waiting, round=${waitRound}, active=${activeNow}, queued=${getPendingDeferredSpawnCount()}, pollMs=${getWaitPollMs(waitRound)}`);
           }
         }
@@ -2236,7 +2357,7 @@ export class AgentActor {
         if (structuredTaskResults.length > 0) {
           traceTaskFlow("all_children_terminal", {
             phase,
-            active_count: this.actorSystem?.getActiveSpawnedTasks(this.id).length ?? 0,
+            active_count: getActiveSpawnedTasksForCurrentTask().length,
             queued_count: getPendingDeferredSpawnCount(),
             buffered_structured_count: structuredTaskResults.length,
             artifact_scope: "current_run",
@@ -2247,7 +2368,7 @@ export class AgentActor {
           phase,
           local_wait_rounds: localWaitRound,
           count: processedSpawnFollowUps,
-          active_count: this.actorSystem?.getActiveSpawnedTasks(this.id).length ?? 0,
+          active_count: getActiveSpawnedTasksForCurrentTask().length,
           queued_count: getPendingDeferredSpawnCount(),
           completed_count: structuredTaskResults.filter((taskResult) => taskResult.status === "completed").length,
           failed_count: failedCount + timedOutCount,
@@ -2338,6 +2459,26 @@ export class AgentActor {
         const exportableStructuredCount = filterExportableStructuredResults({
           structuredResults: structuredTaskResults,
         }).length;
+        const exportabilitySummary = exportableStructuredCount < structuredTaskResults.length
+          ? inspectStructuredResultExportability({
+            structuredResults: structuredTaskResults,
+            resultSchema: structuredDeliveryManifest.resultSchema,
+          })
+          : [];
+        if (exportabilitySummary.length > 0) {
+          traceTaskFlow("structured_result_exportability", {
+            phase: "host_export",
+            buffered_structured_count: structuredTaskResults.length,
+            exportable_structured_count: exportableStructuredCount,
+            artifact_scope: "current_run",
+            preview: previewActorText(
+              exportabilitySummary
+                .map((entry) => `${entry.label}:${entry.rowCount > 0 ? `rows=${entry.rowCount}` : `rows=0,json=${entry.hasJsonCandidate ? "yes" : "no"},kind=${entry.resultKind}`}`)
+                .join(" | "),
+              240,
+            ),
+          });
+        }
         if (!hostExportPlan) {
           traceTaskFlow("host_export_blocked", {
             phase: "host_export",
@@ -2506,7 +2647,7 @@ export class AgentActor {
         const acceptedRepairLabels: string[] = [];
         const failedRepairLabels: string[] = [];
         const concurrencyLimit = Math.max(1, this.actorSystem?.getDialogSpawnConcurrencyLimit?.() ?? dispatchableSuggestions.length);
-        let projectedActiveCount = this.actorSystem?.getActiveSpawnedTasks(this.id).length ?? 0;
+        let projectedActiveCount = getActiveSpawnedTasksForCurrentTask().length;
 
         for (const suggestion of dispatchableSuggestions) {
           const suggestionTask = suggestion.task?.trim();
@@ -2604,6 +2745,39 @@ export class AgentActor {
         finalValidation = validateFinalResult(result);
         await executeDeterministicHostExport();
       }
+      const resolveStrictFunctionCallingBlocker = (params: {
+        stage: "final_synthesis" | "validation_repair";
+        error: unknown;
+      }): boolean => {
+        if (!(params.error instanceof FunctionCallingRequiredError)) return false;
+        if (!taskRequestsSpreadsheetOutput(query)) return false;
+        const blocker = buildSpreadsheetTerminalBlocker({
+          taskText: query,
+          candidateResult: undefined,
+          structuredResults: structuredTaskResults,
+          hostExportRepairPlan,
+          fallbackReason: params.error.message,
+          preferRepair: false,
+        }) ?? params.error.message;
+        traceTaskFlow("function_calling_required_blocked", {
+          phase: params.stage,
+          status: params.error.reason,
+          buffered_structured_count: structuredTaskResults.length,
+          exportable_structured_count: filterExportableStructuredResults({ structuredResults: structuredTaskResults }).length,
+          artifact_scope: "current_run",
+          preview: previewActorText(blocker),
+        });
+        emitTaskStep({
+          type: "observation",
+          content: `Function Calling 当前不可用，且${params.stage === "final_synthesis" ? "最终综合" : "结果修复"}阶段禁止降级为文本 ReAct；系统已直接按 host blocker 收尾。`,
+          timestamp: Date.now(),
+        });
+        result = blocker.startsWith("阻塞原因")
+          ? blocker
+          : `阻塞原因：${blocker}`;
+        finalValidation = validateFinalResult(result);
+        return true;
+      };
       recoverConcreteArtifactResult();
       if (
         structuredTaskResults.length > 0
@@ -2662,7 +2836,7 @@ export class AgentActor {
         });
         traceTaskFlow("aggregation_started", {
           count: structuredTaskResults.length,
-          active_count: this.actorSystem?.getActiveSpawnedTasks(this.id).length ?? 0,
+          active_count: getActiveSpawnedTasksForCurrentTask().length,
           queued_count: getPendingDeferredSpawnCount(),
           buffered_structured_count: structuredTaskResults.length,
           artifact_scope: "current_run",
@@ -2673,7 +2847,7 @@ export class AgentActor {
           count: structuredTaskResults.length,
           failed_count: structuredTaskResults.filter((taskResult) => taskResult.status === "error" || taskResult.status === "aborted").length,
           status: hadFailedSpawnFollowUp ? "takeover" : "normal",
-          active_count: this.actorSystem?.getActiveSpawnedTasks(this.id).length ?? 0,
+          active_count: getActiveSpawnedTasksForCurrentTask().length,
           queued_count: getPendingDeferredSpawnCount(),
           buffered_structured_count: structuredTaskResults.length,
           artifact_scope: "current_run",
@@ -2699,57 +2873,70 @@ export class AgentActor {
               stage: "final_synthesis",
               aggregateOnly: finalSynthesisAggregateOnly,
             });
-        const { result: finalSynthesisResult, finalQuery: finalSynthesisQuery } = await runWithBudgetPause(
-          "final_synthesis",
-          () => runWithTimeoutGuard(
-            this.runWithClarifications(
-              finalSynthesisPrompt,
-              undefined,
-              emitTaskStep,
-              finalSynthesisRunOverrides,
-              isTaskActive,
+        try {
+          const { result: finalSynthesisResult, finalQuery: finalSynthesisQuery } = await runWithBudgetPause(
+            "final_synthesis",
+            () => runWithTimeoutGuard(
+              this.runWithClarifications(
+                finalSynthesisPrompt,
+                undefined,
+                emitTaskStep,
+                finalSynthesisRunOverrides,
+                isTaskActive,
+              ),
             ),
-          ),
-        );
-        throwIfTimedOut();
-        this.appendSessionHistory("user", finalSynthesisQuery);
-        this.appendSessionHistory("assistant", finalSynthesisResult ?? "");
-        result = finalSynthesisResult ?? result;
-        traceTaskFlow("aggregation_completed", {
-          status: "completed",
-          buffered_structured_count: structuredTaskResults.length,
-          artifact_scope: "current_run",
-          rerun_policy: hadFailedSpawnFollowUp ? "takeover_fallback" : "all_terminal_only",
-          preview: previewActorText(finalSynthesisResult),
-        });
-        traceTaskFlow("final_synthesis_completed", {
-          status: "completed",
-          buffered_structured_count: structuredTaskResults.length,
-          artifact_scope: "current_run",
-          preview: previewActorText(finalSynthesisResult),
-        });
-        finalValidation = validateFinalResult(result);
-        const spreadsheetTerminalBlocker = buildSpreadsheetTerminalBlocker({
-          taskText: query,
-          candidateResult: result,
-          structuredResults: structuredTaskResults,
-          hostExportRepairPlan,
-          fallbackReason: finalValidation.reason,
-        });
-        if (spreadsheetTerminalBlocker) {
-          traceTaskFlow("spreadsheet_terminal_guard_triggered", {
-            status: "blocked",
+          );
+          throwIfTimedOut();
+          this.appendUserHistoryWithInboxCaptures(
+            finalSynthesisQuery,
+            this.consumeCapturedInboxUserQueries(),
+          );
+          this.appendSessionHistory("assistant", finalSynthesisResult ?? "");
+          result = finalSynthesisResult ?? result;
+          traceTaskFlow("aggregation_completed", {
+            status: "completed",
             buffered_structured_count: structuredTaskResults.length,
-            exportable_structured_count: filterExportableStructuredResults({ structuredResults: structuredTaskResults }).length,
             artifact_scope: "current_run",
-            preview: previewActorText(result),
+            rerun_policy: hadFailedSpawnFollowUp ? "takeover_fallback" : "all_terminal_only",
+            preview: previewActorText(finalSynthesisResult),
           });
-          result = spreadsheetTerminalBlocker.startsWith("阻塞原因")
-            ? spreadsheetTerminalBlocker
-            : `阻塞原因：${spreadsheetTerminalBlocker}`;
+          traceTaskFlow("final_synthesis_completed", {
+            status: "completed",
+            buffered_structured_count: structuredTaskResults.length,
+            artifact_scope: "current_run",
+            preview: previewActorText(finalSynthesisResult),
+          });
           finalValidation = validateFinalResult(result);
+          const spreadsheetTerminalBlocker = buildSpreadsheetTerminalBlocker({
+            taskText: query,
+            candidateResult: result,
+            structuredResults: structuredTaskResults,
+            hostExportRepairPlan,
+            fallbackReason: finalValidation.reason,
+            preferRepair: true,
+          });
+          if (spreadsheetTerminalBlocker) {
+            traceTaskFlow("spreadsheet_terminal_guard_triggered", {
+              status: "blocked",
+              buffered_structured_count: structuredTaskResults.length,
+              exportable_structured_count: filterExportableStructuredResults({ structuredResults: structuredTaskResults }).length,
+              artifact_scope: "current_run",
+              preview: previewActorText(result),
+            });
+            result = spreadsheetTerminalBlocker.startsWith("阻塞原因")
+              ? spreadsheetTerminalBlocker
+              : `阻塞原因：${spreadsheetTerminalBlocker}`;
+            finalValidation = validateFinalResult(result);
+          }
+          recoverConcreteArtifactResult();
+        } catch (error) {
+          if (!resolveStrictFunctionCallingBlocker({
+            stage: "final_synthesis",
+            error,
+          })) {
+            throw error;
+          }
         }
-        recoverConcreteArtifactResult();
       }
       if (!finalValidation.accepted) {
         actorWarnLog(this.role.name, "assignTask: final result validation failed", {
@@ -2768,7 +2955,7 @@ export class AgentActor {
         rerunDiagnostics.validationRepairTriggered = true;
         traceTaskFlow("repair_started", {
           status: "repairing",
-          active_count: this.actorSystem?.getActiveSpawnedTasks(this.id).length ?? 0,
+          active_count: getActiveSpawnedTasksForCurrentTask().length,
           queued_count: getPendingDeferredSpawnCount(),
           buffered_structured_count: structuredTaskResults.length,
           artifact_scope: "current_run",
@@ -2849,55 +3036,68 @@ export class AgentActor {
               stage: "validation_repair",
             })
           : buildAggregationRunOverrides({ stage: "validation_repair" });
-        const { result: repairedResult, finalQuery: repairedQuery } = await runWithBudgetPause(
-          "validation_repair",
-          () => runWithTimeoutGuard(
-            this.runWithClarifications(
-              repairPrompt,
-              undefined,
-              emitTaskStep,
-              repairRunOverrides,
-              isTaskActive,
+        try {
+          const { result: repairedResult, finalQuery: repairedQuery } = await runWithBudgetPause(
+            "validation_repair",
+            () => runWithTimeoutGuard(
+              this.runWithClarifications(
+                repairPrompt,
+                undefined,
+                emitTaskStep,
+                repairRunOverrides,
+                isTaskActive,
+              ),
             ),
-          ),
-        );
-        throwIfTimedOut();
-        this.appendSessionHistory("user", repairedQuery);
-        this.appendSessionHistory("assistant", repairedResult ?? "");
-        result = repairedResult ?? result;
-        traceTaskFlow("repair_completed", {
-          status: "completed",
-          buffered_structured_count: structuredTaskResults.length,
-          artifact_scope: "current_run",
-          rerun_policy: hadFailedSpawnFollowUp ? "takeover_fallback" : "all_terminal_only",
-          preview: previewActorText(repairedResult),
-        });
-        traceTaskFlow("validation_repair_completed", {
-          status: "completed",
-          buffered_structured_count: structuredTaskResults.length,
-          artifact_scope: "current_run",
-          preview: previewActorText(repairedResult),
-        });
-        finalValidation = validateFinalResult(result);
-        const spreadsheetTerminalBlocker = buildSpreadsheetTerminalBlocker({
-          taskText: query,
-          candidateResult: result,
-          structuredResults: structuredTaskResults,
-          hostExportRepairPlan,
-          fallbackReason: finalValidation.reason,
-        });
-        if (spreadsheetTerminalBlocker) {
-          traceTaskFlow("final_result_rejected_as_plan_for_spreadsheet", {
-            status: "blocked",
+          );
+          throwIfTimedOut();
+          this.appendUserHistoryWithInboxCaptures(
+            repairedQuery,
+            this.consumeCapturedInboxUserQueries(),
+          );
+          this.appendSessionHistory("assistant", repairedResult ?? "");
+          result = repairedResult ?? result;
+          recoverConcreteArtifactResult();
+          traceTaskFlow("repair_completed", {
+            status: "completed",
             buffered_structured_count: structuredTaskResults.length,
-            exportable_structured_count: filterExportableStructuredResults({ structuredResults: structuredTaskResults }).length,
             artifact_scope: "current_run",
-            preview: previewActorText(result),
+            rerun_policy: hadFailedSpawnFollowUp ? "takeover_fallback" : "all_terminal_only",
+            preview: previewActorText(repairedResult),
           });
-          result = spreadsheetTerminalBlocker.startsWith("阻塞原因")
-            ? spreadsheetTerminalBlocker
-            : `阻塞原因：${spreadsheetTerminalBlocker}`;
+          traceTaskFlow("validation_repair_completed", {
+            status: "completed",
+            buffered_structured_count: structuredTaskResults.length,
+            artifact_scope: "current_run",
+            preview: previewActorText(repairedResult),
+          });
           finalValidation = validateFinalResult(result);
+          const spreadsheetTerminalBlocker = buildSpreadsheetTerminalBlocker({
+            taskText: query,
+            candidateResult: result,
+            structuredResults: structuredTaskResults,
+            hostExportRepairPlan,
+            fallbackReason: finalValidation.reason,
+          });
+          if (spreadsheetTerminalBlocker) {
+            traceTaskFlow("final_result_rejected_as_plan_for_spreadsheet", {
+              status: "blocked",
+              buffered_structured_count: structuredTaskResults.length,
+              exportable_structured_count: filterExportableStructuredResults({ structuredResults: structuredTaskResults }).length,
+              artifact_scope: "current_run",
+              preview: previewActorText(result),
+            });
+            result = spreadsheetTerminalBlocker.startsWith("阻塞原因")
+              ? spreadsheetTerminalBlocker
+              : `阻塞原因：${spreadsheetTerminalBlocker}`;
+            finalValidation = validateFinalResult(result);
+          }
+        } catch (error) {
+          if (!resolveStrictFunctionCallingBlocker({
+            stage: "validation_repair",
+            error,
+          })) {
+            throw error;
+          }
         }
         actorDebugLog(this.role.name, "assignTask: final result revalidation", {
           accepted: finalValidation.accepted,
@@ -3238,9 +3438,22 @@ export class AgentActor {
     return selected;
   }
 
+  private buildTranscriptMessages(): RuntimeTranscriptMessage[] | undefined {
+    if (this.sessionTranscriptMessages.length === 0) return undefined;
+    const budget = this._contextTokens ?? 8000;
+    return trimTranscriptMessagesToBudget(
+      prepareTranscriptMessagesForResume(this.sessionTranscriptMessages),
+      budget,
+    );
+  }
+
   /** 导出 sessionHistory（用于持久化） */
   getSessionHistory(): Array<{ role: "user" | "assistant"; content: string; timestamp: number }> {
     return [...this.sessionHistory];
+  }
+
+  getTranscriptMessages(): RuntimeTranscriptMessage[] {
+    return cloneTranscriptMessages(this.sessionTranscriptMessages);
   }
 
   /** 导入 sessionHistory（用于恢复） */
@@ -3248,9 +3461,15 @@ export class AgentActor {
     this.sessionHistory = history.slice(-50); // 限制大小
   }
 
+  loadTranscriptMessages(messages: RuntimeTranscriptMessage[]): void {
+    const normalized = prepareTranscriptMessagesForResume(messages);
+    this.sessionTranscriptMessages = normalized.slice(-120);
+  }
+
   /** 清空 sessionHistory（重置 session 时调用） */
   clearSessionHistory(): void {
     this.sessionHistory = [];
+    this.sessionTranscriptMessages = [];
   }
 
   /** 获取 systemPromptOverride（用于快照） */
@@ -3260,10 +3479,37 @@ export class AgentActor {
 
   /** 追加到会话记忆 */
   private appendSessionHistory(role: "user" | "assistant", content: string): void {
-    this.sessionHistory.push({ role, content, timestamp: Date.now() });
+    const normalized = String(content ?? "").trim();
+    if (!normalized) return;
+    this.sessionHistory.push({ role, content: normalized, timestamp: Date.now() });
     const MAX_TOTAL = 50;
     if (this.sessionHistory.length > MAX_TOTAL) {
       this.sessionHistory = this.sessionHistory.slice(-MAX_TOTAL);
+    }
+  }
+
+  private consumeCapturedInboxUserQueries(): string[] {
+    if (this._capturedInboxUserQueries.length === 0) return [];
+    const captured = [...this._capturedInboxUserQueries];
+    this._capturedInboxUserQueries = [];
+    return captured;
+  }
+
+  private appendUserHistoryWithInboxCaptures(
+    primaryQuery: string,
+    capturedInboxUserQueries?: readonly string[],
+  ): void {
+    const normalizedPrimary = String(primaryQuery ?? "").trim();
+    const appended = new Set<string>();
+    if (normalizedPrimary) {
+      this.appendSessionHistory("user", normalizedPrimary);
+      appended.add(normalizedPrimary);
+    }
+    for (const item of capturedInboxUserQueries ?? []) {
+      const normalized = String(item ?? "").trim();
+      if (!normalized || appended.has(normalized)) continue;
+      this.appendSessionHistory("user", normalized);
+      appended.add(normalized);
     }
   }
 
@@ -3566,7 +3812,7 @@ export class AgentActor {
         throw new Error(this._abortReason ?? "Aborted");
       }
     };
-    const activeImageRefs = new Set<string>((images ?? []).filter(Boolean));
+    const initialImageRefs = [...new Set((images ?? []).filter(Boolean))];
     const activeOwnerRecord = this.actorSystem?.getSpawnedTasksSnapshot?.()
       .filter((record) =>
         record.targetActorId === this.id
@@ -3689,9 +3935,22 @@ export class AgentActor {
     const hasExplicitStructuredDeliveryContext =
       !activeOwnerRecord
       && (adapterExplicitlyEngaged || hasPlannerOwnedStructuredDeliveryContext);
+    const hasStrategyOwnedStructuredDeliveryContext =
+      !activeOwnerRecord
+      && structuredDeliveryManifest.source === "strategy"
+      && structuredDeliveryManifest.applyInitialIsolation
+      && (
+        structuredDeliveryManifest.deliveryContract !== "general"
+        || structuredDeliveryManifest.parentContract !== "general"
+        || Boolean(structuredDeliveryStrategyReferenceId)
+        || (structuredDeliveryManifest.targets?.length ?? 0) > 0
+        || (structuredDeliveryManifest.resultSchema?.fields?.length ?? 0) > 0
+      );
+    const hasStructuredDeliveryGuidanceContext =
+      hasExplicitStructuredDeliveryContext || hasStrategyOwnedStructuredDeliveryContext;
     const shouldApplyInitialStructuredDeliveryIsolation =
-      hasExplicitStructuredDeliveryContext && structuredDeliveryManifest.applyInitialIsolation;
-    const shouldSuggestStructuredDeliveryAdapter = hasExplicitStructuredDeliveryContext && (
+      hasStructuredDeliveryGuidanceContext && structuredDeliveryManifest.applyInitialIsolation;
+    const shouldSuggestStructuredDeliveryAdapter = hasStructuredDeliveryGuidanceContext && (
       Boolean(structuredDeliveryStrategyReferenceId)
       || (structuredDeliveryManifest.targets?.length ?? 0) > 0
       || (structuredDeliveryManifest.resultSchema?.fields?.length ?? 0) > 0
@@ -3716,13 +3975,6 @@ export class AgentActor {
           manifest: structuredDeliveryManifest,
         })
       : "";
-    const mergeActiveImages = (nextImages?: string[]) => {
-      if (!nextImages?.length) return;
-      for (const image of nextImages) {
-        const normalized = String(image ?? "").trim();
-        if (normalized) activeImageRefs.add(normalized);
-      }
-    };
     const structuredDispatchPlan = shouldSuggestStructuredDeliveryAdapter
       && !/(?:结构化子任务摘要|你派发的子任务现在都已经结束)/u.test(query)
       ? buildStructuredDispatchPlanFromContract({
@@ -3736,6 +3988,10 @@ export class AgentActor {
         manifest: structuredDeliveryManifest,
       }) ?? null
       : null;
+    const allowStructuredOrchestration = !activeOwnerRecord
+      && shouldApplyInitialStructuredDeliveryIsolation
+      && structuredDeliveryManifest.deliveryContract === "spreadsheet"
+      && structuredDeliveryManifest.parentContract === "single_workbook";
     const initialStructuredDispatchSuggestion = structuredDispatchPlan
       ? buildStructuredDispatchSuggestionBlock({
           dispatchPlan: structuredDispatchPlan,
@@ -3781,6 +4037,7 @@ export class AgentActor {
       this.getDialogExecutionModeToolPolicy(),
       this.getDialogSubagentToolPolicy({
         activeOwnerRecord: Boolean(activeOwnerRecord),
+        allowStructuredOrchestration,
       }),
       shouldApplyInitialStructuredDeliveryIsolation
         ? {
@@ -3811,216 +4068,196 @@ export class AgentActor {
       maxIterations: effectiveMaxIterations,
       thinkingLevel: effectiveThinkingLevel ?? "adaptive",
       inboxSize: this.inbox.length,
-      imageCount: activeImageRefs.size,
+      imageCount: initialImageRefs.length,
       queryPreview: previewActorText(query),
     });
+    if (allowStructuredOrchestration) {
+      this.traceFlow("structured_orchestration_tools_enabled", {
+        task_id: this.currentTask?.id,
+        phase: "initial_orchestration",
+        count: structuredDispatchPlan?.shards.length ?? 0,
+        delivery_contract: structuredDeliveryManifest.deliveryContract,
+        parent_contract: structuredDeliveryManifest.parentContract,
+        tool_policy_source: "structured_dispatch_plan",
+        preview: previewActorText(structuredDeliveryManifest.tracePreview ?? query),
+      });
+    }
     ensureTaskStillActive();
     this.traceFlow("llm_round_started", {
       task_id: this.currentTask?.id,
       model: effectiveModelOverride ?? "default",
       count: 1,
-      image_count: activeImageRefs.size,
+      image_count: initialImageRefs.length,
       preview: previewActorText(query),
     });
-
-    const ctx: ActorRunContext = {
-      query,
-      images,
-      getCurrentImages: () => (activeImageRefs.size > 0 ? [...activeImageRefs] : undefined),
-      onStep,
-      actorId: this.id,
-      role: this.role,
-      modelOverride: effectiveModelOverride,
-      maxIterations: effectiveMaxIterations,
-      systemPromptOverride: effectiveSystemPromptOverride,
-      workspace: this._workspace,
-      contextTokens: effectiveContextTokens,
-      toolPolicy: effectiveToolPolicy,
-      executionPolicy: effectiveExecutionPolicy,
-      executionMode: this._dialogExecutionMode,
-      actorSystem: this.actorSystem,
-      askUser: this.askUser,
-      confirmDangerousAction: this.confirmDangerousAction,
-      extraTools: this.extraTools,
-      middlewareOverrides: effectiveMiddlewareOverrides,
-      tools: [],
-      rolePrompt: "",
-      hasCodingWorkflowSkill: false,
-      fcCompatibilityKey: "",
-      contextMessages: this.buildContextMessages(),
-    };
-
-    await runMiddlewareChain(createDefaultMiddlewares({
+    const middlewares = createDefaultMiddlewares({
       isSubagent: Boolean(activeOwnerRecord),
-    }), ctx);
-    ensureTaskStillActive();
-    actorInfoLog(this.role.name, "runWithInbox middleware completed", {
-      actorId: this.id,
-      toolCount: ctx.tools.length,
-      contextMessageCount: ctx.contextMessages.length,
-      hasSkillsPrompt: Boolean(ctx.skillsPrompt),
-      hasMemoryPrompt: Boolean(ctx.userMemoryPrompt),
     });
-    this._lastMemoryRecallAttempted = ctx.memoryRecallAttempted === true;
-    this._lastMemoryRecallPreview = [...(ctx.appliedMemoryPreview ?? [])];
-    this._lastTranscriptRecallAttempted = ctx.transcriptRecallAttempted === true;
-    this._lastTranscriptRecallHitCount = Math.max(0, ctx.transcriptRecallHitCount ?? 0);
-    this._lastTranscriptRecallPreview = [...(ctx.appliedTranscriptPreview ?? [])];
+    const defaultProductMode = this.actorSystem?.defaultProductMode === "review"
+      ? "dialog"
+      : this.actorSystem?.defaultProductMode ?? "dialog";
+    const queryEngine = new QueryEngine({
+      productMode: defaultProductMode,
+      modelOverride: effectiveModelOverride,
+      currentTaskId: this.currentTask?.id,
+      thinkingLevel: effectiveThinkingLevel,
+      temperature: effectiveTemperature,
+      middlewares,
+      isTaskActive,
+      drainInbox: () => {
+        const drained = this.drainInbox();
+        if (drained.length > 0) {
+          actorDebugLog(this.role.name, `inboxDrain: ${drained.length} messages drained`);
+        }
+        return drained;
+      },
+      resolveInboxSenderName: (from) => (
+        from === "user"
+          ? "用户"
+          : (this.actorSystem?.get(from)?.role.name ?? from)
+      ),
+      onTraceEvent: (event, detail) => {
+        if (isTaskActive?.() === false) return;
+        this.traceFlow(event, detail);
+      },
+      onVisibleToolNames: (visibleToolNames) => {
+        this.traceFlow("tool_policy_snapshot", {
+          task_id: this.currentTask?.id,
+          count: visibleToolNames.length,
+          allowed_tool_count: visibleToolNames.length,
+          manifest_source: !activeOwnerRecord ? structuredDeliveryManifest.source : undefined,
+          strategy_id: !activeOwnerRecord ? structuredDeliveryManifest.strategyId : undefined,
+          recommended_strategy_id: !activeOwnerRecord ? structuredDeliveryManifest.recommendedStrategyId : undefined,
+          delivery_contract: structuredDeliveryContract,
+          task_contract: activeOwnerRecord ? "child_partial" : "parent_final",
+          child_contract: activeOwnerRecord?.executionIntent === "content_executor"
+            ? "structured_partial"
+            : activeOwnerRecord?.executionIntent,
+          parent_contract: !activeOwnerRecord
+            ? structuredDeliveryManifest.parentContract
+            : undefined,
+          tool_policy_source: activeOwnerRecord?.executionIntent
+            ? activeOwnerRecord.workerProfileId
+              ? `${activeOwnerRecord.workerProfileId}_profile`
+              : `${activeOwnerRecord.executionIntent}_intent`
+            : shouldApplyInitialStructuredDeliveryIsolation
+              ? "strict_orchestration"
+              : "actor_runtime",
+          worker_profile: activeOwnerRecord?.workerProfileId,
+          execution_intent: activeOwnerRecord?.executionIntent,
+          status: activeOwnerRecord?.roleBoundary ?? undefined,
+          preview: previewActorText(visibleToolNames.slice(0, 12).join(", "), 160),
+        });
+      },
+      onMiddlewareCompleted: (ctxSnapshot) => {
+        actorInfoLog(this.role.name, "runWithInbox middleware completed", {
+          actorId: this.id,
+          toolCount: ctxSnapshot.toolCount,
+          contextMessageCount: ctxSnapshot.contextMessageCount,
+          hasSkillsPrompt: ctxSnapshot.hasSkillsPrompt,
+          hasMemoryPrompt: ctxSnapshot.hasMemoryPrompt,
+        });
+        this._lastMemoryRecallAttempted = ctxSnapshot.memoryRecallAttempted;
+        this._lastMemoryRecallPreview = [...ctxSnapshot.appliedMemoryPreview];
+        this._lastTranscriptRecallAttempted = ctxSnapshot.transcriptRecallAttempted;
+        this._lastTranscriptRecallHitCount = ctxSnapshot.transcriptRecallHitCount;
+        this._lastTranscriptRecallPreview = [...ctxSnapshot.appliedTranscriptPreview];
+        actorInfoLog(this.role.name, "runWithInbox invoking llm", {
+          actorId: this.id,
+          model: effectiveModelOverride ?? "default",
+          toolCount: ctxSnapshot.toolCount,
+          hasRetry: ctxSnapshot.hasRetry,
+          imageCount: initialImageRefs.length,
+          queryPreview: previewActorText(query),
+        });
+      },
+      onContextRecovery: async (error) => {
+        const recovered = await this.tryRecoverDialogContextPressure(query, onStep, error);
+        if (recovered) {
+          this.traceFlow("llm_retry", {
+            task_id: this.currentTask?.id,
+            model: effectiveModelOverride ?? "default",
+            status: "context_recovered",
+          });
+        }
+        return recovered;
+      },
+    });
 
     this.abortController = new AbortController();
     const signal = this.abortController.signal;
-    const ai = getMToolsAI(this.actorSystem?.defaultProductMode ?? "dialog");
-
-    const agent = new ReActAgent(
-      ai,
-      ctx.tools,
-      {
-        maxIterations: effectiveMaxIterations,
-        verbose: true,
-        onTraceEvent: (event, detail) => {
-          if (isTaskActive?.() === false) return;
-          this.traceFlow(event, {
-            task_id: this.currentTask?.id,
-            ...(detail ?? {}),
-          });
-        },
-        fcCompatibilityKey: ctx.fcCompatibilityKey,
-        temperature: effectiveTemperature,
-        initialMode: "execute",
-        userMemoryPrompt: ctx.userMemoryPrompt,
-      skillsPrompt: ctx.skillsPrompt,
-      skipInternalCodingBlock: ctx.hasCodingWorkflowSkill,
-      roleOverride: ctx.rolePrompt || undefined,
-      dangerousToolPatterns: ["write_file", "run_shell_command", "native_"],
-      confirmDangerousAction: this.confirmDangerousAction,
-        onToolExecuted: ctx.notifyToolCalled,
-      modelOverride: effectiveModelOverride,
-      thinkingLevel: effectiveThinkingLevel,
-      contextBudget: effectiveContextTokens,
-      contextMessages: ctx.contextMessages,
-      patchDanglingToolCalls: ctx.patchDanglingToolCalls === true,
-      loopDetection: ctx.loopDetectionConfig,
-      authoritativeToolList: true,
-      inboxDrain: () => {
-          if (isTaskActive?.() === false) return [];
-          const drained = this.drainInbox();
-          if (drained.length > 0) {
-            actorDebugLog(this.role.name, `inboxDrain: ${drained.length} messages drained`);
-            drained.forEach((message) => mergeActiveImages(message.images));
-            if (!this._capturedInboxUserQuery) {
-              const userMsgs = drained.filter((m) => m.from === "user");
-              if (userMsgs.length > 0) {
-                this._capturedInboxUserQuery = userMsgs.map((m) => m.content).join("\n\n");
-              }
-            }
-          }
-          return drained.map((m) => ({
-            ...m,
-            from: (m.from === "user") ? "用户" : (this.actorSystem?.get(m.from)?.role.name ?? m.from),
-          }));
-        },
-      },
-      (step) => {
-        if (isTaskActive?.() === false) return;
-        onStep?.(step);
-      },
-    );
-    const visibleToolNames = agent.listVisibleToolNames();
-    this.traceFlow("tool_policy_snapshot", {
-      task_id: this.currentTask?.id,
-      count: visibleToolNames.length,
-      allowed_tool_count: visibleToolNames.length,
-      manifest_source: !activeOwnerRecord ? structuredDeliveryManifest.source : undefined,
-      strategy_id: !activeOwnerRecord ? structuredDeliveryManifest.strategyId : undefined,
-      recommended_strategy_id: !activeOwnerRecord ? structuredDeliveryManifest.recommendedStrategyId : undefined,
-      delivery_contract: structuredDeliveryContract,
-      task_contract: activeOwnerRecord ? "child_partial" : "parent_final",
-      child_contract: activeOwnerRecord?.executionIntent === "content_executor"
-        ? "structured_partial"
-        : activeOwnerRecord?.executionIntent,
-      parent_contract: !activeOwnerRecord
-        ? structuredDeliveryManifest.parentContract
-        : undefined,
-      tool_policy_source: activeOwnerRecord?.executionIntent
-        ? activeOwnerRecord.workerProfileId
-          ? `${activeOwnerRecord.workerProfileId}_profile`
-          : `${activeOwnerRecord.executionIntent}_intent`
-        : shouldApplyInitialStructuredDeliveryIsolation
-          ? "strict_orchestration"
-          : "actor_runtime",
-      worker_profile: activeOwnerRecord?.workerProfileId,
-      execution_intent: activeOwnerRecord?.executionIntent,
-      status: activeOwnerRecord?.roleBoundary ?? undefined,
-      preview: previewActorText(visibleToolNames.slice(0, 12).join(", "), 160),
-    });
-
-    let llmAttempt = 0;
     try {
-      actorInfoLog(this.role.name, "runWithInbox invoking llm", {
-        actorId: this.id,
-        model: effectiveModelOverride ?? "default",
-        toolCount: ctx.tools.length,
-        hasRetry: Boolean(ctx.withRetry && ctx.retryConfig),
-        imageCount: activeImageRefs.size,
-        queryPreview: previewActorText(query),
-      });
-      const invokeAgent = async () => {
-        llmAttempt += 1;
-        if (llmAttempt > 1) {
-          this.traceFlow("llm_retry", {
-            task_id: this.currentTask?.id,
-            count: llmAttempt - 1,
-            model: effectiveModelOverride ?? "default",
-          });
-        }
-        return agent.run(query, signal, images);
-      };
-      if (ctx.withRetry && ctx.retryConfig) {
-        const retryConf = ctx.retryConfig as Required<typeof ctx.retryConfig>;
-        const answer = await ctx.withRetry(() => invokeAgent(), retryConf, `LLM call for ${this.role.name}`);
-        ensureTaskStillActive();
-        actorInfoLog(this.role.name, "runWithInbox llm completed", {
+      const engineResult = await queryEngine.run({
+        query,
+        images,
+        signal,
+        retryLabel: `LLM call for ${this.role.name}`,
+        allowContextRecovery,
+        createRunContext: (messageStore): ActorRunContext => ({
+          query,
+          images,
+          getCurrentImages: () => messageStore.getCurrentImages(),
+          onStep,
           actorId: this.id,
-          answerPreview: previewActorText(answer),
-        });
-        this.traceFlow("llm_round_completed", {
-          task_id: this.currentTask?.id,
-          model: effectiveModelOverride ?? "default",
-          status: "completed",
-          count: llmAttempt,
-          preview: previewActorText(answer),
-        });
-        return answer;
-      }
-      const answer = await invokeAgent();
+          role: this.role,
+          modelOverride: effectiveModelOverride,
+          maxIterations: effectiveMaxIterations,
+          systemPromptOverride: effectiveSystemPromptOverride,
+          workspace: this._workspace,
+          contextTokens: effectiveContextTokens,
+          toolPolicy: effectiveToolPolicy,
+          executionPolicy: effectiveExecutionPolicy,
+          executionMode: this._dialogExecutionMode,
+          actorSystem: this.actorSystem,
+          askUser: this.askUser,
+          confirmDangerousAction: this.confirmDangerousAction,
+          extraTools: this.extraTools,
+          middlewareOverrides: effectiveMiddlewareOverrides,
+          tools: [],
+          rolePrompt: "",
+          hasCodingWorkflowSkill: false,
+          fcCompatibilityKey: "",
+          contextMessages: this.sessionTranscriptMessages.length > 0
+            ? []
+            : this.buildContextMessages(),
+          transcriptMessages: this.buildTranscriptMessages(),
+          requireFunctionCalling: runOverrides?.requireFunctionCalling,
+          toolResultReplacementState: this.toolResultReplacementState,
+          toolResultReplacementSnapshot: this.getToolResultReplacementSnapshot(),
+          onConversationMessagesUpdated: (messages) => {
+            this.loadTranscriptMessages(messages);
+          },
+        }),
+      });
       ensureTaskStillActive();
-      actorInfoLog(this.role.name, "runWithInbox llm completed", {
-        actorId: this.id,
-        answerPreview: previewActorText(answer),
-      });
-      this.traceFlow("llm_round_completed", {
-        task_id: this.currentTask?.id,
-        model: effectiveModelOverride ?? "default",
-        status: "completed",
-        count: llmAttempt,
-        preview: previewActorText(answer),
-      });
-      return answer;
-    } catch (error) {
-      if (error instanceof WaitForSpawnedTasksInterrupt) {
+      this._capturedInboxUserQueries = [...(engineResult.capturedInboxUserQueries ?? [])];
+      if (engineResult.status === "spawn_wait") {
         actorInfoLog(this.role.name, "runWithInbox deferred to spawned-task wait", {
           actorId: this.id,
-          pendingSummary: error.summary,
+          pendingSummary: engineResult.summary,
         });
         this.traceFlow("llm_round_completed", {
           task_id: this.currentTask?.id,
           model: effectiveModelOverride ?? "default",
           status: "spawn_wait",
-          count: llmAttempt,
-          preview: previewActorText(error.summary ?? "等待子任务结果"),
+          count: engineResult.attempts,
+          preview: previewActorText(engineResult.summary ?? "等待子任务结果"),
         });
         return WAIT_FOR_SPAWNED_TASKS_DEFERRED_RESULT;
       }
+      actorInfoLog(this.role.name, "runWithInbox llm completed", {
+        actorId: this.id,
+        answerPreview: previewActorText(engineResult.result),
+      });
+      this.traceFlow("llm_round_completed", {
+        task_id: this.currentTask?.id,
+        model: effectiveModelOverride ?? "default",
+        status: "completed",
+        count: engineResult.attempts,
+        preview: previewActorText(engineResult.result),
+      });
+      return engineResult.result;
+    } catch (error) {
       actorErrorLog(this.role.name, "runWithInbox llm failed", {
         actorId: this.id,
         error: error instanceof Error ? error.message : String(error),
@@ -4031,17 +4268,6 @@ export class AgentActor {
         status: "failed",
         preview: previewActorText(error instanceof Error ? error.message : String(error)),
       });
-      const recovered = allowContextRecovery
-        ? await this.tryRecoverDialogContextPressure(query, onStep, error)
-        : false;
-      if (recovered) {
-        this.traceFlow("llm_retry", {
-          task_id: this.currentTask?.id,
-          model: effectiveModelOverride ?? "default",
-          status: "context_recovered",
-        });
-        return this.runWithInbox(query, activeImageRefs.size > 0 ? [...activeImageRefs] : images, onStep, runOverrides, false);
-      }
       throw error;
     } finally {
       this.abortController = null;

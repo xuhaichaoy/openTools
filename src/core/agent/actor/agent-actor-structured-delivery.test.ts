@@ -64,6 +64,7 @@ vi.mock("./actor-middleware", async (importOriginal) => {
 vi.mock("@/plugins/builtin/SmartAgent/core/react-agent", () => ({
   WAIT_FOR_SPAWNED_TASKS_DEFERRED_RESULT: "__WAIT_FOR_SPAWNED_TASKS_DEFERRED__",
   WaitForSpawnedTasksInterrupt: class WaitForSpawnedTasksInterrupt extends Error {},
+  FunctionCallingRequiredError: class FunctionCallingRequiredError extends Error {},
   ReActAgent: class MockReActAgent {
     private readonly tools: Array<{ name: string }>;
 
@@ -85,7 +86,7 @@ vi.mock("@/plugins/builtin/SmartAgent/core/react-agent", () => ({
 import { AgentActor, DIALOG_FULL_ROLE } from "./agent-actor";
 
 describe("AgentActor structured spreadsheet delivery isolation", () => {
-  it("keeps spreadsheet orchestration prompt-driven on the first turn", async () => {
+  it("applies strict isolation for strategy-inferred single_workbook delivery on the first turn", async () => {
     const spawnTask = vi.fn((spawnerActorId: string, targetActorId: string, task: string, opts?: Record<string, unknown>) => ({
       runId: `${targetActorId}-run`,
       spawnerActorId,
@@ -121,10 +122,10 @@ describe("AgentActor structured spreadsheet delivery isolation", () => {
     expect(spawnTask).not.toHaveBeenCalled();
     expect(hoisted.visibleToolNames).toEqual([
       "read_document",
+      "spawn_task",
+      "wait_for_spawned_tasks",
       "export_spreadsheet",
       "task_done",
-      "write_file",
-      "run_shell_command",
     ]);
   });
 });

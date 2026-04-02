@@ -3,8 +3,12 @@ import type { ActorEvent, DialogMessage } from "./types";
 import {
   formatDialogTraceLine,
   getDialogStepTraceMode,
+  getDialogTraceScopeKey,
+  registerDialogTraceActorSystemInstance,
   setDialogStepTraceMode,
   shouldTraceDialogStep,
+  unregisterDialogTraceActorSystemInstance,
+  updateDialogTraceActorSystemSession,
 } from "./dialog-step-trace";
 
 afterEach(() => {
@@ -80,5 +84,81 @@ describe("dialog-step-trace", () => {
       content: "调用 read_file",
       timestamp: 1,
     })).toBe(true);
+  });
+
+  it("tracks rapid actor-system replacement only within the same trace scope", () => {
+    const sharedContext = {
+      surface: "local_dialog" as const,
+      ownerId: "dialog_main",
+      runtimeKey: "local_dialog::replacement-test",
+    };
+    const otherScopeContext = {
+      surface: "local_dialog" as const,
+      ownerId: "dialog_main",
+      runtimeKey: "local_dialog::replacement-test-other",
+    };
+
+    const initial = registerDialogTraceActorSystemInstance({
+      sessionId: "session-scope-a",
+      traceContext: sharedContext,
+      timestamp: 1_000,
+    });
+    const replaced = registerDialogTraceActorSystemInstance({
+      sessionId: "session-scope-b",
+      traceContext: sharedContext,
+      timestamp: 1_800,
+    });
+    const isolated = registerDialogTraceActorSystemInstance({
+      sessionId: "session-scope-c",
+      traceContext: otherScopeContext,
+      timestamp: 1_900,
+    });
+
+    expect(initial.replacedSessionId).toBeUndefined();
+    expect(replaced.replacedSessionId).toBe("session-scope-a");
+    expect(replaced.elapsedMs).toBe(800);
+    expect(isolated.replacedSessionId).toBeUndefined();
+    expect(getDialogTraceScopeKey(sharedContext)).not.toBe(getDialogTraceScopeKey(otherScopeContext));
+
+    unregisterDialogTraceActorSystemInstance({
+      sessionId: "session-scope-b",
+      traceContext: sharedContext,
+    });
+    unregisterDialogTraceActorSystemInstance({
+      sessionId: "session-scope-c",
+      traceContext: otherScopeContext,
+    });
+  });
+
+  it("rebinds the registered actor-system session when a restored session id is adopted", () => {
+    const traceContext = {
+      surface: "im_conversation" as const,
+      ownerId: "dingtalk",
+      runtimeKey: "im::conversation::restore-test",
+    };
+
+    registerDialogTraceActorSystemInstance({
+      sessionId: "session-before-restore",
+      traceContext,
+      timestamp: 2_000,
+    });
+    updateDialogTraceActorSystemSession({
+      previousSessionId: "session-before-restore",
+      nextSessionId: "session-restored",
+      traceContext,
+    });
+    const replacement = registerDialogTraceActorSystemInstance({
+      sessionId: "session-after-restore",
+      traceContext,
+      timestamp: 3_000,
+    });
+
+    expect(replacement.replacedSessionId).toBe("session-restored");
+    expect(replacement.elapsedMs).toBe(1_000);
+
+    unregisterDialogTraceActorSystemInstance({
+      sessionId: "session-after-restore",
+      traceContext,
+    });
   });
 });

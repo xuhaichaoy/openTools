@@ -10,7 +10,6 @@ import {
   deriveToolPolicyForAccessMode,
   normalizeExecutionPolicy,
   resolveExecutionPolicyInheritance,
-  type NormalizedExecutionPolicy,
 } from "./execution-policy";
 export {
   DEFAULT_ACCESS_MODE,
@@ -270,10 +269,73 @@ function assessPackageManagerCommand(parts: string[]): { risk: ToolApprovalRisk;
   return { risk: "medium", reason: "命令可能执行项目脚本，自动审核建议谨慎确认" };
 }
 
+export function detectSuspiciousShellCommand(command: string): string | null {
+  const normalized = normalizeWhitespace(command);
+  if (!normalized) return null;
+
+  const stuckSleepMatch = normalized.match(/^sleep(\d+(?:\.\d+)?)\b/i);
+  if (stuckSleepMatch) {
+    return `命令看起来把 sleep 和秒数粘连了，建议先修正为“sleep ${stuckSleepMatch[1]}”后再执行`;
+  }
+
+  const missingSpaceBeforeFlags = normalized.match(
+    /^(ls|find|rg|grep|cat|head|tail|sed|wc|stat|du|basename|dirname|realpath)(-[A-Za-z0-9]+)/i,
+  );
+  if (missingSpaceBeforeFlags) {
+    const commandName = missingSpaceBeforeFlags[1] ?? "命令";
+    const flagPart = missingSpaceBeforeFlags[2] ?? "";
+    return `命令看起来缺少空格，建议先修正为“${commandName} ${flagPart} ...”后再执行`;
+  }
+
+  const missingSpaceMatch = normalized.match(
+    /^(find|rg|grep|ls|cat|head|tail|sed|wc|stat|du|basename|dirname|realpath)(\/|~\/|\.{1,2}\/)/i,
+  );
+  if (missingSpaceMatch) {
+    const commandName = missingSpaceMatch[1] ?? "命令";
+    return `命令看起来缺少空格，建议先修正为“${commandName} <path> ...”后再执行`;
+  }
+
+  return null;
+}
+
+export function detectBlockedSleepPattern(command: string): string | null {
+  const segments = splitShellSegments(command);
+  if (segments.length === 0) return null;
+  const first = segments[0]?.trim() ?? "";
+  const match = /^sleep\s+(\d+)\s*$/.exec(first);
+  if (!match) return null;
+  const seconds = Number.parseInt(match[1] ?? "", 10);
+  if (!Number.isFinite(seconds) || seconds < 2) return null;
+  const rest = segments.slice(1).join(" ").trim();
+  return rest ? `sleep ${seconds} followed by: ${rest}` : `standalone sleep ${seconds}`;
+}
+
+export function detectRejectedShellCommand(command: string): string | null {
+  const normalized = normalizeWhitespace(command);
+  if (!normalized) return null;
+
+  const sleepPattern = detectBlockedSleepPattern(normalized);
+  if (sleepPattern) {
+    return `Blocked: ${sleepPattern}. 不要用 shell 盲等；如需等待子任务，请改用 wait_for_spawned_tasks。若只是节流/短暂延迟，请控制在 2 秒以内。`;
+  }
+
+  const suspiciousReason = detectSuspiciousShellCommand(normalized);
+  if (suspiciousReason) {
+    return suspiciousReason;
+  }
+
+  return null;
+}
+
 function assessShellCommand(command: string): { risk: ToolApprovalRisk; reason: string } {
   const normalized = normalizeWhitespace(command);
   if (!normalized) {
     return { risk: "unknown", reason: "命令为空，自动审核无法判断风险" };
+  }
+
+  const rejectedReason = detectRejectedShellCommand(normalized);
+  if (rejectedReason) {
+    return { risk: "high", reason: rejectedReason };
   }
 
   const lowered = normalized.toLowerCase();
@@ -461,6 +523,17 @@ export function assessToolApproval(
   }
 
   const assessment = assessByToolName(toolName, params, options.workspace);
+  if (SHELL_TOOL_NAMES.has(toolName)) {
+    const rejectedReason = detectRejectedShellCommand(toDisplayString(params.command ?? params.cmd));
+    if (rejectedReason) {
+      return {
+        decision: "deny",
+        risk: "high",
+        layer: "policy",
+        reason: rejectedReason,
+      };
+    }
+  }
   const effectiveThreshold = Math.min(trustThreshold(trustMode), approvalThreshold(approvalMode));
 
   if (assessment.risk === "safe") {

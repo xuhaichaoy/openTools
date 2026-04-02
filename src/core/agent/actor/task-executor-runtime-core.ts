@@ -12,6 +12,9 @@ export interface TaskExecutorRuntimeState<TProfile extends string = string> {
   completedAt?: number;
   timeoutSeconds?: number;
   eventCount: number;
+  toolUseCount?: number;
+  lastToolName?: string;
+  lastToolAt?: number;
 }
 
 export interface TaskExecutorLifecycleRecord<

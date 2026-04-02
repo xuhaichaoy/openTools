@@ -395,6 +395,58 @@ export class IMConversationRuntimeManager {
     };
   }
 
+  async submitDesktopMessage(params: {
+    channelId: string;
+    channelType: ChannelType;
+    conversationId: string;
+    conversationType: ChannelIncomingMessage["conversationType"];
+    text: string;
+    topicId?: string | null;
+    senderName?: string;
+    images?: string[];
+    timestamp?: number;
+    messageId?: string;
+  }): Promise<IMCommandResult> {
+    const normalizedText = params.text.trim();
+    if (!normalizedText) {
+      return {
+        handled: true,
+        replyText: "消息内容为空。",
+      };
+    }
+
+    const conversationState = this.getConversationState(
+      params.channelId,
+      params.conversationId,
+      {
+        channelType: params.channelType,
+        conversationType: params.conversationType,
+      },
+    );
+    const requestedTopicId = params.topicId?.trim();
+    if (requestedTopicId && requestedTopicId !== conversationState.activeTopicId) {
+      conversationState.activeTopicId = requestedTopicId;
+      conversationState.updatedAt = Date.now();
+      this.syncConversationSnapshots();
+    }
+
+    return this.handleIncoming({
+      channelId: params.channelId,
+      channelType: params.channelType,
+      msg: {
+        messageId: params.messageId?.trim() || `desktop:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`,
+        senderId: "desktop",
+        senderName: params.senderName?.trim() || "桌面",
+        text: normalizedText,
+        messageType: params.images?.length ? "image" : "text",
+        conversationId: params.conversationId,
+        conversationType: params.conversationType,
+        timestamp: params.timestamp ?? Date.now(),
+        ...(params.images?.length ? { images: [...params.images] } : {}),
+      },
+    });
+  }
+
   disposeChannel(channelId: string): void {
     for (const runtime of [...this.runtimes.values()]) {
       if (runtime.channelId !== channelId) continue;
@@ -578,9 +630,14 @@ export class IMConversationRuntimeManager {
     conversationType: ChannelIncomingMessage["conversationType"];
     topicId: string;
   }, restored?: PersistedIMRuntimeRecord): IMConversationRuntime {
-    const system = new ActorSystem();
+    const runtimeKey = buildRuntimeKey(params.channelId, params.conversationId, params.topicId);
+    const system = new ActorSystem({
+      traceSurface: "im_conversation",
+      traceOwnerId: params.channelId.trim() || params.channelType,
+      traceRuntimeKey: runtimeKey,
+    });
     if (restored?.sessionId) {
-      (system as unknown as { sessionId: string }).sessionId = restored.sessionId;
+      system.restoreSessionId(restored.sessionId);
     }
 
     if (restored?.actorConfigs?.length) {
@@ -624,7 +681,7 @@ export class IMConversationRuntimeManager {
     }
 
     const runtime: IMConversationRuntime = {
-      key: buildRuntimeKey(params.channelId, params.conversationId, params.topicId),
+      key: runtimeKey,
       channelId: params.channelId,
       channelType: params.channelType,
       conversationId: params.conversationId,
@@ -1764,7 +1821,7 @@ export class IMConversationRuntimeManager {
     runtime.queue = [];
     runtime.unsubscribe();
     runtime.controller.dispose();
-    runtime.system.killAll();
+    runtime.system.dispose("im_runtime_disposed");
     this.runtimes.delete(runtime.key);
     if (options?.syncPersistence !== false) {
       this.syncConversationSnapshots();

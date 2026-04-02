@@ -31,9 +31,33 @@ const COLLABORATION_SUMMARY_MARKERS = [
   /仅确认完成状态/u,
   /wait_for_spawned_tasks|memory_search|agents/u,
 ];
+const STRUCTURED_RESULT_KEYS = new Set([
+  "tasks",
+  "results",
+  "rows",
+  "items",
+  "data",
+  "artifacts",
+  "task_tree",
+  "agents",
+  "structured_rows",
+  "source_item_ids",
+  "scoped_source_items",
+  "schema_fields",
+  "columns",
+]);
 const LOW_SIGNAL_CONTINUATION_TOOL_NAMES = new Set([
   "sequential_thinking",
 ]);
+const LOW_SIGNAL_COLLABORATION_MESSAGE_PATTERNS = [
+  /命令执行完成[，,、]?\s*分析输出/u,
+  /搜索完成[，,、]?\s*分析结果/u,
+  /已同步(?:子任务结果|协作状态)/u,
+  /子任务(?:运行中|已收齐|已全部完成)/u,
+  /协作状态已同步/u,
+  /返回\s*\d+\s*条结果/u,
+  /返回\s*\d+\s*个字段/u,
+];
 const REPAIR_CONTINUATION_PATTERNS = [
   /纠偏|修复|repair|blocker|未通过结果校验/u,
   /重新导出|补齐交付|再次导出/u,
@@ -129,18 +153,29 @@ function isPureOrchestrationObservation(content: string | undefined): boolean {
   }
 }
 
-function parseStructuredObject(content: string | undefined): Record<string, unknown> | null {
+function extractStructuredPayloadCandidate(content: string | undefined): string | undefined {
   const normalized = String(content ?? "").trim();
-  if (!normalized || (!normalized.startsWith("{") && !normalized.startsWith("["))) {
-    return null;
-  }
+  if (!normalized) return undefined;
+  const codeBlockMatch = normalized.match(/^```(?:json)?\s*([\s\S]*?)```$/iu);
+  if (codeBlockMatch?.[1]?.trim()) return codeBlockMatch[1].trim();
+  if (normalized.startsWith("{") || normalized.startsWith("[")) return normalized;
+  return undefined;
+}
+
+function parseStructuredPayload(content: string | undefined): unknown {
+  const candidate = extractStructuredPayloadCandidate(content);
+  if (!candidate) return null;
   try {
-    const parsed = JSON.parse(normalized) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-    return parsed as Record<string, unknown>;
+    return JSON.parse(candidate) as unknown;
   } catch {
     return null;
   }
+}
+
+function parseStructuredObject(content: string | undefined): Record<string, unknown> | null {
+  const parsed = parseStructuredPayload(content);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  return parsed as Record<string, unknown>;
 }
 
 function isLowSignalStructuredReasoning(content: string | undefined): boolean {
@@ -618,6 +653,40 @@ function isLikelyCollaborationSummary(content: string): boolean {
   return score >= 4;
 }
 
+function isLikelyStructuredCoordinatorPayload(content: string | undefined): boolean {
+  const normalized = String(content ?? "").trim();
+  if (!normalized) return false;
+
+  const parsed = parseStructuredPayload(normalized);
+  if (Array.isArray(parsed)) {
+    if (parsed.length === 0) return false;
+    if (normalized.length >= 180) return true;
+    return parsed.some((item) => Array.isArray(item) || (item && typeof item === "object"));
+  }
+
+  if (parsed && typeof parsed === "object") {
+    const value = parsed as Record<string, unknown>;
+    if (isPureOrchestrationObservation(normalized)) return true;
+    if (Object.keys(value).some((key) => STRUCTURED_RESULT_KEYS.has(key))) return true;
+
+    const nestedStructuredValueCount = Object.values(value)
+      .filter((item) => Array.isArray(item) || (item && typeof item === "object"))
+      .length;
+    if (nestedStructuredValueCount >= 2) return true;
+
+    if (normalized.length >= 220 && Object.keys(value).length >= 4) return true;
+  }
+
+  return normalized.length >= 240
+    && (/^```(?:json)?/iu.test(normalized) || normalized.startsWith("{") || normalized.startsWith("["));
+}
+
+function isLowSignalCollaborationCoordinatorMessage(content: string | undefined): boolean {
+  const normalized = String(content ?? "").replace(/\s+/g, " ").trim();
+  if (!normalized || normalized.length > 180) return false;
+  return LOW_SIGNAL_COLLABORATION_MESSAGE_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
 export function shouldHideLocalDialogMessage(message: Pick<
   DialogMessage,
   "from" | "to" | "content" | "relatedRunId" | "expectReply" | "kind"
@@ -628,10 +697,47 @@ export function shouldHideLocalDialogMessage(message: Pick<
   if (message.expectReply) return false;
   if (message.kind === "approval_request" || message.kind === "clarification_request") return false;
   if (message.relatedRunId) return true;
-  if (options?.hasCollaborationGroups && message.kind === "agent_result" && isLikelyCollaborationSummary(message.content)) {
-    return true;
+  if (options?.hasCollaborationGroups) {
+    if (/^spawned-/i.test(message.from)) return true;
+    if (message.to && message.to !== "user") return true;
+    if (
+      (message.kind === "agent_result" || message.kind === "agent_message" || message.kind === "system_notice")
+      && (
+        isLikelyCollaborationSummary(message.content)
+        || isLikelyStructuredCoordinatorPayload(message.content)
+        || isLowSignalCollaborationCoordinatorMessage(message.content)
+      )
+    ) {
+      return true;
+    }
   }
   return TASK_RESULT_PREFIX.test(message.content);
+}
+
+export function shouldPreferLocalDialogContinuationSummary(params: {
+  hasCollaborationGroups: boolean;
+  continuationState?: LocalDialogLiveContinuationState;
+}): boolean {
+  if (!params.hasCollaborationGroups) return false;
+  const state = params.continuationState;
+  if (!state || state.latestOrchestrationIndex < 0) return false;
+  return state.isContinuingAfterOrchestration;
+}
+
+export function getLocalDialogContinuationSummaryLabel(
+  phase?: LocalDialogContinuationPhase,
+): string {
+  switch (phase) {
+    case "repairing":
+      return "修复并重试";
+    case "published":
+      return "整理最终交付";
+    case "waiting_children":
+      return "等待子任务完成";
+    case "aggregating":
+    default:
+      return "汇总子任务结果";
+  }
 }
 
 export function shouldHideLocalDialogLiveActor(params: {

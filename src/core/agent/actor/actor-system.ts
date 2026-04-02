@@ -34,6 +34,7 @@ import type {
   SpawnedTaskRecord,
   SpawnedTaskRoleBoundary,
   SpawnedTaskEventDetail,
+  ThinkingLevel,
   ToolPolicy,
 } from "./types";
 import {
@@ -60,15 +61,20 @@ import {
   resolveChildExecutionSettings,
 } from "@/core/collaboration/execution-contract";
 import type { ExecutionContract } from "@/core/collaboration/types";
+import type { ToolResultReplacementSnapshot } from "@/core/agent/runtime/tool-result-replacement";
 import { createLogger } from "@/core/logger";
 import {
+  type DialogTraceContext,
   getDialogStepTracePath,
   isDialogFullTraceEnabled,
   isDialogStepTraceEnabled,
+  registerDialogTraceActorSystemInstance,
   resetDialogStepTrace,
   traceDialogActorSystemEvent,
   traceDialogFlowEvent,
   traceDialogSessionStarted,
+  unregisterDialogTraceActorSystemInstance,
+  updateDialogTraceActorSystemSession,
 } from "./dialog-step-trace";
 import { splitStructuredMediaReply } from "@/core/media/structured-media";
 import {
@@ -89,6 +95,23 @@ import {
   isTimeoutErrorMessage,
   normalizePositiveSeconds,
 } from "./timeout-policy";
+import {
+  createDefaultAgentBackendRegistry,
+  type AgentBackendRegistry,
+} from "@/core/agent/backends/registry";
+import {
+  applyBuiltinAgentDefaults,
+  resolveBuiltinAgentDefinition,
+} from "@/core/agent/definitions/builtin";
+import { TeamRegistry, type CreateTeamParams } from "@/core/agent/swarm/team-registry";
+import type {
+  TeamBroadcastDispatchResult,
+  TeamMessageDispatchResult,
+  TeamSnapshot,
+  TeamTaskDispatchResult,
+} from "@/core/agent/swarm/team-context";
+import type { TeamMailboxEntry } from "@/core/agent/swarm/team-mailbox";
+import { getAgentTaskManager } from "@/core/task-center";
 
 const generateId = (): string => {
   // 使用更安全的随机 ID 生成
@@ -198,6 +221,7 @@ const PERMANENT_ERROR_PATTERNS = [
 type DeferredSpawnRequest = {
   id: string;
   spawnerActorId: string;
+  ownerTaskId?: string;
   targetActorId: string;
   task: string;
   queuedAt: number;
@@ -221,6 +245,84 @@ type DeferredSpawnRequest = {
   overrides?: SpawnTaskOverrides;
   plannedDelegationId?: string;
 };
+
+type AgentTaskManagerHandle = {
+  syncDeferredTask: (record: {
+    queueId: string;
+    sessionId: string;
+    spawnerActorId: string;
+    targetActorId: string;
+    task: string;
+    queuedAt: number;
+    label?: string;
+    mode?: SpawnMode;
+    roleBoundary?: SpawnedTaskRoleBoundary;
+    workerProfileId?: string;
+    executionIntent?: DialogSubtaskExecutionIntent;
+    spawnerName?: string;
+    targetName?: string;
+    backend?: "in_process" | "background_process" | "worktree" | "remote";
+    source?: "spawned" | "background" | "remote";
+    status?: "queued" | "running" | "failed";
+    summary?: string;
+    metadata?: Record<string, unknown>;
+  }) => void;
+  failDeferredTask: (record: {
+    queueId: string;
+    sessionId: string;
+    spawnerActorId: string;
+    targetActorId: string;
+    task: string;
+    queuedAt: number;
+    label?: string;
+    mode?: SpawnMode;
+    roleBoundary?: SpawnedTaskRoleBoundary;
+    workerProfileId?: string;
+    executionIntent?: DialogSubtaskExecutionIntent;
+    spawnerName?: string;
+    targetName?: string;
+    backend?: "in_process" | "background_process" | "worktree" | "remote";
+    source?: "spawned" | "background" | "remote";
+    error: string;
+    summary?: string;
+    metadata?: Record<string, unknown>;
+  }) => void;
+  removeDeferredTask: (queueId: string) => boolean;
+};
+
+export interface SpawnAgentParams {
+  agentId: string;
+  agentName: string;
+  initialPrompt?: string;
+  parentActorId?: string;
+  subagentType?: string;
+  description?: string;
+  model?: string;
+  maxIterations?: number;
+  systemPromptOverride?: string;
+  toolPolicy?: ToolPolicy;
+  executionPolicy?: ExecutionPolicy;
+  timeoutSeconds?: number;
+  idleLeaseSeconds?: number;
+  workspace?: string;
+  contextTokens?: number;
+  thinkingLevel?: ThinkingLevel;
+  toolResultReplacementSnapshot?: ToolResultReplacementSnapshot;
+}
+
+export interface SpawnedAgentHandle {
+  id: string;
+  actor: AgentActor;
+  execute(prompt?: string, images?: string[]): Promise<string>;
+  continueWithMessage(message: string, images?: string[]): Promise<string>;
+  receiveMessage(message: {
+    from: string;
+    content: string;
+    timestamp?: number;
+    images?: string[];
+  }): Promise<void>;
+  stop(): Promise<void>;
+}
 
 function isTransientAnnounceError(error: unknown): boolean {
   const msg = error instanceof Error ? error.message : String(error);
@@ -463,8 +565,7 @@ function buildDelegatedTaskPrompt(params: {
     ...(params.inlineOnly
       ? [
           "- 不要写入任何中间 JSON / 临时文件；直接在 terminal result 返回结构化结果，由父 Agent 统一导出最终交付。",
-          "- 如果任务是在整理课程、表格、文档或候选清单，先给完整结果，再在末尾补一行简短摘要；不要只回摘要。",
-          "- 当你使用 `task_done` 结束任务时，确保完整结果已经出现在 answer / streaming answer 中，避免只留下 summary。",
+          "- 完成后直接调用 `task_done`，将完整结果放在 result 参数中。无需在 answer 中重复输出完整结果。",
         ]
       : []),
   );
@@ -646,14 +747,39 @@ function isLowSignalCoordinationMessage(content: string): boolean {
 const actorSystemLogger = createLogger("ActorSystem");
 const log = (message: string, data?: unknown) => actorSystemLogger.debug(message, data);
 const logWarn = (message: string, data?: unknown) => actorSystemLogger.warn(message, data);
-let lastTracedActorSystemSessionId: string | null = null;
-let lastTracedActorSystemCreatedAt = 0;
 
 function previewActorSystemText(value?: string, maxLength = 120): string | undefined {
   const normalized = String(value ?? "").replace(/\s+/g, " ").trim();
   if (!normalized) return undefined;
   if (normalized.length <= maxLength) return normalized;
   return `${normalized.slice(0, Math.max(1, maxLength - 3)).trimEnd()}...`;
+}
+
+function normalizeSpawnRequestText(value?: string): string {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function sameOrderedStringList(left?: readonly string[], right?: readonly string[]): boolean {
+  const leftValues = left ?? [];
+  const rightValues = right ?? [];
+  if (leftValues.length !== rightValues.length) return false;
+  return leftValues.every((value, index) => value === rightValues[index]);
+}
+
+function ensureUniqueActorDisplayName(
+  requestedName: string,
+  hasActorWithName: (name: string) => boolean,
+): string {
+  const baseName = requestedName.trim() || "Temporary Worker";
+  if (!hasActorWithName(baseName)) return baseName;
+
+  let index = 2;
+  let candidate = `${baseName} (${index})`;
+  while (hasActorWithName(candidate)) {
+    index += 1;
+    candidate = `${baseName} (${index})`;
+  }
+  return candidate;
 }
 
 function deriveEphemeralActorName(params: {
@@ -799,6 +925,11 @@ export interface ActorSystemOptions {
   askUser?: AskUserCallback;
   confirmDangerousAction?: ConfirmDangerousAction;
   defaultProductMode?: "dialog" | "review";
+  backendRegistry?: AgentBackendRegistry;
+  coordinatorModeEnabled?: boolean;
+  traceSurface?: "local_dialog" | "im_conversation";
+  traceOwnerId?: string;
+  traceRuntimeKey?: string;
 }
 
 /**
@@ -829,19 +960,30 @@ export class ActorSystem {
   private dialogRoomCompaction: DialogRoomCompactionState | null = null;
   private dialogExecutionMode: DialogExecutionMode = "execute";
   private dialogSubagentEnabled = false;
+  private coordinatorModeEnabled = false;
   private options: ActorSystemOptions;
   readonly sessionId: string;
   private hooks = new Map<HookType, Array<HookHandler<any>>>();
   private modifyHooks = new Map<ModifyHookType, Array<ModifyHookHandler<any>>>();
   private _cron: ActorCron;
   private readonly dialogSubtaskRuntime: DialogSubtaskRuntime;
+  private readonly backendRegistry: AgentBackendRegistry;
+  private readonly teamRegistry: TeamRegistry;
+  private readonly traceContext: DialogTraceContext;
   private supportActorCleanupScheduled = false;
+  private disposed = false;
+
+  private replaceSessionId(sessionId: string): void {
+    (this as unknown as { sessionId: string }).sessionId = sessionId;
+    this.dialogSubtaskRuntime.replaceSessionId(sessionId);
+  }
 
   private traceFlow(
     event: string,
     detail?: Record<string, unknown>,
     actorId?: string | null,
   ): void {
+    if (this.disposed) return;
     this.recordDialogFlowEvent({
       event,
       actorId: actorId ?? this.coordinatorActorId ?? undefined,
@@ -852,32 +994,50 @@ export class ActorSystem {
       actorId: actorId ?? this.coordinatorActorId ?? undefined,
       event,
       detail,
+      traceContext: this.traceContext,
     });
   }
 
   constructor(options: ActorSystemOptions = {}) {
     this.options = options;
     this.sessionId = generateId();
+    this.traceContext = {
+      surface: options.traceSurface ?? "local_dialog",
+      ownerId: options.traceOwnerId,
+      runtimeKey: options.traceRuntimeKey,
+    };
+    this.coordinatorModeEnabled = options.coordinatorModeEnabled === true;
+    this.backendRegistry = options.backendRegistry ?? createDefaultAgentBackendRegistry(this);
+    this.teamRegistry = new TeamRegistry({
+      backendRegistry: this.backendRegistry,
+      listKnownActors: () => this.getAll().map((actor) => ({
+        id: actor.id,
+        name: actor.role.name,
+        capabilities: actor.capabilities?.tags,
+        workspace: actor.workspace,
+      })),
+    });
     if (isDialogStepTraceEnabled()) {
-      traceDialogSessionStarted(this.sessionId);
+      const createdAt = Date.now();
+      const registration = registerDialogTraceActorSystemInstance({
+        sessionId: this.sessionId,
+        traceContext: this.traceContext,
+        timestamp: createdAt,
+      });
+      traceDialogSessionStarted(this.sessionId, this.traceContext);
       if (isDialogFullTraceEnabled()) {
-        const createdAt = Date.now();
-        if (
-          lastTracedActorSystemSessionId
-          && createdAt - lastTracedActorSystemCreatedAt <= 1_500
-        ) {
+        if (registration.replacedSessionId && registration.elapsedMs !== undefined) {
           traceDialogFlowEvent({
             sessionId: this.sessionId,
             event: "system_instance_replaced",
+            traceContext: this.traceContext,
             detail: {
-              previous_session: lastTracedActorSystemSessionId.slice(0, 8),
-              elapsed_ms: createdAt - lastTracedActorSystemCreatedAt,
+              previous_session: registration.replacedSessionId.slice(0, 8),
+              elapsed_ms: registration.elapsedMs,
             },
           });
         }
         this.traceFlow("system_instance_created");
-        lastTracedActorSystemSessionId = this.sessionId;
-        lastTracedActorSystemCreatedAt = createdAt;
       }
       void getDialogStepTracePath()
         .then((path) => {
@@ -925,12 +1085,26 @@ export class ActorSystem {
           result: record.result,
           error: record.error,
         });
-        this.dispatchDeferredSpawnTasks(record.spawnerActorId);
+        this.dispatchDeferredSpawnTasks(record.spawnerActorId, {
+          ownerTaskId: record.ownerTaskId,
+        });
         this.tryFinalizeExecutionContract();
         this.scheduleExecutionContractProgressCheck();
       },
     });
     this._cron = new ActorCron(this);
+  }
+
+  restoreSessionId(sessionId: string): void {
+    const normalizedSessionId = sessionId.trim();
+    if (!normalizedSessionId || normalizedSessionId === this.sessionId) return;
+
+    updateDialogTraceActorSystemSession({
+      previousSessionId: this.sessionId,
+      nextSessionId: normalizedSessionId,
+      traceContext: this.traceContext,
+    });
+    this.replaceSessionId(normalizedSessionId);
   }
 
   private scheduleSupportActorCleanupAfterCoordinatorCompletion(): void {
@@ -965,6 +1139,14 @@ export class ActorSystem {
     return this.options.defaultProductMode === "review" ? "review" : "dialog";
   }
 
+  getBackendRegistry(): AgentBackendRegistry {
+    return this.backendRegistry;
+  }
+
+  getTeamsSnapshot(): TeamSnapshot[] {
+    return this.teamRegistry.listTeams();
+  }
+
   set defaultProductMode(mode: "dialog" | "review") {
     this.options.defaultProductMode = mode === "review" ? "review" : "dialog";
   }
@@ -975,6 +1157,10 @@ export class ActorSystem {
 
   getDialogSubagentEnabled(): boolean {
     return this.dialogSubagentEnabled === true;
+  }
+
+  isCoordinatorModeEnabled(): boolean {
+    return this.coordinatorModeEnabled === true;
   }
 
   hasLiveDialogSubagentContext(): boolean {
@@ -1022,6 +1208,18 @@ export class ActorSystem {
     this.dialogSubagentEnabled = nextEnabled;
     this.traceFlow("dialog_subagent_mode_changed", {
       enabled: nextEnabled,
+      live_context: this.hasLiveDialogSubagentContext(),
+    });
+  }
+
+  setCoordinatorModeEnabled(enabled: boolean): void {
+    const nextEnabled = enabled === true;
+    if (this.coordinatorModeEnabled === nextEnabled) return;
+    this.coordinatorModeEnabled = nextEnabled;
+    this.traceFlow("coordinator_mode_changed", {
+      enabled: nextEnabled,
+      coordinator: this.getCoordinatorId(),
+      actor_count: this.size,
       live_context: this.hasLiveDialogSubagentContext(),
     });
   }
@@ -1141,6 +1339,7 @@ export class ActorSystem {
   killAll(): void {
     this._cron.cancelAll();
     this.dialogSubtaskRuntime.clearAll();
+    this.teamRegistry.clear();
     this.artifactRecords.clear();
     this.sessionUploads.clear();
     this.dialogRoomCompaction = null;
@@ -1156,9 +1355,142 @@ export class ActorSystem {
     this.pendingReplies.clear();
   }
 
+  dispose(reason = "disposed"): void {
+    if (this.disposed) return;
+    if (isDialogFullTraceEnabled()) {
+      traceDialogFlowEvent({
+        sessionId: this.sessionId,
+        event: "system_instance_disposed",
+        traceContext: this.traceContext,
+        detail: {
+          reason,
+        },
+      });
+    }
+    unregisterDialogTraceActorSystemInstance({
+      sessionId: this.sessionId,
+      traceContext: this.traceContext,
+    });
+    this.disposed = true;
+    this.killAll();
+    this.eventHandlers = [];
+    this.dialogFlowEventHandlers = [];
+    this.hooks.clear();
+    this.modifyHooks.clear();
+  }
+
   /** 获取一个 Actor */
   get(actorId: string): AgentActor | undefined {
     return this.actors.get(actorId);
+  }
+
+  findActorByIdOrName(identifier: string): AgentActor | undefined {
+    const normalized = identifier.trim();
+    if (!normalized) return undefined;
+    return this.actors.get(normalized)
+      ?? this.getAll().find((actor) => actor.role.name === normalized);
+  }
+
+  async spawnAgent(params: SpawnAgentParams): Promise<SpawnedAgentHandle> {
+    const existing = this.actors.get(params.agentId);
+    if (existing) {
+      return this.createSpawnedAgentHandle(existing);
+    }
+
+    const parent = params.parentActorId ? this.actors.get(params.parentActorId) : undefined;
+    const builtinDefinition = resolveBuiltinAgentDefinition(params.subagentType ?? params.agentName);
+    const builtin = applyBuiltinAgentDefaults({
+      builtinAgentId: builtinDefinition?.id,
+      requestedTargetName: params.agentName,
+      requestedChildDescription: params.description,
+      requestedChildCapabilities: parent?.capabilities?.tags,
+      overrides: {
+        ...(params.model ? { model: params.model } : {}),
+      },
+    });
+
+    const promptBlocks = [
+      DIALOG_FULL_ROLE.systemPrompt,
+      "你是通过 Agent 工具启动的专用子 Agent。",
+      builtin.definition?.systemPromptAppend,
+      params.description ? `职责：${params.description}` : "",
+      builtin.defaultAcceptance.length > 0
+        ? `验收要求：\n${builtin.defaultAcceptance.map((item) => `- ${item}`).join("\n")}`
+        : "",
+    ].filter(Boolean);
+
+    const actor = this.spawn({
+      id: params.agentId,
+      role: {
+        ...DIALOG_FULL_ROLE,
+        id: `dialog_agent_${params.agentId}`,
+        name: builtin.targetName ?? params.agentName,
+      },
+      persistent: true,
+      modelOverride: params.model,
+      maxIterations: params.maxIterations ?? builtin.overrides.maxIterations,
+      systemPromptOverride: params.systemPromptOverride ?? promptBlocks.join("\n\n"),
+      toolPolicy: params.toolPolicy ?? builtin.overrides.toolPolicy,
+      executionPolicy: params.executionPolicy ?? parent?.executionPolicy,
+      timeoutSeconds: params.timeoutSeconds,
+      idleLeaseSeconds: params.idleLeaseSeconds,
+      workspace: params.workspace ?? parent?.workspace,
+      contextTokens: params.contextTokens ?? parent?.contextTokens,
+      thinkingLevel: params.thinkingLevel ?? builtin.overrides.thinkingLevel ?? parent?.thinkingLevel,
+      toolResultReplacementSnapshot: params.toolResultReplacementSnapshot,
+      capabilities: builtin.childCapabilities?.length
+        ? {
+            tags: builtin.childCapabilities,
+            description: builtin.childDescription,
+          }
+        : parent?.capabilities,
+      middlewareOverrides: builtin.overrides.middlewareOverrides ?? parent?.middlewareOverrides,
+    });
+
+    if (parent) {
+      try {
+        this.attachDynamicActorToExecutionContract(parent.id, actor.id);
+      } catch {
+        // 非 execution contract 模式下忽略
+      }
+    }
+
+    return this.createSpawnedAgentHandle(actor);
+  }
+
+  private createSpawnedAgentHandle(actor: AgentActor): SpawnedAgentHandle {
+    const runTask = async (prompt?: string, images?: string[]) => {
+      const query = String(prompt ?? "").trim();
+      if (!query) return "";
+      const task = await actor.assignTask(query, images, { publishResult: false });
+      if (typeof task.result === "string" && task.result.trim()) {
+        return task.result;
+      }
+      if (typeof task.error === "string" && task.error.trim()) {
+        throw new Error(task.error);
+      }
+      return "";
+    };
+
+    return {
+      id: actor.id,
+      actor,
+      execute: (prompt?: string, images?: string[]) => runTask(prompt, images),
+      continueWithMessage: (message: string, images?: string[]) => runTask(message, images),
+      receiveMessage: async (message) => {
+        actor.receive({
+          id: generateId(),
+          from: message.from,
+          content: message.content,
+          timestamp: message.timestamp ?? Date.now(),
+          priority: "normal",
+          ...(message.images?.length ? { images: message.images } : {}),
+        });
+      },
+      stop: async () => {
+        actor.stop();
+      },
+    };
   }
 
   private getActorName(actorId: string): string {
@@ -1174,6 +1506,184 @@ export class ActorSystem {
   /** 获取所有 Actor */
   getAll(): AgentActor[] {
     return [...this.actors.values()];
+  }
+
+  createTeam(params: CreateTeamParams): {
+    created: boolean;
+    updated: boolean;
+    team: TeamSnapshot;
+  } {
+    return this.teamRegistry.createTeam(params);
+  }
+
+  deleteTeam(teamIdOrName: string, requesterActorId?: string): {
+    deleted: boolean;
+    teamId?: string;
+    teamName?: string;
+    error?: string;
+  } {
+    return this.teamRegistry.deleteTeam(teamIdOrName, requesterActorId);
+  }
+
+  getTeamMailboxSnapshot(teamIdOrName: string): TeamMailboxEntry[] {
+    return this.teamRegistry.getTeam(teamIdOrName)?.getMailboxSnapshot() ?? [];
+  }
+
+  async sendTeamMessage(params: {
+    senderActorId: string;
+    team: string;
+    teammate: string;
+    content: string;
+    replyTo?: string;
+    relatedRunId?: string;
+  }): Promise<TeamMessageDispatchResult> {
+    const team = this.teamRegistry.getTeam(params.team);
+    if (!team) {
+      return {
+        sent: false,
+        teamId: params.team,
+        teamName: params.team,
+        backendId: this.backendRegistry.defaultBackendId,
+        error: `team "${params.team}" 不存在`,
+      };
+    }
+    return team.sendMessage({
+      senderActorId: params.senderActorId,
+      teammate: params.teammate,
+      content: params.content,
+      replyTo: params.replyTo,
+      relatedRunId: params.relatedRunId,
+    });
+  }
+
+  async broadcastTeamMessage(params: {
+    senderActorId: string;
+    team: string;
+    content: string;
+    replyTo?: string;
+    relatedRunId?: string;
+  }): Promise<TeamBroadcastDispatchResult> {
+    const team = this.teamRegistry.getTeam(params.team);
+    if (!team) {
+      return {
+        sent: false,
+        teamId: params.team,
+        teamName: params.team,
+        total: 0,
+        sentCount: 0,
+        failedCount: 0,
+        results: [],
+        error: `team "${params.team}" 不存在`,
+      };
+    }
+    return team.broadcastMessage({
+      senderActorId: params.senderActorId,
+      content: params.content,
+      replyTo: params.replyTo,
+      relatedRunId: params.relatedRunId,
+    });
+  }
+
+  async dispatchTeamTask(params: {
+    senderActorId: string;
+    team: string;
+    teammate: string;
+    task: string;
+    label?: string;
+    context?: string;
+    attachments?: string[];
+    images?: string[];
+    mode?: "run" | "session";
+    cleanup?: "delete" | "keep";
+    expectsCompletionMessage?: boolean;
+    roleBoundary?: SpawnedTaskRoleBoundary;
+    overrides?: SpawnTaskOverrides;
+    plannedDelegationId?: string;
+    createIfMissing?: boolean;
+    targetDescription?: string;
+    targetCapabilities?: AgentCapability[];
+    targetWorkspace?: string;
+  }): Promise<TeamTaskDispatchResult> {
+    const dispatchTraceId = `team-dispatch-${generateId()}`;
+    const team = this.teamRegistry.getTeam(params.team);
+    if (!team) {
+      return {
+        dispatched: false,
+        teamId: params.team,
+        teamName: params.team,
+        backendId: this.backendRegistry.defaultBackendId,
+        error: `team "${params.team}" 不存在`,
+      };
+    }
+    const result = await team.dispatchTask({
+      senderActorId: params.senderActorId,
+      teammate: params.teammate,
+      task: params.task,
+      label: params.label,
+      context: params.context,
+      attachments: params.attachments,
+      images: params.images,
+      mode: params.mode,
+      cleanup: params.cleanup,
+      expectsCompletionMessage: params.expectsCompletionMessage,
+      roleBoundary: params.roleBoundary,
+      overrides: params.overrides,
+      plannedDelegationId: params.plannedDelegationId,
+      createIfMissing: params.createIfMissing,
+      targetDescription: params.targetDescription,
+      targetCapabilities: params.targetCapabilities,
+      targetWorkspace: params.targetWorkspace,
+    });
+    if (result.backendId !== "in_process") {
+      if (result.dispatched && result.externalTask) {
+        this.syncBackendDispatchedTask({
+          queueId: String(result.runId ?? result.taskId ?? dispatchTraceId),
+          backendId: result.backendId,
+          spawnerActorId: params.senderActorId,
+          targetActorId: result.teammate?.actorId,
+          targetName: result.teammate?.name ?? params.teammate,
+          task: params.task,
+          label: params.label,
+          mode: params.mode,
+          roleBoundary: params.roleBoundary,
+          workerProfileId: params.overrides?.workerProfileId,
+          executionIntent: params.overrides?.executionIntent,
+          status: result.status ?? "running",
+          summary: result.summary ?? `已派发到 ${result.backendId} backend，等待后续状态回流`,
+          metadata: {
+            teamId: result.teamId,
+            teamName: result.teamName,
+            backendId: result.backendId,
+            runId: result.runId,
+            taskId: result.taskId,
+            outputPath: result.outputPath,
+            ...(result.metadata ?? {}),
+          },
+        });
+      } else if (result.error) {
+        this.failBackendDispatchedTask({
+          queueId: dispatchTraceId,
+          backendId: result.backendId,
+          spawnerActorId: params.senderActorId,
+          targetActorId: result.teammate?.actorId,
+          targetName: result.teammate?.name ?? params.teammate,
+          task: params.task,
+          label: params.label,
+          mode: params.mode,
+          roleBoundary: params.roleBoundary,
+          workerProfileId: params.overrides?.workerProfileId,
+          executionIntent: params.overrides?.executionIntent,
+          error: result.error,
+          summary: `${result.backendId} backend 派发失败`,
+          metadata: {
+            teamId: result.teamId,
+            teamName: result.teamName,
+            backendId: result.backendId,
+          },
+        });
+      }
+    }
+    return result;
   }
 
   /** 获取 Actor 数量 */
@@ -1765,12 +2275,272 @@ export class ActorSystem {
     return this.dialogSubtaskRuntime.getOwningTaskForActor(actorId);
   }
 
-  getDeferredSpawnRequests(actorId: string): DeferredSpawnRequest[] {
-    return [...(this.deferredSpawnRequests.get(actorId) ?? [])];
+  private findReusableRunningSpawnedTask(params: {
+    spawnerActorId: string;
+    ownerTaskId?: string;
+    targetActorId: string;
+    task: string;
+    label?: string;
+    images?: string[];
+    plannedDelegationId?: string;
+    roleBoundary?: SpawnedTaskRoleBoundary;
+    workerProfileId?: SpawnedTaskRecord["workerProfileId"];
+    executionIntent?: DialogSubtaskExecutionIntent;
+    resultContract?: SpawnedTaskRecord["resultContract"];
+    deliveryTargetId?: string;
+    deliveryTargetLabel?: string;
+    sheetName?: string;
+    sourceItemIds?: string[];
+    sourceItemCount?: number;
+    prompt?: string;
+  }): SpawnedTaskRecord | undefined {
+    const normalizedTask = normalizeSpawnRequestText(params.task);
+    const normalizedLabel = normalizeSpawnRequestText(params.label);
+    const normalizedPrompt = normalizeSpawnRequestText(params.prompt);
+
+    return this.getActiveSpawnedTasks(params.spawnerActorId).find((record) => {
+      if (record.mode !== "run" || record.targetActorId !== params.targetActorId) return false;
+      if ((record.ownerTaskId ?? undefined) !== (params.ownerTaskId ?? undefined)) return false;
+      if (normalizeSpawnRequestText(record.task) !== normalizedTask) return false;
+      if (normalizeSpawnRequestText(record.label) !== normalizedLabel) return false;
+      if ((record.plannedDelegationId ?? undefined) !== (params.plannedDelegationId ?? undefined)) return false;
+      if ((record.roleBoundary ?? undefined) !== (params.roleBoundary ?? undefined)) return false;
+      if ((record.workerProfileId ?? undefined) !== (params.workerProfileId ?? undefined)) return false;
+      if ((record.executionIntent ?? undefined) !== (params.executionIntent ?? undefined)) return false;
+      if ((record.resultContract ?? undefined) !== (params.resultContract ?? undefined)) return false;
+      if ((record.deliveryTargetId ?? undefined) !== (params.deliveryTargetId ?? undefined)) return false;
+      if ((record.deliveryTargetLabel ?? undefined) !== (params.deliveryTargetLabel ?? undefined)) return false;
+      if ((record.sheetName ?? undefined) !== (params.sheetName ?? undefined)) return false;
+      if ((record.sourceItemCount ?? undefined) !== (params.sourceItemCount ?? undefined)) return false;
+      if (!sameOrderedStringList(record.images, params.images)) return false;
+      if (!sameOrderedStringList(record.sourceItemIds, params.sourceItemIds)) return false;
+
+      if (normalizedPrompt) {
+        const activePrompt = normalizeSpawnRequestText(this.actors.get(record.targetActorId)?.currentTask?.query);
+        if (activePrompt && activePrompt !== normalizedPrompt) {
+          return false;
+        }
+      }
+
+      return true;
+    });
   }
 
-  getPendingDeferredSpawnTaskCount(actorId: string): number {
-    return this.getDeferredSpawnRequests(actorId).length;
+  getDeferredSpawnRequests(
+    actorId: string,
+    opts?: {
+      ownerTaskId?: string;
+    },
+  ): DeferredSpawnRequest[] {
+    const ownerTaskId = opts?.ownerTaskId?.trim();
+    const queue = [...(this.deferredSpawnRequests.get(actorId) ?? [])];
+    if (!ownerTaskId) return queue;
+    return queue.filter((request) => request.ownerTaskId === ownerTaskId);
+  }
+
+  getPendingDeferredSpawnTaskCount(
+    actorId: string,
+    opts?: {
+      ownerTaskId?: string;
+    },
+  ): number {
+    return this.getDeferredSpawnRequests(actorId, opts).length;
+  }
+
+  private pruneDeferredSpawnRequests(
+    actorId: string,
+    opts?: {
+      excludeOwnerTaskId?: string;
+    },
+  ): number {
+    const queue = this.deferredSpawnRequests.get(actorId);
+    if (!queue?.length) return 0;
+    const excludeOwnerTaskId = opts?.excludeOwnerTaskId?.trim();
+    const kept = queue.filter((request) => excludeOwnerTaskId && request.ownerTaskId === excludeOwnerTaskId);
+    const removed = queue.filter((request) => !excludeOwnerTaskId || request.ownerTaskId !== excludeOwnerTaskId);
+    removed.forEach((request) => this.removeDeferredSpawnTask(request.id));
+    if (kept.length > 0) {
+      this.deferredSpawnRequests.set(actorId, kept);
+    } else {
+      this.deferredSpawnRequests.delete(actorId);
+    }
+    return removed.length;
+  }
+
+  private mapBackendIdToAgentTaskBackend(backendId?: string): "in_process" | "background_process" | "worktree" | "remote" {
+    switch (String(backendId ?? "").trim()) {
+      case "remote":
+        return "remote";
+      case "worktree":
+        return "worktree";
+      case "background_process":
+        return "background_process";
+      default:
+        return "in_process";
+    }
+  }
+
+  private mapBackendIdToAgentTaskSource(backendId?: string): "spawned" | "background" | "remote" {
+    switch (String(backendId ?? "").trim()) {
+      case "remote":
+        return "remote";
+      case "worktree":
+      case "background_process":
+        return "background";
+      default:
+        return "spawned";
+    }
+  }
+
+  private syncDeferredSpawnTask(request: DeferredSpawnRequest): void {
+    const manager = this.getAgentTaskManager();
+    if (!manager) return;
+    manager.syncDeferredTask({
+      queueId: request.id,
+      sessionId: this.sessionId,
+      spawnerActorId: request.spawnerActorId,
+      targetActorId: request.targetActorId,
+      task: request.task,
+      queuedAt: request.queuedAt,
+      label: request.label,
+      mode: request.mode,
+      roleBoundary: request.roleBoundary,
+      workerProfileId: request.overrides?.workerProfileId,
+      executionIntent: request.executionIntent,
+      spawnerName: this.getActorName(request.spawnerActorId),
+      targetName: this.getActorName(request.targetActorId),
+      metadata: {
+        plannedDelegationId: request.plannedDelegationId,
+        createIfMissing: request.createIfMissing,
+        cleanup: request.cleanup,
+        expectsCompletionMessage: request.expectsCompletionMessage,
+      },
+    });
+  }
+
+  private failDeferredSpawnTask(request: DeferredSpawnRequest, error: string): void {
+    const manager = this.getAgentTaskManager();
+    if (!manager) return;
+    manager.failDeferredTask({
+      queueId: request.id,
+      sessionId: this.sessionId,
+      spawnerActorId: request.spawnerActorId,
+      targetActorId: request.targetActorId,
+      task: request.task,
+      queuedAt: request.queuedAt,
+      label: request.label,
+      mode: request.mode,
+      roleBoundary: request.roleBoundary,
+      workerProfileId: request.overrides?.workerProfileId,
+      executionIntent: request.executionIntent,
+      spawnerName: this.getActorName(request.spawnerActorId),
+      targetName: this.getActorName(request.targetActorId),
+      error,
+      metadata: {
+        plannedDelegationId: request.plannedDelegationId,
+        createIfMissing: request.createIfMissing,
+        cleanup: request.cleanup,
+        expectsCompletionMessage: request.expectsCompletionMessage,
+      },
+    });
+  }
+
+  private removeDeferredSpawnTask(queueId: string): void {
+    this.getAgentTaskManager()?.removeDeferredTask(queueId);
+  }
+
+  private syncBackendDispatchedTask(params: {
+    queueId: string;
+    backendId: string;
+    spawnerActorId: string;
+    targetActorId?: string;
+    targetName?: string;
+    task: string;
+    label?: string;
+    mode?: SpawnMode;
+    roleBoundary?: SpawnedTaskRoleBoundary;
+    workerProfileId?: string;
+    executionIntent?: DialogSubtaskExecutionIntent;
+    summary: string;
+    status: "queued" | "running";
+    metadata?: Record<string, unknown>;
+  }): void {
+    const manager = this.getAgentTaskManager();
+    if (!manager) return;
+    manager.syncDeferredTask({
+      queueId: params.queueId,
+      sessionId: this.sessionId,
+      spawnerActorId: params.spawnerActorId,
+      targetActorId: params.targetActorId ?? params.targetName ?? params.queueId,
+      task: params.task,
+      queuedAt: Date.now(),
+      label: params.label,
+      mode: params.mode,
+      roleBoundary: params.roleBoundary,
+      workerProfileId: params.workerProfileId,
+      executionIntent: params.executionIntent,
+      spawnerName: this.getActorName(params.spawnerActorId),
+      targetName: params.targetName,
+      backend: this.mapBackendIdToAgentTaskBackend(params.backendId),
+      source: this.mapBackendIdToAgentTaskSource(params.backendId),
+      status: params.status,
+      summary: params.summary,
+      metadata: params.metadata,
+    });
+  }
+
+  private failBackendDispatchedTask(params: {
+    queueId: string;
+    backendId: string;
+    spawnerActorId: string;
+    targetActorId?: string;
+    targetName?: string;
+    task: string;
+    label?: string;
+    mode?: SpawnMode;
+    roleBoundary?: SpawnedTaskRoleBoundary;
+    workerProfileId?: string;
+    executionIntent?: DialogSubtaskExecutionIntent;
+    error: string;
+    summary?: string;
+    metadata?: Record<string, unknown>;
+  }): void {
+    const manager = this.getAgentTaskManager();
+    if (!manager) return;
+    manager.failDeferredTask({
+      queueId: params.queueId,
+      sessionId: this.sessionId,
+      spawnerActorId: params.spawnerActorId,
+      targetActorId: params.targetActorId ?? params.targetName ?? params.queueId,
+      task: params.task,
+      queuedAt: Date.now(),
+      label: params.label,
+      mode: params.mode,
+      roleBoundary: params.roleBoundary,
+      workerProfileId: params.workerProfileId,
+      executionIntent: params.executionIntent,
+      spawnerName: this.getActorName(params.spawnerActorId),
+      targetName: params.targetName,
+      backend: this.mapBackendIdToAgentTaskBackend(params.backendId),
+      source: this.mapBackendIdToAgentTaskSource(params.backendId),
+      error: params.error,
+      summary: params.summary,
+      metadata: params.metadata,
+    });
+  }
+
+  private getAgentTaskManager(): AgentTaskManagerHandle | null {
+    try {
+      return getAgentTaskManager() as AgentTaskManagerHandle;
+    } catch {
+      return null;
+    }
+  }
+
+  private resolveSpawnOwnerTaskId(spawnerActorId: string, explicitOwnerTaskId?: string): string | undefined {
+    const normalizedExplicitOwnerTaskId = explicitOwnerTaskId?.trim();
+    if (normalizedExplicitOwnerTaskId) return normalizedExplicitOwnerTaskId;
+    return this.actors.get(spawnerActorId)?.currentTask?.id?.trim();
   }
 
   enqueueDeferredSpawnTask(
@@ -1795,6 +2565,7 @@ export class ActorSystem {
       };
       overrides?: SpawnTaskOverrides;
       plannedDelegationId?: string;
+      ownerTaskId?: string;
     },
   ): DeferredSpawnRequest {
     const resolvedWorkerProfile = resolveWorkerProfile({
@@ -1815,6 +2586,7 @@ export class ActorSystem {
     const request: DeferredSpawnRequest = {
       id: generateId(),
       spawnerActorId,
+      ownerTaskId: this.resolveSpawnOwnerTaskId(spawnerActorId, opts?.ownerTaskId),
       targetActorId,
       task,
       queuedAt: Date.now(),
@@ -1837,6 +2609,7 @@ export class ActorSystem {
     const queue = this.deferredSpawnRequests.get(spawnerActorId) ?? [];
     queue.push(request);
     this.deferredSpawnRequests.set(spawnerActorId, queue);
+    this.syncDeferredSpawnTask(request);
     this.traceFlow("spawn_queued", {
       queue_id: request.id,
       queue_position: queue.length,
@@ -1850,19 +2623,30 @@ export class ActorSystem {
     return request;
   }
 
-  dispatchDeferredSpawnTasks(actorId: string): number {
+  dispatchDeferredSpawnTasks(
+    actorId: string,
+    opts?: {
+      ownerTaskId?: string;
+    },
+  ): number {
     const queue = this.deferredSpawnRequests.get(actorId);
     if (!queue?.length) return 0;
     if (this.deferredSpawnDispatchingOwners.has(actorId)) return 0;
 
+    const ownerTaskId = opts?.ownerTaskId?.trim();
     this.deferredSpawnDispatchingOwners.add(actorId);
     let dispatched = 0;
     try {
       while (queue.length > 0) {
-        const activeCount = this.getActiveSpawnedTasks(actorId).length;
+        const nextIndex = ownerTaskId
+          ? queue.findIndex((request) => request.ownerTaskId === ownerTaskId)
+          : 0;
+        if (nextIndex < 0) break;
+
+        const activeCount = this.getActiveSpawnedTasks(actorId, { ownerTaskId }).length;
         if (activeCount >= MAX_ACTIVE_DIALOG_CHILDREN) break;
 
-        const next = queue[0];
+        const next = queue[nextIndex];
         const result = this.spawnTask(actorId, next.targetActorId, next.task, {
           label: next.label,
           context: next.context,
@@ -1882,6 +2666,7 @@ export class ActorSystem {
               }
             : next.overrides,
           plannedDelegationId: next.plannedDelegationId,
+          ownerTaskId: next.ownerTaskId,
         });
 
         if (!("runId" in result)) {
@@ -1889,7 +2674,8 @@ export class ActorSystem {
             break;
           }
 
-          queue.shift();
+          queue.splice(nextIndex, 1);
+          this.failDeferredSpawnTask(next, result.error);
           this.traceFlow("spawn_queue_failed", {
             queue_id: next.id,
             status: "error",
@@ -1910,7 +2696,8 @@ export class ActorSystem {
           continue;
         }
 
-        queue.shift();
+        queue.splice(nextIndex, 1);
+        this.removeDeferredSpawnTask(next.id);
         dispatched += 1;
         this.traceFlow("spawn_queue_dispatched", {
           queue_id: next.id,
@@ -2013,6 +2800,11 @@ export class ActorSystem {
       }, to);
     }
     target.receive(msg);
+    if (msg.relatedRunId) {
+      this.dialogSubtaskRuntime.refreshTaskProjection(msg.relatedRunId, {
+        notifyOwner: true,
+      });
+    }
     this.traceFlow("dispatch_delivered", {
       status: "delivered",
       to,
@@ -2397,6 +3189,8 @@ export class ActorSystem {
       overrides?: import("./types").SpawnTaskOverrides;
       /** 显式关联已批准的建议委派 */
       plannedDelegationId?: string;
+      /** 顶层父任务 ID，仅供运行时内部透传 */
+      ownerTaskId?: string;
     },
   ): SpawnedTaskRecord | { error: string } {
     const rejectSpawn = (message: string): { error: string } => {
@@ -2414,6 +3208,7 @@ export class ActorSystem {
     }, spawnerActorId);
     const spawner = this.actors.get(spawnerActorId);
     if (!spawner) return rejectSpawn(`Spawner ${spawnerActorId} not found`);
+    const ownerTaskId = this.resolveSpawnOwnerTaskId(spawnerActorId, opts?.ownerTaskId);
     const activeContract = this.ensureRuntimeExecutionContract();
     const requestedDelegationId = opts?.plannedDelegationId?.trim() || undefined;
     const requestedTimeoutSeconds = normalizePositiveSeconds(opts?.timeoutSeconds);
@@ -2443,6 +3238,11 @@ export class ActorSystem {
         resolvedTargetActorId = actorByName.id;
       }
     }
+    const shouldCreateIfMissing = Boolean(
+      opts?.createIfMissing
+      || plannedSpawn?.createIfMissing
+      || (!plannedSpawn && opts?.createIfMissing !== false && !target),
+    );
     if (!explicitRoleBoundary && resolvedRoleBoundary === "general" && plannedSpawn?.roleBoundary) {
       resolvedRoleBoundary = plannedSpawn.roleBoundary;
     }
@@ -2491,22 +3291,27 @@ export class ActorSystem {
           : `${resolvedWorkerProfile.id}_profile`,
       preview: previewActorSystemText(resolvedTask),
     }, spawnerActorId);
-    if (!target && (opts?.createIfMissing || plannedSpawn?.createIfMissing)) {
-      const childActorName = deriveEphemeralActorName({
-        targetActorId: plannedSpawn?.targetActorName?.trim() || targetActorId.trim() || resolvedTargetActorId,
-        label: opts?.label,
-        description: resolvedCreateChildSpec.description,
-        task: resolvedTask,
-        roleBoundary: resolvedRoleBoundary,
-      });
-      if (resolvedRoleBoundary === "general") {
-        resolvedRoleBoundary = inferEphemeralChildBoundary({
-          name: childActorName,
-          description: resolvedCreateChildSpec.description,
-          capabilities: resolvedCreateChildSpec.capabilities,
+    const createEphemeralSpawnTarget = (params: {
+      preferredName: string;
+      description?: string;
+      capabilities?: AgentCapability[];
+      workspace?: string;
+    }): AgentActor | { error: string } => {
+      const description = params.description ?? resolvedCreateChildSpec.description;
+      const capabilities = params.capabilities ?? resolvedCreateChildSpec.capabilities;
+      const workspace = params.workspace ?? resolvedCreateChildSpec.workspace;
+      let nextRoleBoundary = resolvedRoleBoundary;
+      let nextWorkerProfile = resolvedWorkerProfile;
+      let nextExecutionIntent = resolvedExecutionIntent;
+
+      if (nextRoleBoundary === "general") {
+        nextRoleBoundary = inferEphemeralChildBoundary({
+          name: params.preferredName,
+          description,
+          capabilities,
         }).role;
-        resolvedWorkerProfile = resolveWorkerProfile({
-          roleBoundary: resolvedRoleBoundary,
+        nextWorkerProfile = resolveWorkerProfile({
+          roleBoundary: nextRoleBoundary,
           task: resolvedTask,
           overrideToolPolicy: resolvedOverrides.toolPolicy,
           explicitWorkerProfileId,
@@ -2514,24 +3319,49 @@ export class ActorSystem {
           resultContract: resolvedOverrides.resultContract,
         });
         Object.assign(resolvedOverrides, applyWorkerProfileDefaults({
-          profileId: resolvedWorkerProfile.id,
+          profileId: nextWorkerProfile.id,
           overrides: resolvedOverrides,
         }));
-        resolvedRoleBoundary = resolvedWorkerProfile.roleBoundary;
-        resolvedExecutionIntent = resolvedOverrides.executionIntent ?? resolvedWorkerProfile.executionIntent ?? "general";
+        nextRoleBoundary = nextWorkerProfile.roleBoundary;
+        nextExecutionIntent = resolvedOverrides.executionIntent ?? nextWorkerProfile.executionIntent ?? "general";
       }
+
       const created = this.createEphemeralAgent(spawnerActorId, {
-        name: childActorName,
-        description: resolvedCreateChildSpec.description,
-        capabilities: resolvedCreateChildSpec.capabilities,
-        roleBoundary: resolvedRoleBoundary,
-        executionIntent: resolvedExecutionIntent,
-        workspace: resolvedCreateChildSpec.workspace,
+        name: params.preferredName,
+        description,
+        capabilities,
+        roleBoundary: nextRoleBoundary,
+        executionIntent: nextExecutionIntent,
+        workspace,
         toolPolicy: resolvedOverrides.toolPolicy,
         timeoutSeconds: requestedTimeoutSeconds
           ? Math.max(requestedTimeoutSeconds, DEFAULT_DIALOG_WORKER_BUDGET_SECONDS)
           : undefined,
         overrides: resolvedOverrides,
+      });
+
+      if ("error" in created) {
+        return created;
+      }
+
+      resolvedRoleBoundary = nextRoleBoundary;
+      resolvedWorkerProfile = nextWorkerProfile;
+      resolvedExecutionIntent = nextExecutionIntent;
+      return created;
+    };
+    if (!target && shouldCreateIfMissing) {
+      const childActorName = deriveEphemeralActorName({
+        targetActorId: plannedSpawn?.targetActorName?.trim() || targetActorId.trim() || resolvedTargetActorId,
+        label: opts?.label,
+        description: resolvedCreateChildSpec.description,
+        task: resolvedTask,
+        roleBoundary: resolvedRoleBoundary,
+      });
+      const created = createEphemeralSpawnTarget({
+        preferredName: childActorName,
+        description: resolvedCreateChildSpec.description,
+        capabilities: resolvedCreateChildSpec.capabilities,
+        workspace: resolvedCreateChildSpec.workspace,
       });
       if ("error" in created) {
         return rejectSpawn(created.error);
@@ -2577,6 +3407,24 @@ export class ActorSystem {
     }
 
     const mode = opts?.mode ?? "run";
+    const label = opts?.label ?? plannedSpawn?.label ?? resolvedTask.slice(0, 30);
+    const effectiveContext = opts?.context ?? plannedSpawn?.context;
+    const roleBoundaryInstruction = buildSpawnTaskRoleBoundaryInstruction(resolvedRoleBoundary);
+    const executionHint = buildSpawnTaskExecutionHint(resolvedTask);
+    const inlineOnlyExecutorTask =
+      resolvedWorkerProfile.id === "content_worker"
+      || resolvedWorkerProfile.id === "spreadsheet_worker";
+    const reusablePrompt = buildDelegatedTaskPrompt({
+      spawnerName: spawner.role.name,
+      task: resolvedTask,
+      label,
+      roleBoundaryInstruction,
+      context: effectiveContext,
+      attachments: opts?.attachments,
+      executionHint,
+      inlineOnly: inlineOnlyExecutorTask,
+      scopedSourceItems: resolvedOverrides.scopedSourceItems,
+    });
     const existingOpenSession = this.getOpenSpawnedSessionByTarget(resolvedTargetActorId);
     if (mode === "session" && existingOpenSession) {
       if (existingOpenSession.spawnerActorId !== spawnerActorId) {
@@ -2601,7 +3449,68 @@ export class ActorSystem {
     }
 
     if (mode === "run" && target.status === "running") {
-      return rejectSpawn(`[sessions_spawn] ${target.role.name} is already running a task (mode='run' requires idle target)`);
+      const reusableRunningTask = this.findReusableRunningSpawnedTask({
+        spawnerActorId,
+        ownerTaskId,
+        targetActorId: resolvedTargetActorId,
+        task: resolvedTask,
+        label,
+        images: opts?.images,
+        plannedDelegationId: plannedSpawn?.id,
+        roleBoundary: resolvedRoleBoundary,
+        workerProfileId: resolvedWorkerProfile.id,
+        executionIntent: resolvedExecutionIntent,
+        resultContract: resolvedOverrides.resultContract,
+        deliveryTargetId: resolvedOverrides.deliveryTargetId,
+        deliveryTargetLabel: resolvedOverrides.deliveryTargetLabel,
+        sheetName: resolvedOverrides.sheetName,
+        sourceItemIds: resolvedOverrides.sourceItemIds,
+        sourceItemCount: resolvedOverrides.sourceItemCount,
+        prompt: reusablePrompt,
+      });
+      if (reusableRunningTask) {
+        reusableRunningTask.contractId = activeContract?.contractId ?? reusableRunningTask.contractId;
+        reusableRunningTask.plannedDelegationId = plannedSpawn?.id ?? reusableRunningTask.plannedDelegationId;
+        reusableRunningTask.dispatchSource = plannedSpawn ? "contract_suggestion" : reusableRunningTask.dispatchSource;
+        this.traceFlow("spawn_reused", {
+          status: "reused",
+          target: resolvedTargetActorId,
+          run_id: reusableRunningTask.runId,
+          preview: previewActorSystemText(resolvedTask),
+        }, spawnerActorId);
+        return reusableRunningTask;
+      }
+
+      if (shouldCreateIfMissing) {
+        const uniqueTargetName = ensureUniqueActorDisplayName(
+          deriveEphemeralActorName({
+            targetActorId: target.role.name,
+            label,
+            description: resolvedCreateChildSpec.description ?? target.capabilities?.description,
+            task: resolvedTask,
+            roleBoundary: resolvedRoleBoundary,
+          }),
+          (name) => this.getAll().some((actor) => actor.role.name === name),
+        );
+        log(`spawnTask: target ${target.role.name} busy, forking ephemeral worker`, {
+          targetActorId: resolvedTargetActorId,
+          forkedName: uniqueTargetName,
+          task: previewActorSystemText(resolvedTask),
+        });
+        const forked = createEphemeralSpawnTarget({
+          preferredName: uniqueTargetName,
+          description: resolvedCreateChildSpec.description ?? target.capabilities?.description,
+          capabilities: resolvedCreateChildSpec.capabilities ?? target.capabilities?.tags,
+          workspace: resolvedCreateChildSpec.workspace ?? target.workspace,
+        });
+        if ("error" in forked) {
+          return rejectSpawn(forked.error);
+        }
+        target = forked;
+        resolvedTargetActorId = forked.id;
+      } else {
+        return rejectSpawn(`[sessions_spawn] ${target.role.name} is already running a task (mode='run' requires idle target)`);
+      }
     }
     if (mode === "session" && target.status === "running") {
       return rejectSpawn(`[sessions_spawn] ${target.role.name} 正在执行其他任务，请等待空闲后再创建新的子会话`);
@@ -2622,7 +3531,7 @@ export class ActorSystem {
       return rejectSpawn(`[sessions_spawn] spawn not allowed at this depth (current: ${depth}, max: ${MAX_SPAWN_DEPTH})`);
     }
 
-    const activeChildren = this.getActiveSpawnedTasks(spawnerActorId).length;
+    const activeChildren = this.getActiveSpawnedTasks(spawnerActorId, { ownerTaskId }).length;
     if (activeChildren >= MAX_CHILDREN_PER_AGENT) {
       return rejectSpawn(`[sessions_spawn] max active children reached (${activeChildren}/${MAX_CHILDREN_PER_AGENT})`);
     }
@@ -2631,7 +3540,6 @@ export class ActorSystem {
     const spawnedAt = Date.now();
     const spawnerName = spawner.role.name;
     const targetName = target.role.name;
-    const label = opts?.label ?? plannedSpawn?.label ?? task.slice(0, 30);
     const baseBudgetSeconds = normalizePositiveSeconds(target.timeoutSeconds)
       ?? DEFAULT_DIALOG_WORKER_BUDGET_SECONDS;
     const budgetSeconds = requestedTimeoutSeconds
@@ -2639,14 +3547,8 @@ export class ActorSystem {
       : baseBudgetSeconds;
     const idleLeaseSeconds = normalizePositiveSeconds(target.idleLeaseSeconds)
       ?? DEFAULT_DIALOG_WORKER_IDLE_LEASE_SECONDS;
-    const cleanup = opts?.cleanup ?? (opts?.createIfMissing && mode === "run" ? "delete" : "keep");
+    const cleanup = opts?.cleanup ?? (shouldCreateIfMissing && mode === "run" ? "delete" : "keep");
     const expectsCompletionMessage = opts?.expectsCompletionMessage ?? true;
-    const effectiveContext = opts?.context ?? plannedSpawn?.context;
-    const roleBoundaryInstruction = buildSpawnTaskRoleBoundaryInstruction(resolvedRoleBoundary);
-    const executionHint = buildSpawnTaskExecutionHint(resolvedTask);
-    const inlineOnlyExecutorTask =
-      resolvedWorkerProfile.id === "content_worker"
-      || resolvedWorkerProfile.id === "spreadsheet_worker";
     const fullTask = buildDelegatedTaskPrompt({
       spawnerName,
       task: resolvedTask,
@@ -2667,6 +3569,7 @@ export class ActorSystem {
     const record: SpawnedTaskRecord = {
       runId,
       spawnerActorId,
+      ownerTaskId,
       targetActorId: resolvedTargetActorId,
       contractId: activeContract?.contractId,
       plannedDelegationId: plannedSpawn?.id,
@@ -2736,13 +3639,23 @@ export class ActorSystem {
   }
 
   /** 获取某个 Agent 派发的所有 spawned tasks */
-  getSpawnedTasks(actorId: string): SpawnedTaskRecord[] {
-    return this.dialogSubtaskRuntime.getSpawnedTasks(actorId);
+  getSpawnedTasks(
+    actorId: string,
+    opts?: {
+      ownerTaskId?: string;
+    },
+  ): SpawnedTaskRecord[] {
+    return this.dialogSubtaskRuntime.getSpawnedTasks(actorId, opts);
   }
 
-  buildWaitForSpawnedTasksResult(actorId: string) {
-    const base = this.dialogSubtaskRuntime.buildWaitForSpawnedTasksResult(actorId);
-    const pendingDispatches = this.getDeferredSpawnRequests(actorId);
+  buildWaitForSpawnedTasksResult(
+    actorId: string,
+    opts?: {
+      ownerTaskId?: string;
+    },
+  ) {
+    const base = this.dialogSubtaskRuntime.buildWaitForSpawnedTasksResult(actorId, opts);
+    const pendingDispatches = this.getDeferredSpawnRequests(actorId, opts);
     const pendingDispatchCount = pendingDispatches.length;
     const plannedCount = base.tasks.length + pendingDispatchCount;
 
@@ -2779,6 +3692,7 @@ export class ActorSystem {
   collectStructuredSpawnedTaskResults(
     actorId: string,
     opts?: {
+      ownerTaskId?: string;
       terminalOnly?: boolean;
       excludeRunIds?: Iterable<string>;
     },
@@ -2800,16 +3714,66 @@ export class ActorSystem {
   }
 
   /** 获取某个 Agent 的 running 状态 spawned tasks */
-  getActiveSpawnedTasks(actorId: string): SpawnedTaskRecord[] {
-    return this.dialogSubtaskRuntime.getActiveSpawnedTasks(actorId);
+  getActiveSpawnedTasks(
+    actorId: string,
+    opts?: {
+      ownerTaskId?: string;
+    },
+  ): SpawnedTaskRecord[] {
+    return this.dialogSubtaskRuntime.getActiveSpawnedTasks(actorId, opts);
   }
 
   getDialogSpawnConcurrencyLimit(): number {
     return MAX_ACTIVE_DIALOG_CHILDREN;
   }
 
-  abortActiveRunSpawnedTasks(spawnerActorId: string, error = "父任务被终止"): number {
-    const aborted = this.dialogSubtaskRuntime.abortActiveRunTasksForSpawner(spawnerActorId, error);
+  pruneStaleSpawnedTaskState(
+    actorId: string,
+    activeOwnerTaskId?: string,
+  ): {
+    abortedRunningCount: number;
+    removedCompletedCount: number;
+    droppedDeferredCount: number;
+  } {
+    const abortedRunningCount = this.dialogSubtaskRuntime.abortActiveRunTasksForSpawner(
+      actorId,
+      "检测到新的顶层任务开始，上一轮未完成的子任务已终止。",
+      {
+        excludeOwnerTaskId: activeOwnerTaskId,
+      },
+    );
+    const removedCompletedCount = this.dialogSubtaskRuntime.pruneCompletedTasksForSpawner(actorId, {
+      excludeOwnerTaskId: activeOwnerTaskId,
+    });
+    const droppedDeferredCount = this.pruneDeferredSpawnRequests(actorId, {
+      excludeOwnerTaskId: activeOwnerTaskId,
+    });
+    if (abortedRunningCount > 0 || removedCompletedCount > 0 || droppedDeferredCount > 0) {
+      this.traceFlow("stale_spawned_task_cleanup", {
+        owner_task_id: activeOwnerTaskId,
+        aborted_running_count: abortedRunningCount,
+        removed_completed_count: removedCompletedCount,
+        dropped_deferred_count: droppedDeferredCount,
+      }, actorId);
+      log(
+        `pruneStaleSpawnedTaskState: actor=${actorId}, abortedRunning=${abortedRunningCount}, removedCompleted=${removedCompletedCount}, droppedDeferred=${droppedDeferredCount}`,
+      );
+    }
+    return {
+      abortedRunningCount,
+      removedCompletedCount,
+      droppedDeferredCount,
+    };
+  }
+
+  abortActiveRunSpawnedTasks(
+    spawnerActorId: string,
+    error = "父任务被终止",
+    opts?: {
+      excludeOwnerTaskId?: string;
+    },
+  ): number {
+    const aborted = this.dialogSubtaskRuntime.abortActiveRunTasksForSpawner(spawnerActorId, error, opts);
     if (aborted > 0) {
       this.tryFinalizeExecutionContract();
       this.scheduleExecutionContractProgressCheck();
@@ -3111,8 +4075,13 @@ export class ActorSystem {
    * 获取某个 Agent 的完整后代任务树（含孙任务、曾孙任务...）。
    * 返回扁平列表，每个 record 带 depth 字段表示层级。
    */
-  getDescendantTasks(actorId: string): Array<SpawnedTaskRecord & { depth: number }> {
-    return this.dialogSubtaskRuntime.getDescendantTasks(actorId);
+  getDescendantTasks(
+    actorId: string,
+    opts?: {
+      ownerTaskId?: string;
+    },
+  ): Array<SpawnedTaskRecord & { depth: number }> {
+    return this.dialogSubtaskRuntime.getDescendantTasks(actorId, opts);
   }
 
   /** 计算 spawn 链深度（通过 spawnedTasks 回溯 spawner 链） */
@@ -3782,13 +4751,18 @@ export class ActorSystem {
     archiveSession(oldSessionId, summary);
     this.dialogHistory = [];
     this.dialogFlowEvents = [];
-    (this as any).sessionId = generateId();
+    this.replaceSessionId(generateId());
     this.traceFlow("session_reset", {
       previous_session: oldSessionId.slice(0, 8),
       preview: previewActorSystemText(summary),
     });
+    updateDialogTraceActorSystemSession({
+      previousSessionId: oldSessionId,
+      nextSessionId: this.sessionId,
+      traceContext: this.traceContext,
+    });
     resetDialogStepTrace();
-    traceDialogSessionStarted(this.sessionId);
+    traceDialogSessionStarted(this.sessionId, this.traceContext);
     this.artifactRecords.clear();
     this.sessionUploads.clear();
     this.dialogSubtaskRuntime.focusSession(null);
@@ -3818,6 +4792,7 @@ export class ActorSystem {
     }
 
     this.dialogSubtaskRuntime.clearAll();
+    this.dialogSubtaskRuntime.replaceSessionId(this.sessionId);
     this.deferredSpawnRequests.clear();
     this.deferredSpawnDispatchingOwners.clear();
     this.activeExecutionContract = null;
@@ -4033,6 +5008,7 @@ export class ActorSystem {
     detail?: Record<string, unknown>;
     timestamp?: number;
   }): void {
+    if (this.disposed) return;
     const event: DialogFlowTraceEvent = {
       event: params.event,
       actorId: params.actorId?.trim() || undefined,
@@ -4046,7 +5022,8 @@ export class ActorSystem {
   }
 
   emitEvent(event: ActorEvent | DialogMessage): void {
-    traceDialogActorSystemEvent(this.sessionId, event);
+    if (this.disposed) return;
+    traceDialogActorSystemEvent(this.sessionId, event, this.traceContext);
     for (const handler of this.eventHandlers) {
       try { handler(event); } catch { /* non-critical */ }
     }

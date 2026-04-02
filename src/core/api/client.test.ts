@@ -2,7 +2,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const authState = {
   token: "test-token",
+  tokenUpdatedAt: Date.now(),
   refreshToken: null as string | null,
+  isLoggedIn: true,
   logout: vi.fn(),
   login: vi.fn(),
 };
@@ -27,6 +29,10 @@ describe("api client", () => {
   beforeEach(() => {
     authState.logout.mockReset();
     authState.login.mockReset();
+    authState.token = "test-token";
+    authState.tokenUpdatedAt = Date.now();
+    authState.refreshToken = null;
+    authState.isLoggedIn = true;
     global.fetch = vi.fn();
   });
 
@@ -79,5 +85,43 @@ describe("api client", () => {
       expect(apiError.code).toBe("INVALID_RESPONSE_SHAPE");
       expect(apiError.path).toBe("/shape-test");
     }
+  });
+
+  it("refreshes an aging token before sending protected requests", async () => {
+    authState.token = "stale-token";
+    authState.refreshToken = "refresh-token";
+    authState.tokenUpdatedAt = Date.now() - 21 * 60 * 1000;
+
+    authState.login.mockImplementation((_user, token, refreshToken) => {
+      authState.token = token;
+      authState.refreshToken = refreshToken ?? null;
+      authState.tokenUpdatedAt = Date.now();
+      authState.isLoggedIn = true;
+    });
+
+    (global.fetch as any)
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            user: { id: "user-1" },
+            access_token: "fresh-token",
+            refresh_token: "fresh-refresh-token",
+          }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: true }), { status: 200 }),
+      );
+
+    const result = await api.get<{ ok: boolean }>("/protected");
+
+    expect(result).toEqual({ ok: true });
+    expect(authState.login).toHaveBeenCalledWith(
+      { id: "user-1" },
+      "fresh-token",
+      "fresh-refresh-token",
+    );
+    expect((global.fetch as any).mock.calls[1]?.[1]?.headers?.Authorization).toBe("Bearer fresh-token");
   });
 });

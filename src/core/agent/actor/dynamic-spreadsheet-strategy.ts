@@ -1,6 +1,7 @@
 import {
   buildDynamicWorkbook,
   buildDynamicWorkbookReply,
+  filterExportableStructuredResults,
 } from "./dynamic-workbook-builder";
 import { analyzeStructuredSpreadsheetQuality } from "./delivery-quality-gate";
 import { buildSourceGroundingSnapshot, inferRequestedOutputSchema } from "./source-grounding";
@@ -294,6 +295,48 @@ function buildDynamicRepairPlan(params: {
   };
 }
 
+function buildWorkbookBlockerRepairPlan(params: {
+  taskText: string;
+  manifest: StructuredDeliveryManifest;
+  structuredResults: readonly import("./dialog-subtask-runtime").DialogStructuredSubtaskResult[];
+  blocker: string;
+}): StructuredDeliveryRepairPlan | undefined {
+  const sourceSnapshotItems = params.manifest.sourceSnapshot?.items ?? [];
+  if (sourceSnapshotItems.length === 0) return undefined;
+
+  const exportableResults = filterExportableStructuredResults({
+    structuredResults: params.structuredResults,
+    resultSchema: params.manifest.resultSchema,
+  });
+  const coveredSourceItemIds = new Set(
+    exportableResults.flatMap((result) => result.sourceItemIds ?? []),
+  );
+  const exportableRunIds = new Set(exportableResults.map((result) => result.runId));
+  const blockedSourceItemIds = new Set(
+    params.structuredResults
+      .filter((result) => !exportableRunIds.has(result.runId))
+      .flatMap((result) => result.sourceItemIds ?? []),
+  );
+
+  let missingSourceItems = sourceSnapshotItems.filter((item) => !coveredSourceItemIds.has(item.id));
+  if (missingSourceItems.length === 0 && blockedSourceItemIds.size > 0) {
+    missingSourceItems = sourceSnapshotItems.filter((item) => blockedSourceItemIds.has(item.id));
+  }
+  if (missingSourceItems.length === 0) {
+    missingSourceItems = sourceSnapshotItems;
+  }
+
+  return buildDynamicRepairPlan({
+    taskText: params.taskText,
+    manifest: params.manifest,
+    blocker: params.blocker,
+    missingSourceItems,
+    missingThemeLabels: uniqueNonEmpty(missingSourceItems.map((item) => item.topicTitle ?? item.label)),
+    multiTopicRowCount: 0,
+    unmappedRowCount: 0,
+  });
+}
+
 export const dynamicSpreadsheetStrategy: StructuredDeliveryStrategy = {
   id: DYNAMIC_SPREADSHEET_STRATEGY_ID,
   deliveryContract: "spreadsheet",
@@ -312,7 +355,7 @@ export const dynamicSpreadsheetStrategy: StructuredDeliveryStrategy = {
       deliveryContract: "spreadsheet",
       parentContract: "single_workbook",
       requiresSpreadsheetOutput: true,
-      applyInitialIsolation: false,
+      applyInitialIsolation: true,
       sourceSnapshot: snapshot,
       targets,
       resultSchema,
@@ -382,7 +425,15 @@ export const dynamicSpreadsheetStrategy: StructuredDeliveryStrategy = {
       resultSchema: params.manifest.resultSchema,
     });
     if ("blocker" in workbookPlan) {
-      return { blocker: workbookPlan.blocker };
+      return {
+        blocker: workbookPlan.blocker,
+        repairPlan: buildWorkbookBlockerRepairPlan({
+          taskText: params.taskText,
+          manifest: params.manifest,
+          structuredResults: params.structuredResults,
+          blocker: workbookPlan.blocker,
+        }),
+      };
     }
     const qualityAnalysis = analyzeStructuredSpreadsheetQuality({
       manifest: params.manifest,

@@ -155,6 +155,9 @@ describe("PromptBuildMiddleware", () => {
     expect(ctx.rolePrompt).toContain("已批准建议委派只是许可与建议");
     expect(ctx.rolePrompt).toContain("当你的下一步明确依赖子任务结果时");
     expect(ctx.rolePrompt).toContain("先判断自己是否已经能直接完成");
+    expect(ctx.rolePrompt).toContain("Coordinator Mode");
+    expect(ctx.rolePrompt).toContain("Coordinator Tool Pool");
+    expect(ctx.rolePrompt).toContain("## Worker 结果协议");
     expect(ctx.rolePrompt).not.toContain("不要独自完成所有工作");
     expect(ctx.rolePrompt).not.toContain("应先拆解任务");
     expect(ctx.rolePrompt).not.toContain("务必立刻调用 `wait_for_spawned_tasks`");
@@ -186,6 +189,7 @@ describe("PromptBuildMiddleware", () => {
     ctx.actorSystem = {
       size: 2,
       shouldEnableDialogSubagentCapabilities: () => true,
+      isCoordinatorModeEnabled: () => true,
       getAll: () => [
         { id: "actor-1", role: { name: "Builder" } },
         { id: "actor-2", role: { name: "Reviewer" } },
@@ -198,6 +202,51 @@ describe("PromptBuildMiddleware", () => {
 
     expect(ctx.rolePrompt).toContain("## 多 Agent 协作");
     expect(ctx.rolePrompt).toContain("先判断自己是否已经能直接完成");
+    expect(ctx.rolePrompt).toContain("Coordinator Tool Pool");
+  });
+
+  it("keeps generic collaboration guidance when coordinator mode is explicitly off", async () => {
+    const ctx = createContext();
+    ctx.actorSystem = {
+      size: 2,
+      shouldEnableDialogSubagentCapabilities: () => true,
+      isCoordinatorModeEnabled: () => false,
+      hasLiveDialogSubagentContext: () => false,
+      getAll: () => [
+        { id: "actor-1", role: { name: "Builder" } },
+        { id: "actor-2", role: { name: "Reviewer" } },
+      ],
+      getCoordinator: () => ({ id: "actor-1" }),
+      getActiveExecutionContract: () => null,
+    } as ActorRunContext["actorSystem"];
+
+    await new PromptBuildMiddleware().apply(ctx);
+
+    expect(ctx.rolePrompt).toContain("## 多 Agent 协作");
+    expect(ctx.rolePrompt).not.toContain("## 当前角色：协调者（Coordinator Mode）");
+    expect(ctx.rolePrompt).not.toContain("Worker in Coordinator Mode");
+  });
+
+  it("adds worker result protocol text for non-coordinator actors", async () => {
+    const ctx = createContext();
+    ctx.actorId = "actor-2";
+    ctx.actorSystem = {
+      size: 2,
+      shouldEnableDialogSubagentCapabilities: () => true,
+      isCoordinatorModeEnabled: () => true,
+      getAll: () => [
+        { id: "actor-1", role: { name: "Builder" } },
+        { id: "actor-2", role: { name: "Reviewer" } },
+      ],
+      getCoordinator: () => ({ id: "actor-1" }),
+      getActiveExecutionContract: () => null,
+    } as ActorRunContext["actorSystem"];
+
+    await new PromptBuildMiddleware().apply(ctx);
+
+    expect(ctx.rolePrompt).toContain("Worker in Coordinator Mode");
+    expect(ctx.rolePrompt).toContain("## Worker 结果协议");
+    expect(ctx.rolePrompt).toContain("terminal result 必须给协调者真实回传");
   });
 
   it("surfaces session thread-data paths in the final prompt", async () => {

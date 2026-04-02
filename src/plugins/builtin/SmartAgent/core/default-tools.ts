@@ -1,15 +1,53 @@
 import { agentRuntimeManager, type RuntimeFallbackContext } from "@/core/agent/runtime";
+import { detectRejectedShellCommand } from "@/core/agent/actor/tool-approval-policy";
 import type { AgentTool } from "./react-agent";
 import { createMemoryTools } from "@/core/agent/actor/actor-memory";
 import {
   CLAWHUB_EXPLICIT_REQUEST_REFUSAL,
   clawHubRuntimeService,
 } from "@/core/agent/skills/clawhub-runtime-service";
+import {
+  decodeJsonLikeString,
+  escapeRawControlCharsInJsonStrings,
+} from "./tool-call-arguments";
 
 function normalizeSpreadsheetSheetsJson(input: unknown): string | null {
   const normalizeParsed = (value: unknown): string | null => {
     if (Array.isArray(value)) return JSON.stringify(value);
     if (value && typeof value === "object") return JSON.stringify([value]);
+    return null;
+  };
+
+  const tryNormalizeCandidate = (candidate: string): string | null => {
+    if (!candidate) return null;
+
+    const uniqueCandidates = [...new Set([
+      candidate,
+      candidate.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim(),
+      escapeRawControlCharsInJsonStrings(candidate),
+      escapeRawControlCharsInJsonStrings(
+        candidate.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim(),
+      ),
+      decodeJsonLikeString(candidate),
+      decodeJsonLikeString(
+        candidate.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim(),
+      ),
+      escapeRawControlCharsInJsonStrings(decodeJsonLikeString(candidate)),
+    ])].filter(Boolean);
+
+    for (const rawCandidate of uniqueCandidates) {
+      try {
+        const parsed = JSON.parse(rawCandidate);
+        if (typeof parsed === "string") {
+          const reparsed = tryNormalizeCandidate(parsed);
+          if (reparsed) return reparsed;
+          continue;
+        }
+        const normalized = normalizeParsed(parsed);
+        if (normalized) return normalized;
+      } catch {}
+    }
+
     return null;
   };
 
@@ -35,23 +73,51 @@ function normalizeSpreadsheetSheetsJson(input: unknown): string | null {
   }
 
   for (const candidate of [...new Set(candidates)]) {
-    if (!candidate) continue;
-    try {
-      const parsed = JSON.parse(candidate);
-      if (typeof parsed === "string") {
-        try {
-          const reparsed = JSON.parse(parsed);
-          const normalized = normalizeParsed(reparsed);
-          if (normalized) return normalized;
-        } catch {}
-      }
-      const normalized = normalizeParsed(parsed);
-      if (normalized) return normalized;
-    } catch {}
+    const normalized = tryNormalizeCandidate(candidate);
+    if (normalized) return normalized;
   }
 
   return null;
 }
+
+const JSON_VALUE_SCHEMA = {
+  oneOf: [
+    { type: "string" },
+    { type: "number" },
+    { type: "boolean" },
+    { type: "null" },
+    { type: "array", items: {} },
+    { type: "object", additionalProperties: true },
+  ],
+} as const;
+
+const SPREADSHEET_SHEETS_SCHEMA = {
+  type: "array",
+  items: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      name: {
+        type: "string",
+        description: "工作表名称",
+      },
+      headers: {
+        type: "array",
+        items: { type: "string" },
+        description: "表头",
+      },
+      rows: {
+        type: "array",
+        description: "二维单元格数组",
+        items: {
+          type: "array",
+          items: JSON_VALUE_SCHEMA,
+        },
+      },
+    },
+    required: ["name", "headers", "rows"],
+  },
+} as const;
 
 /**
  * 安全的数学表达式解析器（递归下降），不使用 eval/Function。
@@ -554,6 +620,22 @@ function createLocalDevTools(
       name: "export_spreadsheet",
       description:
         "将数据导出为 Excel (.xlsx) 文件，用户可以直接打开。适用于数据分析结果、报表生成、数据清洗后输出等场景。",
+      rawParametersSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          file_name: {
+            type: "string",
+            description: "输出文件名（如 report.xlsx），会保存到用户的下载目录",
+          },
+          sheets: {
+            ...SPREADSHEET_SHEETS_SCHEMA,
+            description:
+              "工作表数组，格式: [{name, headers, rows}]；单元格支持 string/number/boolean/null/object/array",
+          },
+        },
+        required: ["file_name", "sheets"],
+      },
       parameters: {
         file_name: {
           type: "string",
@@ -795,6 +877,10 @@ function createLocalDevTools(
       execute: async (params) => {
         const command = String(params.command || "").trim();
         if (!command) return { error: "command 不能为空" };
+        const rejectedReason = detectRejectedShellCommand(command);
+        if (rejectedReason) {
+          return { error: rejectedReason };
+        }
         const redirect = getShellDocumentRedirectError(command);
         if (redirect) return redirect;
         return agentRuntimeManager.runShellCommand(command, {
@@ -1593,6 +1679,24 @@ export function createBuiltinAgentTools(
       name: "task_done",
       description: "显式标记当前任务已完成。必须在验证结果正确后才能调用。调用后 Agent 将停止执行并返回最终结论。",
       readonly: true,
+      rawParametersSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          summary: {
+            type: "string",
+            description: "任务完成摘要（可选）",
+          },
+          result: {
+            ...JSON_VALUE_SCHEMA,
+            description: "完整最终结果（可选）。内容型/结构化子任务请直接传对象/数组，不要手写 JSON 字符串。",
+          },
+          answer: {
+            ...JSON_VALUE_SCHEMA,
+            description: "完整最终回答（兼容字段，可选）。若提供，系统会优先把它作为最终结果候选。",
+          },
+        },
+      },
       parameters: {
         summary: {
           type: "string",
@@ -1841,6 +1945,10 @@ export function createBuiltinAgentTools(
 
       const command = String(params.command || "").trim();
       if (!command) return { error: "command 不能为空" };
+      const rejectedReason = detectRejectedShellCommand(command);
+      if (rejectedReason) {
+        return { error: rejectedReason };
+      }
       const redirect = getShellDocumentRedirectError(command);
       if (redirect) return redirect;
 

@@ -47,7 +47,7 @@ describe("structured-delivery strategy registry", () => {
     expect(manifest.parentContract).toBe("single_workbook");
     expect(manifest.adapterEnabled).toBe(false);
     expect(isStructuredDeliveryAdapterEnabled(manifest)).toBe(false);
-    expect(manifest.applyInitialIsolation).toBe(false);
+    expect(manifest.applyInitialIsolation).toBe(true);
     expect(manifest.resultSchema?.fields.map((field) => field.label)).toEqual(["课程名称", "课程介绍"]);
     expect(manifest.targets?.length).toBeGreaterThan(1);
     expect(new Set(manifest.targets?.map((target) => target.label))).toEqual(new Set(["结果清单"]));

@@ -1,7 +1,36 @@
 {
   "permissions": {
     "allow": [
-      "Bash(pnpm vitest:*)"
+      "Bash(pnpm vitest:*)",
+      "Bash(find src/core/agent/runtime src/core/task-center src/core/agent/actor src/core/agent/backends src/core/agent/definitions src/core/agent/swarm -type f -name *.ts)",
+      "Bash(curl -s http://localhost:5180/)",
+      "Bash(open -a \"Google Chrome\" http://localhost:5180/)",
+      "Bash(open http://localhost:5180/)",
+      "Bash(pnpm exec:*)",
+      "Bash(pkill:*)",
+      "Bash(grep -E \"\\\\.\\(ts|tsx\\)$\")",
+      "Bash(xargs ls:*)",
+      "Bash(find src/core/agent/definitions/builtin -name *.ts)",
+      "Bash(node -e \"console.log\\(require\\(''''readline''''\\).createInterface\\({input:process.stdin}\\).on\\(''''line'''', l => console.log\\(l.trim\\(\\)\\)\\)\\)\")",
+      "Bash(node:*)",
+      "Bash(find src/core/agent/actor -name \"*.ts\" -exec grep -l \"write_file\" {})",
+      "Bash(ls -d tools/*/)",
+      "Bash(find src/core/agent/tools -name *.ts -type f)",
+      "Bash(ls src/core/ai/*.ts)",
+      "Bash(npm run:*)",
+      "Bash(git checkout:*)",
+      "Bash(ls -la src/core/agent/tools/*.ts)",
+      "Bash(/Users/haichao/Desktop/work/51ToolBox/docs/claude-code-complete-gap-analysis.md:*)",
+      "Bash(grep -A 20 'is already running' /Users/haichao/Desktop/work/claude-code/src -r --include=*.ts)",
+      "Bash(/Users/haichao/Desktop/work/51ToolBox/docs/loop-delegation-analysis.md:*)",
+      "Bash(grep:*)",
+      "Bash(/Users/haichao/Desktop/work/51ToolBox/docs/fix-implementation.md:*)",
+      "Bash(xargs -I {} basename {} .ts)",
+      "Bash(/Users/haichao/Desktop/work/51ToolBox/docs/claude-code-comprehensive-gap-analysis.md:*)",
+      "Bash(/Users/haichao/Desktop/work/51ToolBox/docs/claude-code-gap-analysis-zh.md:*)",
+      "Bash(ls:*)",
+      "Bash(find /Users/haichao/Desktop/work/51ToolBox -name *dialog*trace*.txt -o -name *step*trace*.txt)",
+      "Bash(/Users/haichao/Desktop/work/51ToolBox/docs/dialog-step-trace-analysis.md:*)"
     ]
   }
 }

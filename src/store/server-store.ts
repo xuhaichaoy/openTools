@@ -57,7 +57,11 @@ export const useServerStore = create<ServerState>()(
     (set, get) => ({
       serverUrl: DEFAULT_SERVER_URL,
       setServerUrl: (url: string) => {
-        const normalized = url.replace(/\/+$/, "");
+        let normalized = url.trim().replace(/\/+$/, "");
+        // 修复缺少 // 的 http: 或 https: 协议
+        if (/^https?:[^/]/.test(normalized)) {
+          normalized = normalized.replace(/^(https?:)/, "$1//");
+        }
         set({ serverUrl: normalized || DEFAULT_SERVER_URL });
       },
       getBaseUrl: () => get().serverUrl || DEFAULT_SERVER_URL,

@@ -18,6 +18,7 @@ interface AuthState {
   user: User | null;
   token: string | null;
   refreshToken: string | null;
+  tokenUpdatedAt: number | null;
   isLoggedIn: boolean;
   setUser: (user: User | null) => void;
   setToken: (token: string | null) => void;
@@ -41,13 +42,18 @@ export const useAuthStore = create<AuthState>()(
       user: null,
       token: null,
       refreshToken: null,
+      tokenUpdatedAt: null,
       isLoggedIn: false,
 
       setUser: (user) => {
         const normalized = normalizeUser(user);
         set({ user: normalized, isLoggedIn: !!normalized });
       },
-      setToken: (token) => set({ token }),
+      setToken: (token) =>
+        set({
+          token,
+          tokenUpdatedAt: token ? Date.now() : null,
+        }),
       setRefreshToken: (refreshToken) => set({ refreshToken }),
 
       login: (user, token, refreshToken) => {
@@ -56,6 +62,7 @@ export const useAuthStore = create<AuthState>()(
           user: normalized,
           token,
           refreshToken: refreshToken ?? null,
+          tokenUpdatedAt: Date.now(),
           isLoggedIn: !!normalized,
         });
       },
@@ -65,6 +72,7 @@ export const useAuthStore = create<AuthState>()(
           user: null,
           token: null,
           refreshToken: null,
+          tokenUpdatedAt: null,
           isLoggedIn: false,
         }),
 

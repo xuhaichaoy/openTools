@@ -1,6 +1,6 @@
 import { useAuthStore } from "@/store/auth-store";
 import { getServerUrl } from "@/store/server-store";
-import { handleError } from "@/core/errors";
+import { ensureFreshAuthToken, refreshAuthSession } from "@/core/auth/session";
 
 interface RequestOptions extends RequestInit {
   params?: Record<string, string | number | undefined>;
@@ -50,44 +50,13 @@ export function assertResponseShape<T>(
   });
 }
 
-let isRefreshing = false;
-let refreshPromise: Promise<boolean> | null = null;
-
 async function tryRefreshToken(): Promise<boolean> {
-  if (isRefreshing && refreshPromise) {
-    return refreshPromise;
-  }
-  isRefreshing = true;
-  refreshPromise = (async () => {
-    try {
-      const { refreshToken } = useAuthStore.getState();
-      if (!refreshToken) return false;
-
-      const baseUrl = getServerUrl();
-      const res = await fetch(`${baseUrl}/v1/auth/refresh`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ refresh_token: refreshToken }),
-      });
-
-      if (!res.ok) return false;
-
-      const data = await res.json();
-      useAuthStore.getState().login(
-        data.user,
-        data.access_token,
-        data.refresh_token,
-      );
-      return true;
-    } catch (e) {
-      handleError(e, { context: "刷新Token", silent: true });
-      return false;
-    } finally {
-      isRefreshing = false;
-      refreshPromise = null;
-    }
-  })();
-  return refreshPromise;
+  const result = await refreshAuthSession({
+    reason: "api_client_401",
+    promptOnFailure: false,
+    logoutOnFatal: false,
+  });
+  return result.ok;
 }
 
 async function parseBody(response: Response): Promise<{
@@ -145,10 +114,17 @@ async function request<T>(
   options: RequestOptions = {},
   retried = false,
 ): Promise<T> {
-  const { token, logout } = useAuthStore.getState();
+  const { logout } = useAuthStore.getState();
   const { params, headers, skipAuth, ...rest } = options;
 
   const isAuthPath = path.startsWith("/auth/");
+  const token = !skipAuth && !isAuthPath
+    ? await ensureFreshAuthToken({
+        reason: `api_request:${path}`,
+        promptOnFailure: false,
+        logoutOnFatal: false,
+      })
+    : String(useAuthStore.getState().token || "").trim() || null;
   if (!token && !skipAuth && !isAuthPath) {
     throw new ApiError({
       status: 401,
@@ -203,8 +179,11 @@ async function request<T>(
     if (refreshed) {
       return request<T>(path, options, true);
     }
-    logout();
-    window.dispatchEvent(new CustomEvent("open-login-modal"));
+    const stillLoggedIn = useAuthStore.getState().isLoggedIn;
+    if (!stillLoggedIn) {
+      logout();
+      window.dispatchEvent(new CustomEvent("open-login-modal"));
+    }
     throw new ApiError({
       status: 401,
       code: "UNAUTHORIZED",
@@ -214,8 +193,11 @@ async function request<T>(
   }
 
   if (response.status === 401) {
-    logout();
-    window.dispatchEvent(new CustomEvent("open-login-modal"));
+    const stillLoggedIn = useAuthStore.getState().isLoggedIn;
+    if (!stillLoggedIn) {
+      logout();
+      window.dispatchEvent(new CustomEvent("open-login-modal"));
+    }
     throw new ApiError({
       status: 401,
       code: "UNAUTHORIZED",

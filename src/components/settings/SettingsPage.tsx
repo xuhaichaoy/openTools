@@ -1,12 +1,18 @@
 import { useState } from "react";
-import { ArrowLeft, Bot, Monitor, ShieldCheck } from "lucide-react";
+import { ArrowLeft, Bot, Monitor, ShieldCheck, Server, Brain, Sparkles } from "lucide-react";
 import { AISettings } from "./AISettings";
 import { GeneralSettings } from "./GeneralSettings";
 import { CredentialSettings } from "@/components/data-forge/CredentialSettings";
+import { McpManager } from "@/components/ai/McpManager";
+import { MemoryManager } from "@/components/ai/MemoryManager";
+import { SkillsManager } from "@/components/ai/SkillsManager";
 import { useDragWindow } from "@/hooks/useDragWindow";
 
 const tabs = [
   { id: "ai", label: "AI 模型", icon: Bot },
+  { id: "skills", label: "技能", icon: Sparkles },
+  { id: "mcp", label: "MCP", icon: Server },
+  { id: "memory", label: "记忆", icon: Brain },
   { id: "general", label: "通用", icon: Monitor },
   { id: "credentials", label: "凭证", icon: ShieldCheck },
 ] as const;
@@ -56,6 +62,9 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
       {/* Tab 内容 */}
       <div className="flex-1 overflow-y-auto p-5">
         {activeTab === "ai" && <AISettings />}
+        {activeTab === "skills" && <SkillsManager />}
+        {activeTab === "mcp" && <McpManager />}
+        {activeTab === "memory" && <MemoryManager />}
         {activeTab === "general" && <GeneralSettings />}
         {activeTab === "credentials" && <CredentialSettings />}
       </div>

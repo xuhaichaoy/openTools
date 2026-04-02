@@ -1592,7 +1592,7 @@ describe("AgentActor timeout guards", () => {
       if (query.includes("上一条答复未通过结果校验")) {
         expect(runOverrides?.toolPolicy).toEqual(expect.objectContaining({
           allow: expect.arrayContaining(["task_done", "export_spreadsheet"]),
-          deny: expect.arrayContaining(["session_history", "session_list"]),
+          deny: expect.arrayContaining(["session_history", "session_list", "read_file_range", "run_shell_command"]),
         }));
         expect(runOverrides?.toolPolicy?.allow).not.toContain("send_local_media");
         expect(runOverrides?.toolPolicy?.allow).not.toContain("export_document");
@@ -1635,6 +1635,7 @@ describe("AgentActor timeout guards", () => {
       if (query.includes("结构化子任务摘要")) {
         expect(runOverrides?.toolPolicy?.allow).toEqual(["task_done"]);
         expect(runOverrides?.toolPolicy?.allow).not.toContain("export_document");
+        expect(runOverrides?.toolPolicy?.deny).toEqual(expect.arrayContaining(["read_file_range", "run_shell_command"]));
         return {
           result: "目前已收到各子任务反馈。",
           finalQuery: query,

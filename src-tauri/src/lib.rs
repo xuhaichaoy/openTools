@@ -196,7 +196,9 @@ pub fn run() {
             if webview.label() != "main" || payload.event() != PageLoadEvent::Started {
                 return;
             }
-            let cancellation = webview.app_handle().state::<commands::ai::StreamCancellation>();
+            let cancellation = webview
+                .app_handle()
+                .state::<commands::ai::StreamCancellation>();
             cancellation.cancel(None);
             log::info!(
                 "[ai_stream] cancelled active streams on main webview page reload: {}",

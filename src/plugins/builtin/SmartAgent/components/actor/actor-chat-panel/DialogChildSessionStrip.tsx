@@ -7,6 +7,8 @@ interface DialogChildSessionStripProps {
   sessions: CollaborationChildSession[];
   actorNameById?: ReadonlyMap<string, string>;
   pendingSteerSessionRunId?: string | null;
+  focusedSessionRunId?: string | null;
+  onFocusSession?: (runId: string) => void;
   onOpenWorkspace?: () => void;
 }
 
@@ -59,6 +61,8 @@ export function DialogChildSessionStrip({
   sessions,
   actorNameById,
   pendingSteerSessionRunId = null,
+  focusedSessionRunId = null,
+  onFocusSession,
   onOpenWorkspace,
 }: DialogChildSessionStripProps) {
   const activeSessions = useMemo(
@@ -112,11 +116,17 @@ export function DialogChildSessionStrip({
             ?? session.lastResultSummary,
           ) ?? "主 Agent 保留中的专项上下文";
           const isPendingSteer = pendingSteerSessionRunId === session.runId;
+          const isFocused = focusedSessionRunId === session.runId;
+          const canFocus = Boolean(onFocusSession && session.focusable);
 
           return (
             <div
               key={session.id}
-              className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 overflow-hidden rounded-xl border border-[var(--color-border)]/80 bg-[var(--color-bg)] px-2.5 py-1.5"
+              className={`grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 overflow-hidden rounded-xl border px-2.5 py-1.5 ${
+                isFocused
+                  ? "border-[var(--color-accent)]/30 bg-[var(--color-accent)]/8"
+                  : "border-[var(--color-border)]/80 bg-[var(--color-bg)]"
+              }`}
             >
               <div className="min-w-0 overflow-hidden">
                 <div className="flex min-w-0 items-center gap-2 overflow-hidden">
@@ -136,10 +146,24 @@ export function DialogChildSessionStrip({
                 <div className={`rounded-full px-1.5 py-0.5 text-[10px] ${statusMeta.className}`}>
                   {statusMeta.label}
                 </div>
+                {isFocused && (
+                  <div className="rounded-full bg-[var(--color-accent)]/10 px-1.5 py-0.5 text-[10px] text-[var(--color-accent)]">
+                    当前对话中
+                  </div>
+                )}
                 {isPendingSteer && (
                   <div className="rounded-full bg-sky-500/10 px-1.5 py-0.5 text-[10px] text-sky-700">
                     主 Agent 正在接管
                   </div>
+                )}
+                {canFocus && !isFocused && (
+                  <button
+                    type="button"
+                    onClick={() => onFocusSession?.(session.runId)}
+                    className="rounded-full bg-[var(--color-accent)]/10 px-2 py-1 text-[10px] text-[var(--color-accent)] transition-colors hover:bg-[var(--color-accent)]/15"
+                  >
+                    接管对话
+                  </button>
                 )}
               </div>
             </div>

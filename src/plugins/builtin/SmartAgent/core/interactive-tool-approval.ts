@@ -3,6 +3,7 @@ import type {
   ToolApprovalAssessment,
   ToolApprovalRisk,
 } from "@/core/agent/actor/tool-approval-policy";
+import { detectSuspiciousShellCommand } from "@/core/agent/actor/tool-approval-policy";
 import { createLogger } from "@/core/logger";
 import type { MToolsAI } from "@/core/plugin-system/plugin-interface";
 import type { AICenterMode } from "@/store/app-store";
@@ -70,7 +71,8 @@ function shouldUseModelReview(
   if (assessment.risk === "high") return false;
 
   if (toolName === "run_shell_command" || toolName === "persistent_shell") {
-    return buildCommandPreview(params).length > 0;
+    const preview = buildCommandPreview(params);
+    return preview.length > 0 && !detectSuspiciousShellCommand(preview);
   }
 
   if (assessment.risk !== "unknown") return false;
@@ -331,15 +333,15 @@ export async function resolveInteractiveToolApproval(
         }
 
         promptReason = review
-          ? `模型复核后仍需人工确认：${review.reason}`
-          : "模型复核未返回可用结论，改为人工确认。";
+          ? review.reason
+          : assessment.reason;
       }
     } catch (error) {
       log.warn("model review failed", {
         toolName,
         error: error instanceof Error ? error.message : String(error),
       });
-      promptReason = "模型复核失败，改为人工确认。";
+      promptReason = assessment.reason;
     }
   }
 

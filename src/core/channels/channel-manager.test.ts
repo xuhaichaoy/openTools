@@ -4,8 +4,8 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async () => () => undefined),
 }));
 
-import type { ChannelConfig, IMChannel, MessageHandler } from "./types";
-import { ChannelManager } from "./channel-manager";
+import type { ChannelConfig, ChannelStatus, IMChannel, MessageHandler } from "./types";
+import { ChannelManager, getChannelManager } from "./channel-manager";
 import {
   CHANNEL_ROUTE_STORAGE_KEY,
   clearPersistedConversationRoutes,
@@ -28,7 +28,7 @@ function createFakeChannel(): IMChannel {
         }
       };
     }),
-    getStatus: vi.fn(() => "connected"),
+    getStatus: vi.fn<() => ChannelStatus>(() => "connected"),
   };
 }
 
@@ -48,6 +48,7 @@ describe("ChannelManager route persistence", () => {
   beforeEach(() => {
     clearPersistedConversationRoutes();
     localStorage.clear();
+    globalThis.__MTOOLS_CHANNEL_MANAGER__ = undefined;
   });
 
   it("persists routes from incoming channel messages and hydrates them on refresh", async () => {
@@ -181,5 +182,16 @@ describe("ChannelManager route persistence", () => {
 
     expect(disposeChannel).toHaveBeenCalledWith("ch-1");
     expect(fakeChannel.disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("upgrades a legacy global singleton to the latest ChannelManager prototype", () => {
+    const legacyManager = new ChannelManager();
+    Object.setPrototypeOf(legacyManager, {});
+    globalThis.__MTOOLS_CHANNEL_MANAGER__ = legacyManager as ChannelManager;
+
+    const manager = getChannelManager();
+
+    expect(manager).toBe(legacyManager);
+    expect(typeof manager.sendDesktopMessageToConversation).toBe("function");
   });
 });

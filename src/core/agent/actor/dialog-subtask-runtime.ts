@@ -34,7 +34,9 @@ import {
   inferColumnsFromRows,
   type StructuredRowRecord,
 } from "./dynamic-workbook-builder";
+import { tryParseStructuredPayload } from "./structured-json-utils";
 import { createLogger } from "@/core/logger";
+import { getAgentTaskManager } from "@/core/task-center";
 
 const runtimeLogger = createLogger("DialogSubtaskRuntime");
 const RESTORED_RUNNING_TASK_ERROR =
@@ -113,27 +115,6 @@ function summarizeNarrativeProgress(
   return GENERIC_PROGRESS_BY_STEP_TYPE[stepType ?? ""];
 }
 
-function extractStructuredJsonCandidate(value: string | undefined): string | undefined {
-  const normalized = String(value ?? "").trim();
-  if (!normalized) return undefined;
-  const blockMatch = normalized.match(/```(?:json)?\s*([\s\S]*?)```/iu);
-  if (blockMatch?.[1]?.trim()) return blockMatch[1].trim();
-  if ((normalized.startsWith("{") && normalized.endsWith("}")) || (normalized.startsWith("[") && normalized.endsWith("]"))) {
-    return normalized;
-  }
-  return undefined;
-}
-
-function tryParseStructuredPayload(value: string | undefined): unknown {
-  const candidate = extractStructuredJsonCandidate(value);
-  if (!candidate) return undefined;
-  try {
-    return JSON.parse(candidate);
-  } catch {
-    return undefined;
-  }
-}
-
 function inferStructuredRowCount(value: string | undefined): number | undefined {
   const payload = tryParseStructuredPayload(value);
   if (Array.isArray(payload)) return payload.length;
@@ -164,14 +145,14 @@ function inferStructuredResultKind(params: {
   if (params.status === "error" || params.status === "aborted" || params.terminalError) {
     return "blocker";
   }
-  if ((params.artifacts?.length ?? 0) > 0) {
-    return "file_artifact";
-  }
   if (params.resultContract === "inline_structured_result") {
     return (params.structuredRowCount ?? 0) > 0 ? "structured_rows" : "blocker";
   }
   if (params.executionIntent === "content_executor" && (params.structuredRowCount ?? 0) > 0) {
     return "structured_rows";
+  }
+  if ((params.artifacts?.length ?? 0) > 0) {
+    return "file_artifact";
   }
   return "unknown";
 }
@@ -184,21 +165,15 @@ export interface DialogSubtaskArtifactSummary {
   preview?: string;
 }
 
-type TaskQueueHandle = {
-  create: (params: {
-    id: string;
-    title: string;
-    description: string;
-    type: string;
-    priority: string;
-    params: Record<string, unknown>;
-    createdBy: string;
-    assignee: string;
-    timeoutSeconds?: number;
-    tags?: string[];
+type AgentTaskManagerHandle = {
+  syncSpawnedTask: (params: {
+    sessionId: string;
+    record: SpawnedTaskRecord;
+    spawnerName?: string;
+    targetName?: string;
+    pendingMessageCount?: number;
   }) => void;
-  complete: (id: string, result?: string) => void;
-  fail: (id: string, error: string) => void;
+  clearSession: (sessionId: string) => void;
 };
 
 type RuntimeActorEvent = {
@@ -322,6 +297,7 @@ export function buildDialogSubtaskEventDetail(
   return {
     runId: record.runId,
     spawnerActorId: record.spawnerActorId,
+    ownerTaskId: record.ownerTaskId,
     targetActorId: record.targetActorId,
     targetName: names.targetName,
     spawnerName: names.spawnerName,
@@ -471,10 +447,10 @@ function summarizeArtifactRecord(record: DialogArtifactRecord): DialogSubtaskArt
   };
 }
 
-function collectSubtaskArtifacts(
+function collectScopedSubtaskArtifactRecords(
   task: SpawnedTaskRecord,
   artifactRecords: readonly DialogArtifactRecord[],
-): DialogSubtaskArtifactSummary[] {
+): DialogArtifactRecord[] {
   if (artifactRecords.length === 0) return [];
   const completedAt = task.completedAt ?? task.runtime?.completedAt ?? Number.POSITIVE_INFINITY;
   const directMatches = artifactRecords.filter((artifact) => artifact.relatedRunId === task.runId);
@@ -484,12 +460,75 @@ function collectSubtaskArtifacts(
       if (artifact.actorId !== task.targetActorId) return false;
       return artifact.timestamp >= task.spawnedAt - 1000 && artifact.timestamp <= completedAt;
     });
-  const deduped = new Map<string, DialogSubtaskArtifactSummary>();
+  const deduped = new Map<string, DialogArtifactRecord>();
   for (const artifact of scopedArtifacts) {
-    const summary = summarizeArtifactRecord(artifact);
-    deduped.set(`${summary.path}::${summary.source}`, summary);
+    deduped.set(`${artifact.path}::${artifact.source}`, artifact);
   }
   return [...deduped.values()].sort((left, right) => left.timestamp - right.timestamp);
+}
+
+function collectSubtaskArtifacts(
+  task: SpawnedTaskRecord,
+  artifactRecords: readonly DialogArtifactRecord[],
+): DialogSubtaskArtifactSummary[] {
+  return collectScopedSubtaskArtifactRecords(task, artifactRecords)
+    .map((artifact) => summarizeArtifactRecord(artifact));
+}
+
+function buildStructuredRowKey(row: StructuredRowRecord): string {
+  return JSON.stringify(
+    Object.entries(row)
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function appendUniqueStructuredRows(
+  rows: StructuredRowRecord[],
+  rowKeys: Set<string>,
+  nextRows: readonly StructuredRowRecord[],
+): void {
+  for (const row of nextRows) {
+    const rowKey = buildStructuredRowKey(row);
+    if (rowKeys.has(rowKey)) continue;
+    rowKeys.add(rowKey);
+    rows.push({ ...row });
+  }
+}
+
+function extractStructuredRowsFromArtifacts(params: {
+  baseResult: DialogStructuredSubtaskResult;
+  artifactRecords: readonly DialogArtifactRecord[];
+}): StructuredRowRecord[] {
+  const rows: StructuredRowRecord[] = [];
+  const rowKeys = new Set<string>();
+
+  for (const artifact of params.artifactRecords) {
+    const contentCandidates = [
+      artifact.fullContent,
+      artifact.preview,
+    ]
+      .map((value) => String(value ?? "").trim())
+      .filter(Boolean);
+
+    for (const content of contentCandidates) {
+      if (!looksLikeStructuredBlob(content) && !tryParseStructuredPayload(content)) {
+        continue;
+      }
+      const extractedRows = extractNormalizedStructuredRows({
+        result: {
+          ...params.baseResult,
+          terminalResult: content,
+          terminalError: undefined,
+          structuredRows: undefined,
+        },
+      });
+      if (extractedRows.length === 0) continue;
+      appendUniqueStructuredRows(rows, rowKeys, extractedRows);
+      break;
+    }
+  }
+
+  return rows;
 }
 
 export function buildDialogStructuredSubtaskResults(
@@ -503,8 +542,9 @@ export function buildDialogStructuredSubtaskResults(
       const runtime = ensureDialogSubtaskRuntime(task);
       const terminalResult = runtime.terminalResult ?? task.result;
       const terminalError = runtime.terminalError ?? task.error;
-      const artifacts = collectSubtaskArtifacts(task, artifactRecords);
-      const structuredRows = extractNormalizedStructuredRows({ result: {
+      const scopedArtifactRecords = collectScopedSubtaskArtifactRecords(task, artifactRecords);
+      const artifacts = scopedArtifactRecords.map((artifact) => summarizeArtifactRecord(artifact));
+      const baseResult: DialogStructuredSubtaskResult = {
         runId: task.runId,
         subtaskId: runtime.subtaskId,
         targetActorId: task.targetActorId,
@@ -528,7 +568,22 @@ export function buildDialogStructuredSubtaskResults(
         completedAt: runtime.completedAt ?? task.completedAt,
         timeoutSeconds: runtime.timeoutSeconds ?? task.budgetSeconds,
         eventCount: runtime.eventCount,
-      } });
+        sessionOpen: task.sessionOpen,
+        timeoutReason: task.timeoutReason,
+        budgetSeconds: task.budgetSeconds,
+        idleLeaseSeconds: task.idleLeaseSeconds,
+        artifacts,
+        sourceItemIds: task.sourceItemIds ? [...task.sourceItemIds] : undefined,
+        sourceItemCount: task.sourceItemCount,
+        scopedSourceItems: cloneScopedSourceItems(task.scopedSourceItems),
+      };
+      const structuredRowsFromTerminal = extractNormalizedStructuredRows({ result: baseResult });
+      const structuredRows = structuredRowsFromTerminal.length > 0
+        ? structuredRowsFromTerminal
+        : extractStructuredRowsFromArtifacts({
+            baseResult,
+            artifactRecords: scopedArtifactRecords,
+          });
       const rowCount = structuredRows.length > 0
         ? structuredRows.length
         : inferStructuredRowCount(terminalResult);
@@ -645,6 +700,20 @@ export class DialogSubtaskRuntime {
     this.deps = deps;
   }
 
+  replaceSessionId(sessionId: string): void {
+    const normalizedSessionId = sessionId.trim();
+    if (!normalizedSessionId || normalizedSessionId === this.deps.sessionId) return;
+
+    const previousSessionId = this.deps.sessionId;
+    const manager = this.getAgentTaskManager();
+    manager?.clearSession(previousSessionId);
+    this.deps.sessionId = normalizedSessionId;
+
+    for (const record of this.records.values()) {
+      this.syncAgentTaskRecord(record);
+    }
+  }
+
   private get records(): Map<string, SpawnedTaskRecord> {
     return this.core.getRecordsMap();
   }
@@ -660,6 +729,7 @@ export class DialogSubtaskRuntime {
   }
 
   restoreRecord(record: SpawnedTaskRecord): DialogSubtaskRuntimeState {
+    const wasRunning = record.status === "running";
     const runtime = ensureDialogSubtaskRuntime(record, {
       subtaskId: record.runId,
       profile: resolveDialogSubtaskProfile(record.roleBoundary),
@@ -667,23 +737,49 @@ export class DialogSubtaskRuntime {
       timeoutSeconds: record.budgetSeconds,
     });
     this.core.registerRecord(record);
-    this.reconcileRestoredRunningRecord(record);
+    if (wasRunning) {
+      this.reconcileRestoredRunningRecord(record);
+    } else {
+      this.syncAgentTaskRecord(record);
+    }
     return runtime;
   }
 
-  getSpawnedTasks(actorId: string): SpawnedTaskRecord[] {
-    return [...this.records.values()].filter((record) => record.spawnerActorId === actorId);
+  getSpawnedTasks(
+    actorId: string,
+    opts?: {
+      ownerTaskId?: string;
+    },
+  ): SpawnedTaskRecord[] {
+    const ownerTaskId = opts?.ownerTaskId?.trim();
+    return [...this.records.values()].filter((record) => (
+      record.spawnerActorId === actorId
+      && (!ownerTaskId || record.ownerTaskId === ownerTaskId)
+    ));
   }
 
-  getActiveSpawnedTasks(actorId: string): SpawnedTaskRecord[] {
-    return this.getSpawnedTasks(actorId).filter((record) => record.status === "running");
+  getActiveSpawnedTasks(
+    actorId: string,
+    opts?: {
+      ownerTaskId?: string;
+    },
+  ): SpawnedTaskRecord[] {
+    return this.getSpawnedTasks(actorId, opts).filter((record) => record.status === "running");
   }
 
-  abortActiveRunTasksForSpawner(spawnerActorId: string, error: string): number {
+  abortActiveRunTasksForSpawner(
+    spawnerActorId: string,
+    error: string,
+    opts?: {
+      excludeOwnerTaskId?: string;
+    },
+  ): number {
+    const excludeOwnerTaskId = opts?.excludeOwnerTaskId?.trim();
     const activeRunTasks = [...this.records.values()].filter((record) =>
       record.spawnerActorId === spawnerActorId
       && record.mode === "run"
-      && record.status === "running",
+      && record.status === "running"
+      && (!excludeOwnerTaskId || record.ownerTaskId !== excludeOwnerTaskId)
     );
 
     for (const record of activeRunTasks) {
@@ -696,9 +792,14 @@ export class DialogSubtaskRuntime {
     return activeRunTasks.length;
   }
 
-  buildWaitForSpawnedTasksResult(actorId: string) {
+  buildWaitForSpawnedTasksResult(
+    actorId: string,
+    opts?: {
+      ownerTaskId?: string;
+    },
+  ) {
     return buildDialogSubtaskWaitResult(
-      this.getSpawnedTasks(actorId),
+      this.getSpawnedTasks(actorId, opts),
       this.deps.getActorNames(),
       this.deps.getArtifactRecordsSnapshot(),
     );
@@ -707,13 +808,14 @@ export class DialogSubtaskRuntime {
   collectStructuredSpawnedTaskResults(
     actorId: string,
     opts?: {
+      ownerTaskId?: string;
       terminalOnly?: boolean;
       excludeRunIds?: Iterable<string>;
     },
   ): DialogStructuredSubtaskResult[] {
     const excluded = new Set(opts?.excludeRunIds ?? []);
     const structured = buildDialogStructuredSubtaskResults(
-      this.getSpawnedTasks(actorId).filter((task) => !excluded.has(task.runId)),
+      this.getSpawnedTasks(actorId, { ownerTaskId: opts?.ownerTaskId }).filter((task) => !excluded.has(task.runId)),
       this.deps.getActorNames(),
       this.deps.getArtifactRecordsSnapshot(),
     );
@@ -758,7 +860,23 @@ export class DialogSubtaskRuntime {
   }
 
   getRelatedRunIdForActor(actorId: string): string | undefined {
-    return this.getOpenSessionByTarget(actorId)?.runId;
+    return this.getOpenSessionByTarget(actorId)?.runId
+      ?? this.getOwningTaskForActor(actorId)?.runId
+      ?? [...this.records.values()]
+        .filter((record) => record.targetActorId === actorId)
+        .sort((left, right) => {
+          const leftTimestamp = left.lastActiveAt
+            ?? left.completedAt
+            ?? left.runtime?.completedAt
+            ?? left.runtime?.startedAt
+            ?? left.spawnedAt;
+          const rightTimestamp = right.lastActiveAt
+            ?? right.completedAt
+            ?? right.runtime?.completedAt
+            ?? right.runtime?.startedAt
+            ?? right.spawnedAt;
+          return rightTimestamp - leftTimestamp;
+        })[0]?.runId;
   }
 
   getFocusedSessionRunId(): string | null {
@@ -788,12 +906,19 @@ export class DialogSubtaskRuntime {
       .sort((a, b) => (b.lastActiveAt ?? b.spawnedAt) - (a.lastActiveAt ?? a.spawnedAt))[0];
   }
 
-  getDescendantTasks(actorId: string): Array<SpawnedTaskRecord & { depth: number }> {
+  getDescendantTasks(
+    actorId: string,
+    opts?: {
+      ownerTaskId?: string;
+    },
+  ): Array<SpawnedTaskRecord & { depth: number }> {
     const result: Array<SpawnedTaskRecord & { depth: number }> = [];
     const visited = new Set<string>();
     const taskByParentRunId = new Map<string, SpawnedTaskRecord[]>();
+    const ownerTaskId = opts?.ownerTaskId?.trim();
 
     for (const record of this.records.values()) {
+      if (ownerTaskId && record.ownerTaskId !== ownerTaskId) continue;
       if (!record.parentRunId) continue;
       const bucket = taskByParentRunId.get(record.parentRunId) ?? [];
       bucket.push(record);
@@ -809,7 +934,7 @@ export class DialogSubtaskRuntime {
       }
     };
 
-    const roots = this.getSpawnedTasks(actorId).sort((a, b) => a.spawnedAt - b.spawnedAt);
+    const roots = this.getSpawnedTasks(actorId, { ownerTaskId }).sort((a, b) => a.spawnedAt - b.spawnedAt);
     collect(roots, 1);
     return result;
   }
@@ -846,7 +971,28 @@ export class DialogSubtaskRuntime {
     );
   }
 
+  pruneCompletedTasksForSpawner(
+    spawnerActorId: string,
+    opts?: {
+      excludeOwnerTaskId?: string;
+    },
+  ): number {
+    const excludeOwnerTaskId = opts?.excludeOwnerTaskId?.trim();
+    return this.core.pruneRecords(
+      (record) => (
+        record.spawnerActorId === spawnerActorId
+        && record.status !== "running"
+        && (!excludeOwnerTaskId || record.ownerTaskId !== excludeOwnerTaskId)
+      ),
+      (record) => {
+        this.clearTimeoutMonitor(record);
+        this.detachProgressListener(record.runId);
+      },
+    );
+  }
+
   clearAll(): void {
+    const manager = this.getAgentTaskManager();
     for (const record of this.records.values()) {
       this.clearTimeoutMonitor(record);
       this.detachProgressListener(record.runId);
@@ -857,6 +1003,7 @@ export class DialogSubtaskRuntime {
     this.core.clearRecords();
     this.progressListeners.clear();
     this.focusedSessionRunId = null;
+    manager?.clearSession(this.deps.sessionId);
   }
 
   waitForSpawnedTaskUpdate(actorId: string, timeoutMs: number): Promise<{ reason: TaskExecutorUpdateReason }> {
@@ -879,6 +1026,7 @@ export class DialogSubtaskRuntime {
       record.lastActiveAt = timestamp;
       record.sessionHistoryEndIndex = undefined;
       touched = true;
+      this.syncAgentTaskRecord(record);
       this.notifySpawnedTaskUpdate(record.spawnerActorId);
     }
     if (touched) {
@@ -906,6 +1054,7 @@ export class DialogSubtaskRuntime {
           timeoutSeconds: record.budgetSeconds,
         });
         record.lastActiveAt = timestamp;
+        this.syncAgentTaskRecord(record);
         this.notifySpawnedTaskUpdate(record.spawnerActorId);
       }
     }
@@ -942,6 +1091,7 @@ export class DialogSubtaskRuntime {
     if (this.focusedSessionRunId === record.runId) {
       this.focusedSessionRunId = null;
     }
+    this.syncAgentTaskRecord(record);
     this.notifySpawnedTaskUpdate(record.spawnerActorId);
   }
 
@@ -956,7 +1106,18 @@ export class DialogSubtaskRuntime {
     const record = this.getOpenSessionByRunId(runId);
     if (!record) return undefined;
     record.lastActiveAt = Math.max(record.lastActiveAt ?? 0, timestamp);
+    this.syncAgentTaskRecord(record);
     this.notifySpawnedTaskUpdate(record.spawnerActorId);
+    return record;
+  }
+
+  refreshTaskProjection(runId: string, opts?: { notifyOwner?: boolean }): SpawnedTaskRecord | undefined {
+    const record = this.records.get(runId);
+    if (!record) return undefined;
+    this.syncAgentTaskRecord(record);
+    if (opts?.notifyOwner !== false) {
+      this.notifySpawnedTaskUpdate(record.spawnerActorId);
+    }
     return record;
   }
 
@@ -984,6 +1145,7 @@ export class DialogSubtaskRuntime {
       record.sessionOpen = true;
       record.sessionClosedAt = undefined;
     }
+    this.syncAgentTaskRecord(record);
     this.notifySpawnedTaskUpdate(record.spawnerActorId);
     return runtime;
   }
@@ -1146,6 +1308,7 @@ export class DialogSubtaskRuntime {
     },
   ): DialogSubtaskRuntimeState {
     const runtime = applyDialogSubtaskLifecycle(record, patch);
+    this.syncAgentTaskRecord(record);
     if (opts?.notifyOwner !== false) {
       this.notifySpawnedTaskUpdate(record.spawnerActorId, {
         minIntervalMs: opts?.minOwnerNotifyIntervalMs,
@@ -1217,8 +1380,23 @@ export class DialogSubtaskRuntime {
         step?: { content?: string; type?: string; streaming?: boolean; toolName?: string };
       } | undefined)?.step;
       if (!step) return;
+      const runtime = ensureDialogSubtaskRuntime(record, {
+        subtaskId: record.runId,
+        profile: resolveDialogSubtaskProfile(record.roleBoundary),
+        startedAt: record.spawnedAt,
+        timeoutSeconds: record.budgetSeconds,
+      });
+      const toolActivityChanged = step.type === "action" && Boolean(step.toolName?.trim());
+      if (toolActivityChanged) {
+        runtime.toolUseCount = (runtime.toolUseCount ?? 0) + 1;
+        runtime.lastToolName = step.toolName?.trim();
+        runtime.lastToolAt = event.timestamp;
+      }
       const message = this.summarizeProgressStep(step) ?? "";
       if (!message) {
+        if (toolActivityChanged) {
+          this.syncAgentTaskRecord(record);
+        }
         this.notifySpawnedTaskUpdate(record.spawnerActorId);
         return;
       }
@@ -1228,6 +1406,13 @@ export class DialogSubtaskRuntime {
         timestamp: event.timestamp,
         streaming: Boolean(step.streaming),
       })) {
+        if (toolActivityChanged) {
+          this.syncAgentTaskRecord(record);
+          this.notifySpawnedTaskUpdate(record.spawnerActorId, {
+            minIntervalMs: 1_000,
+            channel: "progress",
+          });
+        }
         return;
       }
       this.applyLifecycle(record, {
@@ -1525,6 +1710,7 @@ export class DialogSubtaskRuntime {
       terminalError,
       countEvent: false,
     });
+    this.syncAgentTaskRecord(record);
 
     if (!canContinueSession) {
       this.deps.finalizeSpawnedTaskHistoryWindow(record, this.deps.getActor(record.targetActorId));
@@ -1552,46 +1738,33 @@ export class DialogSubtaskRuntime {
   }
 
   private syncTaskQueueCreate(
-    record: SpawnedTaskRecord,
-    spawnerName: string,
-    targetName: string,
+    _record: SpawnedTaskRecord,
+    _spawnerName: string,
+    _targetName: string,
   ): void {
-    const queue = this.getTaskQueue();
-    if (!queue) return;
-    queue.create({
-      id: `spawn-${record.runId}`,
-      title: record.label ?? record.task.slice(0, 30),
-      description: record.task.slice(0, 200),
-      type: "agent_spawn",
-      priority: "normal",
-      params: {
-        runId: record.runId,
-        spawnerActorId: record.spawnerActorId,
-        targetActorId: record.targetActorId,
-      },
-      createdBy: spawnerName,
-      assignee: targetName,
-      timeoutSeconds: record.budgetSeconds,
-      tags: [record.mode, targetName],
+  }
+
+  private syncTaskQueueComplete(_runId: string, _result?: string): void {
+  }
+
+  private syncTaskQueueFail(_runId: string, _error: string): void {
+  }
+
+  private syncAgentTaskRecord(record: SpawnedTaskRecord): void {
+    const manager = this.getAgentTaskManager();
+    if (!manager) return;
+    manager.syncSpawnedTask({
+      sessionId: this.deps.sessionId,
+      record,
+      spawnerName: this.deps.getActorName(record.spawnerActorId),
+      targetName: this.deps.getActorName(record.targetActorId),
+      pendingMessageCount: this.deps.getActor(record.targetActorId)?.pendingInboxCount ?? 0,
     });
   }
 
-  private syncTaskQueueComplete(runId: string, result?: string): void {
-    const queue = this.getTaskQueue();
-    if (!queue) return;
-    queue.complete(`spawn-${runId}`, result?.slice(0, 500));
-  }
-
-  private syncTaskQueueFail(runId: string, error: string): void {
-    const queue = this.getTaskQueue();
-    if (!queue) return;
-    queue.fail(`spawn-${runId}`, error);
-  }
-
-  private getTaskQueue(): TaskQueueHandle | null {
+  private getAgentTaskManager(): AgentTaskManagerHandle | null {
     try {
-      const { getTaskQueue } = require("@/core/task-center/task-queue");
-      return getTaskQueue() as TaskQueueHandle;
+      return getAgentTaskManager() as AgentTaskManagerHandle;
     } catch {
       return null;
     }

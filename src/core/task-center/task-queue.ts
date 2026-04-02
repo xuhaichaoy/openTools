@@ -77,6 +77,27 @@ export class TaskQueue {
     return this.tasks.get(id);
   }
 
+  /** 更新任务字段 */
+  update(id: string, patch: Partial<TaskRecord>): TaskRecord | undefined {
+    const task = this.tasks.get(id);
+    if (!task) return undefined;
+
+    const next: TaskRecord = {
+      ...task,
+      ...patch,
+      id: task.id,
+      createdAt: task.createdAt,
+    };
+    this.tasks.set(id, next);
+    this._persist();
+    this._emit({ type: "task_updated", taskId: id, patch });
+
+    if (patch.status === "pending" || patch.status === "queued") {
+      this._scheduleNext();
+    }
+    return next;
+  }
+
   /** 查询任务列表 */
   list(filter?: TaskFilter): TaskRecord[] {
     let results = [...this.tasks.values()];
@@ -109,6 +130,16 @@ export class TaskQueue {
     this._persist();
     this._emit({ type: "task_cancelled", taskId: id });
     log.info(`Task cancelled: ${task.title} (${id})`);
+    return true;
+  }
+
+  /** 删除任务 */
+  remove(id: string): boolean {
+    const existed = this.tasks.delete(id);
+    if (!existed) return false;
+    this._persist();
+    this._emit({ type: "task_deleted", taskId: id });
+    log.info(`Task deleted: ${id}`);
     return true;
   }
 
@@ -240,6 +271,8 @@ export class TaskQueue {
   // ── Private ──
 
   private _scheduleNext(): void {
+    if (!this._executor) return;
+
     const running = [...this.tasks.values()].filter((t) => t.status === "running");
     if (running.length >= MAX_CONCURRENT) return;
 
@@ -265,6 +298,7 @@ export class TaskQueue {
     return [...this.tasks.values()]
       .filter((t) => {
         if (t.status !== "pending" && t.status !== "queued") return false;
+        if (t.type === "agent_spawn") return false;
         if (t.scheduledAt && t.scheduledAt > now) return false;
         if (t.dependencies?.length) {
           return t.dependencies.every((depId) => {
@@ -309,6 +343,7 @@ export class TaskQueue {
 
       for (const t of arr) {
         if (!t.id || !t.title) continue;
+        if (t.type === "agent_spawn") continue;
         // 恢复时，将 running 状态重置为 queued（进程重启不保留执行状态）
         if (t.status === "running") t.status = "queued";
         this.tasks.set(t.id, t);
@@ -333,6 +368,11 @@ export function getTaskQueue(): TaskQueue {
     _instance.startScheduler();
   }
   return _instance;
+}
+
+export function resetTaskQueue(): void {
+  _instance?.stopScheduler();
+  _instance = null;
 }
 
 /**

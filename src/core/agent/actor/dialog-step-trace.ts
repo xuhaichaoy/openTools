@@ -5,17 +5,33 @@ import type { ActorEvent, DialogMessage } from "./types";
 
 export const DIALOG_STEP_TRACE_FILE_NAME = "51toolbox-dialog-step-trace.txt";
 export type DialogTraceMode = "off" | "full";
+export type DialogTraceSurface = "local_dialog" | "im_conversation";
+
+export interface DialogTraceContext {
+  surface?: DialogTraceSurface;
+  ownerId?: string | null;
+  runtimeKey?: string | null;
+}
+
+export interface NormalizedDialogTraceContext {
+  surface: DialogTraceSurface;
+  ownerId: string;
+  runtimeKey: string;
+  scopeKey: string;
+}
 
 const DIALOG_TRACE_MODE_STORAGE_KEY = "dialog_step_trace_mode";
 const TRACE_PREVIEW_MAX = 80;
+const INSTANCE_REPLACEMENT_WINDOW_MS = 1_500;
 
 let appendQueue = Promise.resolve();
 let cachedTraceContent = "";
 let resolvedTracePathPromise: Promise<string> | null = null;
 let traceSequence = 0;
 let dialogTraceModeCache: DialogTraceMode | null = null;
-let pendingSessionStartedTimer: ReturnType<typeof setTimeout> | null = null;
-let pendingSessionStartedId: string | null = null;
+const pendingSessionStartedTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const pendingSessionStartedIds = new Map<string, string>();
+const actorSystemScopeRegistry = new Map<string, { sessionId: string; createdAt: number }>();
 
 function hasTauriFileBridge(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -109,11 +125,15 @@ function buildTraceLine(fields: Record<string, unknown>): string {
     "ts",
     "seq",
     "session",
+    "surface",
+    "owner",
+    "runtime_key",
     "actor",
     "event",
     "phase",
     "kind",
     "task_id",
+    "owner_task_id",
     "run_id",
     "status",
     "model",
@@ -139,6 +159,104 @@ function buildTraceLine(fields: Record<string, unknown>): string {
     parts.push(`${key}=${formatted}`);
   }
   return parts.join(" ");
+}
+
+function normalizeTraceIdentifier(
+  value: string | null | undefined,
+  fallback: string,
+): string {
+  const normalized = String(value ?? "").trim();
+  return normalized || fallback;
+}
+
+export function normalizeDialogTraceContext(
+  context?: DialogTraceContext,
+): NormalizedDialogTraceContext {
+  const surface: DialogTraceSurface = context?.surface === "im_conversation"
+    ? "im_conversation"
+    : "local_dialog";
+  const ownerId = normalizeTraceIdentifier(context?.ownerId, surface === "local_dialog" ? "dialog_main" : surface);
+  const runtimeKey = normalizeTraceIdentifier(context?.runtimeKey, `${surface}::${ownerId}`);
+  return {
+    surface,
+    ownerId,
+    runtimeKey,
+    scopeKey: `${surface}::${runtimeKey}`,
+  };
+}
+
+export function buildDialogTraceContextFields(
+  context?: DialogTraceContext,
+): Record<string, string> {
+  const normalized = normalizeDialogTraceContext(context);
+  return {
+    surface: normalized.surface,
+    owner: normalized.ownerId,
+    runtime_key: normalized.runtimeKey,
+  };
+}
+
+export function getDialogTraceScopeKey(context?: DialogTraceContext): string {
+  return normalizeDialogTraceContext(context).scopeKey;
+}
+
+export function registerDialogTraceActorSystemInstance(params: {
+  sessionId: string;
+  traceContext?: DialogTraceContext;
+  timestamp?: number;
+}): {
+  traceContext: NormalizedDialogTraceContext;
+  replacedSessionId?: string;
+  elapsedMs?: number;
+} {
+  const normalizedContext = normalizeDialogTraceContext(params.traceContext);
+  const createdAt = params.timestamp ?? Date.now();
+  const previous = actorSystemScopeRegistry.get(normalizedContext.scopeKey);
+
+  actorSystemScopeRegistry.set(normalizedContext.scopeKey, {
+    sessionId: params.sessionId,
+    createdAt,
+  });
+
+  if (
+    previous
+    && previous.sessionId !== params.sessionId
+    && createdAt - previous.createdAt <= INSTANCE_REPLACEMENT_WINDOW_MS
+  ) {
+    return {
+      traceContext: normalizedContext,
+      replacedSessionId: previous.sessionId,
+      elapsedMs: createdAt - previous.createdAt,
+    };
+  }
+
+  return {
+    traceContext: normalizedContext,
+  };
+}
+
+export function updateDialogTraceActorSystemSession(params: {
+  previousSessionId: string;
+  nextSessionId: string;
+  traceContext?: DialogTraceContext;
+}): void {
+  const normalizedContext = normalizeDialogTraceContext(params.traceContext);
+  const current = actorSystemScopeRegistry.get(normalizedContext.scopeKey);
+  if (!current || current.sessionId !== params.previousSessionId) return;
+  actorSystemScopeRegistry.set(normalizedContext.scopeKey, {
+    sessionId: params.nextSessionId,
+    createdAt: current.createdAt,
+  });
+}
+
+export function unregisterDialogTraceActorSystemInstance(params: {
+  sessionId: string;
+  traceContext?: DialogTraceContext;
+}): void {
+  const normalizedContext = normalizeDialogTraceContext(params.traceContext);
+  const current = actorSystemScopeRegistry.get(normalizedContext.scopeKey);
+  if (!current || current.sessionId !== params.sessionId) return;
+  actorSystemScopeRegistry.delete(normalizedContext.scopeKey);
 }
 
 function summarizeStep(step: AgentStep | undefined): string {
@@ -179,6 +297,7 @@ function formatActorEventLine(sessionId: string, event: ActorEvent): string {
       return [
         prefix,
         `event=${event.type}`,
+        `owner_task_id=${normalizeToken(String(detail.ownerTaskId ?? detail.owner_task_id ?? ""))}`,
         `run_id=${normalizeToken(String(detail.runId ?? ""))}`,
         `spawner=${normalizeToken(String(detail.spawnerActorId ?? ""))}`,
         `target=${normalizeToken(String(detail.targetActorId ?? ""))}`,
@@ -227,37 +346,45 @@ export function shouldTraceDialogStep(step: AgentStep | undefined): boolean {
   return step.type !== "answer" && step.type !== "tool_streaming";
 }
 
-export function traceDialogSessionStarted(sessionId: string): void {
+export function traceDialogSessionStarted(
+  sessionId: string,
+  traceContext?: DialogTraceContext,
+): void {
   if (!isDialogFullTraceEnabled()) return;
-  if (pendingSessionStartedTimer) {
-    clearTimeout(pendingSessionStartedTimer);
-    pendingSessionStartedTimer = null;
+  const normalizedContext = normalizeDialogTraceContext(traceContext);
+  const scopeKey = normalizedContext.scopeKey;
+  const existingTimer = pendingSessionStartedTimers.get(scopeKey);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+    pendingSessionStartedTimers.delete(scopeKey);
   }
-  pendingSessionStartedId = sessionId;
-  pendingSessionStartedTimer = setTimeout(() => {
-    const finalSessionId = pendingSessionStartedId;
-    pendingSessionStartedId = null;
-    pendingSessionStartedTimer = null;
+  pendingSessionStartedIds.set(scopeKey, sessionId);
+  const timer = setTimeout(() => {
+    const finalSessionId = pendingSessionStartedIds.get(scopeKey);
+    pendingSessionStartedIds.delete(scopeKey);
+    pendingSessionStartedTimers.delete(scopeKey);
     if (!finalSessionId) return;
     void getDialogStepTracePath().then((path) => {
       traceDialogFlowEvent({
         sessionId: finalSessionId,
         event: "session_started",
+        traceContext: normalizedContext,
         detail: {
           path,
         },
       });
     });
   }, 80);
+  pendingSessionStartedTimers.set(scopeKey, timer);
 }
 
 export function resetDialogStepTrace(): void {
   if (!hasTauriFileBridge()) return;
-  if (pendingSessionStartedTimer) {
-    clearTimeout(pendingSessionStartedTimer);
-    pendingSessionStartedTimer = null;
-    pendingSessionStartedId = null;
+  for (const timer of pendingSessionStartedTimers.values()) {
+    clearTimeout(timer);
   }
+  pendingSessionStartedTimers.clear();
+  pendingSessionStartedIds.clear();
   appendQueue = appendQueue
     .then(async () => {
       const tracePath = await getDialogStepTracePath();
@@ -270,12 +397,17 @@ export function resetDialogStepTrace(): void {
     });
 }
 
-export function traceDialogActorSystemEvent(sessionId: string, event: ActorEvent | DialogMessage): void {
+export function traceDialogActorSystemEvent(
+  sessionId: string,
+  event: ActorEvent | DialogMessage,
+  traceContext?: DialogTraceContext,
+): void {
   if (!isDialogFullTraceEnabled()) return;
   if (isDialogMessage(event)) {
     traceDialogFlowEvent({
       sessionId,
       event: "dialog_message",
+      traceContext,
       detail: {
         kind: event.kind ?? "agent_message",
         from: event.from,
@@ -293,6 +425,7 @@ export function traceDialogActorSystemEvent(sessionId: string, event: ActorEvent
       sessionId,
       actorId: event.actorId,
       event: "step",
+      traceContext,
       detail: {
         tool: step?.toolName,
         step: step?.type,
@@ -306,8 +439,11 @@ export function traceDialogActorSystemEvent(sessionId: string, event: ActorEvent
     sessionId,
     actorId: event.actorId,
     event: event.type,
+    traceContext,
     detail: {
       ...(typeof detail.taskId === "string" ? { task_id: detail.taskId } : {}),
+      ...(typeof detail.ownerTaskId === "string" ? { owner_task_id: detail.ownerTaskId } : {}),
+      ...(typeof detail.owner_task_id === "string" ? { owner_task_id: detail.owner_task_id } : {}),
       ...(typeof detail.runId === "string" ? { run_id: detail.runId } : {}),
       ...(typeof detail.status === "string" ? { status: detail.status } : {}),
       ...(typeof detail.elapsed === "number" ? { elapsed_ms: detail.elapsed } : {}),
@@ -322,10 +458,14 @@ export function traceDialogFlowEvent(params: {
   sessionId?: string | null;
   actorId?: string | null;
   detail?: Record<string, unknown>;
+  traceContext?: DialogTraceContext;
 }): void {
   if (!isDialogFullTraceEnabled()) return;
   const timestamp = Date.now();
-  const detail = { ...(params.detail ?? {}) };
+  const detail = {
+    ...buildDialogTraceContextFields(params.traceContext),
+    ...(params.detail ?? {}),
+  };
   const sequence = traceSequence + 1;
   traceSequence = sequence;
   const line = buildTraceLine({

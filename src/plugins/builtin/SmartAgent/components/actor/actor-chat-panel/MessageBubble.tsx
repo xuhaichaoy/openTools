@@ -521,6 +521,7 @@ export interface MessageBubbleProps {
   targetName?: string;
   isUser: boolean;
   isWaitingReply?: boolean;
+  showRecallInfo?: boolean;
   pendingInteraction?: PendingInteraction;
   onReplyToInteraction?: (messageId: string, content: string) => void;
   onOpenApprovalDrawer?: (messageId: string) => void;
@@ -533,6 +534,7 @@ function MessageBubbleBase({
   targetName,
   isUser,
   isWaitingReply,
+  showRecallInfo = true,
   pendingInteraction,
   onReplyToInteraction,
   onOpenApprovalDrawer,
@@ -629,7 +631,7 @@ function MessageBubbleBase({
             这次提问会保持已超时。Agent 已按已有信息继续或结束当前分支；现在再发送内容，只会作为新的跟进消息发给原提问 Actor，不会把状态改回已处理，也不会接回原等待流程。
           </div>
         )}
-        {!isUser && <RecallInfoChips message={message} />}
+        {!isUser && showRecallInfo && <RecallInfoChips message={message} />}
       </div>
     </div>
   );
@@ -662,6 +664,7 @@ export const MessageBubble = React.memo(
     prev.targetName === next.targetName &&
     prev.isUser === next.isUser &&
     prev.isWaitingReply === next.isWaitingReply &&
+    prev.showRecallInfo === next.showRecallInfo &&
     prev.pendingInteraction?.id === next.pendingInteraction?.id &&
     prev.pendingInteraction?.status === next.pendingInteraction?.status &&
     prev.onReplyToInteraction === next.onReplyToInteraction &&

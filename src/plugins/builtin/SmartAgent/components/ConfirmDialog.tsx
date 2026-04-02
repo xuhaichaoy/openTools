@@ -1,7 +1,9 @@
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { AlertCircle, ChevronDown, ChevronRight } from "lucide-react";
 import type { ToolApprovalRisk } from "@/core/agent/actor/tool-approval-policy";
+import { buildToolApprovalDialogModel } from "../core/tool-approval-dialog";
+import { useToolTrustStore } from "@/store/command-allowlist-store";
 
 export interface ConfirmResult {
   confirmed: boolean;
@@ -16,78 +18,6 @@ interface ConfirmDialogProps {
   onResult: (result: ConfirmResult) => void;
 }
 
-function formatRiskLabel(risk?: ToolApprovalRisk): string | null {
-  switch (risk) {
-    case "high":
-      return "高风险";
-    case "medium":
-      return "中风险";
-    case "unknown":
-      return "风险不明确";
-    case "low":
-      return "低风险";
-    default:
-      return null;
-  }
-}
-
-function describeAction(
-  toolName: string,
-  params: Record<string, unknown>,
-): string {
-  const name = toolName.toLowerCase();
-
-  if (name.includes("shell") || name.includes("run_shell") || name.includes("command")) {
-    const cmd = String(params.command || params.cmd || "");
-    return cmd ? `即将执行命令：\`${cmd}\`` : "即将执行一条系统命令";
-  }
-
-  if (name.includes("write_file") || name.includes("write_text")) {
-    const path = String(params.path || params.filePath || "");
-    const len = String(params.content || "").length;
-    return path
-      ? `即将写入文件：${path}（${len} 字符）`
-      : `即将写入一个文件（${len} 字符）`;
-  }
-
-  if (name.includes("str_replace_edit") || name.includes("edit_file")) {
-    const path = String(params.path || params.filePath || "");
-    const command = String(params.command || "");
-    return path
-      ? `即将修改文件：${path}${command ? `（${command}）` : ""}`
-      : "即将修改一个文件";
-  }
-
-  if (name.includes("read_file") || name.includes("read_text")) {
-    const path = String(params.path || params.filePath || "");
-    return path ? `即将读取文件：${path}` : "即将读取一个文件";
-  }
-
-  if (name.includes("open_path")) {
-    const path = String(params.path || params.filePath || "");
-    return path ? `即将打开：${path}` : "即将打开文件或目录";
-  }
-
-  if (name.includes("delete") || name.includes("remove")) {
-    const path = String(params.path || params.filePath || "");
-    return path ? `即将删除：${path}` : "即将执行删除操作";
-  }
-
-  if (name.includes("abort_child_session")) {
-    const childSession = String(params.childSession || params.runId || "");
-    const actor = String(params.actor || "");
-    if (childSession && actor) {
-      return `即将中止子会话：${childSession}（${actor}）`;
-    }
-    if (childSession) {
-      return `即将中止子会话：${childSession}`;
-    }
-    return "即将中止一个子会话，并打断它后续的协作执行";
-  }
-
-  return `即将调用工具 ${toolName}`;
-}
-
 export function ConfirmDialog({
   toolName,
   params,
@@ -96,83 +26,150 @@ export function ConfirmDialog({
   reviewedByModel = false,
   onResult,
 }: ConfirmDialogProps) {
-  const [showDetail, setShowDetail] = useState(false);
-  const description = describeAction(toolName, params);
-  const riskLabel = formatRiskLabel(risk);
+  const [showRawDetail, setShowRawDetail] = useState(false);
+  const model = useMemo(
+    () => buildToolApprovalDialogModel({
+      toolName,
+      toolParams: params,
+      risk,
+      reason,
+      reviewedByModel,
+    }),
+    [params, reason, reviewedByModel, risk, toolName],
+  );
+
+  const handleAllowSession = () => {
+    if (model.sessionAction) {
+      useToolTrustStore.getState().rememberSessionDecision(
+        toolName,
+        params,
+        model.sessionAction.scope,
+      );
+    }
+    onResult({ confirmed: true });
+  };
 
   const dialog = (
-    <div className="fixed inset-0 z-9999 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-      <div className="bg-(--color-bg) border border-(--color-border) rounded-xl shadow-2xl w-[420px] p-5">
-        <div className="flex items-center gap-2 mb-3">
-          <div className="w-8 h-8 rounded-full bg-amber-500/10 flex items-center justify-center">
-            <AlertCircle className="w-4 h-4 text-amber-500" />
+    <div className="fixed inset-0 z-9999 overflow-y-auto bg-black/40 px-4 py-6 backdrop-blur-sm sm:flex sm:items-center sm:justify-center sm:py-8">
+      <div className="mx-auto flex w-[min(560px,100%)] max-h-[calc(100vh-3rem)] flex-col overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-2xl sm:max-h-[calc(100vh-4rem)]">
+        <div className="border-b border-[var(--color-border)] px-5 py-4">
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-amber-500/12 text-amber-600">
+              <AlertCircle className="h-4.5 w-4.5" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="text-[15px] font-semibold text-[var(--color-text)]">
+                  {model.title}
+                </h3>
+                <span className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 text-[11px] text-[var(--color-text-secondary)]">
+                  {model.toolTag}
+                </span>
+                {model.riskLabel && (
+                  <span className="rounded-full bg-amber-500/12 px-2 py-0.5 text-[11px] font-medium text-amber-700">
+                    {model.riskLabel}
+                  </span>
+                )}
+              </div>
+              <p className="mt-1.5 text-[12px] leading-relaxed text-[var(--color-text-secondary)]">
+                {model.subtitle}
+              </p>
+            </div>
           </div>
-          <h3 className="text-sm font-semibold text-[var(--color-text)]">
-            操作确认
-          </h3>
         </div>
 
-        <p className="text-sm text-[var(--color-text)] mb-3 leading-relaxed">
-          {description}
-        </p>
-
-        {(riskLabel || reason) && (
-          <div className="mb-3 rounded-lg border border-amber-500/15 bg-amber-500/6 px-3 py-2">
-            <div className="flex flex-wrap items-center gap-2 text-[11px]">
-              {riskLabel && (
-                <span className="rounded-full bg-amber-500/12 px-2 py-0.5 font-medium text-amber-600">
-                  {riskLabel}
-                </span>
-              )}
-              <span className="text-[var(--color-text-secondary)]">
-                {reviewedByModel
-                  ? "自动审核与模型复核都未直接放行，已升级到人工确认。"
-                  : "自动审核未直接放行，已升级到人工确认。"}
-              </span>
+        <div className="min-h-0 space-y-3 overflow-y-auto px-5 py-4">
+          {model.warning && (
+            <div className="rounded-2xl border border-amber-500/20 bg-amber-500/8 px-3.5 py-3 text-[12px] leading-5 text-amber-800">
+              {model.warning}
             </div>
-            {reason && (
-              <div className="mt-1 text-[11px] leading-5 text-[var(--color-text-secondary)]">
-                {reason}
-              </div>
-            )}
-          </div>
-        )}
+          )}
 
-        <div className="mb-4">
-          <button
-            onClick={() => setShowDetail((v) => !v)}
-            className="flex items-center gap-1 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text)] transition-colors mb-1"
-          >
-            {showDetail ? (
-              <ChevronDown className="w-3 h-3" />
-            ) : (
-              <ChevronRight className="w-3 h-3" />
-            )}
-            查看详情
-          </button>
-          {showDetail && (
-            <div className="bg-[var(--color-bg-secondary)] rounded-lg p-3 text-xs font-mono">
-              <div className="text-amber-500 font-medium mb-1">{toolName}</div>
-              <pre className="text-[var(--color-text-secondary)] whitespace-pre-wrap break-all max-h-32 overflow-auto">
-                {JSON.stringify(params, null, 2)}
+          {model.preview && (
+            <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/50 px-3.5 py-3">
+              <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                {model.previewLabel ?? "内容"}
+              </div>
+              <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-xl bg-[var(--color-bg)] px-3 py-2.5 font-mono text-[12px] leading-5 text-[var(--color-text)]">
+                {model.preview}
               </pre>
             </div>
           )}
+
+          {model.details.length > 0 && (
+            <div className="grid gap-2 sm:grid-cols-2">
+              {model.details.map((detail) => (
+                <div
+                  key={`${detail.label}-${detail.value}`}
+                  className="min-w-0 rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/35 px-3 py-2.5"
+                >
+                  <div className="text-[10px] text-[var(--color-text-tertiary)]">
+                    {detail.label}
+                  </div>
+                  <div className={`mt-1 break-all text-[12px] text-[var(--color-text)] ${detail.mono ? "font-mono" : ""}`}>
+                    {detail.value}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {model.reason && (
+            <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/35 px-3.5 py-3 text-[12px] leading-5 text-[var(--color-text-secondary)]">
+              {model.reason}
+            </div>
+          )}
+
+          <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/20 p-2">
+            <button
+              onClick={() => setShowRawDetail((value) => !value)}
+              className="flex w-full items-center gap-1 px-1.5 py-1 text-left text-[12px] text-[var(--color-text-secondary)] transition-colors hover:text-[var(--color-text)]"
+            >
+              {showRawDetail ? (
+                <ChevronDown className="h-3.5 w-3.5" />
+              ) : (
+                <ChevronRight className="h-3.5 w-3.5" />
+              )}
+              原始参数
+            </button>
+            {showRawDetail && (
+              <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap break-all rounded-xl bg-[var(--color-bg)] px-3 py-2.5 font-mono text-[11px] leading-5 text-[var(--color-text-secondary)]">
+                {JSON.stringify(params, null, 2)}
+              </pre>
+            )}
+          </div>
         </div>
 
-        <div className="flex gap-2 justify-end">
-          <button
-            onClick={() => onResult({ confirmed: false })}
-            className="px-3 py-1.5 text-xs rounded-lg border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] transition-colors"
-          >
-            拒绝
-          </button>
-          <button
-            onClick={() => onResult({ confirmed: true })}
-            className="px-3 py-1.5 text-xs rounded-lg bg-amber-500 hover:bg-amber-600 text-white transition-colors"
-          >
-            允许执行
-          </button>
+        <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-bg-secondary)]/30 px-5 py-4">
+          <div className="grid gap-2">
+            <button
+              onClick={() => onResult({ confirmed: true })}
+              className="rounded-2xl bg-[var(--color-accent)] px-4 py-2.5 text-left text-[13px] font-medium text-white transition-colors hover:opacity-90"
+            >
+              允许一次
+            </button>
+
+            {model.sessionAction && (
+              <button
+                onClick={handleAllowSession}
+                className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] px-4 py-2.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]"
+              >
+                <div className="text-[13px] font-medium text-[var(--color-text)]">
+                  {model.sessionAction.label}
+                </div>
+                <div className="mt-1 text-[11px] leading-5 text-[var(--color-text-secondary)]">
+                  {model.sessionAction.description}
+                </div>
+              </button>
+            )}
+
+            <button
+              onClick={() => onResult({ confirmed: false })}
+              className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] px-4 py-2.5 text-left text-[13px] font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text)]"
+            >
+              拒绝
+            </button>
+          </div>
         </div>
       </div>
     </div>
